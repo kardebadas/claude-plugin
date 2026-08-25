@@ -62,8 +62,22 @@ def validate_round(obj):
                 for j, option in enumerate(options):
                     if not isinstance(option, dict) or not isinstance(option.get("value"), str):
                         errors.append("{}.options[{}]: needs a string value".format(where, j))
+                    elif not option["value"].strip():
+                        errors.append("{}.options[{}]: needs a non-blank value".format(where, j))
 
     return errors
+
+
+def _choice_has_content(entry):
+    """Whether one entry of a `choice` list carries something to record.
+
+    An empty or whitespace-only entry is nothing at all. Counting it as an
+    answer would settle a question with no content in it, and the fold-in step
+    would then write that emptiness into the brief as a real decision.
+    """
+    if isinstance(entry, str):
+        return bool(entry.strip())
+    return entry is not None
 
 
 def answer_state(ans):
@@ -75,7 +89,7 @@ def answer_state(ans):
     if ans.get("skipped") is True:
         return "skipped"
     choice = ans.get("choice")
-    if isinstance(choice, list) and choice:
+    if isinstance(choice, list) and any(_choice_has_content(e) for e in choice):
         return "answered"
     if isinstance(choice, str) and choice.strip():
         return "answered"
@@ -87,7 +101,10 @@ def answer_state(ans):
 
 
 def count_open(round_obj, answers):
-    """How many questions of each importance are still waiting for the user."""
+    """How many questions of each importance are still waiting for the user.
+
+    Precondition: the round must be one `validate_round` accepted.
+    """
     answers = answers or {}
     counts = dict((level, 0) for level in IMPORTANCES)
     for question in (round_obj or {}).get("questions", []):
@@ -100,7 +117,10 @@ def count_open(round_obj, answers):
 
 
 def count_answered(round_obj, answers):
-    """Answered or deliberately delegated — both are settled."""
+    """Answered or deliberately delegated — both are settled.
+
+    Precondition: the round must be one `validate_round` accepted.
+    """
     answers = answers or {}
     settled = 0
     for question in (round_obj or {}).get("questions", []):

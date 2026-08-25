@@ -188,6 +188,15 @@ class ValidateQuestionTest(unittest.TestCase):
         self.assertEqual(validate_round(a_round("not a question")),
                          ["questions[0]: not an object"])
 
+    def test_a_second_bad_question_is_reported_alongside_the_first(self):
+        """The per-question mirror of the round-level early-return test: the
+        loop skips a bad question, it does not stop at one. Fail-fast here
+        would halve the report and surface the second problem only after the
+        first was fixed."""
+        self.assertEqual(validate_round(a_round("not a question", 7)),
+                         ["questions[0]: not an object",
+                          "questions[1]: not an object"])
+
     def test_a_missing_title_is_reported(self):
         self.assertEqual(validate_round(a_round(question(title=""))),
                          ["questions[0]: title missing"])
@@ -210,7 +219,11 @@ class ValidateQuestionTest(unittest.TestCase):
     def test_a_missing_importance_is_reported(self):
         q = question()
         del q["importance"]
-        self.assertEqual(len(validate_round(a_round(q))), 1)
+        self.assertEqual(
+            validate_round(a_round(q)),
+            ["questions[0]: importance must be one of "
+             "REQUIRED/IMPORTANT/PREFERENCE/OPTIONAL"],
+        )
 
     def test_the_type_error_names_the_whole_vocabulary(self):
         self.assertEqual(
@@ -345,13 +358,40 @@ class OptionsTest(unittest.TestCase):
         self.assertEqual(
             validate_round(a_round(question(type="longtext", options=[]))), [])
 
-    def test_an_unknown_type_is_not_also_asked_for_options(self):
-        """One error for one mistake: a bogus type reports the type, not a
-        second complaint about the options it was never going to have."""
+    def test_an_empty_option_value_is_reported(self):
+        """An option carrying no value is a phantom answer waiting to happen:
+        selecting it would settle the question with nothing in it, and the
+        fold-in step would write that nothing into the brief as a decision."""
         self.assertEqual(
-            validate_round(a_round(question(type="dropdown"))),
-            ["questions[0]: type must be one of single/multi/text/longtext"],
+            validate_round(a_round(question(type="single",
+                                            options=[{"value": ""}]))),
+            ["questions[0].options[0]: needs a non-blank value"],
         )
+
+    def test_a_whitespace_only_option_value_is_reported(self):
+        self.assertEqual(
+            validate_round(a_round(question(type="multi",
+                                            options=[{"value": "  \t\n "}]))),
+            ["questions[0].options[0]: needs a non-blank value"],
+        )
+
+    def test_a_blank_option_beside_a_good_one_is_reported_at_its_own_index(self):
+        q = question(type="multi", options=[{"value": "email"},
+                                            {"value": ""},
+                                            {"value": "sms"}])
+        self.assertEqual(
+            validate_round(a_round(q)),
+            ["questions[0].options[1]: needs a non-blank value"],
+        )
+
+    def test_a_blank_value_is_a_different_complaint_from_a_missing_one(self):
+        """Two mistakes, two messages: an author who left the value out is
+        looking for something different from one who left it empty."""
+        blank = validate_round(a_round(question(type="single",
+                                                options=[{"value": ""}])))
+        absent = validate_round(a_round(question(type="single",
+                                                 options=[{"label": "Email"}])))
+        self.assertNotEqual(blank, absent)
 
 
 class VocabularyTest(unittest.TestCase):
@@ -403,6 +443,26 @@ class AnswerStateContentTest(unittest.TestCase):
 
     def test_an_empty_string_choice_is_skipped(self):
         self.assertEqual(answer_state({"choice": ""}), "skipped")
+
+    def test_a_choice_list_holding_one_empty_string_is_skipped(self):
+        """The second half of the phantom answer. Validation now keeps blank
+        option values off the wire, but a hand-posted round could still send
+        one, and a selection with nothing in it settles nothing."""
+        self.assertEqual(answer_state({"choice": [""]}), "skipped")
+
+    def test_a_choice_list_of_nothing_but_blanks_is_skipped(self):
+        self.assertEqual(answer_state({"choice": ["", "   ", "\n\t"]}),
+                         "skipped")
+
+    def test_a_real_entry_among_blanks_is_still_an_answer(self):
+        """The over-correction to guard against: dropping a selection the user
+        really made because a blank rode along beside it."""
+        self.assertEqual(answer_state({"choice": ["", "email"]}), "answered")
+        self.assertEqual(answer_state({"choice": ["email", ""]}), "answered")
+
+    def test_a_blank_choice_list_does_not_hide_a_real_other(self):
+        self.assertEqual(answer_state({"choice": [""], "other": "passkeys"}),
+                         "answered")
 
     def test_a_choice_that_is_neither_list_nor_string_is_skipped(self):
         self.assertEqual(answer_state({"choice": 0}), "skipped")

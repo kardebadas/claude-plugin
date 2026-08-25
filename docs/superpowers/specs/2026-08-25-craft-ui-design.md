@@ -212,26 +212,43 @@ free, reuse it; otherwise take an ephemeral one. Reuse is what lets a restarted
 server be picked up by the tab the user already has open, so a crash or an idle
 exit costs a reconnect rather than a new URL.
 
-**Session lock.** Before binding, `serve` takes `.craft/session.lock`, which
-holds `{"pid": …, "started_at": …}`. The lock is written to a temp file in
-`.craft/` and then published with `os.link()`, which fails if the target already
-exists. **Publishing by link rather than by `O_EXCL` create is deliberate and
-load-bearing:** an `O_EXCL` create makes the lock visible while it is still zero
-bytes, and a second session arriving in that window reads an unreadable lock,
-concludes it is crash-orphaned, and takes it — so both sessions hold the project
-and both rewrite `CRAFT.md`. Linking a fully-written file means the lock never
-exists in an empty state, so there is no window to race. A crashed session still
-leaves a *complete* lock naming a dead pid, which the liveness check reclaims.
+**Session lock — held by the kernel, not by a pid file.** Before binding,
+`serve` opens `.craft/session.lock` and takes an exclusive non-blocking lock on
+the open file descriptor: `fcntl.flock(fd, LOCK_EX | LOCK_NB)` on Unix,
+`msvcrt.locking(fd, LK_NBLCK, 1)` on Windows, behind one small
+platform-dispatch function. It then writes `{"pid": …, "started_at": …}` into
+the file so a refusal can name the holder. The fd is held open for the life of
+the process.
 
-If the lock exists and its pid is alive, `serve` refuses:
+**Two earlier designs failed here, and the reasons are worth keeping.** An
+`O_EXCL` create left the lock visible and zero-byte between create and write, so
+a second session read an unreadable lock, judged it crash-orphaned, and took it.
+Publishing a fully-written file with `os.link()` fixed *creation* but not
+*destruction*: both places that removed a lock unlinked **by path**, without
+re-checking that what was at the path was still what they had judged removable —
+so two sessions could both judge one stale lock stale, and the loser's unlink
+would delete the winner's brand-new live lock. Both bugs were confirmed with
+reproductions, the second with two real OS processes, and **the whole test suite
+passed against both.**
+
+A kernel lock removes that entire class. The lock lives against the open file
+description, so the kernel releases it when the process exits **by any means,
+including `SIGKILL`**. There is no staleness to detect, no liveness heuristic,
+no reclaim path, and nothing ever unlinks the lock file — so there is no blind
+unlink left to get wrong. `release_lock` unlocks and closes the fd.
+
+If another live process holds it, `serve` refuses and exits `4`:
 
 ```
 LOCKED  another craft session (pid 44913, started 14:02) owns .craft/
-        use --force to take it over
+        that process is still running; stop it, or kill 44913
 ```
 
-and exits `4`. A lock whose pid is dead is stale: it is reclaimed silently. The
-lock is released on clean `stop` and on idle exit.
+**There is no `--force`.** It existed to take over a stale lock, and stale locks
+no longer occur. A held lock means a live holder, and the remedy is to end that
+process — which releases the lock — rather than to have two sessions writing
+`CRAFT.md`. Unlinking the file while the old holder still holds a lock on the
+old inode would reintroduce exactly the bug this design removes.
 
 This exists because `CRAFT.md` is rewritten whole on every round. Two sessions
 on one project means last-writer-wins, silently — one session's answers
@@ -425,9 +442,9 @@ guidance governs both front-ends.
 | `wait` — no server | exits `3` printing `NOSERVER` |
 | auth | a request with no key, and one with a wrong key, both get `403` |
 | lock — held | a second `serve` against the same project exits `4` printing `LOCKED`, and does not bind |
-| lock — stale | a lock naming a dead pid is reclaimed and `serve` starts normally |
-| lock — force | `--force` takes over a live lock; the displaced server's port is freed and rebound |
-| lock — release | clean `stop` removes the lock, so the next `serve` starts without `--force` |
+| lock — death releases | a holder killed with `SIGKILL` leaves the project immediately lockable, with no reclaim step |
+| lock — cross-process | two real OS processes: exactly one acquires, the other is refused |
+| lock — release | clean `stop` releases the lock, so the next `serve` starts normally |
 | malformed round | a `questions.json` with a syntax error yields an error screen, and the process is still alive afterwards |
 | answer states | delegated, skipped, answered and absent round-trip distinctly through the JSON |
 
@@ -460,11 +477,14 @@ it stays a consumer, and is refreshed by `marketplace update` after a push.
 
 ## Deliberate limitations
 
-- One session per project directory at a time, enforced by `.craft/session.lock`
-  (see *Session lock*). The lock guards the common case — a second session
-  started while the first is live. It does not make `.craft/` safe for genuine
-  concurrent use, and nothing else does either; `--force` is an override, not a
-  merge.
+- One session per project directory at a time, enforced by a kernel lock on
+  `.craft/session.lock` (see *Session lock*). It guards a second session started
+  while the first is live. It does not make `.craft/` safe for genuine concurrent
+  use, and nothing else does either.
+- **The Windows lock path is built but unproven.** `msvcrt.locking` is written to
+  the same contract as `fcntl.flock` and sits behind a one-function dispatch, but
+  no Windows machine has run it. Treat Windows as built-but-unverified until
+  someone does, the same way any untested platform claim should be treated.
 - No round history UI. Earlier rounds remain on disk as JSON and are readable,
   but the page shows the current round only (D5).
 - No authentication beyond the session key, and no TLS. Loopback only.

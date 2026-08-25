@@ -13,7 +13,7 @@ import re
 import tempfile
 from pathlib import Path
 
-ROUND_RE = re.compile(r"^round-([0-9]{3})\.questions\.json$")
+ROUND_RE = re.compile(r"^round-([0-9]{3})\.questions\.json\Z")
 
 
 def write_json_atomic(path, obj):

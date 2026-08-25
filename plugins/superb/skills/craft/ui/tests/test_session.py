@@ -291,6 +291,25 @@ class SessionPathsTest(unittest.TestCase):
         self.assertIsNone(ROUND_RE.match("round-\u07c0\u07c0\u07c2.questions.json"))
         self.assertIsNotNone(ROUND_RE.match("round-002.questions.json"))
 
+    def test_a_trailing_newline_is_not_part_of_the_round_grammar(self):
+        """$ also matches immediately before a trailing newline, so under it a
+        file named "round-002.questions.json\\n" was read as round 2. \\Z is the
+        end of the string and nothing else. Nothing in the system produces such
+        a name; the grammar should still say what it means."""
+        name = "round-002.questions.json\n"
+        self.assertIsNone(ROUND_RE.match(name))
+        self.assertIsNone(ROUND_RE.search(name))
+        self.assertIsNotNone(ROUND_RE.match("round-002.questions.json"))
+        try:
+            (self.s.craft_dir / name).write_text("{}", encoding="utf-8")
+        except (OSError, ValueError) as exc:
+            self.skipTest(
+                "this filesystem will not hold a newline in a name: {}".format(exc)
+            )
+        self.assertIsNone(self.s.current_round())
+        self._round(1)
+        self.assertEqual(self.s.current_round(), 1)
+
     def test_a_directory_named_like_a_round_is_not_a_round(self):
         """current_round() reports rounds that were written, and a directory is
         not something anyone wrote a round into."""

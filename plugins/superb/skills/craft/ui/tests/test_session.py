@@ -12,6 +12,7 @@ import threading
 import time
 import types
 import unittest
+import weakref
 from pathlib import Path
 from unittest import mock
 
@@ -449,6 +450,17 @@ class _LockChild:
             self.proc.wait()
 
 
+def _dead_pid():
+    """A pid that names nothing: a child run to completion and reaped.
+
+    Nothing here may name it as a holder, so several tests need one, and a
+    number picked out of the air is not one -- it might be in use.
+    """
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
 def _rewrite_in_place(path, text):
     """Replace a file's bytes without replacing the file.
 
@@ -621,9 +633,7 @@ class SessionLockAcrossProcessesTest(unittest.TestCase):
 
     @staticmethod
     def _dead_pid():
-        proc = subprocess.Popen([sys.executable, "-c", "pass"])
-        proc.wait()
-        return proc.pid
+        return _dead_pid()
 
     def _holding_child(self):
         """A child that has the lock and is sitting on it."""
@@ -768,6 +778,268 @@ class SessionLockAcrossProcessesTest(unittest.TestCase):
         self.assertEqual(child.proc.returncode, 0)
         self.s.acquire_lock()  # must not raise
         self.assertEqual(read_json(self.s.lock_path)["pid"], os.getpid())
+
+
+class RefusalNamesTheHolderTest(unittest.TestCase):
+    """What a refusal is allowed to say about who is holding the project.
+
+    The refusal is the only thing a user sees, and what it says decides what
+    they do next. Told a pid, they look for that session. Told nothing, or
+    told a pid that is not running, the one remedy left is to delete the lock
+    file by hand -- which is exactly how two live sessions end up on one
+    project, each rewriting CRAFT.md whole.
+
+    So the message has three obligations, and each is a test here: read again
+    when the winner has not written itself down yet, never name a process that
+    is not running, and never leave the file as the only thing left to try.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.s = Session(self._tmp.name)
+        self.s.ensure_dirs()
+        self._sessions = [self.s]
+
+    def tearDown(self):
+        for s in self._sessions:
+            s.release_lock()
+        self._tmp.cleanup()
+
+    def _session(self):
+        s = Session(self.s.project_dir)
+        self._sessions.append(s)
+        return s
+
+    def test_a_refusal_waits_for_the_winner_to_write_down_who_it_is(self):
+        """The window every double-launch lands in.
+
+        The kernel grants the lock before the winner truncates, writes and
+        fsyncs its payload, so a loser refused in that window reads an empty
+        file -- or, since nothing ever unlinks it, the previous holder. One
+        read is the wrong instrument: measured over 240 contended acquires it
+        named the live holder 4.6% of the time. The file is made to arrive
+        late here, and the refusal still has to name the process that has it.
+        """
+        self.s.acquire_lock()
+        real_read = Session._read_lock
+        reads = []
+
+        def late(inner):
+            reads.append(True)
+            if len(reads) < 4:
+                return None  # the winner has not got to its write yet
+            return real_read(inner)
+
+        with mock.patch.object(Session, "_read_lock", late):
+            with self.assertRaises(LockHeld) as caught:
+                self._session().acquire_lock()
+
+        self.assertGreaterEqual(len(reads), 4, "the lock file was read only once")
+        self.assertEqual(caught.exception.pid, os.getpid())
+        self.assertEqual(
+            caught.exception.started_at, read_json(self.s.lock_path)["started_at"]
+        )
+        self.assertIn(str(os.getpid()), str(caught.exception))
+
+    def test_a_refusal_stops_reading_rather_than_waiting_for_a_holder(self):
+        """Bounded, and bounded by a number rather than by patience.
+
+        A holder that never writes a payload is a real state -- it may have
+        been killed between the lock and the write, and the lock file it left
+        behind stays empty forever. A server startup that never returns is
+        worse than one that says it cannot name the holder, so the reading is
+        counted out and the refusal goes ahead without a name.
+        """
+        reads = []
+
+        def never(inner):
+            reads.append(True)
+            return None
+
+        # Asserted before anything is run, so that a bound raised to something
+        # absurd fails this test rather than sitting in it for ten minutes.
+        self.assertLessEqual(
+            session._HOLDER_READ_ATTEMPTS, 32, "a refusal has to be prompt"
+        )
+        self.assertLessEqual(session._HOLDER_READ_BACKOFF_CAP, 0.25)
+        self.s.acquire_lock()
+        started = time.time()
+        with mock.patch.object(Session, "_read_lock", never):
+            with self.assertRaises(LockHeld) as caught:
+                self._session().acquire_lock()
+        elapsed = time.time() - started
+
+        self.assertEqual(len(reads), session._HOLDER_READ_ATTEMPTS)
+        self.assertLess(elapsed, 2.0, "the refusal waited far longer than its bound")
+        self.assertIsNone(caught.exception.pid)
+        self.assertIn("unknown", str(caught.exception))
+
+    def test_a_refusal_never_names_a_process_that_is_not_running(self):
+        """Nothing unlinks the lock file, so the pid in it is the previous
+        holder's until the current one overwrites it -- and a user sent to
+        find a process that exited last week is a user who deletes the lock
+        file. Liveness decides only whether the message may say the name; the
+        lock is held either way, and the refusal stands either way.
+        """
+        self.s.acquire_lock()
+        dead = _dead_pid()
+        _rewrite_in_place(
+            self.s.lock_path, json.dumps({"pid": dead, "started_at": "last week"})
+        )
+        with self.assertRaises(LockHeld) as caught:
+            self._session().acquire_lock()
+        self.assertIsNone(caught.exception.pid)
+        self.assertNotIn(str(dead), str(caught.exception))
+        self.assertNotIn("last week", str(caught.exception))
+        self.assertIn("unknown", str(caught.exception))
+
+    def test_liveness_never_decides_who_owns_the_lock(self):
+        """The distinction that two earlier designs died on.
+
+        A dead pid in the file used to mean the lock was stale, which meant a
+        reclaim, which meant an unlink by path, which meant one session
+        deleting another's live lock. The file now says a corpse owns the
+        project while a live session holds it, and the answer is still no.
+        """
+        self.s.acquire_lock()
+        _rewrite_in_place(
+            self.s.lock_path, json.dumps({"pid": _dead_pid(), "started_at": "old"})
+        )
+        with self.assertRaises(LockHeld):
+            self._session().acquire_lock()
+        self.assertTrue(self.s.lock_path.is_file())
+        self.assertTrue(self.s.verify_lock_still_ours())
+
+    def test_a_refusal_offers_a_remedy_that_is_not_the_lock_file(self):
+        """Both messages, since the unknown one is the usual one.
+
+        A user acts on the sentence. It has to leave them with something to do
+        that is not reaching for the file, so it names the session and not the
+        path -- and the unknown one says the honest thing, which is that the
+        other session is probably still starting up.
+        """
+        unknown = str(LockHeld(None, "unknown"))
+        named = str(LockHeld(4321, "2026-08-25T09:00:00Z"))
+        for message in (unknown, named):
+            lowered = message.lower()
+            for word in ("rm ", "delete", "remove", "unlink", "session.lock", "kill"):
+                self.assertNotIn(
+                    word,
+                    lowered,
+                    "{!r} sends the user at the lock file".format(message),
+                )
+            self.assertIn("close", lowered)
+            self.assertIn("wait", lowered)
+        self.assertIn("starting up", unknown)
+        self.assertIn("4321", named)
+
+
+class ContendedRefusalTest(unittest.TestCase):
+    """The refusal a double-launch actually produces, measured not asserted.
+
+    Every other refusal test establishes the holder first and asks afterwards,
+    which is the one arrangement in which the payload is always already on
+    disk -- and it is why a message that was wrong most of the time survived a
+    suite of ninety-seven tests. Here the two sessions are started together,
+    so the loser is refused while the winner is still between being granted
+    the lock and writing down who it is.
+
+    The project directory is deliberately reused across rounds. Nothing
+    unlinks the lock file, so from the second round on it holds a pid that has
+    since exited, and a refusal that reports whatever it reads names a corpse.
+    Measured over 240 rounds before this was fixed: 4.6% named the live
+    holder, 65.8% named nobody, 29.6% named a dead pid.
+    """
+
+    # Enough rounds that a message which names the holder by luck cannot pass,
+    # and few enough to keep the suite under a second of process churn.
+    ROUNDS = 16
+    # Every round must be truthful. The majority is about the retry working at
+    # all, and is set well below what a fixed implementation does (16 of 16
+    # here, 240 of 240 in the measurement above) so that an ordinarily busy
+    # machine does not fail a correct implementation.
+    LEAST_NAMED = 12
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.s = Session(self._tmp.name)
+        self.s.ensure_dirs()
+        self._children = []
+
+    def tearDown(self):
+        for child in self._children:
+            child.stop()
+        self._tmp.cleanup()
+
+    def _race(self):
+        """Two real sessions started together; (winner pid, refusal) after."""
+        children = [_LockChild(self.s.project_dir), _LockChild(self.s.project_dir)]
+        self._children.extend(children)
+        try:
+            for child in children:
+                self.assertEqual(child.line(), "ready")
+            for child in children:
+                child.release()
+            outcomes = [child.line() for child in children]
+        finally:
+            for child in children:
+                child.stop()
+        won = [o for o in outcomes if o.startswith("won")]
+        refused = [o for o in outcomes if o.startswith("refused")]
+        self.assertEqual(len(won), 1, "outcomes were {}".format(outcomes))
+        self.assertEqual(len(refused), 1, "outcomes were {}".format(outcomes))
+        return int(won[0].split()[1]), refused[0].split()[1]
+
+    def test_a_contended_refusal_names_the_process_that_actually_holds_it(self):
+        named = 0
+        for round_number in range(self.ROUNDS):
+            winner, reported = self._race()
+            with self.subTest(round=round_number):
+                if reported == "None":
+                    continue
+                self.assertEqual(
+                    int(reported),
+                    winner,
+                    "the refusal named {} while {} held the lock".format(
+                        reported, winner
+                    ),
+                )
+                named += 1
+        self.assertGreaterEqual(
+            named,
+            self.LEAST_NAMED,
+            "only {} of {} contended refusals could name the holder".format(
+                named, self.ROUNDS
+            ),
+        )
+
+    def test_a_pid_a_contended_refusal_names_is_a_process_that_exists(self):
+        """The winner is still sitting on the lock when the loser is refused,
+        so a named pid has to be findable right then -- which is the whole
+        premise of telling a user to go and close it. Checked while the winner
+        is alive rather than after, because a pid checked after everything has
+        exited proves nothing either way.
+        """
+        for round_number in range(self.ROUNDS // 4):
+            children = [_LockChild(self.s.project_dir), _LockChild(self.s.project_dir)]
+            self._children.extend(children)
+            for child in children:
+                self.assertEqual(child.line(), "ready")
+            for child in children:
+                child.release()
+            outcomes = [child.line() for child in children]
+            refused = [o for o in outcomes if o.startswith("refused")]
+            self.assertEqual(len(refused), 1, "outcomes were {}".format(outcomes))
+            reported = refused[0].split()[1]
+            with self.subTest(round=round_number):
+                if reported != "None":
+                    # Still holding: nothing has been released yet.
+                    self.assertTrue(
+                        session._pid_is_alive(int(reported)),
+                        "the refusal named {}, which is not running".format(reported),
+                    )
+            for child in children:
+                child.stop()
 
 
 class SessionLockHardeningTest(unittest.TestCase):
@@ -1009,12 +1281,33 @@ class FileIdentityTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.addCleanup(os.close, self.fd)
 
-    def _stat_like(self, real, st_dev=None, st_ino=None):
-        """A stat result that differs from `real` in exactly one field."""
+    def _stat_like(self, real, st_dev=None, st_ino=None, st_size=None, st_mtime=None):
+        """A stat result differing from `real` in exactly the fields named.
+
+        The ten-field tuple os.stat_result is built from carries whole-second
+        timestamps, so a copy made from that alone differs from the original
+        in st_mtime no matter what else it says -- and a check comparing
+        timestamps instead of inodes would then pass every test below without
+        ever looking at an inode. The second argument is what keeps the copy
+        byte-identical in the fields nobody asked to change.
+        """
         fields = list(real)
         fields[1] = real.st_ino if st_ino is None else st_ino
         fields[2] = real.st_dev if st_dev is None else st_dev
-        return os.stat_result(tuple(fields))
+        fields[6] = real.st_size if st_size is None else st_size
+        mtime = real.st_mtime if st_mtime is None else st_mtime
+        fields[8] = int(mtime)
+        return os.stat_result(
+            tuple(fields),
+            {
+                "st_atime": real.st_atime,
+                "st_mtime": mtime,
+                "st_ctime": real.st_ctime,
+                "st_atime_ns": real.st_atime_ns,
+                "st_mtime_ns": int(mtime * 1e9),
+                "st_ctime_ns": real.st_ctime_ns,
+            },
+        )
 
     def test_a_descriptor_on_the_file_the_path_names_is_that_file(self):
         """The control: without this passing, every negative below could be
@@ -1023,10 +1316,28 @@ class FileIdentityTest(unittest.TestCase):
 
     def test_a_different_inode_at_the_same_name_is_a_different_file(self):
         """os.replace puts a new inode at an old name and carries none of its
-        locks over. This is the shape write_json_atomic has."""
+        locks over. This is the shape write_json_atomic has.
+
+        The replacement is made indistinguishable from the original in
+        everything but the inode -- the same bytes, so the same size, and the
+        original's timestamps copied onto it -- so that only a check which
+        compares the inode can tell the two apart. A lock file is a few dozen
+        bytes of JSON rewritten by every session in turn, so two of them
+        agreeing on size and mtime is the ordinary case here, not a contrived
+        one.
+        """
+        real = os.fstat(self.fd)
         other = self.path.with_name("other")
-        other.write_text("y", encoding="utf-8")
+        other.write_text("x", encoding="utf-8")
+        os.utime(str(other), ns=(real.st_atime_ns, real.st_mtime_ns))
         os.replace(str(other), str(self.path))
+        now = os.stat(str(self.path))
+        self.assertNotEqual(now.st_ino, real.st_ino, "the inode did not change")
+        self.assertEqual(
+            (now.st_size, now.st_mtime),
+            (real.st_size, real.st_mtime),
+            "the two files differ in size or mtime, so this proves less than it says",
+        )
         self.assertFalse(session._is_file_at(self.fd, self.path))
 
     def test_a_name_that_no_longer_exists_is_not_our_file(self):
@@ -1041,19 +1352,45 @@ class FileIdentityTest(unittest.TestCase):
         the case the retry exists to catch.
 
         Two filesystems cannot be conjured here, so the second stat is the one
-        a second filesystem would have produced: same inode number, different
-        device.
+        a second filesystem would have produced: same inode number, same size,
+        same timestamps, different device.
         """
         real = os.fstat(self.fd)
         elsewhere = self._stat_like(real, st_dev=real.st_dev + 1)
         self.assertEqual(elsewhere.st_ino, real.st_ino)
+        self.assertEqual(
+            (elsewhere.st_size, elsewhere.st_mtime), (real.st_size, real.st_mtime)
+        )
         with mock.patch("session.os.stat", return_value=elsewhere):
             self.assertFalse(session._is_file_at(self.fd, self.path))
         # And the mirror, so the assertion above cannot pass by comparing
         # nothing at all: same device, different inode is also a different file.
         same_dev = self._stat_like(real, st_ino=real.st_ino + 1)
+        self.assertEqual(
+            (same_dev.st_size, same_dev.st_mtime), (real.st_size, real.st_mtime)
+        )
         with mock.patch("session.os.stat", return_value=same_dev):
             self.assertFalse(session._is_file_at(self.fd, self.path))
+
+    def test_identity_is_not_the_size_and_the_time_the_file_was_written(self):
+        """The other half of what "the same file" has to mean, and the half a
+        suite can pass without ever having pinned it.
+
+        A file is still ours when it has been written to since we opened it --
+        which the lock file is, by every acquire that truncates and rewrites
+        it. Substituting (st_size, st_mtime) for (st_dev, st_ino) leaves the
+        inode tests above green and fails here, which is the point: identity
+        is which file it is, not what is currently in it.
+        """
+        real = os.fstat(self.fd)
+        rewritten = self._stat_like(
+            real, st_size=real.st_size + 4096, st_mtime=real.st_mtime + 60
+        )
+        self.assertEqual(
+            (rewritten.st_dev, rewritten.st_ino), (real.st_dev, real.st_ino)
+        )
+        with mock.patch("session.os.stat", return_value=rewritten):
+            self.assertTrue(session._is_file_at(self.fd, self.path))
 
 
 class SessionLockPathIdentityTest(unittest.TestCase):
@@ -1459,6 +1796,176 @@ class SessionLockOwningProcessTest(unittest.TestCase):
         self.s.acquire_lock()
         self.s.release_lock()
         self._session().acquire_lock()  # must not raise
+
+    def test_a_forked_child_does_not_believe_it_holds_the_parents_lock(self):
+        """The tripwire itself, fired.
+
+        fork() shares the open file description the lock lives on, so without
+        the at-fork handler a child inherits a Session that says it holds the
+        project: it would release the parent's lock, and -- worse, because it
+        is silent -- it would hold the flock open after the parent was killed,
+        so the next session to come along is refused by a process that no
+        longer exists. Nothing forks today, but multiprocessing defaults to
+        fork on Linux, so this is registered rather than remembered.
+        """
+        if not hasattr(os, "fork"):
+            self.skipTest("no os.fork on this platform")
+        self.s.acquire_lock()
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            # The child. os._exit, so that no fixture and no unittest
+            # reporting runs twice.
+            try:
+                os.close(read_fd)
+                said = "fd={} pid={} ours={}".format(
+                    self.s._lock_fd,
+                    self.s._lock_pid,
+                    self.s.verify_lock_still_ours(),
+                )
+                self.s.release_lock()  # must be a no-op, not an error
+                os.write(write_fd, said.encode("utf-8"))
+            except BaseException as exc:  # noqa: BLE001 - reported, not handled
+                try:
+                    os.write(write_fd, "raised {!r}".format(exc).encode("utf-8"))
+                except OSError:
+                    pass
+            finally:
+                os._exit(0)
+
+        self.addCleanup(self._reap, pid)
+        os.close(write_fd)
+        with os.fdopen(read_fd, "rb") as fh:
+            said = fh.read().decode("utf-8")  # EOF is the child having exited
+        os.waitpid(pid, 0)
+        self.assertEqual(said, "fd=None pid=None ours=False")
+
+        # The parent still holds the project, which is the other half of it.
+        self.assertTrue(self.s.verify_lock_still_ours())
+        with self.assertRaises(LockHeld) as caught:
+            self._session().acquire_lock()
+        self.assertEqual(caught.exception.pid, os.getpid())
+
+    def test_the_at_fork_handler_may_be_run_twice(self):
+        """It is registered per import of the module, and a project that
+        imports session under two names registers it twice. Running it again
+        over a set it has already emptied has to be a no-op rather than a
+        second close of a descriptor this process may have reused.
+        """
+        self.s.acquire_lock()
+        holders = weakref.WeakSet([self.s])
+        with mock.patch.object(session, "_LOCK_HOLDERS", holders):
+            session._forget_lock_after_fork()
+            session._forget_lock_after_fork()
+        self.assertIsNone(self.s._lock_fd)
+        self.assertIsNone(self.s._lock_pid)
+        self.assertFalse(self.s.verify_lock_still_ours())
+        self.assertEqual(len(holders), 0)
+        self.s.release_lock()  # must not raise, and has nothing to do
+        # The descriptor went with the state, so the project is free again.
+        self._session().acquire_lock()
+
+    def test_holding_the_lock_registers_the_session_and_releasing_it_does_not(self):
+        """The handler can only clear what it can find, and a set nothing is
+        ever added to would make the fork test above pass for the wrong
+        reason. Releasing takes the entry out again, so a long-lived process
+        that opens many projects does not accumulate them."""
+        self.assertNotIn(self.s, session._LOCK_HOLDERS)
+        self.s.acquire_lock()
+        self.assertIn(self.s, session._LOCK_HOLDERS)
+        self.s.release_lock()
+        self.assertNotIn(self.s, session._LOCK_HOLDERS)
+
+
+class SessionLockOwnershipCheckTest(unittest.TestCase):
+    """verify_lock_still_ours: the holder noticing it has been undermined.
+
+    An `rm .craft/session.lock` after a session has the lock cannot be caught
+    by the next acquirer -- the name it would compare against is gone, so it
+    opens a fresh file, is granted a lock on it, and both sessions believe
+    they own the project. Four live holders were produced this way, one per
+    removal. Nothing on the acquiring side can fix that, so the holder is the
+    one who has to look, and this is what a server calls on a timer before
+    shutting down loudly.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.s = Session(self._tmp.name)
+        self.s.ensure_dirs()
+        self._sessions = [self.s]
+
+    def tearDown(self):
+        for s in self._sessions:
+            s.release_lock()
+        self._tmp.cleanup()
+
+    def _session(self):
+        s = Session(self.s.project_dir)
+        self._sessions.append(s)
+        return s
+
+    def test_a_session_that_never_acquired_holds_nothing(self):
+        self.assertFalse(self.s.verify_lock_still_ours())
+
+    def test_a_session_holding_the_lock_says_so(self):
+        self.s.acquire_lock()
+        self.assertTrue(self.s.verify_lock_still_ours())
+        self.assertTrue(self.s.verify_lock_still_ours(), "asking twice changed it")
+
+    def test_a_session_that_released_the_lock_no_longer_holds_it(self):
+        self.s.acquire_lock()
+        self.s.release_lock()
+        self.assertFalse(self.s.verify_lock_still_ours())
+
+    def test_a_lock_file_removed_under_the_holder_is_no_longer_ours(self):
+        """`rm .craft/session.lock`. The lock is still held -- the kernel does
+        not care that the name is gone -- but it now guards an inode nobody
+        can reach, and the check has to say so rather than raise."""
+        self.s.acquire_lock()
+        os.unlink(str(self.s.lock_path))
+        self.assertFalse(self.s.verify_lock_still_ours())
+
+    def test_a_craft_dir_removed_under_the_holder_is_no_longer_ours(self):
+        """`git clean -xdf`, over a .craft/ this project gitignores."""
+        self.s.acquire_lock()
+        shutil.rmtree(str(self.s.craft_dir))
+        self.assertFalse(self.s.verify_lock_still_ours())
+
+    def test_a_lock_file_replaced_under_the_holder_is_no_longer_ours(self):
+        """The name survives, the inode under it does not."""
+        self.s.acquire_lock()
+        fd, tmp = tempfile.mkstemp(dir=str(self.s.craft_dir), prefix=".tmp-")
+        os.close(fd)
+        os.replace(tmp, str(self.s.lock_path))
+        self.assertFalse(self.s.verify_lock_still_ours())
+
+    def test_the_check_tells_the_two_holders_of_one_project_apart(self):
+        """The catastrophe end to end, which is what makes the check worth
+        having: the file is removed, a second session takes the project, and
+        both of them are holding a lock. The one asking the question is the
+        only place that difference is visible."""
+        self.s.acquire_lock()
+        os.unlink(str(self.s.lock_path))
+        second = self._session()
+        second.acquire_lock()  # nothing can stop this; the name was free
+        self.assertTrue(second.verify_lock_still_ours())
+        self.assertFalse(self.s.verify_lock_still_ours())
+        self.assertEqual(read_json(self.s.lock_path)["pid"], os.getpid())
+
+    def test_the_check_never_raises_on_a_lock_file_it_cannot_stat(self):
+        """It runs on a timer inside a server, so it reports rather than
+        throws, whatever the filesystem says."""
+        self.s.acquire_lock()
+        for failure in (
+            OSError(errno.EACCES, "Permission denied"),
+            OSError(errno.ENOENT, "No such file or directory"),
+            OSError(errno.EIO, "Input/output error"),
+        ):
+            with self.subTest(errno=failure.errno):
+                with mock.patch("session.os.stat", side_effect=failure):
+                    self.assertFalse(self.s.verify_lock_still_ours())
+        self.assertTrue(self.s.verify_lock_still_ours())
 
 
 class SessionLockPayloadWriteTest(unittest.TestCase):

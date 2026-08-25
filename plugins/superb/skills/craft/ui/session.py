@@ -13,6 +13,7 @@ import os
 import re
 import tempfile
 import time
+import weakref
 from pathlib import Path
 
 try:
@@ -59,26 +60,38 @@ class LockHeld(Exception):
     lock because a live process holds it. Every other way the lock can fail --
     a directory at that name, a mode we may not open, a read-only or full
     filesystem -- is LockUnavailable. Keeping the two apart is not cosmetic.
-    A user told "another session owns this, kill pid None" has one obvious
-    remedy left, which is to delete the lock file by hand; that is precisely
-    the act that puts two live holders on one project (see _is_file_at).
+
+    Neither message may leave a user with deleting the lock file as the only
+    thing left to try, because that is precisely the act that puts two live
+    holders on one project (see _is_file_at), and CRAFT.md is rewritten whole
+    every round. So both of them name a remedy that is not the file: close the
+    other session, or wait for it. The unknown-holder message is the one that
+    matters, since it is what a double-launch usually produces -- the winner is
+    between being granted the lock and writing down who it is -- and the
+    honest thing to say then is that a session is starting up, not that some
+    unnameable process must be hunted down.
 
     `pid` is an int when the holder could be identified and None when it could
     not, so a caller may do int(exc.pid) behind a single None check. It is
-    never the string "unknown".
+    never the string "unknown". An int here has been checked to be running:
+    the acquire never reports a pid that is not alive, because a pid that
+    cannot be found is what sends somebody to the lock file with rm.
     """
 
     def __init__(self, pid, started_at):
         self.pid = as_pid(pid)
         self.started_at = started_at
         if self.pid is None:
-            message = "a craft session owns this project (holder unknown, started {})"
+            message = (
+                "a craft session owns this project (holder unknown, started {}) "
+                "-- it is starting up, or it did not record which process it "
+                "is; close the other craft session, or wait for it to finish"
+            )
             super().__init__(message.format(started_at))
         else:
             super().__init__(
-                "craft session pid {} (started {}) owns this project".format(
-                    self.pid, started_at
-                )
+                "craft session pid {} (started {}) owns this project -- close "
+                "that session, or wait for it to finish".format(self.pid, started_at)
             )
 
 
@@ -157,6 +170,16 @@ def _fcntl_try_lock(fd):
     pair POSIX record locks use, so closing some *other* descriptor onto the
     same file does not quietly drop this lock -- which is what the refused
     acquirer below does on its way out.
+
+    That guarantee is a guarantee about local filesystems. Linux implements
+    flock() over NFS as a POSIX record lock unless the mount carries
+    local_lock=flock or local_lock=all, and POSIX record locks are keyed on
+    (process, inode): under one, a refused acquirer's own close() drops the
+    *holder's* lock, and the project comes unlocked the moment somebody is
+    told it is locked. That is the exact semantics this design rejected. No
+    detection is attempted -- there is no portable way to ask a descriptor
+    which lock flavour it got -- so it is recorded here instead: a .craft/ on
+    an NFS mount without local_lock is outside what this lock can promise.
     """
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -294,11 +317,101 @@ def _write_all(fd, payload):
         view = view[written:]
 
 
+def _pid_is_alive(pid):
+    """True if a process with this pid exists right now.
+
+    ONLY ever used to decide whether a message can be trusted, NEVER to decide
+    who owns the lock -- deciding ownership from liveness is the judgement
+    that destroyed the two designs before this one.
+
+    A pid we may not signal (EPERM) exists and belongs to somebody else, which
+    is still a live holder. A platform with no os.kill cannot answer at all,
+    and an answer that was never obtained is not a yes: an unverifiable pid is
+    reported as no holder rather than named to a user who would then go
+    looking for it.
+    """
+    if pid is None or pid <= 0:
+        return False
+    kill = getattr(os, "kill", None)
+    if kill is None:
+        return False
+    try:
+        kill(pid, 0)
+    except OSError as exc:
+        return exc.errno == errno.EPERM
+    except (ValueError, OverflowError):
+        return False
+    return True
+
+
+# How long a refusal will wait for the winner to write down who it is.
+#
+# The winner is granted the lock before it truncates, writes and fsyncs its
+# payload, and a double-launch's loser lands inside that window far more often
+# than outside it: measured over 240 contended acquires, two real processes and
+# no injected delay, a single read named the live holder 4.6% of the time and
+# read an empty or a stale file the other 95.4%. Nothing may be inferred from
+# that -- the refusal already stands, the kernel said so -- but the message
+# built from it is what a user acts on.
+#
+# Bounded and finite, never a spin: at most _HOLDER_READ_ATTEMPTS reads with a
+# doubling pause between them, capped, which is about 0.14 s of waiting in the
+# worst case and none at all when the payload is already there.
+_HOLDER_READ_ATTEMPTS = 8
+_HOLDER_READ_BACKOFF = 0.002
+_HOLDER_READ_BACKOFF_CAP = 0.04
+
+
 # How many times an acquire will start over because the file at lock_path was
 # replaced under it. A single retry covers the ordinary race; a name being
 # replaced three times running is something outside this session churning the
 # path, and spinning on that would hang a server startup rather than report it.
 _LOCK_ATTEMPTS = 3
+
+
+# Every Session that currently holds a lock, weakly, so that a fork can find
+# them. Nothing else may read this: it is not a registry of who owns what.
+_LOCK_HOLDERS = weakref.WeakSet()
+
+
+def _forget_lock_after_fork():
+    """Make a forked child hold nothing, whatever its parent was holding.
+
+    os.fork() copies this process's objects and *shares* the open file
+    description the lock lives on, so without this a child believes it holds
+    the project. Two consequences, and both are silent:
+
+    1. LOCK_UN or close() through the child's copy would free the parent's
+       lock while the parent went on rewriting CRAFT.md.
+    2. The flock survives for as long as any descriptor onto that open file
+       description is open, so a child outliving a SIGKILLed parent keeps the
+       project locked by nobody -- and a newcomer is then refused and sent to
+       find a process that no longer exists.
+
+    Closing the child's descriptor answers both: it is a different descriptor
+    from the parent's, so it does not disturb the parent's lock, and it stops
+    the child from propping the lock up afterwards.
+
+    Nothing forks today -- the server is threaded -- but multiprocessing
+    defaults to fork on Linux, so this is registered rather than remembered.
+    It is idempotent, and safe to run in a process that holds nothing.
+    """
+    for holder in list(_LOCK_HOLDERS):
+        fd = holder._lock_fd
+        holder._lock_fd = None
+        holder._lock_pid = None
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    _LOCK_HOLDERS.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    # Registered per import of this module. Importing it twice under two names
+    # registers it twice, which costs a second pass over an already-empty set.
+    os.register_at_fork(after_in_child=_forget_lock_after_fork)
 
 
 class Session:
@@ -361,6 +474,38 @@ class Session:
             return None
         return holder if isinstance(holder, dict) else None
 
+    def _read_live_holder(self):
+        """(pid, started_at) for the refusal message, once the winner has said.
+
+        pid is an int only when the file names a process that is running, and
+        None otherwise; started_at goes with it, so a dead holder's start time
+        is never shown beside a live holder's refusal.
+
+        Two things make a single read the wrong instrument. The winner is
+        granted the lock before it writes its payload, so an instant after the
+        refusal the file is usually empty; and nothing ever unlinks the file,
+        so what is in it before that write is the *previous* holder, long
+        dead. Reading once therefore names nobody or names a corpse -- which
+        is the message that sends a user to delete the lock file by hand.
+
+        So: read again, a bounded number of times, until the file names
+        somebody who is alive. Nothing about ownership is decided here. The
+        kernel refused us before this was called and would refuse us just the
+        same if every read came back empty; all that is being chosen is what
+        the message is allowed to claim.
+        """
+        pause = _HOLDER_READ_BACKOFF
+        for attempt in range(_HOLDER_READ_ATTEMPTS):
+            holder = self._read_lock()
+            if holder is not None:
+                pid = as_pid(holder.get("pid"))
+                if _pid_is_alive(pid):
+                    return pid, holder.get("started_at", "unknown")
+            if attempt + 1 < _HOLDER_READ_ATTEMPTS:
+                time.sleep(pause)
+                pause = min(pause * 2, _HOLDER_READ_BACKOFF_CAP)
+        return None, "unknown"
+
     def acquire_lock(self):
         """Take the session lock. CRAFT.md is rewritten whole every round, so two
         sessions on one project silently lose one session's answers.
@@ -399,8 +544,7 @@ class Session:
             if not _lock_or_unavailable(fd, self.lock_path):
                 # Reading the file is a courtesy to the message and nothing
                 # more; whatever it says, the refusal already stands.
-                holder = self._read_lock() or {}
-                raise LockHeld(holder.get("pid"), holder.get("started_at", "unknown"))
+                raise LockHeld(*self._read_live_holder())
             ours = _is_file_at(fd, self.lock_path)
             if ours:
                 self._write_holder(fd)
@@ -411,6 +555,7 @@ class Session:
                 # by itself for as long as it lives. _lock_fd is the flag
                 # release_lock reads, so it goes last.
                 self._lock_pid = os.getpid()
+                _LOCK_HOLDERS.add(self)
                 self._lock_fd = fd
         except BaseException:
             os.close(fd)  # also drops the lock, if the failure was after taking it
@@ -448,6 +593,27 @@ class Session:
         except OSError as exc:
             raise LockUnavailable(self.lock_path, exc) from exc
 
+    def verify_lock_still_ours(self):
+        """True while we hold the lock AND lock_path still names our file.
+
+        The acquire proves both once. Neither stays proved: `rm
+        .craft/session.lock`, a `git clean -xdf` over a .craft/ this project
+        gitignores, or any os.replace of the write_json_atomic shape leaves us
+        holding a lock on an inode nobody can reach by name, after which the
+        next session to come along opens a fresh file, is granted a lock on it,
+        and both of us believe we own the project. Nothing on the acquiring
+        side can catch that -- the name it would compare against is gone -- so
+        the holder is the only one left who can notice.
+
+        A caller is meant to run this on a timer and stop loudly when it turns
+        false. It never raises: a missing file, an unreadable one and a
+        replaced one are all simply not ours.
+        """
+        fd = self._lock_fd
+        if fd is None or self._lock_pid != os.getpid():
+            return False
+        return _is_file_at(fd, self.lock_path)
+
     def release_lock(self):
         """Drop the lock if we are holding one, and do nothing if we are not.
 
@@ -462,6 +628,12 @@ class Session:
         on believing it held the project. Nothing forks today -- the server is
         threaded -- but a released lock nobody released is not a failure any
         test downstream of that would attribute to the right cause.
+
+        _forget_lock_after_fork has already emptied a child's state by the time
+        anything in it runs, so this guard should never be what saves a fork.
+        It stays because it is cheap and because the at-fork handler is
+        registered by an import that a child could conceivably be running
+        without.
         """
         fd = self._lock_fd
         if fd is None:
@@ -470,6 +642,7 @@ class Session:
             return
         self._lock_fd = None
         self._lock_pid = None
+        _LOCK_HOLDERS.discard(self)
         try:
             _unlock(fd)
         except OSError:

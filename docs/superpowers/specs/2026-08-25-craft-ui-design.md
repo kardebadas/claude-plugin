@@ -62,11 +62,16 @@ plugins/superb/skills/craft/
   SKILL.md            # + argument-hint, + "# Delivery" section
   README.md
   ui/
-    craftui.py        # server + CLI, stdlib only
+    craftui.py        # CLI: serve, wait, status, stop
+    session.py        # session dir, lock, round discovery, atomic writes
+    schema.py         # round/answer validation, answer states, open counts
+    markdown.py       # CRAFT.md -> HTML, server-side
+    server.py         # HTTP handler + threading server
     app.html          # the entire UI
     tests/
-      test_craftui.py # stdlib unittest
-      smoke.sh        # end-to-end over real HTTP
+      test_session.py   test_schema.py   test_markdown.py
+      test_server.py    test_commands.py
+      smoke.sh          # end-to-end over real HTTP
 ```
 
 ### Session directory
@@ -300,8 +305,11 @@ then posts a final round containing no questions and a closing note, and stops.
   same
   posture as the superpowers brainstorming companion, and it exists so a stray
   tab or another machine on the LAN cannot read the user's product plans.
-- **Serves three things:** `app.html`, the current round JSON, and `CRAFT.md`
-  as raw text for the browser to render.
+- **Serves three things:** `app.html`, the current round JSON, and the brief
+  as **HTML rendered from `CRAFT.md` server-side**. Rendering in Python rather
+  than the browser puts the fiddliest code in the project under ordinary unit
+  tests, with no JS test runner and therefore no dependencies. It does not make
+  the server less stupid: rendering is presentation, not interpretation.
 - **Accepts two things:** a draft PATCH on every change, and a submit POST
   carrying `finished: true|false`.
 - **A malformed `round-NNN.questions.json` renders an error screen naming the
@@ -350,10 +358,11 @@ reconnects on its own when it returns — a restart on the same project director
 reuses the port, so the open tab recovers without a new URL.
 
 **Accepted limitation.** Rendering `CRAFT.md` needs a markdown renderer, and
-"stdlib only, no npm" means a small hand-written one: headings, bold, italic,
-inline code, fenced code, lists, blockquote, horizontal rule, links. That covers
-the brief's shape. It will not cover tables or anything exotic, and the brief
-should not rely on them.
+"stdlib only, no npm" means a small hand-written one in Python: headings, bold,
+italic, inline code, fenced code, lists, blockquote, horizontal rule, links.
+Everything is HTML-escaped before any transformation, so the brief can contain
+angle brackets safely. It will not cover tables or anything exotic, and the
+brief should not rely on them.
 
 ---
 

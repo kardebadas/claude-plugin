@@ -77,6 +77,7 @@ Created in the user's project, beside `CRAFT.md`:
 <project>/
   CRAFT.md                       # the brief. Agent owns it. Server only reads it.
   .craft/                        # session state, gitignored
+    session.lock                 # JSON: pid, started_at — one session per project
     server-info                  # JSON: port, url, session key, pid
     round-001.questions.json     # agent writes
     round-001.draft.json         # server writes on every change
@@ -206,6 +207,25 @@ free, reuse it; otherwise take an ephemeral one. Reuse is what lets a restarted
 server be picked up by the tab the user already has open, so a crash or an idle
 exit costs a reconnect rather than a new URL.
 
+**Session lock.** Before binding, `serve` takes `.craft/session.lock` —
+`{"pid": …, "started_at": …}`, written with `O_EXCL`. If the lock exists and
+its pid is alive, `serve` refuses:
+
+```
+LOCKED  another craft session (pid 44913, started 14:02) owns .craft/
+        use --force to take it over
+```
+
+and exits `4`. A lock whose pid is dead is stale: it is reclaimed silently. The
+lock is released on clean `stop` and on idle exit.
+
+This exists because `CRAFT.md` is rewritten whole on every round. Two sessions
+on one project means last-writer-wins, silently — one session's answers
+disappearing into the other's overwrite, with nothing in either transcript to
+show it happened. Refusing the second server is the cheapest place to stop that,
+and it also blocks the agent-side collision for free, since the second session
+cannot get a server to talk to.
+
 ### `wait`
 
 ```
@@ -220,6 +240,9 @@ Blocks until one of three things happens, prints one line, exits:
 | user pressed Finish | `FINISHED round=2 answers=.craft/round-002.answers.json` | 0 |
 | nothing for `--timeout` | `TIMEOUT round=2` | 2 |
 | server not running | `NOSERVER` | 3 |
+
+(Exit `4` is `serve`'s "another session holds the lock" — see the Session lock
+above. No other command takes the lock.)
 
 Default timeout 900 s. The agent runs `wait` as a background command and ends
 its turn; the harness wakes it when the command exits. A `TIMEOUT` is a
@@ -383,6 +406,10 @@ guidance governs both front-ends.
 | `wait` — timeout | exits `2` printing `TIMEOUT` after the given deadline |
 | `wait` — no server | exits `3` printing `NOSERVER` |
 | auth | a request with no key, and one with a wrong key, both get `403` |
+| lock — held | a second `serve` against the same project exits `4` printing `LOCKED`, and does not bind |
+| lock — stale | a lock naming a dead pid is reclaimed and `serve` starts normally |
+| lock — force | `--force` takes over a live lock; the displaced server's port is freed and rebound |
+| lock — release | clean `stop` removes the lock, so the next `serve` starts without `--force` |
 | malformed round | a `questions.json` with a syntax error yields an error screen, and the process is still alive afterwards |
 | answer states | delegated, skipped, answered and absent round-trip distinctly through the JSON |
 
@@ -415,8 +442,11 @@ it stays a consumer, and is refreshed by `marketplace update` after a push.
 
 ## Deliberate limitations
 
-- One session per project directory at a time. Two concurrent `craft` sessions
-  on one project would collide on `.craft/`; not guarded, not supported.
+- One session per project directory at a time, enforced by `.craft/session.lock`
+  (see *Session lock*). The lock guards the common case — a second session
+  started while the first is live. It does not make `.craft/` safe for genuine
+  concurrent use, and nothing else does either; `--force` is an override, not a
+  merge.
 - No round history UI. Earlier rounds remain on disk as JSON and are readable,
   but the page shows the current round only (D5).
 - No authentication beyond the session key, and no TLS. Loopback only.

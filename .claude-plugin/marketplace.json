@@ -1,0 +1,15 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "kardebadas-claude-plugin",
+  "description": "Personal Claude Code plugins. Currently: superpipeline, an idea-to-finished-branch orchestrator.",
+  "owner": {
+    "name": "kardebadas"
+  },
+  "plugins": [
+    {
+      "name": "superpipeline",
+      "source": "./plugins/superpipeline",
+      "description": "Drives a feature from idea to a finished branch by composing the superpowers skills: brainstorm -> pressure-test -> design gate -> master plan -> phase expansion -> plan gate -> autonomous per-phase implement/review/fix loop. Zero-assumption law, on-disk run state, dependency waves for parallel implementers."
+    }
+  ]
+}

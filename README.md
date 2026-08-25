@@ -16,7 +16,13 @@ inside it is invoked as `bt:<skill>`:
 
 | Skill | Invoke as | What it is |
 | ----- | --------- | ---------- |
-| [`superpipeline`](plugins/bt/skills/superpipeline) | `bt:superpipeline` | Takes a feature from idea to finished branch: brainstorm, pressure-test, design gate, master plan, phase expansion, plan gate, then an autonomous per-phase implement/review/fix loop. Keeps its state on disk so a compaction or a crash cannot lose the run, and runs independent tasks as parallel implementers in separate worktrees. |
+| [`craft`](plugins/bt/skills/craft) | `bt:craft` | Turns a vague product idea into a clear definition of what to build. Writes a questionnaire tailored to the product into `CRAFT.md`, which you answer in your own time; each pass folds your answers in, records confirmed decisions, surfaces assumptions and contradictions, and gets shorter. Deliberately stops before planning — no tasks, no phases, no code. |
+| [`superpipeline`](plugins/bt/skills/superpipeline) | `bt:superpipeline` | Takes a settled idea to a finished branch: brainstorm, pressure-test, design gate, master plan, phase expansion, plan gate, then an autonomous per-phase implement/review/fix loop. Keeps its state on disk so a compaction or a crash cannot lose the run, and runs independent tasks as parallel implementers in separate worktrees. |
+
+The two are meant to run in order: `bt:craft` decides *what* the product is,
+`bt:superpipeline` decides *how* it gets built and then builds it. Crafting
+reaching `CRAFT STATUS: VISION CLEAR` is the signal that the pipeline has
+enough to work from — it is not an instruction to start building.
 
 `superpipeline` composes the [superpowers](https://github.com/obra/superpowers)
 skills, so install that plugin too.

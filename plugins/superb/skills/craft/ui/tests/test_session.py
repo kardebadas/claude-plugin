@@ -4,6 +4,7 @@ import errno
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,7 @@ import session
 from session import (
     ROUND_RE,
     LockHeld,
+    LockUnavailable,
     Session,
     read_json,
     write_json_atomic,
@@ -828,11 +830,18 @@ class SessionLockHardeningTest(unittest.TestCase):
         """Anything can be sitting at that name. A directory there cannot be
         opened as a file and cannot be locked, so the acquire has to say the
         project is unavailable rather than raise IsADirectoryError out of a
-        traceback that names nothing a user can act on."""
+        traceback that names nothing a user can act on.
+
+        It says it as LockUnavailable, not as LockHeld: no session owns this
+        project, and reporting one that does leaves a user with nothing to try
+        except deleting the lock by hand -- which is the act that puts two
+        live holders on one project.
+        """
         self.s.lock_path.mkdir()
-        with self.assertRaises(LockHeld):
+        with self.assertRaises(LockUnavailable) as caught:
             self.s.acquire_lock()
-        with self.assertRaises(LockHeld):
+        self.assertNotIsInstance(caught.exception, LockHeld)
+        with self.assertRaises(LockUnavailable):
             self.s.acquire_lock()
         self.s.release_lock()  # shutdown must still get out
         self.assertTrue(self.s.lock_path.is_dir())
@@ -987,6 +996,651 @@ class LockPlatformDispatchTest(unittest.TestCase):
         ):
             with self.assertRaises(OSError):
                 session._fcntl_try_lock(0)
+
+
+class FileIdentityTest(unittest.TestCase):
+    """What "the same file" means, since the whole of the fix rests on it."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "a-file"
+        self.path.write_text("x", encoding="utf-8")
+        self.fd = os.open(str(self.path), os.O_RDWR)
+        self.addCleanup(self._tmp.cleanup)
+        self.addCleanup(os.close, self.fd)
+
+    def _stat_like(self, real, st_dev=None, st_ino=None):
+        """A stat result that differs from `real` in exactly one field."""
+        fields = list(real)
+        fields[1] = real.st_ino if st_ino is None else st_ino
+        fields[2] = real.st_dev if st_dev is None else st_dev
+        return os.stat_result(tuple(fields))
+
+    def test_a_descriptor_on_the_file_the_path_names_is_that_file(self):
+        """The control: without this passing, every negative below could be
+        passing because the check always says no."""
+        self.assertTrue(session._is_file_at(self.fd, self.path))
+
+    def test_a_different_inode_at_the_same_name_is_a_different_file(self):
+        """os.replace puts a new inode at an old name and carries none of its
+        locks over. This is the shape write_json_atomic has."""
+        other = self.path.with_name("other")
+        other.write_text("y", encoding="utf-8")
+        os.replace(str(other), str(self.path))
+        self.assertFalse(session._is_file_at(self.fd, self.path))
+
+    def test_a_name_that_no_longer_exists_is_not_our_file(self):
+        os.unlink(str(self.path))
+        self.assertFalse(session._is_file_at(self.fd, self.path))
+
+    def test_identity_is_the_device_as_well_as_the_inode(self):
+        """Inode numbers are unique within a filesystem and nowhere else, and
+        a .craft/ that was removed and recreated need not be on the one it was
+        on before. Comparing st_ino alone would call two different files the
+        same one whenever the numbers happened to collide, which is exactly
+        the case the retry exists to catch.
+
+        Two filesystems cannot be conjured here, so the second stat is the one
+        a second filesystem would have produced: same inode number, different
+        device.
+        """
+        real = os.fstat(self.fd)
+        elsewhere = self._stat_like(real, st_dev=real.st_dev + 1)
+        self.assertEqual(elsewhere.st_ino, real.st_ino)
+        with mock.patch("session.os.stat", return_value=elsewhere):
+            self.assertFalse(session._is_file_at(self.fd, self.path))
+        # And the mirror, so the assertion above cannot pass by comparing
+        # nothing at all: same device, different inode is also a different file.
+        same_dev = self._stat_like(real, st_ino=real.st_ino + 1)
+        with mock.patch("session.os.stat", return_value=same_dev):
+            self.assertFalse(session._is_file_at(self.fd, self.path))
+
+
+class SessionLockPathIdentityTest(unittest.TestCase):
+    """The lock is granted on an inode; every caller of it names a path.
+
+    Between the os.open and the lock being granted, the name can come to mean
+    a different file. The old implementation never looked, so it would sit
+    holding an orphaned inode while a real second process held the file at the
+    name -- two live holders on one project, and CRAFT.md is rewritten whole
+    every round.
+
+    Each test below opens that window deliberately, fires one real trigger in
+    it, and lets a genuine second OS process take the file that is at the path
+    afterwards. Nothing is interleaved by hand: the child rendezvouses on
+    pipes and is reaped however the test ends.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.s = Session(self._tmp.name)
+        self.s.ensure_dirs()
+        self._children = []
+        self._sessions = [self.s]
+
+    def tearDown(self):
+        for child in self._children:
+            child.stop()
+        for s in self._sessions:
+            s.release_lock()
+        self._tmp.cleanup()
+
+    def _holding_child(self):
+        """A real second craft session that has the lock and is sitting on it."""
+        child = _LockChild(self.s.project_dir)
+        self._children.append(child)
+        self.assertEqual(child.line(), "ready")
+        child.release()
+        outcome = child.line()
+        self.assertTrue(
+            outcome.startswith("won"), "the child was refused: {}".format(outcome)
+        )
+        return child
+
+    def _refused_when_the_path_moves_under_us(self, trigger):
+        """Fire `trigger` between our open and our lock, then hand the path to
+        a real second process, and assert we are refused rather than joining
+        it as a second holder."""
+        real_try_lock = session._try_lock_exclusive
+        state = {"attempts": 0, "child": None}
+
+        def hook(fd):
+            state["attempts"] += 1
+            if state["child"] is None:
+                trigger()
+                state["child"] = self._holding_child()
+            return real_try_lock(fd)
+
+        with mock.patch.object(session, "_try_lock_exclusive", hook):
+            with self.assertRaises(LockHeld) as caught:
+                self.s.acquire_lock()
+
+        child = state["child"]
+        self.assertIsNotNone(child, "the trigger never ran, so nothing was proved")
+        self.assertEqual(state["attempts"], 2, "the acquire did not start over")
+        self.assertEqual(caught.exception.pid, child.proc.pid)
+        # The holder is untouched, still holds it, and still refuses us.
+        self.assertEqual(read_json(self.s.lock_path)["pid"], child.proc.pid)
+        with self.assertRaises(LockHeld):
+            self.s.acquire_lock()
+
+    def test_a_lock_file_removed_under_us_does_not_make_us_a_second_holder(self):
+        """`rm .craft/session.lock`, which is the remedy a user reaches for
+        when they are told to kill pid None."""
+        self._refused_when_the_path_moves_under_us(
+            lambda: os.unlink(str(self.s.lock_path))
+        )
+
+    def test_a_craft_dir_removed_under_us_does_not_make_us_a_second_holder(self):
+        """`git clean -xdf`, over a .craft/ this project gitignores by its own
+        design. The directory goes with the file, so the retry has to be able
+        to put both back."""
+        self._refused_when_the_path_moves_under_us(
+            lambda: shutil.rmtree(str(self.s.craft_dir))
+        )
+
+    def test_a_lock_file_replaced_under_us_does_not_make_us_a_second_holder(self):
+        """An os.replace of the write_json_atomic shape: the name survives,
+        the inode under it does not, and a lock held on the old one guards
+        nothing anybody else can see."""
+
+        def replace():
+            fd, tmp = tempfile.mkstemp(dir=str(self.s.craft_dir), prefix=".tmp-")
+            os.close(fd)
+            os.replace(tmp, str(self.s.lock_path))
+
+        self._refused_when_the_path_moves_under_us(replace)
+
+    def test_a_lock_file_removed_under_us_with_nobody_else_there_is_retaken(self):
+        """The other half of the retry: when the name really is free, starting
+        over must end in holding it, not in an error. The lock file is put
+        back, and it is the one at the path that we hold."""
+        real_try_lock = session._try_lock_exclusive
+        state = {"attempts": 0}
+
+        def hook(fd):
+            state["attempts"] += 1
+            if state["attempts"] == 1:
+                os.unlink(str(self.s.lock_path))
+            return real_try_lock(fd)
+
+        with mock.patch.object(session, "_try_lock_exclusive", hook):
+            self.s.acquire_lock()
+
+        self.assertEqual(state["attempts"], 2)
+        self.assertEqual(read_json(self.s.lock_path)["pid"], os.getpid())
+        with self.assertRaises(LockHeld):
+            Session(self.s.project_dir).acquire_lock()
+
+    def test_a_name_that_keeps_being_replaced_is_reported_and_not_spun_on(self):
+        """A path something outside this session churns is pathological, not
+        something to retry forever: a server startup that never returns is
+        worse than one that says why. The trigger stops well before an
+        unbounded implementation would, so that a missing bound fails this
+        test instead of hanging the suite.
+        """
+        real_try_lock = session._try_lock_exclusive
+        state = {"attempts": 0}
+
+        def hook(fd):
+            state["attempts"] += 1
+            if state["attempts"] <= 20:
+                os.unlink(str(self.s.lock_path))
+                os.close(os.open(str(self.s.lock_path), os.O_CREAT | os.O_RDWR, 0o644))
+            return real_try_lock(fd)
+
+        with mock.patch.object(session, "_try_lock_exclusive", hook):
+            with self.assertRaises(LockUnavailable) as caught:
+                self.s.acquire_lock()
+
+        self.assertEqual(state["attempts"], session._LOCK_ATTEMPTS)
+        self.assertIn(str(self.s.lock_path), str(caught.exception))
+        self.assertIsNone(self.s._lock_fd, "a descriptor was kept on a lost file")
+
+    def test_starting_over_leaks_no_file_descriptor(self):
+        """Every abandoned attempt closes the descriptor it locked. A retry
+        loop that did not would leak one per attempt and keep the orphaned
+        lock alive for the life of the process."""
+        fd_dir = Path("/proc/self/fd")
+        if not fd_dir.is_dir():
+            self.skipTest("no /proc/self/fd on this platform to count against")
+        real_try_lock = session._try_lock_exclusive
+        state = {"attempts": 0}
+
+        def hook(fd):
+            # Bounded well past the real limit rather than forever, so that an
+            # unbounded retry loop fails this test instead of hanging the suite.
+            state["attempts"] += 1
+            if state["attempts"] <= 20:
+                os.unlink(str(self.s.lock_path))
+                os.close(os.open(str(self.s.lock_path), os.O_CREAT | os.O_RDWR, 0o644))
+            return real_try_lock(fd)
+
+        before = len(os.listdir(str(fd_dir)))
+        for _ in range(10):
+            state["attempts"] = 0
+            with mock.patch.object(session, "_try_lock_exclusive", hook):
+                with self.assertRaises(LockUnavailable):
+                    self.s.acquire_lock()
+        self.assertEqual(len(os.listdir(str(fd_dir))), before)
+
+
+class SessionLockUnavailableTest(unittest.TestCase):
+    """The failures that are not contention, told apart from the one that is.
+
+    Every case here is produced with no other craft session in existence. The
+    old code turned all of them into "another session owns this, kill pid
+    None", and a user handed that message has one remedy left -- deleting the
+    lock file by hand, which is the trigger the identity check above exists to
+    survive. LockHeld now means exactly one thing: a live process holds it.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.s = Session(self.root)
+        self.s.ensure_dirs()
+        self._sessions = [self.s]
+
+    def tearDown(self):
+        for s in self._sessions:
+            s.release_lock()
+        self._tmp.cleanup()
+
+    def _session(self):
+        s = Session(self.s.project_dir)
+        self._sessions.append(s)
+        return s
+
+    def _skip_if_root(self):
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("root is not stopped by a file mode, so this proves nothing")
+
+    def test_the_two_lock_failures_are_different_exceptions(self):
+        """Neither is a subclass of the other, so `except LockHeld` cannot
+        quietly swallow a filesystem fault and report an owner for it."""
+        self.assertFalse(issubclass(LockUnavailable, LockHeld))
+        self.assertFalse(issubclass(LockHeld, LockUnavailable))
+
+    def test_a_directory_at_the_lock_name_names_the_real_cause(self):
+        self.s.lock_path.mkdir()
+        with self.assertRaises(LockUnavailable) as caught:
+            self.s.acquire_lock()
+        exc = caught.exception
+        self.assertEqual(exc.errno, errno.EISDIR)
+        self.assertEqual(exc.path, str(self.s.lock_path))
+        self.assertIsInstance(exc.error, OSError)
+        self.assertIn(str(self.s.lock_path), str(exc))
+        self.assertIn("EISDIR", str(exc))
+        self.assertNotIn("None", str(exc))
+
+    def test_a_lock_file_we_may_not_open_names_the_real_cause(self):
+        self._skip_if_root()
+        self.s.lock_path.write_text("{}", encoding="utf-8")
+        os.chmod(str(self.s.lock_path), 0o444)
+        try:
+            with self.assertRaises(LockUnavailable) as caught:
+                self.s.acquire_lock()
+        finally:
+            # Restored here rather than in a cleanup: cleanups run after
+            # tearDown, and tearDown is what removes the directory this mode
+            # would otherwise keep it from removing.
+            os.chmod(str(self.s.lock_path), 0o644)
+        self.assertEqual(caught.exception.errno, errno.EACCES)
+        self.assertIn(str(self.s.lock_path), str(caught.exception))
+
+    def test_a_craft_dir_we_may_not_write_into_names_the_real_cause(self):
+        self._skip_if_root()
+        self.assertFalse(self.s.lock_path.exists())
+        os.chmod(str(self.s.craft_dir), 0o555)
+        try:
+            with self.assertRaises(LockUnavailable) as caught:
+                self.s.acquire_lock()
+        finally:
+            os.chmod(str(self.s.craft_dir), 0o755)
+        self.assertEqual(caught.exception.errno, errno.EACCES)
+
+    def test_a_read_only_or_a_full_filesystem_names_the_real_cause(self):
+        """Neither can be conjured in a temp directory, so the errno the
+        kernel would return is returned instead. What is being pinned is that
+        no OSError from the open is read as an owner."""
+        for number in (errno.EROFS, errno.ENOSPC, errno.ENAMETOOLONG, errno.EMFILE):
+            with self.subTest(errno=number):
+                failure = OSError(number, os.strerror(number))
+                with mock.patch("session.os.open", side_effect=failure):
+                    with self.assertRaises(LockUnavailable) as caught:
+                        self.s.acquire_lock()
+                self.assertEqual(caught.exception.errno, number)
+                self.assertIs(caught.exception.error, failure)
+                self.assertIn(str(self.s.lock_path), str(caught.exception))
+
+    def test_a_lock_error_that_is_not_contention_names_the_real_cause(self):
+        """The primitive re-raises anything outside its would-block set, and
+        every one of those is a reason the lock is unusable rather than a
+        reason somebody else has it. ENOLCK is the realistic one: an NFS mount
+        with no lock daemon behind it."""
+        for number in (errno.ENOLCK, errno.EBADF, errno.EINVAL):
+            with self.subTest(errno=number):
+                with mock.patch.object(
+                    session.fcntl, "flock", side_effect=OSError(number, "x")
+                ):
+                    with self.assertRaises(LockUnavailable) as caught:
+                        self.s.acquire_lock()
+                self.assertEqual(caught.exception.errno, number)
+                self.assertNotIsInstance(caught.exception, LockHeld)
+
+    def test_contention_is_still_reported_as_a_held_lock(self):
+        """The other side of the split, so that discriminating did not simply
+        turn every refusal into a filesystem fault."""
+        self.s.acquire_lock()
+        with self.assertRaises(LockHeld) as caught:
+            self._session().acquire_lock()
+        self.assertNotIsInstance(caught.exception, LockUnavailable)
+        self.assertEqual(caught.exception.pid, os.getpid())
+
+    def test_an_unusable_lock_leaks_no_file_descriptor(self):
+        """A server that reports the fault and keeps running must not lose a
+        descriptor each time somebody retries."""
+        fd_dir = Path("/proc/self/fd")
+        if not fd_dir.is_dir():
+            self.skipTest("no /proc/self/fd on this platform to count against")
+        before = len(os.listdir(str(fd_dir)))
+        for _ in range(20):
+            with mock.patch.object(
+                session.fcntl, "flock", side_effect=OSError(errno.ENOLCK, "x")
+            ):
+                with self.assertRaises(LockUnavailable):
+                    self.s.acquire_lock()
+        self.assertEqual(len(os.listdir(str(fd_dir))), before)
+
+    def test_an_unusable_lock_leaves_the_session_holding_nothing(self):
+        """Shutdown still has to get out, and a later acquire must not be
+        refused by a descriptor this session never kept."""
+        self.s.lock_path.mkdir()
+        with self.assertRaises(LockUnavailable):
+            self.s.acquire_lock()
+        self.s.release_lock()  # must not raise
+        os.rmdir(str(self.s.lock_path))
+        self.s.acquire_lock()
+        self.assertEqual(read_json(self.s.lock_path)["pid"], os.getpid())
+
+    def test_an_unavailable_lock_reads_as_a_sentence_about_the_file(self):
+        """The message is the whole point of the split. It must name the path
+        and the cause, and it must not tell anyone to kill anything."""
+        failure = OSError(errno.EROFS, "Read-only file system")
+        exc = LockUnavailable(self.s.lock_path, failure)
+        self.assertIn(str(self.s.lock_path), str(exc))
+        self.assertIn("Read-only file system", str(exc))
+        self.assertIn("EROFS", str(exc))
+        self.assertNotIn("kill", str(exc))
+        bare = LockUnavailable(self.s.lock_path)
+        self.assertIsNone(bare.errno)
+        self.assertIn(str(self.s.lock_path), str(bare))
+
+
+class SessionLockOwningProcessTest(unittest.TestCase):
+    """Who is allowed to release the lock.
+
+    flock lives on the open file description, and fork() shares one rather
+    than copying it, so LOCK_UN through a child's inherited copy frees the
+    *parent's* lock while the parent goes on believing it holds the project.
+    Nothing forks today -- the server is threaded, and the descriptor is not
+    handed to subprocesses -- so this is a tripwire for the tasks still to
+    come rather than a live bug.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.s = Session(self._tmp.name)
+        self.s.ensure_dirs()
+        self._sessions = [self.s]
+
+    def tearDown(self):
+        for s in self._sessions:
+            s.release_lock()
+        self._tmp.cleanup()
+
+    def _session(self):
+        s = Session(self.s.project_dir)
+        self._sessions.append(s)
+        return s
+
+    def _reap(self, pid):
+        try:
+            os.waitpid(pid, 0)
+        except (ChildProcessError, OSError):
+            pass
+
+    def test_a_forked_child_releasing_does_not_free_the_parents_lock(self):
+        if not hasattr(os, "fork"):
+            self.skipTest("no os.fork on this platform")
+        self.s.acquire_lock()
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            # The child. os._exit, so that no test fixture, no temporary
+            # directory and no unittest reporting runs twice.
+            code = 1
+            try:
+                os.close(read_fd)
+                self.s.release_lock()
+                code = 0
+            except BaseException:
+                code = 3
+            finally:
+                try:
+                    os.write(write_fd, b"released\n")
+                except OSError:
+                    pass
+                os._exit(code)
+
+        self.addCleanup(self._reap, pid)
+        os.close(write_fd)
+        with os.fdopen(read_fd, "rb") as fh:
+            said = fh.read()  # rendezvous: EOF is the child having exited
+        self.assertEqual(said, b"released\n")
+        _, status = os.waitpid(pid, 0)
+        self.assertTrue(os.WIFEXITED(status), "the child did not exit normally")
+        self.assertEqual(
+            os.WEXITSTATUS(status),
+            0,
+            "release_lock in a forked child must be a no-op, not an error",
+        )
+
+        # The parent still holds the project, which is the whole assertion.
+        with self.assertRaises(LockHeld) as caught:
+            self._session().acquire_lock()
+        self.assertEqual(caught.exception.pid, os.getpid())
+        self.assertEqual(read_json(self.s.lock_path)["pid"], os.getpid())
+
+    def test_the_process_that_took_the_lock_can_still_release_it(self):
+        """The control for the test above: guarding the release by pid must
+        not stop the ordinary release from working."""
+        self.s.acquire_lock()
+        self.s.release_lock()
+        self._session().acquire_lock()  # must not raise
+
+
+class SessionLockPayloadWriteTest(unittest.TestCase):
+    """The holder's identity reaches the file whole, or not at all.
+
+    os.write is entitled to write less than it was given. Discarding what it
+    returns truncates the JSON, and a refusal that should have named a pid
+    names nobody -- which is the message that sends a user to delete the lock
+    file.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.s = Session(self._tmp.name)
+        self.s.ensure_dirs()
+        self._sessions = [self.s]
+
+    def tearDown(self):
+        for s in self._sessions:
+            s.release_lock()
+        self._tmp.cleanup()
+
+    def _session(self):
+        s = Session(self.s.project_dir)
+        self._sessions.append(s)
+        return s
+
+    def test_a_short_write_still_leaves_the_whole_payload_in_the_lock(self):
+        real_write = os.write
+        calls = []
+
+        def one_byte_at_a_time(fd, data):
+            calls.append(len(data))
+            return real_write(fd, data[:1])
+
+        with mock.patch("session.os.write", one_byte_at_a_time):
+            self.s.acquire_lock()
+
+        self.assertGreater(
+            len(calls), 1, "the payload was short enough to prove nothing"
+        )
+        holder = read_json(self.s.lock_path)
+        self.assertEqual(holder["pid"], os.getpid())
+        self.assertTrue(holder["started_at"])
+        with self.assertRaises(LockHeld) as caught:
+            self._session().acquire_lock()
+        self.assertEqual(caught.exception.pid, os.getpid())
+
+    def test_a_write_that_never_progresses_is_reported_and_not_spun_on(self):
+        with mock.patch("session.os.write", return_value=0):
+            with self.assertRaises(LockUnavailable) as caught:
+                self.s.acquire_lock()
+        self.assertIn(str(self.s.lock_path), str(caught.exception))
+        self.assertIsNone(self.s._lock_fd)
+        self.s.acquire_lock()  # and the failure left the project free
+
+    def test_a_failed_payload_write_does_not_leave_the_project_locked(self):
+        with mock.patch(
+            "session.os.write", side_effect=OSError(errno.ENOSPC, "No space left")
+        ):
+            with self.assertRaises(LockUnavailable) as caught:
+                self.s.acquire_lock()
+        self.assertEqual(caught.exception.errno, errno.ENOSPC)
+        self._session().acquire_lock()  # must not raise
+
+
+class SessionLockInterruptTest(unittest.TestCase):
+    """An interrupt on the boundary between taking the lock and recording it.
+
+    The descriptor is the lock. If the assignment that records it sits outside
+    the try, a signal arriving between the fsync and the assignment leaves the
+    lock held on a descriptor nothing tracks: release_lock becomes a no-op,
+    and the process is refused by its own lock for as long as it lives.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.s = Session(self._tmp.name)
+        self.s.ensure_dirs()
+        self._sessions = [self.s]
+
+    def tearDown(self):
+        for s in self._sessions:
+            s.release_lock()
+        self._tmp.cleanup()
+
+    def _session(self):
+        s = Session(self.s.project_dir)
+        self._sessions.append(s)
+        return s
+
+    def test_an_interrupt_just_after_the_payload_is_written_frees_the_lock(self):
+        """The interrupt is aimed at the last step of the acquire: the payload
+        is on disk and fsynced, and the very next thing the acquire does is
+        raise. Everything up to that point has happened, so what is being
+        pinned is that the descriptor is still closed and the project still
+        free -- failing closed, not held by a ghost."""
+        real_getpid = os.getpid
+        calls = []
+
+        def getpid():
+            calls.append(True)
+            if len(calls) == 2:  # the payload's pid was the first
+                raise KeyboardInterrupt("signal on the boundary")
+            return real_getpid()
+
+        with mock.patch("session.os.getpid", getpid):
+            with self.assertRaises(KeyboardInterrupt):
+                self.s.acquire_lock()
+
+        self.assertEqual(len(calls), 2, "the interrupt did not land where it was aimed")
+        self.assertIsNone(
+            self.s._lock_fd, "the lock is held on an untracked descriptor"
+        )
+        self.s.release_lock()  # must not raise
+        self._session().acquire_lock()  # and the project is free again
+
+
+class MsvcrtLockContractTest(unittest.TestCase):
+    """The Windows primitive's contract, asserted from a machine without one.
+
+    _msvcrt_try_lock is never executed on this platform, but it is a plain
+    function of a descriptor and the msvcrt module `session` bound at import,
+    so substituting that module exercises the branch honestly. What is pinned
+    is the discrimination the fcntl branch already makes: contention is False,
+    and everything else is raised so that acquire_lock reports it as
+    LockUnavailable instead of naming an owner nobody can find or kill.
+    """
+
+    def setUp(self):
+        fd, path = tempfile.mkstemp()
+        self.fd = fd
+        self.addCleanup(os.close, fd)
+        self.addCleanup(os.unlink, path)
+
+    def _fake_msvcrt(self, error=None):
+        calls = []
+
+        def locking(fd, mode, nbytes):
+            calls.append((fd, mode, nbytes))
+            if error is not None:
+                raise error
+
+        fake = types.SimpleNamespace(locking=locking, LK_NBLCK=1, LK_UNLCK=0)
+        return fake, calls
+
+    def test_the_msvcrt_lock_says_so_when_it_took_the_file(self):
+        fake, calls = self._fake_msvcrt()
+        with mock.patch.object(session, "msvcrt", fake):
+            self.assertTrue(session._msvcrt_try_lock(self.fd))
+        self.assertEqual(calls, [(self.fd, fake.LK_NBLCK, 1)])
+
+    def test_the_msvcrt_lock_reports_a_conflict_rather_than_raising(self):
+        """EACCES is what the CRT sets for a locking violation, which under
+        LK_NBLCK is contention; EDEADLOCK is the retrying mode giving up."""
+        for number in (errno.EACCES, errno.EDEADLOCK):
+            with self.subTest(errno=number):
+                fake, _ = self._fake_msvcrt(OSError(number, "locking violation"))
+                with mock.patch.object(session, "msvcrt", fake):
+                    self.assertFalse(session._msvcrt_try_lock(self.fd))
+
+    def test_the_msvcrt_lock_re_raises_anything_that_is_not_a_conflict(self):
+        """A bad descriptor, a bad argument, a full disk: none of them mean
+        another session owns the project, and returning False for all of them
+        is how "somebody has it" came to mean "something went wrong"."""
+        for number in (errno.EBADF, errno.EINVAL, errno.ENOSPC):
+            with self.subTest(errno=number):
+                fake, _ = self._fake_msvcrt(OSError(number, "x"))
+                with mock.patch.object(session, "msvcrt", fake):
+                    with self.assertRaises(OSError) as caught:
+                        session._msvcrt_try_lock(self.fd)
+                self.assertEqual(caught.exception.errno, number)
+
+    def test_a_failed_seek_is_not_reported_as_a_conflict(self):
+        """The seek is part of the primitive -- msvcrt.locking works from the
+        current offset -- so its failures belong to the same contract."""
+        fake, calls = self._fake_msvcrt()
+        with mock.patch.object(session, "msvcrt", fake), \
+                mock.patch("session.os.lseek", side_effect=OSError(errno.EBADF, "x")):
+            with self.assertRaises(OSError):
+                session._msvcrt_try_lock(self.fd)
+        self.assertEqual(calls, [], "the lock was attempted from an unknown offset")
 
 
 if __name__ == "__main__":

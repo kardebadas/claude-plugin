@@ -13,7 +13,7 @@ import re
 import tempfile
 from pathlib import Path
 
-ROUND_RE = re.compile(r"^round-(\d{3})\.questions\.json$")
+ROUND_RE = re.compile(r"^round-([0-9]{3})\.questions\.json$")
 
 
 def write_json_atomic(path, obj):
@@ -65,7 +65,7 @@ class Session:
         found = []
         for entry in self.craft_dir.iterdir():
             match = ROUND_RE.match(entry.name)
-            if match:
+            if match and entry.is_file():
                 found.append(int(match.group(1)))
         return max(found) if found else None
 

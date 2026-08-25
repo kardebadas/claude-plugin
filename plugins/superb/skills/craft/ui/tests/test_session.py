@@ -1,5 +1,6 @@
 import contextlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,19 +25,31 @@ def _mkstemp_dir(args, kwargs):
 def _default_encoding_is_not_utf8():
     """Stand in for a machine whose default text encoding is not UTF-8.
 
-    A read_text() that forgot to name its encoding is invisible here, because
-    this machine's locale is UTF-8 -- and setting LC_ALL=C does not expose it
-    either, since CPython auto-enables UTF-8 mode under the C locale. Both are
-    accidents of where the suite runs; a Windows cp1252 box, or any non-UTF-8
-    locale Python does not coerce, would decode the same bytes differently.
-    Substituting the fallback pins the contract wherever the suite runs.
+    A read_text() or an os.fdopen() that forgot to name its encoding is
+    invisible here, because this machine's locale is UTF-8 -- and setting
+    LC_ALL=C does not expose it either, since CPython auto-enables UTF-8 mode
+    under the C locale. Both are accidents of where the suite runs; a Windows
+    cp1252 box, or any non-UTF-8 locale Python does not coerce, would turn the
+    same characters into different bytes. Substituting the fallback pins the
+    contract wherever the suite runs, on the write side as well as the read
+    side -- a file written in the wrong encoding is corrupt for good, which is
+    the worse of the two failures.
     """
     real_read_text = Path.read_text
+    real_fdopen = os.fdopen
 
     def read_text(self, encoding=None, *args, **kwargs):
         return real_read_text(self, encoding or "latin-1", *args, **kwargs)
 
-    with mock.patch.object(Path, "read_text", read_text):
+    def fdopen(fd, *args, **kwargs):
+        mode = kwargs.get("mode", args[0] if args else "r")
+        named = "encoding" in kwargs or len(args) > 2
+        if "b" not in mode and not named:
+            kwargs["encoding"] = "latin-1"
+        return real_fdopen(fd, *args, **kwargs)
+
+    with mock.patch.object(Path, "read_text", read_text), \
+            mock.patch.object(os, "fdopen", fdopen):
         yield
 
 
@@ -113,9 +126,13 @@ class SessionPathsTest(unittest.TestCase):
         self.assertIsNone(self.s.current_round())
 
     def test_write_leaves_no_temp_files_behind(self):
+        """Named exactly, not filtered by prefix: a refactor free to rename the
+        temp file is not free to leave one behind."""
         self._round(1)
-        leftovers = [p.name for p in self.s.craft_dir.iterdir() if p.name.startswith(".tmp-")]
-        self.assertEqual(leftovers, [])
+        self.assertEqual(
+            sorted(p.name for p in self.s.craft_dir.iterdir()),
+            ["round-001.questions.json"],
+        )
 
     def test_write_goes_through_a_same_dir_temp_file_and_os_replace(self):
         """The atomicity guarantee itself: a temp file in the destination's own
@@ -155,8 +172,10 @@ class SessionPathsTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             write_json_atomic(path, {"bad": object()})
         self.assertEqual(path.read_text(encoding="utf-8"), '{"round": 5}')
-        leftovers = [p.name for p in self.s.craft_dir.iterdir() if p.name.startswith(".tmp-")]
-        self.assertEqual(leftovers, [])
+        self.assertEqual(
+            sorted(p.name for p in self.s.craft_dir.iterdir()),
+            ["round-005.questions.json"],
+        )
 
     def test_write_then_read_round_trips(self):
         write_json_atomic(self.s.questions_path(1), {"round": 1, "note": "café ☕"})
@@ -207,6 +226,78 @@ class SessionPathsTest(unittest.TestCase):
         with mock.patch("pathlib.Path.read_text", side_effect=PermissionError("nope")):
             with self.assertRaises(PermissionError):
                 self.s.read_brief()
+
+    def test_write_encodes_utf8_whatever_the_locale_is(self):
+        """The mirror of the read-side test, and the more damaging half: bytes
+        written under a cp1252 default are wrong on disk permanently."""
+        path = self.s.questions_path(9)
+        with _default_encoding_is_not_utf8():
+            write_json_atomic(path, {"note": "café"})
+        raw = path.read_bytes()
+        self.assertIn("café".encode("utf-8"), raw)
+        self.assertEqual(json.loads(raw.decode("utf-8"))["note"], "café")
+
+    def test_writing_a_path_again_replaces_what_was_there(self):
+        """Overwriting is the normal case, not the exception -- the draft file
+        is rewritten every time the user types."""
+        path = self.s.draft_path(1)
+        write_json_atomic(path, {"round": 1, "text": "first"})
+        write_json_atomic(path, {"round": 1, "text": "second"})
+        self.assertEqual(read_json(path), {"round": 1, "text": "second"})
+        self.assertEqual(
+            sorted(p.name for p in self.s.craft_dir.iterdir()),
+            ["round-001.draft.json"],
+        )
+
+    def test_ensure_dirs_may_be_called_again_on_a_session_that_has_one(self):
+        """A server calls it on startup and may call it again per request."""
+        self.assertTrue(self.s.craft_dir.is_dir())
+        self.s.ensure_dirs()
+        self.s.ensure_dirs()
+        self.assertTrue(self.s.craft_dir.is_dir())
+
+    def test_ensure_dirs_creates_every_missing_level_of_the_path(self):
+        """A project dir several levels below anything that exists is still a
+        project dir."""
+        deep = Session(self.root / "a" / "b" / "c")
+        self.assertFalse(deep.project_dir.exists())
+        deep.ensure_dirs()
+        self.assertTrue(deep.craft_dir.is_dir())
+
+    def test_the_round_grammar_is_anchored_at_the_start_of_the_name(self):
+        """ROUND_RE is exported, so a later consumer may reach for .search or
+        .findall. The anchor has to do the work, not re.match's own rule that
+        it only ever tries position zero."""
+        self.assertIsNone(ROUND_RE.search("xround-002.questions.json"))
+        self.assertIsNone(ROUND_RE.search("backup/round-002.questions.json"))
+        self.assertIsNotNone(ROUND_RE.search("round-002.questions.json"))
+
+    def test_a_string_path_is_accepted_by_both_entry_points(self):
+        """Callers hand over whatever they are holding; str is contract."""
+        path = self.s.questions_path(3)
+        write_json_atomic(str(path), {"round": 3})
+        self.assertTrue(path.is_file())
+        self.assertEqual(read_json(str(path)), {"round": 3})
+
+    def test_only_ascii_digits_are_round_numbers(self):
+        """Three digits means 0-9, and nothing else.
+
+        \\d also accepts Unicode digits, so an Arabic-Indic 002 would otherwise
+        be read as round 2. The names are checked directly rather than written
+        to disk: under a non-UTF-8 filesystem encoding they are not creatable
+        filenames at all.
+        """
+        self.assertIsNone(ROUND_RE.match("round-\u0660\u0660\u0662.questions.json"))
+        self.assertIsNone(ROUND_RE.match("round-\u07c0\u07c0\u07c2.questions.json"))
+        self.assertIsNotNone(ROUND_RE.match("round-002.questions.json"))
+
+    def test_a_directory_named_like_a_round_is_not_a_round(self):
+        """current_round() reports rounds that were written, and a directory is
+        not something anyone wrote a round into."""
+        (self.s.craft_dir / "round-005.questions.json").mkdir()
+        self.assertIsNone(self.s.current_round())
+        self._round(1)
+        self.assertEqual(self.s.current_round(), 1)
 
 
 if __name__ == "__main__":

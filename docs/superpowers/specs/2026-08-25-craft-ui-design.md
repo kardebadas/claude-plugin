@@ -445,6 +445,8 @@ guidance governs both front-ends.
 | lock — death releases | a holder killed with `SIGKILL` leaves the project immediately lockable, with no reclaim step |
 | lock — cross-process | two real OS processes: exactly one acquires, the other is refused |
 | lock — release | clean `stop` releases the lock, so the next `serve` starts normally |
+| lock — stolen mid-session | removing the lock file under a running server makes it log and shut down rather than keep writing |
+| lock — truthful refusal | under contention, a refusal names the process that actually holds the lock |
 | malformed round | a `questions.json` with a syntax error yields an error screen, and the process is still alive afterwards |
 | answer states | delegated, skipped, answered and absent round-trip distinctly through the JSON |
 
@@ -481,6 +483,19 @@ it stays a consumer, and is refreshed by `marketplace update` after a push.
   `.craft/session.lock` (see *Session lock*). It guards a second session started
   while the first is live. It does not make `.craft/` safe for genuine concurrent
   use, and nothing else does either.
+- **A lock file removed *after* a session acquired it cannot be defended
+  against.** Each removal lets one more session acquire; four simultaneous
+  holders were reproduced. No acquirer-side check can prevent it — once the name
+  is gone there is nothing to compare against. The mitigation is that the holder
+  notices: `Session.verify_lock_still_ours()` is checked on the server's watchdog
+  tick, and a server whose lock was taken shuts down loudly rather than keep
+  writing `CRAFT.md`. `.craft/` is gitignored, so `git clean -xdf` is a realistic
+  trigger, not a theoretical one.
+- **On NFS the guarantee degrades.** Linux implements `flock()` over NFS as a
+  POSIX record lock unless mounted `local_lock=flock|all`, and those are keyed on
+  `(process, inode)` — the semantics this design specifically rejects, under
+  which a refused acquirer's own `close()` drops the holder's lock. Sound on
+  local filesystems, including WSL's 9p/drvfs, which was tested.
 - **The Windows lock path is built but unproven.** `msvcrt.locking` is written to
   the same contract as `fcntl.flock` and sits behind a one-function dispatch, but
   no Windows machine has run it. Treat Windows as built-but-unverified until

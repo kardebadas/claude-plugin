@@ -1,0 +1,665 @@
+import copy
+import unittest
+
+from schema import (
+    CHOICE_TYPES,
+    IMPORTANCES,
+    TYPES,
+    answer_state,
+    count_answered,
+    count_open,
+    validate_round,
+)
+
+
+def question(**kw):
+    base = {"id": "Q-001", "importance": "REQUIRED", "title": "Auth?", "type": "text"}
+    base.update(kw)
+    return base
+
+
+def a_round(*questions):
+    return {"round": 1, "questions": list(questions)}
+
+
+class ValidateRoundTest(unittest.TestCase):
+    def test_a_minimal_valid_round_has_no_errors(self):
+        self.assertEqual(validate_round(a_round(question())), [])
+
+    def test_a_choice_question_with_options_is_valid(self):
+        q = question(type="single", options=[{"value": "email", "label": "Email"}])
+        self.assertEqual(validate_round(a_round(q)), [])
+
+    def test_a_non_object_round_is_rejected(self):
+        self.assertEqual(validate_round([1, 2]), ["round must be a JSON object"])
+
+    def test_a_missing_round_number_is_reported(self):
+        obj = a_round(question())
+        del obj["round"]
+        self.assertIn("round: missing or not an integer", validate_round(obj))
+
+    def test_missing_questions_list_is_reported(self):
+        self.assertIn("questions: missing or not a list", validate_round({"round": 1}))
+
+    def test_a_missing_id_is_reported(self):
+        errors = validate_round(a_round(question(id="")))
+        self.assertTrue(any("id missing" in e for e in errors))
+
+    def test_a_duplicate_id_is_reported(self):
+        errors = validate_round(a_round(question(), question()))
+        self.assertTrue(any("duplicate id Q-001" in e for e in errors))
+
+    def test_a_bad_importance_is_reported(self):
+        errors = validate_round(a_round(question(importance="CRITICAL")))
+        self.assertTrue(any("importance must be one of" in e for e in errors))
+
+    def test_a_bad_type_is_reported(self):
+        errors = validate_round(a_round(question(type="dropdown")))
+        self.assertTrue(any("type must be one of" in e for e in errors))
+
+    def test_single_without_options_is_reported(self):
+        errors = validate_round(a_round(question(type="single")))
+        self.assertTrue(any("requires a non-empty options list" in e for e in errors))
+
+    def test_multi_with_a_valueless_option_is_reported(self):
+        q = question(type="multi", options=[{"label": "Email"}])
+        errors = validate_round(a_round(q))
+        self.assertTrue(any("needs a string value" in e for e in errors))
+
+    def test_text_ignores_options_entirely(self):
+        self.assertEqual(validate_round(a_round(question(type="longtext"))), [])
+
+
+class AnswerStateTest(unittest.TestCase):
+    def test_absent_is_skipped(self):
+        self.assertEqual(answer_state(None), "skipped")
+
+    def test_explicit_skip_is_skipped(self):
+        self.assertEqual(answer_state({"skipped": True}), "skipped")
+
+    def test_delegated_is_delegated(self):
+        self.assertEqual(answer_state({"delegated": True}), "delegated")
+
+    def test_delegated_wins_over_a_stale_choice(self):
+        self.assertEqual(answer_state({"delegated": True, "choice": ["a"]}), "delegated")
+
+    def test_a_choice_is_answered(self):
+        self.assertEqual(answer_state({"choice": ["email"]}), "answered")
+
+    def test_an_empty_choice_list_is_skipped(self):
+        self.assertEqual(answer_state({"choice": []}), "skipped")
+
+    def test_text_is_answered(self):
+        self.assertEqual(answer_state({"text": "yes"}), "answered")
+
+    def test_whitespace_only_text_is_skipped(self):
+        self.assertEqual(answer_state({"text": "   "}), "skipped")
+
+    def test_other_alone_is_answered(self):
+        self.assertEqual(answer_state({"choice": [], "other": "passkeys"}), "answered")
+
+    def test_a_note_alone_is_not_an_answer(self):
+        self.assertEqual(answer_state({"note": "thinking about it"}), "skipped")
+
+
+class CountsTest(unittest.TestCase):
+    def setUp(self):
+        self.round = a_round(
+            question(id="Q-1", importance="REQUIRED"),
+            question(id="Q-2", importance="REQUIRED"),
+            question(id="Q-3", importance="IMPORTANT"),
+            question(id="Q-4", importance="OPTIONAL"),
+        )
+
+    def test_everything_open_when_there_are_no_answers(self):
+        # The brief wrote OPTIONAL: 0 here, which contradicts both its own
+        # implementation and this test's own name -- the fixture's Q-4 is an
+        # unanswered OPTIONAL question, so it is open. Every consumer of
+        # count_open treats the four levels uniformly, so the literal was the
+        # slip, not the code. OpenAtItsOwnLevelTest below pins it properly.
+        self.assertEqual(
+            count_open(self.round, {}),
+            {"REQUIRED": 2, "IMPORTANT": 1, "PREFERENCE": 0, "OPTIONAL": 1},
+        )
+
+    def test_delegated_questions_are_not_open(self):
+        answers = {"Q-1": {"choice": ["a"]}, "Q-2": {"delegated": True}}
+        self.assertEqual(count_open(self.round, answers)["REQUIRED"], 0)
+
+    def test_skipped_questions_stay_open(self):
+        self.assertEqual(count_open(self.round, {"Q-1": {"skipped": True}})["REQUIRED"], 2)
+
+    def test_count_answered_includes_delegated(self):
+        answers = {"Q-1": {"choice": ["a"]}, "Q-2": {"delegated": True}, "Q-3": {"skipped": True}}
+        self.assertEqual(count_answered(self.round, answers), 2)
+
+
+# ---------------------------------------------------------------------------
+# Hardening. Everything above is the brief's own suite; everything below was
+# added because a plausible one-line change to schema.py passed all of it.
+# Each class names the mutation it exists to catch.
+# ---------------------------------------------------------------------------
+
+
+class ValidateRoundShapeTest(unittest.TestCase):
+    """The outer envelope: the round object itself, before any question."""
+
+    def test_none_is_rejected_like_any_other_non_object(self):
+        self.assertEqual(validate_round(None), ["round must be a JSON object"])
+
+    def test_a_json_string_is_rejected(self):
+        self.assertEqual(validate_round("{}"), ["round must be a JSON object"])
+
+    def test_a_non_integer_round_number_is_reported(self):
+        obj = a_round(question())
+        obj["round"] = "1"
+        self.assertEqual(validate_round(obj), ["round: missing or not an integer"])
+
+    def test_the_round_number_error_survives_the_questions_early_return(self):
+        """questions-not-a-list returns early. It must return the errors found
+        before it, not just its own -- otherwise a round that is broken twice
+        reports half its problems and the second surfaces only after a fix."""
+        self.assertEqual(
+            validate_round({"questions": "nope"}),
+            ["round: missing or not an integer", "questions: missing or not a list"],
+        )
+
+    def test_an_empty_questions_list_is_a_valid_round(self):
+        self.assertEqual(validate_round({"round": 1, "questions": []}), [])
+
+    def test_validation_does_not_mutate_the_round_it_was_given(self):
+        obj = a_round(question(), question(id="Q-002", type="single",
+                                           options=[{"value": "a"}]))
+        before = copy.deepcopy(obj)
+        validate_round(obj)
+        self.assertEqual(obj, before)
+
+
+class ValidateQuestionTest(unittest.TestCase):
+    """Every per-question rule, one test each, asserting the whole error list.
+
+    Asserting equality rather than `any(... in e)` is deliberate: a substring
+    match cannot tell "the right rule fired" from "some other rule fired and
+    happened to contain the words", and it cannot see a lost `questions[i]`
+    prefix at all.
+    """
+
+    def test_a_non_object_question_is_reported_and_nothing_else_is(self):
+        self.assertEqual(validate_round(a_round("not a question")),
+                         ["questions[0]: not an object"])
+
+    def test_a_missing_title_is_reported(self):
+        self.assertEqual(validate_round(a_round(question(title=""))),
+                         ["questions[0]: title missing"])
+
+    def test_a_non_string_title_is_reported(self):
+        self.assertEqual(validate_round(a_round(question(title=42))),
+                         ["questions[0]: title missing"])
+
+    def test_a_non_string_id_is_reported(self):
+        self.assertEqual(validate_round(a_round(question(id=7))),
+                         ["questions[0]: id missing"])
+
+    def test_the_importance_error_names_the_whole_vocabulary(self):
+        self.assertEqual(
+            validate_round(a_round(question(importance="CRITICAL"))),
+            ["questions[0]: importance must be one of "
+             "REQUIRED/IMPORTANT/PREFERENCE/OPTIONAL"],
+        )
+
+    def test_a_missing_importance_is_reported(self):
+        q = question()
+        del q["importance"]
+        self.assertEqual(len(validate_round(a_round(q))), 1)
+
+    def test_the_type_error_names_the_whole_vocabulary(self):
+        self.assertEqual(
+            validate_round(a_round(question(type="dropdown"))),
+            ["questions[0]: type must be one of single/multi/text/longtext"],
+        )
+
+    def test_a_missing_type_is_reported(self):
+        q = question()
+        del q["type"]
+        self.assertEqual(
+            validate_round(a_round(q)),
+            ["questions[0]: type must be one of single/multi/text/longtext"],
+        )
+
+    def test_every_problem_in_one_question_is_reported_not_just_the_first(self):
+        q = {"id": "", "importance": "CRITICAL", "title": "", "type": "dropdown"}
+        self.assertEqual(
+            sorted(validate_round(a_round(q))),
+            sorted([
+                "questions[0]: id missing",
+                "questions[0]: importance must be one of "
+                "REQUIRED/IMPORTANT/PREFERENCE/OPTIONAL",
+                "questions[0]: title missing",
+                "questions[0]: type must be one of single/multi/text/longtext",
+            ]),
+        )
+
+    def test_a_message_names_the_position_of_the_question_it_is_about(self):
+        errors = validate_round(a_round(question(id="Q-1"),
+                                        question(id="Q-2", title="")))
+        self.assertEqual(errors, ["questions[1]: title missing"])
+
+
+class DuplicateIdTest(unittest.TestCase):
+    def test_distinct_ids_are_not_duplicates(self):
+        self.assertEqual(validate_round(a_round(question(id="Q-1"),
+                                                question(id="Q-2"))), [])
+
+    def test_empty_ids_are_missing_rather_than_duplicates(self):
+        """Two blank ids are two missing ids. Reporting the second as a
+        duplicate of the first would send the author looking for a collision
+        that does not exist."""
+        self.assertEqual(
+            validate_round(a_round(question(id=""), question(id=""))),
+            ["questions[0]: id missing", "questions[1]: id missing"],
+        )
+
+    def test_a_third_occurrence_is_reported_too(self):
+        errors = validate_round(a_round(question(), question(), question()))
+        self.assertEqual(errors, ["questions[1]: duplicate id Q-001",
+                                  "questions[2]: duplicate id Q-001"])
+
+    def test_the_duplicate_message_names_the_offending_id(self):
+        errors = validate_round(a_round(question(id="Q-auth"),
+                                        question(id="Q-auth")))
+        self.assertEqual(errors, ["questions[1]: duplicate id Q-auth"])
+
+
+class OptionsTest(unittest.TestCase):
+    """Options are required for choice types, forbidden from mattering for the
+    text types, and validated one by one."""
+
+    def test_an_empty_options_list_is_as_bad_as_no_options(self):
+        self.assertEqual(
+            validate_round(a_round(question(type="single", options=[]))),
+            ["questions[0]: type single requires a non-empty options list"],
+        )
+
+    def test_options_that_are_not_a_list_are_reported(self):
+        self.assertEqual(
+            validate_round(a_round(question(type="multi", options={"a": 1}))),
+            ["questions[0]: type multi requires a non-empty options list"],
+        )
+
+    def test_the_missing_options_message_names_the_offending_type(self):
+        """Not a hardcoded "single" -- a multi must say multi."""
+        self.assertEqual(
+            validate_round(a_round(question(type="multi"))),
+            ["questions[0]: type multi requires a non-empty options list"],
+        )
+
+    def test_a_non_string_option_value_is_reported(self):
+        self.assertEqual(
+            validate_round(a_round(question(type="single",
+                                            options=[{"value": 1}]))),
+            ["questions[0].options[0]: needs a string value"],
+        )
+
+    def test_an_option_that_is_not_an_object_is_reported(self):
+        self.assertEqual(
+            validate_round(a_round(question(type="single", options=["email"]))),
+            ["questions[0].options[0]: needs a string value"],
+        )
+
+    def test_each_bad_option_is_reported_at_its_own_index(self):
+        q = question(type="multi",
+                     options=[{"value": "a"}, {"label": "b"}, "email"])
+        self.assertEqual(
+            validate_round(a_round(q)),
+            ["questions[0].options[1]: needs a string value",
+             "questions[0].options[2]: needs a string value"],
+        )
+
+    def test_an_option_needs_no_label_only_a_value(self):
+        self.assertEqual(
+            validate_round(a_round(question(type="single",
+                                            options=[{"value": "a"}]))),
+            [],
+        )
+
+    def test_a_text_question_never_looks_at_its_options(self):
+        """The brief's test of this name passed no options at all, so it could
+        not tell "ignored" from "absent". These pass options that would be
+        fatal on a choice type."""
+        self.assertEqual(
+            validate_round(a_round(question(type="text",
+                                            options=[{"label": "broken"}]))),
+            [],
+        )
+        self.assertEqual(
+            validate_round(a_round(question(type="text", options="nonsense"))), [])
+        self.assertEqual(
+            validate_round(a_round(question(type="text", options=[]))), [])
+
+    def test_a_longtext_question_never_looks_at_its_options(self):
+        self.assertEqual(
+            validate_round(a_round(question(type="longtext",
+                                            options=[{"label": "broken"}]))),
+            [],
+        )
+        self.assertEqual(
+            validate_round(a_round(question(type="longtext", options=[]))), [])
+
+    def test_an_unknown_type_is_not_also_asked_for_options(self):
+        """One error for one mistake: a bogus type reports the type, not a
+        second complaint about the options it was never going to have."""
+        self.assertEqual(
+            validate_round(a_round(question(type="dropdown"))),
+            ["questions[0]: type must be one of single/multi/text/longtext"],
+        )
+
+
+class VocabularyTest(unittest.TestCase):
+    """The constants are a wire contract shared with the browser and with the
+    agent writing rounds. Reordering them silently rewrites error messages."""
+
+    def test_importances_are_exactly_the_four_in_descending_order(self):
+        self.assertEqual(IMPORTANCES,
+                         ("REQUIRED", "IMPORTANT", "PREFERENCE", "OPTIONAL"))
+
+    def test_types_are_exactly_the_four(self):
+        self.assertEqual(TYPES, ("single", "multi", "text", "longtext"))
+
+    def test_choice_types_are_exactly_the_two_that_carry_options(self):
+        self.assertEqual(CHOICE_TYPES, ("single", "multi"))
+
+    def test_choice_types_are_a_subset_of_types(self):
+        for name in CHOICE_TYPES:
+            self.assertIn(name, TYPES)
+
+
+class AnswerStateNonObjectTest(unittest.TestCase):
+    def test_a_bare_string_is_skipped(self):
+        self.assertEqual(answer_state("yes"), "skipped")
+
+    def test_a_bare_list_is_skipped(self):
+        self.assertEqual(answer_state(["email"]), "skipped")
+
+    def test_an_empty_dict_is_skipped(self):
+        self.assertEqual(answer_state({}), "skipped")
+
+    def test_zero_is_skipped(self):
+        self.assertEqual(answer_state(0), "skipped")
+
+    def test_false_is_skipped(self):
+        self.assertEqual(answer_state(False), "skipped")
+
+
+class AnswerStateContentTest(unittest.TestCase):
+    """Where the line between answered and skipped actually falls."""
+
+    def test_a_single_choice_sent_as_a_string_is_answered(self):
+        """The browser may send one radio value as a string rather than a
+        one-element list. The brief's suite never exercised this branch."""
+        self.assertEqual(answer_state({"choice": "email"}), "answered")
+
+    def test_a_whitespace_only_string_choice_is_skipped(self):
+        self.assertEqual(answer_state({"choice": "   "}), "skipped")
+
+    def test_an_empty_string_choice_is_skipped(self):
+        self.assertEqual(answer_state({"choice": ""}), "skipped")
+
+    def test_a_choice_that_is_neither_list_nor_string_is_skipped(self):
+        self.assertEqual(answer_state({"choice": 0}), "skipped")
+        self.assertEqual(answer_state({"choice": {"value": "email"}}), "skipped")
+
+    def test_whitespace_only_other_is_skipped(self):
+        self.assertEqual(answer_state({"other": "   "}), "skipped")
+
+    def test_an_empty_text_is_skipped(self):
+        self.assertEqual(answer_state({"text": ""}), "skipped")
+
+    def test_a_zero_typed_into_a_text_box_is_an_answer(self):
+        """"0" is a real answer to "how many?". Anything testing truthiness of
+        a parsed value rather than of the string would lose it."""
+        self.assertEqual(answer_state({"text": "0"}), "answered")
+
+    def test_a_non_string_text_is_not_an_answer(self):
+        for value in (0, False, True, 1, ["yes"], {"a": 1}):
+            self.assertEqual(answer_state({"text": value}), "skipped")
+
+    def test_a_note_alongside_a_real_answer_does_not_change_it(self):
+        self.assertEqual(answer_state({"note": "x", "choice": ["a"]}), "answered")
+
+    def test_a_whitespace_only_note_is_still_not_an_answer(self):
+        self.assertEqual(answer_state({"note": "   "}), "skipped")
+
+
+class AnswerStateFlagTest(unittest.TestCase):
+    """The flags, their precedence, and their strictness.
+
+    Delegation is the state the whole UI exists to record: it must be produced
+    only by an explicit JSON `true`, and it must never be produced by accident.
+    """
+
+    def test_delegation_beats_an_explicit_skip(self):
+        self.assertEqual(answer_state({"delegated": True, "skipped": True}),
+                         "delegated")
+
+    def test_delegation_beats_text_typed_before_the_button_was_pressed(self):
+        self.assertEqual(answer_state({"delegated": True, "text": "maybe email"}),
+                         "delegated")
+
+    def test_an_explicit_skip_discards_a_stale_answer(self):
+        """Pressing skip after typing means skip. If the content checks ran
+        first, the stale text would win and the question would never be asked
+        again."""
+        self.assertEqual(answer_state({"skipped": True, "text": "old draft"}),
+                         "skipped")
+        self.assertEqual(answer_state({"skipped": True, "choice": ["a"]}),
+                         "skipped")
+
+    def test_a_false_delegation_flag_does_not_delegate(self):
+        self.assertEqual(answer_state({"delegated": False, "text": "yes"}),
+                         "answered")
+
+    def test_a_false_skip_flag_does_not_skip(self):
+        self.assertEqual(answer_state({"skipped": False, "choice": ["a"]}),
+                         "answered")
+
+    def test_a_truthy_non_boolean_delegation_flag_does_not_delegate(self):
+        """Fail-safe direction: a malformed flag must not manufacture a
+        Delegated Decision the user never made. Ask again instead."""
+        self.assertEqual(answer_state({"delegated": "yes", "text": "email"}),
+                         "answered")
+        self.assertEqual(answer_state({"delegated": 1}), "skipped")
+
+    def test_a_truthy_non_boolean_skip_flag_does_not_discard_an_answer(self):
+        self.assertEqual(answer_state({"skipped": "true", "text": "email"}),
+                         "answered")
+
+
+class FourStatesTest(unittest.TestCase):
+    """The distinction this module exists for: a markdown file could not tell
+    delegated from skipped, and conflating them either nags the user about a
+    decision they handed over or silently drops one they expected recorded."""
+
+    def test_delegated_is_not_the_same_state_as_skipped(self):
+        self.assertNotEqual(answer_state({"delegated": True}),
+                            answer_state({"skipped": True}))
+
+    def test_delegated_is_not_the_same_state_as_answered(self):
+        self.assertNotEqual(answer_state({"delegated": True}),
+                            answer_state({"text": "email"}))
+
+    def test_absent_and_explicitly_skipped_collapse_to_one_state(self):
+        """Four states in, three names out: absent means the same thing as
+        skipped, and callers must not have to tell them apart."""
+        self.assertEqual(answer_state(None), answer_state({"skipped": True}))
+
+    def test_no_input_ever_produces_a_fourth_name(self):
+        inputs = [None, {}, "x", ["x"], 0, {"note": "n"}, {"text": "t"},
+                  {"choice": []}, {"choice": ["a"]}, {"choice": "a"},
+                  {"other": "o"}, {"skipped": True}, {"delegated": True},
+                  {"delegated": True, "skipped": True, "text": "t"}]
+        for ans in inputs:
+            self.assertIn(answer_state(ans),
+                          ("answered", "delegated", "skipped"))
+
+
+class OpenAtItsOwnLevelTest(unittest.TestCase):
+    """Each importance is counted at its own level. No level is special-cased,
+    and none is silently zeroed -- which is what the brief's own literal did to
+    OPTIONAL."""
+
+    def setUp(self):
+        self.round = a_round(
+            question(id="Q-r", importance="REQUIRED"),
+            question(id="Q-i", importance="IMPORTANT"),
+            question(id="Q-p", importance="PREFERENCE"),
+            question(id="Q-o", importance="OPTIONAL"),
+        )
+
+    def test_one_unanswered_question_per_level_is_one_open_per_level(self):
+        self.assertEqual(count_open(self.round, {}),
+                         {"REQUIRED": 1, "IMPORTANT": 1,
+                          "PREFERENCE": 1, "OPTIONAL": 1})
+
+    def test_an_unanswered_optional_question_is_open(self):
+        self.assertEqual(count_open(self.round, {})["OPTIONAL"], 1)
+
+    def test_an_unanswered_preference_question_is_open(self):
+        self.assertEqual(count_open(self.round, {})["PREFERENCE"], 1)
+
+    def test_answering_one_level_leaves_the_others_alone(self):
+        counts = count_open(self.round, {"Q-r": {"text": "yes"}})
+        self.assertEqual(counts, {"REQUIRED": 0, "IMPORTANT": 1,
+                                  "PREFERENCE": 1, "OPTIONAL": 1})
+
+    def test_answering_everything_closes_every_level(self):
+        answers = dict((q["id"], {"text": "yes"})
+                       for q in self.round["questions"])
+        self.assertEqual(count_open(self.round, answers),
+                         {"REQUIRED": 0, "IMPORTANT": 0,
+                          "PREFERENCE": 0, "OPTIONAL": 0})
+
+
+class CountsShapeTest(unittest.TestCase):
+    def test_the_counts_always_carry_all_four_levels(self):
+        self.assertEqual(set(count_open({"round": 1, "questions": []}, {})),
+                         set(IMPORTANCES))
+
+    def test_each_call_returns_a_fresh_dict(self):
+        """A module-level counts dict would accumulate across calls and be
+        wrong from the second round onward."""
+        round_obj = a_round(question(id="Q-1"))
+        first = count_open(round_obj, {})
+        first["REQUIRED"] = 99
+        self.assertEqual(count_open(round_obj, {})["REQUIRED"], 1)
+
+    def test_a_missing_round_and_missing_answers_count_nothing(self):
+        self.assertEqual(count_open(None, None),
+                         dict((level, 0) for level in IMPORTANCES))
+        self.assertEqual(count_answered(None, None), 0)
+
+    def test_answers_of_none_are_treated_as_no_answers(self):
+        """Not the same as `count_open(None, None)`: an empty round never
+        reaches the answers lookup at all, so that call cannot tell whether
+        the None default exists. This one has questions to look up."""
+        round_obj = a_round(question(id="Q-1"), question(id="Q-2"))
+        self.assertEqual(count_open(round_obj, None)["REQUIRED"], 2)
+        self.assertEqual(count_answered(round_obj, None), 0)
+
+    def test_a_round_without_a_questions_key_counts_nothing(self):
+        self.assertEqual(count_open({"round": 1}, {}),
+                         dict((level, 0) for level in IMPORTANCES))
+        self.assertEqual(count_answered({"round": 1}, {}), 0)
+
+
+class MalformedQuestionCountsTest(unittest.TestCase):
+    """Counting runs on rounds that validation may not have blessed."""
+
+    def test_an_unknown_importance_is_ignored_rather_than_crashing(self):
+        round_obj = a_round(question(id="Q-1", importance="CRITICAL"))
+        self.assertEqual(count_open(round_obj, {}),
+                         dict((level, 0) for level in IMPORTANCES))
+
+    def test_a_missing_importance_is_ignored_rather_than_crashing(self):
+        q = question(id="Q-1")
+        del q["importance"]
+        self.assertEqual(count_open(a_round(q), {}),
+                         dict((level, 0) for level in IMPORTANCES))
+
+    def test_an_unknown_importance_never_adds_a_fifth_key(self):
+        round_obj = a_round(question(id="Q-1", importance="CRITICAL"))
+        self.assertEqual(set(count_open(round_obj, {})), set(IMPORTANCES))
+
+    def test_a_question_with_no_id_can_never_be_settled(self):
+        """It cannot be looked up, so it stays open rather than matching some
+        other question's answer."""
+        q = {"importance": "REQUIRED", "title": "Auth?", "type": "text"}
+        round_obj = a_round(q)
+        answers = {"Q-1": {"text": "yes"}, "": {"text": "yes"}}
+        self.assertEqual(count_open(round_obj, answers)["REQUIRED"], 1)
+        self.assertEqual(count_answered(round_obj, answers), 0)
+
+    def test_a_duplicated_id_settles_both_entries(self):
+        """Counting trusts validate_round to have rejected the duplicate; this
+        pins what happens if it is ever called anyway."""
+        round_obj = a_round(question(id="Q-1"), question(id="Q-1"))
+        answers = {"Q-1": {"text": "yes"}}
+        self.assertEqual(count_answered(round_obj, answers), 2)
+        self.assertEqual(count_open(round_obj, answers)["REQUIRED"], 0)
+
+
+class CountsUseAnswerStateTest(unittest.TestCase):
+    """Both counters must ask answer_state, not merely whether a key exists in
+    the answers dict. The browser posts a record for every question it renders,
+    including the ones left blank."""
+
+    def setUp(self):
+        self.round = a_round(question(id="Q-1"), question(id="Q-2"))
+
+    def test_an_empty_answer_record_leaves_the_question_open(self):
+        answers = {"Q-1": {}, "Q-2": {"choice": [], "note": "later"}}
+        self.assertEqual(count_open(self.round, answers)["REQUIRED"], 2)
+        self.assertEqual(count_answered(self.round, answers), 0)
+
+    def test_a_whitespace_only_answer_leaves_the_question_open(self):
+        answers = {"Q-1": {"text": "   "}, "Q-2": {"text": "\n\t"}}
+        self.assertEqual(count_open(self.round, answers)["REQUIRED"], 2)
+        self.assertEqual(count_answered(self.round, answers), 0)
+
+    def test_an_explicit_skip_leaves_the_question_open(self):
+        answers = {"Q-1": {"skipped": True}, "Q-2": {"skipped": True}}
+        self.assertEqual(count_open(self.round, answers)["REQUIRED"], 2)
+        self.assertEqual(count_answered(self.round, answers), 0)
+
+    def test_delegation_settles_a_question_for_both_counters(self):
+        answers = {"Q-1": {"delegated": True}}
+        self.assertEqual(count_open(self.round, answers)["REQUIRED"], 1)
+        self.assertEqual(count_answered(self.round, answers), 1)
+
+    def test_count_answered_ignores_importance_entirely(self):
+        round_obj = a_round(question(id="Q-1", importance="OPTIONAL"),
+                            question(id="Q-2", importance="CRITICAL"))
+        answers = {"Q-1": {"text": "y"}, "Q-2": {"text": "y"}}
+        self.assertEqual(count_answered(round_obj, answers), 2)
+
+    def test_answered_plus_open_accounts_for_every_question(self):
+        """The invariant the UI's progress display rests on: with every
+        importance recognised, nothing is counted twice and nothing vanishes."""
+        round_obj = a_round(
+            question(id="Q-1", importance="REQUIRED"),
+            question(id="Q-2", importance="IMPORTANT"),
+            question(id="Q-3", importance="PREFERENCE"),
+            question(id="Q-4", importance="OPTIONAL"),
+            question(id="Q-5", importance="REQUIRED"),
+        )
+        answers = {"Q-1": {"text": "yes"}, "Q-2": {"delegated": True},
+                   "Q-3": {"skipped": True}}
+        total = len(round_obj["questions"])
+        self.assertEqual(
+            count_answered(round_obj, answers)
+            + sum(count_open(round_obj, answers).values()),
+            total,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

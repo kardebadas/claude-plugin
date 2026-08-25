@@ -1,0 +1,17 @@
+{
+  "name": "bt",
+  "version": "0.1.0",
+  "description": "Personal skill collection. Skills are invoked as bt:<skill>. Currently ships superpipeline, an idea-to-finished-branch orchestrator that composes the superpowers skills and owns the seams: a zero-assumption question law, on-disk run state, two approval gates, reviewer fan-out math, a recursive fix loop with convergence and cap guard rails, and dependency waves that run independent tasks as parallel implementers in separate worktrees.",
+  "author": {
+    "name": "kardebadas"
+  },
+  "keywords": [
+    "pipeline",
+    "orchestration",
+    "planning",
+    "code-review",
+    "subagents",
+    "parallel",
+    "autonomous"
+  ]
+}

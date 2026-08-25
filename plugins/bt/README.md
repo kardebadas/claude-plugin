@@ -1,5 +1,7 @@
 # superpipeline
 
+Part of the `bt` plugin — invoked as **`bt:superpipeline`**.
+
 Takes a feature from an idea to a finished branch in one mostly-autonomous run.
 
 It **composes** existing skills rather than reimplementing them — brainstorming,
@@ -68,6 +70,10 @@ run after the merge. Tasks that share a file or a dependency still run in order.
 | `/superpipeline` | Full run, starting at the brainstorm |
 | `/superpipeline resume` | Re-enter an interrupted run; never starts a new one |
 | `/superpipeline status` | Read-only report — no writes, no dispatches, no fixes |
+
+Referred to by name — in a prompt, or by another skill — it is
+`bt:superpipeline`. The `bt:` prefix is the plugin name and only matters for
+disambiguation; typing `/superpipeline` is enough when nothing else claims it.
 
 ## Requires
 

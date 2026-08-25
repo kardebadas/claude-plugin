@@ -1339,10 +1339,19 @@ class SubmitTest(WriteTestCase):
         self.assertIs(stored["finished"], False)
 
     def test_submit_leaves_the_draft_in_place_untouched(self):
+        """Both halves: the draft is not written, and it is not read either.
+
+        Catches the promotion that only fires when the posted answers are
+        empty -- typed, autosaved, cleared, Send. The draft still holds what
+        was discarded, and a submit that falls back to it stores the thing
+        the user just deleted as the product. What was posted was nothing,
+        so what is stored is nothing.
+        """
         self.patch({"round": 1, "answers": {"Q-1": {"text": "d"}}})
         before = self.session.draft_path(1).read_bytes()
         self.post({"round": 1, "answers": {}, "finished": False})
         self.assertEqual(self.session.draft_path(1).read_bytes(), before)
+        self.assertEqual(read_json(self.session.answers_path(1))["answers"], {})
 
     def test_submit_writes_the_answers_and_not_the_draft(self):
         self.post({"round": 1, "answers": {"Q-1": {"text": "a"}}, "finished": False})
@@ -1405,6 +1414,33 @@ class SubmitTest(WriteTestCase):
         }
         self.post({"round": 1, "answers": answers, "finished": False})
         self.assertEqual(read_json(self.session.answers_path(1))["answers"], answers)
+
+    def test_the_answers_file_is_the_servers_shape_and_not_the_bodys(self):
+        """Verbatim stops at the answers. The server builds the file around
+        them key by key, and those four keys are all of it.
+
+        Two mutants, one assertion each. Building the payload from the
+        request body -- `dict(body)` and then update -- carries every
+        top-level key the caller sent into the file the agent parses.
+        `body.get("submitted_at") or time.strftime(...)` lets the caller
+        forge the record of when the round was sent, which nothing else here
+        would notice because nothing else sends one. The decoy is a date no
+        clock on this machine can produce.
+        """
+        decoy = "1999-01-01T00:00:00Z"
+        body = {
+            "round": 1,
+            "answers": {"Q-1": {"text": "a"}},
+            "finished": False,
+            "submitted_at": decoy,
+            "note": "smuggled",
+            "brief": "# not the brief",
+        }
+        self.post(body)
+        stored = read_json(self.session.answers_path(1))
+        self.assertEqual(set(stored), {"round", "submitted_at", "finished", "answers"})
+        self.assertNotEqual(stored["submitted_at"], decoy)
+        self.assertRegex(stored["submitted_at"], r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
 
     def test_submit_stamps_the_time_in_utc(self):
         """`time.gmtime` -> `time.localtime` is a one-word change that keeps
@@ -1566,7 +1602,17 @@ class WriteShapeTest(WriteTestCase):
             )
 
     def test_a_body_that_is_not_valid_json_is_a_400(self):
-        for raw in (b"{", b"", b"\xff\xfe", b'{"round": 1,}', b"{'round': 1}"):
+        """The last case is the one a decode that replaces cannot answer.
+
+        `b"\\xff\\xfe"` stays invalid JSON however it is decoded, so it says
+        nothing about how the bytes were turned into text. The latin-1
+        bytes inside the string value below are valid JSON the moment
+        `errors="replace"` is used, and what gets stored is then the user's
+        sentence with U+FFFD where their letters were. Undecodable is
+        refused, not repaired.
+        """
+        for raw in (b"{", b"", b"\xff\xfe", b'{"round": 1,}', b"{'round': 1}",
+                    b'{"round": 1, "answers": {"Q-1": {"text": "caf\xe9 na\xefve"}}}'):
             for method, path, error in self.each(raw=raw):
                 self.assertEqual(error.code, 400, (method, raw))
         self.assertEqual(self.written(), [])
@@ -1855,10 +1901,18 @@ class RequestBodyTest(WriteTestCase):
             limit - len(skeleton.encode("utf-8")),
         )
 
-    def test_a_body_one_byte_over_the_limit_is_refused(self):
+    def test_a_body_over_the_limit_is_refused_however_far_over(self):
+        """The byte past the ceiling, and a length nowhere near it.
+
+        A ceiling is not a band. `MAX < length < 2 * MAX` refuses the first
+        of these and lets the second through framing, at which point the
+        server settles down to read a gigabyte off a laptop socket.
+        """
         limit = server_module.MAX_BODY_BYTES
-        received = self.raw(["Content-Length: {}".format(limit + 1)])
-        self.assertIn(b"413", self.status(received), received)
+        for length in (limit + 1, 10 ** 9):
+            received = self.raw(["Content-Length: {}".format(length)])
+            self.assertIn(b"413", self.status(received), (length, received))
+        self.assertEqual(self.written(), [])
 
     def test_a_body_shorter_than_its_content_length_writes_nothing(self):
         """A length that over-promises must not be padded, truncated or
@@ -1968,6 +2022,40 @@ class RequestBodyTest(WriteTestCase):
         self.assertIn(b"200", self.status(received), received)
         self.assertEqual(received.count(b"HTTP/1."), 1, received)
         self.assertFalse(self.session.draft_path(5).exists())
+
+    def test_the_connection_ends_on_the_path_that_refuses_the_write_too(self):
+        """The same guard, on the branch the test above never reaches.
+
+        `close_connection = True` sits ABOVE the key check, so a request
+        this server will not serve still ends its connection and takes its
+        unread body with it. Move that line below the check and only the
+        AUTHORISED path closes -- the refusal is back to resting on
+        protocol_version being HTTP/1.0, which is the exact dependency the
+        line exists to remove. So it is raised here, and the first request
+        carries no key: what follows the 403 down the connection is a body
+        nobody read, which the next read takes for a request line.
+        """
+        self.addCleanup(
+            setattr, server_module._Handler, "protocol_version",
+            server_module._Handler.protocol_version,
+        )
+        server_module._Handler.protocol_version = "HTTP/1.1"
+        first = b'{"round": 1, "answers": {"Q-1": {"text": "unauthorised"}}}'
+        target = self.url("/api/draft")[len(self.base):]
+        smuggled = b'{"round": 6, "answers": {"Q-1": {"text": "smuggled"}}}'
+        rest = (
+            "PATCH {} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n"
+            .format(target, len(smuggled)).encode("utf-8")
+        ) + smuggled
+        received = self.raw(
+            ["Content-Length: {}".format(len(first)), "Connection: keep-alive"],
+            first + rest,
+            key=False,
+        )
+        self.assertIn(b"403", self.status(received), received)
+        self.assertEqual(received.count(b"HTTP/1."), 1, received)
+        self.assertFalse(self.session.draft_path(6).exists())
+        self.assertEqual(self.written(), [])
 
     def test_a_lie_about_the_length_smuggles_nothing_either(self):
         """The same pipelining, framed by a Content-Length that stops short

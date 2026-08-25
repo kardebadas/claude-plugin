@@ -1,5 +1,5 @@
 ---
-name: superpipeline
+name: pipeline
 description: Use when the user wants a feature idea taken end-to-end in one autonomous run — phrases like "run the whole pipeline", "take this feature from idea to finished branch", "brainstorm then build it autonomously", "do everything from idea to merged", "implement all phases without stopping". Triggers when they want brainstorm → plan → implement → review → fix chained with minimal supervision.
 argument-hint: "[resume|status]"
 ---
@@ -8,7 +8,7 @@ argument-hint: "[resume|status]"
 
 ## Overview
 
-`superpipeline` drives a feature from idea to a finished branch by **composing
+`pipeline` drives a feature from idea to a finished branch by **composing
 existing superpowers skills** — it never reimplements brainstorming, planning,
 implementation, or review. It calls those skills and manages the seams between
 them, plus an autonomous per-phase implement → review → recursive-fix loop.
@@ -30,10 +30,10 @@ Dispatch on the argument (`$0`) before doing anything else:
 
 | Invocation | Behavior |
 |------------|----------|
-| `/superpipeline` (no argument) | **Full mode** — current behavior: start at Stage 1, step 0. |
-| `/superpipeline resume` | Run the **Resume Protocol** in `references/run-state.md`. **Never start a new run in this mode** — if no run directory exists, say so and stop. |
-| `/superpipeline status` | **Strictly read-only report** (below). No writes, no dispatches, no fixes. |
-| `/superpipeline <anything else>` | **Ask the user what they meant.** Never guess a verb. `fix-mode` in particular is internal-only — set exclusively by this skill's own fix loop, never a user argument; if the user passes it, refuse and explain that. |
+| `/pipeline` (no argument) | **Full mode** — current behavior: start at Stage 1, step 0. |
+| `/pipeline resume` | Run the **Resume Protocol** in `references/run-state.md`. **Never start a new run in this mode** — if no run directory exists, say so and stop. |
+| `/pipeline status` | **Strictly read-only report** (below). No writes, no dispatches, no fixes. |
+| `/pipeline <anything else>` | **Ask the user what they meant.** Never guess a verb. `fix-mode` in particular is internal-only — set exclusively by this skill's own fix loop, never a user argument; if the user passes it, refuse and explain that. |
 
 **`status`:** locate the run directory (same candidate logic as the Resume
 Protocol — if more than one qualifies, ask which); read `progress.md`,
@@ -138,7 +138,7 @@ both.
 ### Tracker structure (fixed)
 
 ```markdown
-# Super Pipeline — Progress Tracker
+# Pipeline — Progress Tracker
 
 ## Current State
 - **Phase:** <current phase number and name>
@@ -303,7 +303,7 @@ directly).
 ## Stage flow
 
 ```dot
-digraph superpipeline {
+digraph pipeline {
     "Stage 1: brainstorm question rounds (until register empty)" [shape=box];
     "Stage 1b: 2-agent pressure-test (gaps -> new questions)" [shape=box];
     "GATE 1: approve design (register must be empty)" [shape=diamond];
@@ -412,7 +412,7 @@ For each phase — in dependency order, independent phases concurrently as lanes
    Consolidate + dedup into `findings.md`, **assigning each new finding a
    stable `F-NNN` ID** (Critical / Major (= `/review` "Warning") / Minor;
    severity ties resolve upward; a rediscovered finding keeps its old ID).
-3. **Fix loop**: if any Critical/Major/bug → recurse `superpipeline` in
+3. **Fix loop**: if any Critical/Major/bug → recurse `pipeline` in
    fix-mode on the open F-IDs, then re-review. Repeat until clean, subject to
    the convergence rule (an ID still open after a fix-mode run that targeted
    it, or a repeated open-ID set, stops the loop with a user question — before

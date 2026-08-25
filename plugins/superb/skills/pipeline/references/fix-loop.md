@@ -174,7 +174,7 @@ entry in `register.md`** when it is asked, and record the user's verbatim answer
 there when it arrives, so later agents — and the run after the next compaction —
 inherit the answer instead of re-asking or guessing.
 
-## Fix loop (recursive `superpipeline` in fix-mode)
+## Fix loop (recursive `pipeline` in fix-mode)
 
 When blocking findings exist (and the convergence rule permits another run):
 
@@ -185,7 +185,7 @@ When blocking findings exist (and the convergence rule permits another run):
    the tracker does: a compaction empties your context but not the table, and a
    cap you re-derive from memory resets to zero and stops capping anything.
    Never trust a remembered iteration number — read the row.
-2. Recurse `superpipeline` in **fix-mode** on the open ledger entries, **named
+2. Recurse `pipeline` in **fix-mode** on the open ledger entries, **named
    by F-ID** so the convergence check can tell what this run targeted:
    - Fix-mode **skips Stage 1 (brainstorming)** entirely — no interactive Q&A,
      no 2-agent pressure-test.

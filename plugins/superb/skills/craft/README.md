@@ -57,4 +57,4 @@ CRAFT STATUS: BLOCKED BY CONTRADICTION
 `VISION CLEAR` means another skill could now plan the architecture from
 `CRAFT.md` alone, without the original conversation. It does **not** mean
 building should start automatically — that is still your call, and
-[`superb:superpipeline`](../superpipeline) is the skill that takes it from there.
+[`superb:pipeline`](../pipeline) is the skill that takes it from there.

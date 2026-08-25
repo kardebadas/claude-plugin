@@ -4,7 +4,7 @@ TEMPLATE — read-only. Copy to the run directory, then delete this comment:
 Keep the Current State block at the very top at all times.
 -->
 
-# Super Pipeline — Progress Tracker
+# Pipeline — Progress Tracker
 
 ## Current State
 - **Phase:** <current phase number and name>

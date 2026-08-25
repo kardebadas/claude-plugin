@@ -387,6 +387,22 @@ class SessionLockTest(unittest.TestCase):
         self.assertTrue(pid_alive(os.getpid()))
         self.assertFalse(pid_alive(self._dead_pid()))
 
+    def test_pid_alive_reads_a_pid_that_json_carried_as_a_string(self):
+        """JSON carries whatever the writer put there, and a lock naming its
+        holder as "1234" names a live process just as surely as 1234 does.
+        Without the int() coercion the check answers "dead" and the whole
+        refusal turns into a theft, with every other test still green."""
+        self.assertTrue(pid_alive(str(os.getpid())))
+        self.assertFalse(pid_alive(str(self._dead_pid())))
+
+    def test_pid_alive_says_no_to_a_pid_that_is_not_a_process(self):
+        """kill(2) reads 0 and negatives as process groups, so a lock claiming
+        "pid": 0 would read as a live holder and could only be cleared with
+        --force. Nothing at or below zero is a process to ask about."""
+        self.assertFalse(pid_alive(0))
+        self.assertFalse(pid_alive(-1))
+        self.assertFalse(pid_alive(-os.getpid()))
+
 
 class SessionLockHardeningTest(unittest.TestCase):
     """Tests for the parts of the lock the happy-path tests above do not pin.
@@ -436,45 +452,115 @@ class SessionLockHardeningTest(unittest.TestCase):
 
         A read-then-write implementation ("is there a lock? no -- write one")
         passes every other test here and still lets two servers that start in
-        the same millisecond both believe they won. O_CREAT|O_EXCL makes the
-        kernel the arbiter, so this asserts the flags the lock is created with.
+        the same millisecond both believe they won. os.link makes the kernel
+        the arbiter exactly as O_CREAT|O_EXCL did -- it refuses a name that
+        exists -- and it publishes a file that already holds its payload, so
+        this asserts both halves: the lock arrived by an exclusive primitive,
+        and it named its holder the moment it became visible.
         """
-        real_open = session.os.open
-        flags_seen = []
+        real_link = session.os.link
+        published = []
 
-        def recording_open(path, flags, *args, **kwargs):
-            if str(path) == str(self.s.lock_path):
-                flags_seen.append(flags)
-            return real_open(path, flags, *args, **kwargs)
+        def recording_link(src, dst, *args, **kwargs):
+            result = real_link(src, dst, *args, **kwargs)
+            if str(dst) == str(self.s.lock_path):
+                published.append(Path(dst).read_text(encoding="utf-8"))
+            return result
 
-        with mock.patch("session.os.open", recording_open):
+        with mock.patch("session.os.link", recording_link):
             self.s.acquire_lock()
 
         self.assertTrue(
-            flags_seen, "the lock file was never created through os.open"
+            published, "the lock file was never published through os.link"
         )
-        for flags in flags_seen:
-            self.assertTrue(flags & os.O_CREAT, "O_CREAT missing from the lock open")
-            self.assertTrue(flags & os.O_EXCL, "O_EXCL missing from the lock open")
+        for payload in published:
+            self.assertEqual(json.loads(payload)["pid"], os.getpid())
+
+        # And the primitive is the exclusive one: a second publish of the same
+        # name fails rather than overwriting the holder that is already there.
+        fd, tmp = tempfile.mkstemp(dir=str(self.s.craft_dir))
+        os.close(fd)
+        try:
+            with self.assertRaises(FileExistsError):
+                os.link(tmp, str(self.s.lock_path))
+        finally:
+            os.unlink(tmp)
+
+    def test_a_second_acquirer_cannot_win_while_the_first_is_publishing(self):
+        """The lock is never visible in a state that names nobody.
+
+        The old implementation created the lock with O_CREAT|O_EXCL and only
+        then wrote its JSON, so between those two syscalls the file existed and
+        was zero bytes. A second acquirer arriving in that window read it as
+        unreadable, called it unowned, unlinked it and made its own -- and both
+        sessions then believed they held the project, with the file naming the
+        second. This interleaves two acquires deterministically at the instant
+        the lock file first appears -- no threads, no sleeps -- and requires
+        the second one to be refused.
+        """
+        other = Session(self.s.project_dir)
+        state = {"running": False, "outcome": None}
+
+        def run_other_acquirer():
+            if state["running"] or state["outcome"] is not None:
+                return  # the nested acquire must not re-enter this hook
+            state["running"] = True
+            try:
+                other.acquire_lock()
+                state["outcome"] = "won"
+            except LockHeld:
+                state["outcome"] = "refused"
+            finally:
+                state["running"] = False
+
+        real_open = session.os.open
+        real_link = session.os.link
+
+        def hooked_open(path, *args, **kwargs):
+            fd = real_open(path, *args, **kwargs)
+            if str(path) == str(self.s.lock_path):
+                run_other_acquirer()  # the lock exists now: is it complete?
+            return fd
+
+        def hooked_link(src, dst, *args, **kwargs):
+            result = real_link(src, dst, *args, **kwargs)
+            if str(dst) == str(self.s.lock_path):
+                run_other_acquirer()  # the lock exists now: is it complete?
+            return result
+
+        with mock.patch("session.os.open", hooked_open), \
+                mock.patch("session.os.link", hooked_link):
+            self.s.acquire_lock()
+
+        self.assertEqual(
+            state["outcome"],
+            "refused",
+            "a second acquirer took the project while the first was publishing",
+        )
+        self.assertEqual(read_json(self.s.lock_path)["pid"], os.getpid())
 
     def test_acquire_gives_up_rather_than_spinning_forever(self):
         """The reclaim path loops. A lock that keeps reappearing between the
         unlink and the create must end in a refusal, not a hung server."""
-        real_open = session.os.open
+        real_link = session.os.link
         attempts = []
 
-        def always_taken(path, flags, *args, **kwargs):
-            if str(path) == str(self.s.lock_path):
-                attempts.append(flags)
-                raise FileExistsError(17, "File exists", str(path))
-            return real_open(path, flags, *args, **kwargs)
+        def always_taken(src, dst, *args, **kwargs):
+            if str(dst) == str(self.s.lock_path):
+                attempts.append(str(dst))
+                raise FileExistsError(17, "File exists", str(dst))
+            return real_link(src, dst, *args, **kwargs)
 
-        with mock.patch("session.os.open", always_taken):
-            with self.assertRaises(LockHeld):
+        with mock.patch("session.os.link", always_taken):
+            with self.assertRaises(LockHeld) as caught:
                 self.s.acquire_lock()
 
         self.assertGreater(len(attempts), 1, "it never retried")
         self.assertLess(len(attempts), 50, "the retry is not bounded tightly enough")
+        # Nobody was identified, so pid is None -- not the string "unknown",
+        # which a caller reaching for int(exc.pid) would choke on.
+        self.assertIsNone(caught.exception.pid)
+        self.assertIn("unknown", str(caught.exception))
 
     def test_the_refusal_names_the_holder_on_disk(self):
         """The message is the whole user-facing value of the refusal: it is how
@@ -501,9 +587,67 @@ class SessionLockHardeningTest(unittest.TestCase):
             self.assertEqual(caught.exception.pid, proc.pid)
             self.assertEqual(read_json(self.s.lock_path)["pid"], proc.pid)
 
+    def test_lock_held_normalises_the_pid_it_is_handed(self):
+        """LockHeld is exported and raised from more than one place, so the
+        int-or-None contract belongs to the exception itself rather than to
+        the discipline of whoever constructs it."""
+        self.assertEqual(LockHeld("1234", "old").pid, 1234)
+        self.assertEqual(LockHeld(1234, "old").pid, 1234)
+        self.assertIsNone(LockHeld(None, "old").pid)
+        self.assertIsNone(LockHeld("unknown", "unknown").pid)
+        self.assertIn("unknown", str(LockHeld(None, "unknown")))
+        self.assertIn("1234", str(LockHeld("1234", "old")))
+
+    def test_a_string_pid_on_disk_is_reported_as_an_int(self):
+        """LockHeld declares pid: int, and a lock may name its holder as the
+        JSON string "1234" -- hand-edited, or written by some other tool. The
+        holder is still refused, and the pid a caller reads off the exception
+        is still something int() has already been applied to."""
+        with self._sleeping_child() as proc:
+            write_json_atomic(
+                self.s.lock_path, {"pid": str(proc.pid), "started_at": "old"}
+            )
+            with self.assertRaises(LockHeld) as caught:
+                self.s.acquire_lock()
+            self.assertIsInstance(caught.exception.pid, int)
+            self.assertEqual(caught.exception.pid, proc.pid)
+            self.assertIn(str(proc.pid), str(caught.exception))
+            self.assertEqual(read_json(self.s.lock_path)["pid"], str(proc.pid))
+
+    def test_a_lock_that_is_a_directory_is_refused_rather_than_crashing(self):
+        """Anything can be sitting at that name. A directory there cannot be
+        read, cannot be unlinked, and cannot be rescued by --force, so all
+        three entry points have to say so rather than raise IsADirectoryError
+        out of a traceback that names nothing a user can act on."""
+        self.s.lock_path.mkdir()
+        with self.assertRaises(LockHeld):
+            self.s.acquire_lock()
+        with self.assertRaises(LockHeld):
+            self.s.acquire_lock(force=True)
+        self.s.release_lock()  # shutdown must still get out
+        self.assertTrue(self.s.lock_path.is_dir())
+        self.assertEqual(
+            sorted(p.name for p in self.s.craft_dir.iterdir()),
+            ["session.lock"],
+            "a temp file was left behind by the failed acquires",
+        )
+
+    def test_a_lock_claiming_pid_zero_is_reclaimed(self):
+        """The lock file is data, and 0 is not a process. Read as one it would
+        answer "alive" through kill(2)'s process-group rule and hold the
+        project shut against a session that has every right to it."""
+        write_json_atomic(self.s.lock_path, {"pid": 0, "started_at": "old"})
+        self.s.acquire_lock()
+        self.assertEqual(read_json(self.s.lock_path)["pid"], os.getpid())
+
     def test_force_takes_over_a_lock_held_by_another_live_process(self):
         """force is the escape hatch, and it has to work against a real live
-        holder, replacing both fields rather than editing the pid in place."""
+        holder, replacing both fields rather than editing the pid in place.
+
+        This is the load-bearing force test, and the only one: the sibling in
+        SessionLockTest seeds the lock with our own pid, so it passes even
+        against a force that does nothing at all. Do not prune this as a
+        duplicate of it -- the duplicate is the one that proves nothing."""
         with self._sleeping_child() as proc:
             write_json_atomic(
                 self.s.lock_path, {"pid": proc.pid, "started_at": "old"}
@@ -521,7 +665,12 @@ class SessionLockHardeningTest(unittest.TestCase):
         self.assertEqual(read_json(self.s.lock_path)["pid"], os.getpid())
 
     def test_an_empty_lock_file_is_reclaimed(self):
-        """The exact shape a crash between create and write leaves behind."""
+        """A zero-byte lock names nobody, so it holds nobody out.
+
+        No live acquirer produces this shape any more -- the lock is published
+        with its payload already in it -- so what is left is a file some other
+        accident truncated. Reclaiming it is still the right call: refusing on
+        it would wedge the project shut behind a holder nobody can name."""
         self.s.lock_path.write_text("", encoding="utf-8")
         self.s.acquire_lock()
         self.assertEqual(read_json(self.s.lock_path)["pid"], os.getpid())
@@ -591,17 +740,6 @@ class SessionLockHardeningTest(unittest.TestCase):
         self.s.release_lock()
         self.assertFalse(self.s.lock_path.exists())
 
-    def test_release_leaves_a_live_holders_lock_alone(self):
-        """The pid-1 version of this cannot tell "not ours" from "not alive".
-        A live foreign holder can: releasing must not free somebody else."""
-        with self._sleeping_child() as proc:
-            write_json_atomic(
-                self.s.lock_path, {"pid": proc.pid, "started_at": "old"}
-            )
-            self.s.release_lock()
-            self.assertTrue(self.s.lock_path.exists())
-            self.assertEqual(read_json(self.s.lock_path)["pid"], proc.pid)
-
     def test_the_lock_is_per_project(self):
         """One lock per project directory, not one per machine."""
         other_root = self.root / "other-project"
@@ -619,14 +757,24 @@ class SessionLockHardeningTest(unittest.TestCase):
         self.assertIsNone(ROUND_RE.match(self.s.lock_path.name))
 
     def test_the_lock_survives_a_round_trip_of_acquire_release_acquire(self):
-        """The ordinary server lifecycle, twice, in one project."""
+        """The ordinary server lifecycle, twice, in one project.
+
+        The second acquire returning at all is the real assertion here: it runs
+        outside assertRaises, so a release that left the lock behind would come
+        back as a LockHeld and fail the test.
+        """
         self.s.acquire_lock()
-        first = read_json(self.s.lock_path)
+        self.assertEqual(read_json(self.s.lock_path)["pid"], os.getpid())
         self.s.release_lock()
+        self.assertFalse(self.s.lock_path.exists())
         self.s.acquire_lock()
         second = read_json(self.s.lock_path)
-        self.assertEqual(first["pid"], second["pid"])
+        self.assertEqual(second["pid"], os.getpid())
+        self.assertTrue(second["started_at"])
         self.assertTrue(self.s.lock_path.is_file())
+        self.assertEqual(
+            [p.name for p in self.s.craft_dir.iterdir()], ["session.lock"]
+        )
 
 
 if __name__ == "__main__":

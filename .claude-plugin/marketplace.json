@@ -7,9 +7,9 @@
   },
   "plugins": [
     {
-      "name": "bt",
-      "source": "./plugins/bt",
-      "description": "Personal skill collection, invoked as bt:<skill>. craft turns a vague product idea into a decision-rich CRAFT.md brief without planning or coding; superpipeline drives a settled idea to a finished branch by composing the superpowers skills, with a zero-assumption question law, on-disk run state, two approval gates, reviewer fan-out, a recursive fix loop, and dependency waves for parallel implementers."
+      "name": "superb",
+      "source": "./plugins/superb",
+      "description": "Personal skill collection, invoked as superb:<skill>. craft turns a vague product idea into a decision-rich CRAFT.md brief without planning or coding; superpipeline drives a settled idea to a finished branch by composing the superpowers skills, with a zero-assumption question law, on-disk run state, two approval gates, reviewer fan-out, a recursive fix loop, and dependency waves for parallel implementers."
     }
   ]
 }

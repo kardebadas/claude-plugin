@@ -1,6 +1,6 @@
 # craft
 
-Part of the `bt` plugin — invoked as **`bt:craft`**.
+Part of the `superb` plugin — invoked as **`superb:craft`**.
 
 Turns a vague product idea into a clear representation of what you actually
 want. "Let's craft an application similar to Spotify" does not mean *build
@@ -57,4 +57,4 @@ CRAFT STATUS: BLOCKED BY CONTRADICTION
 `VISION CLEAR` means another skill could now plan the architecture from
 `CRAFT.md` alone, without the original conversation. It does **not** mean
 building should start automatically — that is still your call, and
-[`bt:superpipeline`](../superpipeline) is the skill that takes it from there.
+[`superb:superpipeline`](../superpipeline) is the skill that takes it from there.

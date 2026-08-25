@@ -1,0 +1,20 @@
+{
+  "name": "superb",
+  "version": "0.2.0",
+  "description": "Personal skill collection. Skills are invoked as superb:<skill>. craft turns a vague product idea into a decision-rich CRAFT.md brief \u2014 it questions, challenges and records, and deliberately stops short of planning. superpipeline takes a settled idea to a finished branch, composing the superpowers skills with a zero-assumption question law, on-disk run state, two approval gates, reviewer fan-out, a recursive fix loop, and dependency waves for parallel implementers.",
+  "author": {
+    "name": "kardebadas"
+  },
+  "keywords": [
+    "product-discovery",
+    "requirements",
+    "design",
+    "pipeline",
+    "orchestration",
+    "planning",
+    "code-review",
+    "subagents",
+    "parallel",
+    "autonomous"
+  ]
+}

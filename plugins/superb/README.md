@@ -1,6 +1,6 @@
 # superpipeline
 
-Part of the `bt` plugin — invoked as **`bt:superpipeline`**.
+Part of the `superb` plugin — invoked as **`superb:superpipeline`**.
 
 Takes a feature from an idea to a finished branch in one mostly-autonomous run.
 
@@ -72,7 +72,7 @@ run after the merge. Tasks that share a file or a dependency still run in order.
 | `/superpipeline status` | Read-only report — no writes, no dispatches, no fixes |
 
 Referred to by name — in a prompt, or by another skill — it is
-`bt:superpipeline`. The `bt:` prefix is the plugin name and only matters for
+`superb:superpipeline`. The `superb:` prefix is the plugin name and only matters for
 disambiguation; typing `/superpipeline` is enough when nothing else claims it.
 
 ## Requires

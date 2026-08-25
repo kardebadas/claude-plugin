@@ -3,6 +3,8 @@
 The session directory lives beside CRAFT.md in the user's project. Nothing in
 this module knows anything about HTTP, and nothing here ever writes CRAFT.md.
 """
+# Deliberate: kept so any annotation added later may use `int | None` syntax
+# while this project's floor is Python 3.9. Do not delete.
 from __future__ import annotations
 
 import json

@@ -2117,5 +2117,582 @@ class WriteTerminalTest(WriteTestCase):
         self.assertEqual(self.server.handler_errors, 0)
 
 
+class BodyDepthTest(WriteTestCase):
+    """What a body may BECOME, which is not what it may carry.
+
+    write_json_atomic serialises with indent=2, and indentation is charged
+    per nesting level on every line below it -- so nesting is a multiplier
+    on the file that the byte ceiling cannot see. Measured against the code
+    before this class existed: a 1,048,384-byte body nested 975 deep wrote a
+    685,214,154-byte file into .craft/ in the user's project. 653x, from one
+    request, under the ceiling, holding a valid key.
+
+    MAX_BODY_BYTES' own comment says it exists so that nothing "can hand
+    this process a body the size of the disk and watch it be written into
+    the user's project as a file they never asked for". That was the finding
+    almost word for word.
+    """
+
+    # What the file may be, as a multiple of the request that produced it.
+    # Derived, not guessed: the deepest container an accepted body may have
+    # sits at nesting level MAX_BODY_DEPTH, so its items are indented
+    # 2 * MAX_BODY_DEPTH, and the cheapest item a caller can send is "1," --
+    # two bytes in, (2 * 6) + 1 + len(",\n") = 15 bytes out. 7.5, and the
+    # eight below is that with a byte of slack for the wrapper.
+    AMPLIFICATION = 8
+
+    def nested(self, depth):
+        """A body whose deepest container sits exactly `depth` levels in."""
+        value = 1
+        # -2: the body itself is level 1 and "answers" is level 2, so two
+        # levels are already spent on the shape every honest body has, and
+        # the first container added lands under a question id at level 3.
+        for _ in range(depth - 2):
+            value = [value]
+        return {"round": 1, "answers": {"Q-1": value}}
+
+    def test_a_body_nested_deeper_than_the_limit_is_refused(self):
+        for depth in (server_module.MAX_BODY_DEPTH + 1, 20, 300, 900):
+            for method, path in (("PATCH", "/api/draft"), ("POST", "/api/submit")):
+                error = self.rejected(method, path, self.nested(depth))
+                self.assertEqual(error.code, 400, (method, depth))
+                body = error.read().decode("utf-8", "replace")
+                self.assertIn(str(server_module.MAX_BODY_DEPTH), body, depth)
+                self.assertNamesNoPath(body, str(depth))
+        self.assertEqual(self.written(), [])
+        self.assertEqual(self.server.handler_errors, 0)
+
+    def test_a_body_at_the_limit_is_still_accepted(self):
+        """The other half of the bound. A limit that refuses everything is
+        not a limit, and this one has to leave the page's own bodies alone."""
+        depth = server_module.MAX_BODY_DEPTH
+        self.assertEqual(self.patch(self.nested(depth)), {"ok": True})
+        self.post(dict(self.nested(depth), finished=False))
+        self.assertTrue(self.session.answers_path(1).exists())
+
+    def test_the_shape_the_page_actually_sends_is_well_inside_the_limit(self):
+        """The limit is a number chosen against a real body, so the real body
+        is what pins it. Every answer state the page can produce, at once."""
+        answers = {
+            "Q-1": {"choice": ["email", "sso"], "other": "passkeys", "note": "later"},
+            "Q-2": {"delegated": True},
+            "Q-3": {"skipped": True},
+            "Q-4": {"text": "a sentence"},
+        }
+        self.post({"round": 1, "answers": answers, "finished": True})
+        self.assertEqual(read_json(self.session.answers_path(1))["answers"], answers)
+
+    def test_the_depth_limit_is_a_small_number(self):
+        """A limit of None, or of 980, is the finding again with a number in
+        front of it: the amplification is linear in this value."""
+        depth = server_module.MAX_BODY_DEPTH
+        self.assertIsInstance(depth, int)
+        self.assertTrue(4 <= depth <= 16, depth)
+
+    def test_the_file_a_body_can_write_is_bounded_by_the_body(self):
+        """The property, asserted directly rather than through the mechanism.
+
+        Not "a deep body is refused" -- that is how the bound happens to be
+        implemented today. This is the bound itself: the worst body this
+        server will accept, sent to a real server, and then the size of what
+        it left on disk. It survives any future rewrite of how the limit is
+        reached, and it is the assertion the finding was actually about.
+
+        The body is hand-written rather than json.dumps'd because
+        json.dumps separates with ", " and a caller writes ",", and the
+        worst case is the caller's.
+        """
+        depth = server_module.MAX_BODY_DEPTH
+        head = b'{"round":1,"answers":{"Q-1":' + b"[" * (depth - 2)
+        tail = b"]" * (depth - 2) + b"}}"
+        room = server_module.MAX_BODY_BYTES - len(head) - len(tail)
+        body = head + b"1," * ((room - 1) // 2) + b"1" + tail
+        self.assertLessEqual(len(body), server_module.MAX_BODY_BYTES)
+        self.assertEqual(
+            json.loads(self.send("PATCH", "/api/draft", raw=body).read().decode("utf-8")),
+            {"ok": True},
+        )
+        written = self.session.draft_path(1).stat().st_size
+        self.assertLessEqual(
+            written,
+            self.AMPLIFICATION * len(body),
+            "{} bytes of request wrote {} bytes of file".format(len(body), written),
+        )
+
+
+class SilentFailureTest(WriteTestCase):
+    """Two ordinary inputs that produced no HTTP response at all.
+
+    _store caught OSError and _read_body caught ValueError, and neither of
+    these is either. What failed was never the storing -- the temp file was
+    cleaned up both times -- it was the acknowledgement, which is the exact
+    failure _store's own docstring describes: "The browser sees a reset
+    connection, and the person at it has no reason to think the answers they
+    just sent were not saved."
+    """
+
+    SURROGATE_BODIES = (
+        # In a value, and in a question id, because the writer encodes keys
+        # as well as values and the guard has to walk both.
+        b'{"round": 1, "answers": {"Q-1": {"text": "\\ud800"}}}',
+        b'{"round": 1, "answers": {"\\ud800": {"text": "x"}}}',
+        b'{"round": 1, "answers": {"Q-1": {"choice": ["a", "\\udfff"]}}}',
+    )
+
+    def test_a_lone_surrogate_is_answered_rather_than_dropped(self):
+        """A browser produces this on its own: ES2019 JSON.stringify escapes
+        a lone surrogate as \\ud800 and json.loads decodes it straight back,
+        so no attacker is needed. Writing it to a UTF-8 file then raises
+        UnicodeEncodeError -- a ValueError, not an OSError -- which escaped
+        _store and left the request with no response at all.
+
+        assertRaises(HTTPError) is doing the work here: against the code
+        before the fix urllib raises RemoteDisconnected instead, because
+        there is no response to parse.
+        """
+        for raw in self.SURROGATE_BODIES:
+            for method, path in (("PATCH", "/api/draft"), ("POST", "/api/submit")):
+                error = self.rejected(method, path, raw=raw)
+                self.assertEqual(error.code, 400, (method, raw))
+                self.assertNamesNoPath(error.read().decode("utf-8", "replace"))
+        self.assertEqual(self.written(), [])
+        self.assertEqual(self.server.handler_errors, 0)
+
+    def test_a_body_the_decoder_cannot_read_is_answered_rather_than_dropped(self):
+        """json.loads raises RecursionError past roughly 980 levels, and a
+        RecursionError is not a ValueError. Measured on the code before the
+        fix: 980 was answered, 985 was silence.
+
+        The depth limit does NOT close this one and must not be credited
+        with it. It is checked on a body that has already been decoded, so
+        the decoder always runs first; the catch in _read_body is the whole
+        of the guard.
+        """
+        for depth in (985, 2000, 20000):
+            raw = (b'{"round": 1, "answers": {"Q-1": '
+                   + b"[" * depth + b"]" * depth + b"}}")
+            for method, path in (("PATCH", "/api/draft"), ("POST", "/api/submit")):
+                error = self.rejected(method, path, raw=raw)
+                self.assertEqual(error.code, 400, (method, depth))
+                self.assertNamesNoPath(error.read().decode("utf-8", "replace"))
+        self.assertEqual(self.written(), [])
+        self.assertEqual(self.server.handler_errors, 0)
+
+    def test_the_boundary_the_decoder_used_to_answer_is_still_answered(self):
+        """980 levels was served before the fix and is refused after it, and
+        both are responses. What must never come back is nothing."""
+        raw = b'{"round": 1, "answers": {"Q-1": ' + b"[" * 980 + b"]" * 980 + b"}}"
+        self.assertEqual(self.rejected("PATCH", "/api/draft", raw=raw).code, 400)
+        self.assertEqual(self.server.handler_errors, 0)
+
+    def test_neither_input_reaches_the_agents_terminal(self):
+        """Both used to arrive as handler_errors with a line on stderr. The
+        wait is negative and bounded, like WriteTerminalTest's: handle_error
+        runs after the response, so the only honest way to say nothing
+        happened afterwards is to give it a moment to happen in."""
+        deep = b'{"round": 1, "answers": {"Q-1": ' + b"[" * 5000 + b"]" * 5000 + b"}}"
+        buffer = io.StringIO()
+        with contextlib.redirect_stderr(buffer):
+            for raw in self.SURROGATE_BODIES + (deep,):
+                for method, path in (("POST", "/api/submit"), ("PATCH", "/api/draft")):
+                    with contextlib.suppress(urllib.error.HTTPError):
+                        self.send(method, path, raw=raw).read()
+            self.assertFalse(
+                self.wait_until(lambda: self.server.handler_errors > 0, timeout=0.5)
+            )
+        self.assertEqual(buffer.getvalue(), "")
+        self.assertEqual(self.server.handler_errors, 0)
+
+    def test_the_writer_is_guarded_and_not_merely_preceded_by_a_check(self):
+        """A limit in front of a call is not a guard around it.
+
+        The check in _read_body should mean nothing ever reaches _store
+        carrying either of these, and "should mean" is why _store catches
+        them anyway. Reached here by making the writer itself raise, which
+        is the only way in once the door is shut -- and the point: whatever
+        else ever makes write_json_atomic raise one of these, the browser
+        gets an answer and the agent's terminal gets nothing.
+        """
+        # Captured once, before the loop: taking it inside would restore the
+        # first iteration's replacement on the way out.
+        self.addCleanup(
+            setattr, server_module, "write_json_atomic",
+            server_module.write_json_atomic,
+        )
+        for exc in (UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed"),
+                    RecursionError("maximum recursion depth exceeded")):
+            def explode(path, payload, exc=exc):
+                raise exc
+
+            server_module.write_json_atomic = explode
+            error = self.rejected("PATCH", "/api/draft", {"round": 1, "answers": {}})
+            self.assertEqual(error.code, 500, repr(exc))
+            body = error.read().decode("utf-8", "replace")
+            self.assertIn("round-001.draft.json", body)
+            self.assertNotIn("Traceback", body)
+            self.assertNamesNoPath(body.replace("round-001.draft.json", ""))
+            self.assertNotIn('"ok": true', body.lower())
+        self.assertEqual(self.server.handler_errors, 0)
+
+
+class TempSweepTest(WriteTestCase):
+    """The .tmp- files a killed session leaves in the user's project.
+
+    write_json_atomic cleans up in an except clause, and process death does
+    not run one: measured, twelve SIGKILLs during writes left forty-four
+    orphans, and SIGTERM, SIGHUP and Ctrl-C all leak too -- the last because
+    KeyboardInterrupt lands on the main thread while writer threads are
+    somewhere else entirely. Nothing ever removed one, session.ROUND_RE does
+    not match one, and each holds whatever the user had typed.
+    """
+
+    def orphan(self, name=".tmp-abc123.json", age=None):
+        """A temp file of the shape write_json_atomic leaves behind."""
+        path = self.session.craft_dir / name
+        path.write_text('{"round": 1, "answers": {"Q-1": {"text": "typed"}}}',
+                        encoding="utf-8")
+        if age is not None:
+            # Aged by hand rather than by waiting: the sweep's own grace
+            # period is seconds, and a suite that sleeps them is a suite
+            # nobody runs.
+            stamp = time.time() - age
+            os.utime(str(path), (stamp, stamp))
+        return path
+
+    def old(self):
+        return server_module.TMP_GRACE_S + 60
+
+    def test_a_start_removes_the_temp_files_a_killed_session_left(self):
+        paths = [self.orphan(".tmp-{}.json".format(n), age=self.old()) for n in "abc"]
+        server = self.start_server()
+        self.assertEqual(server.swept, len(paths))
+        for path in paths:
+            self.assertFalse(path.exists(), path.name)
+
+    def test_a_start_leaves_alone_a_temp_file_a_live_write_may_be_using(self):
+        """An orphan and a temp file another process is mid-write on are the
+        same file on disk, so the sweep does not guess: it removes only what
+        nothing has touched for TMP_GRACE_S. A write here is one dump, one
+        fsync and one rename, so anything that old is not one in flight."""
+        fresh = self.orphan(".tmp-live.json")
+        server = self.start_server()
+        self.assertEqual(server.swept, 0)
+        self.assertTrue(fresh.exists())
+
+    def test_the_sweep_removes_nothing_else_in_the_session_directory(self):
+        """Only that exact shape, and only in .craft/. Every one of these is
+        aged past the grace period, so surviving is about the NAME."""
+        keep = []
+        for name in ("round-001.questions.json", "round-001.draft.json",
+                     "round-001.answers.json", "session.lock", "tmp-abc.json",
+                     ".tmp-abc.txt", ".tmpabc.json", "notes.json"):
+            keep.append(self.orphan(name, age=self.old()))
+        outside = Path(self._tmp.name) / ".tmp-outside.json"
+        outside.write_text("{}", encoding="utf-8")
+        os.utime(str(outside), (0, 0))
+        server = self.start_server()
+        self.assertEqual(server.swept, 0)
+        for path in keep:
+            self.assertTrue(path.exists(), path.name)
+        self.assertTrue(outside.exists())
+
+    def test_the_sweep_does_not_remove_a_directory_wearing_that_name(self):
+        directory = self.session.craft_dir / ".tmp-adirectory.json"
+        directory.mkdir()
+        os.utime(str(directory), (0, 0))
+        server = self.start_server()
+        self.assertEqual(server.swept, 0)
+        self.assertTrue(directory.is_dir())
+
+    def test_the_sweep_does_not_follow_a_symlink_wearing_that_name(self):
+        """mkstemp cannot produce a symlink, so anything wearing this name
+        and pointing somewhere else was put there by something that is not
+        this tool -- and unlinking through it is not ours to do."""
+        target = Path(self._tmp.name) / "elsewhere.json"
+        target.write_text('{"keep": true}', encoding="utf-8")
+        link = self.session.craft_dir / ".tmp-link.json"
+        link.symlink_to(target)
+        server = self.start_server()
+        self.assertEqual(server.swept, 0)
+        self.assertTrue(target.exists())
+        self.assertEqual(target.read_text(encoding="utf-8"), '{"keep": true}')
+
+    def test_a_session_directory_that_cannot_be_swept_still_starts(self):
+        """The sweep is housekeeping. It may not be the reason a session
+        refuses to start, so every filesystem error in it is absorbed."""
+        self.session.craft_dir.chmod(0o000)
+        self.addCleanup(self.session.craft_dir.chmod, 0o755)
+        try:
+            list(self.session.craft_dir.iterdir())
+        except PermissionError:
+            pass
+        else:
+            self.skipTest("this user can list a mode-000 directory; probably root")
+        server = self.start_server()
+        self.assertEqual(server.swept, 0)
+        self.session.craft_dir.chmod(0o755)
+        self.assertEqual(self.get("/").status, 200)  # and it serves
+
+    def test_a_missing_session_directory_does_not_stop_a_start(self):
+        import shutil
+
+        shutil.rmtree(str(self.session.craft_dir))
+        server = self.start_server()
+        self.assertEqual(server.swept, 0)
+
+    def test_the_sweep_leaves_a_real_draft_recoverable(self):
+        """The whole reason autosave exists. Sweeping the wreckage of a
+        killed session must not sweep what that session actually saved."""
+        self.patch({"round": 1, "answers": {"Q-1": {"text": "typed"}}})
+        self.orphan(age=self.old())
+        self.server.shutdown()
+        self.server = self.start_server()
+        self.base = "http://127.0.0.1:{}".format(self.server.port)
+        self.assertEqual(
+            self.get_json("/api/draft?round=1")["answers"]["Q-1"]["text"], "typed"
+        )
+
+    def test_the_grace_period_is_a_bounded_number_of_seconds(self):
+        """A grace of a day is a leak with a delay on it; a grace of zero is
+        a race against another process's write."""
+        grace = server_module.TMP_GRACE_S
+        self.assertIsInstance(grace, (int, float))
+        self.assertTrue(0 < grace <= 300, grace)
+
+
+class DraftSequenceTest(WriteTestCase):
+    """Autosave fires per keystroke, so two PATCHes for one round overlap as
+    the ordinary case rather than as an edge one: HTTP/1.0 means a connection
+    per request and ThreadingHTTPServer runs them side by side. Measured
+    before this class existed: "hello world" typed once, two saves
+    acknowledged 200, and "hel" left on disk.
+    """
+
+    def draft(self, round_number=1):
+        return read_json(self.session.draft_path(round_number))["answers"]["Q-1"]["text"]
+
+    def patch_seq(self, text, seq=None, round_number=1):
+        body = {"round": round_number, "answers": {"Q-1": {"text": text}}}
+        if seq is not None:
+            body["seq"] = seq
+        return self.patch(body)
+
+    def test_an_older_patch_does_not_overwrite_a_newer_one(self):
+        """The finding itself: the older keystroke arrives last and wins."""
+        self.patch_seq("hello world", 7)
+        self.patch_seq("hel", 3)
+        self.assertEqual(self.draft(), "hello world")
+
+    def test_a_newer_patch_does_overwrite_an_older_one(self):
+        """The other half of the bound. Sequencing that refuses everything
+        after the first write is not sequencing, it is a broken autosave."""
+        self.patch_seq("hel", 3)
+        self.patch_seq("hello world", 7)
+        self.assertEqual(self.draft(), "hello world")
+
+    def test_an_ignored_patch_is_a_success_and_not_an_error(self):
+        """The client is not wrong -- it sent what it had when it had it, and
+        the newer draft is already on disk, which is what the user wanted. An
+        error here would put a failure in front of somebody who is typing."""
+        self.patch_seq("hello world", 7)
+        response = self.send("PATCH", "/api/draft",
+                             {"round": 1, "answers": {}, "seq": 3})
+        self.assertEqual(response.status, 200)
+        payload = json.loads(response.read().decode("utf-8"))
+        self.assertIs(payload["ok"], True)
+        self.assertIs(payload["stale"], True)
+
+    def test_the_same_seq_twice_is_a_retry_and_not_a_stale_write(self):
+        """Equal is not lower. A client that retries one keystroke -- which
+        is what a dropped connection looks like from the page -- must not be
+        told its own write is out of date."""
+        self.patch_seq("hello", 7)
+        self.assertEqual(self.patch_seq("hello!", 7), {"ok": True})
+        self.assertEqual(self.draft(), "hello!")
+
+    def test_a_patch_with_no_seq_keeps_last_writer_wins(self):
+        """Nothing may break in the window before a client sends one, so a
+        body with no seq behaves exactly as it did before seq existed."""
+        self.patch_seq("one")
+        self.patch_seq("two")
+        self.assertEqual(self.draft(), "two")
+
+    def test_a_patch_with_no_seq_wins_over_a_sequenced_one(self):
+        """The mixed case, in the direction that could have been an
+        accident: an unsequenced PATCH is not compared, so it lands."""
+        self.patch_seq("sequenced", 7)
+        self.patch_seq("unsequenced")
+        self.assertEqual(self.draft(), "unsequenced")
+
+    def test_an_unsequenced_patch_does_not_reset_the_ordering(self):
+        """The other direction of the mixed case, and the one a mutant gets
+        wrong: writing without a seq must not forget the mark, or the next
+        stale keystroke walks straight over the newest text."""
+        self.patch_seq("hello world", 7)
+        self.patch_seq("unsequenced")
+        self.patch_seq("hel", 3)
+        self.assertEqual(self.draft(), "unsequenced")
+
+    def test_the_ordering_is_kept_per_round(self):
+        """One mark for the whole server would make round 2's first
+        keystroke stale because round 1 is further along."""
+        self.patch_seq("round one", 7, round_number=1)
+        self.patch_seq("round two", 3, round_number=2)
+        self.assertEqual(self.draft(2), "round two")
+
+    def test_the_seq_is_stored_beside_the_draft(self):
+        self.patch_seq("hi", 7)
+        self.assertEqual(read_json(self.session.draft_path(1))["seq"], 7)
+
+    def test_a_draft_with_no_seq_is_written_with_the_keys_it_always_had(self):
+        """A seq invented for a client that did not send one is a number the
+        server made up, and the next PATCH would be compared against it."""
+        self.patch_seq("hi")
+        self.assertEqual(set(read_json(self.session.draft_path(1))), {"round", "answers"})
+
+    def test_reading_a_draft_back_is_the_same_shape_it_always_was(self):
+        """The stored seq is the server's bookkeeping, not the page's."""
+        self.patch_seq("hi", 7)
+        self.assertEqual(
+            self.get_json("/api/draft?round=1"),
+            {"round": 1, "answers": {"Q-1": {"text": "hi"}}},
+        )
+
+    def test_a_seq_that_is_not_a_whole_number_is_a_400(self):
+        """bool is an int in Python, so True would order as seq 1. A float
+        or a digit string is a client that believes it is sequencing and is
+        not, which is worse than one that does not try."""
+        for value in ("3", "abc", 3.0, 0.5, True, False, [], {}, [3]):
+            error = self.rejected("PATCH", "/api/draft",
+                                  {"round": 1, "answers": {}, "seq": value})
+            self.assertEqual(error.code, 400, repr(value))
+        self.assertEqual(self.written(), [])
+
+    def test_a_null_seq_is_the_same_as_no_seq(self):
+        """JSON.stringify writes null for an absent field often enough that
+        refusing it would refuse an honest client."""
+        self.assertEqual(self.patch({"round": 1, "answers": {}, "seq": None}),
+                         {"ok": True})
+
+    def test_a_seq_is_only_remembered_once_its_write_has_landed(self):
+        """A write that failed must not make the next one look out of date.
+
+        Otherwise one unwritable moment turns every later keystroke into a
+        silent no-op answered 200: the user keeps typing, the page keeps
+        saying saved, and nothing reaches the file again.
+
+        Asserted through the NEXT patch rather than by reading the mark.
+        _store sends its own 500 from inside the lock, before do_PATCH gets
+        as far as recording anything, so a test that reads the mark the
+        moment that response arrives is racing the handler thread -- and a
+        racing test lets the mutant through most of the time. The patch
+        below is not racing it: it waits on the same lock the recording
+        would have happened under.
+        """
+        blocked = _UnwritableSession(self._tmp.name)
+        (blocked.craft_dir / "wall").write_text("not a directory", encoding="utf-8")
+        self.server.session = blocked
+        self.assertEqual(
+            self.rejected("PATCH", "/api/draft",
+                          {"round": 1, "answers": {}, "seq": 9}).code,
+            500,
+        )
+        self.server.session = self.session  # the disk comes back
+        self.assertEqual(self.patch_seq("typed again", 5), {"ok": True})
+        self.assertEqual(self.draft(), "typed again")
+
+    def test_a_write_in_progress_cannot_be_overtaken_by_a_newer_one(self):
+        """The lock has to cover the WRITE and not only the comparison.
+
+        Two PATCHes can pass an ordering check in the right order and still
+        reach os.replace in the wrong one, which is the finding again with a
+        smaller window. On loopback that window is microseconds, so a test
+        that hopes to hit it is a test that passes against the bug -- the
+        mutation run confirmed exactly that. So the window is opened by
+        hand: the older write is held inside write_json_atomic until the
+        newer one has had its chance to overtake it.
+
+        Under a lock that spans the write, the newer PATCH is still waiting
+        when the older one finishes, and lands after it. Under one that
+        spans only the comparison, it lands FIRST and the older content is
+        written over the top of it -- which is what the file then holds.
+        """
+        real = server_module.write_json_atomic
+        self.addCleanup(setattr, server_module, "write_json_atomic", real)
+        started = threading.Event()
+        release = threading.Event()
+        # Before anything that can fail: a parked writer thread outlives the
+        # assertion that parked it.
+        self.addCleanup(release.set)
+        held = []
+
+        def slow(path, payload):
+            if not held:  # the first write only, which is the older one
+                held.append(True)
+                started.set()
+                release.wait(timeout=10)
+            return real(path, payload)
+
+        server_module.write_json_atomic = slow
+        failures = []
+
+        def send(text, seq):
+            try:
+                self.patch_seq(text, seq)
+            except Exception as exc:  # recorded, not raised, off the main thread
+                failures.append(exc)
+
+        older = threading.Thread(target=send, args=("older", 3))
+        older.start()
+        newer = None
+        try:
+            self.assertTrue(started.wait(timeout=5), "the first write never began")
+            newer = threading.Thread(target=send, args=("newer", 7))
+            newer.start()
+            # Bounded, and its result is not asserted: under a correct lock
+            # the newer write cannot land yet and this simply runs out,
+            # which is the point of waiting on the file rather than sleeping.
+            self.wait_until(lambda: self.session.draft_path(1).exists(), timeout=0.5)
+        finally:
+            release.set()
+            for thread in (older, newer):
+                if thread is not None:
+                    thread.join(timeout=10)
+                    self.assertFalse(thread.is_alive(), "a PATCH never finished")
+        self.assertEqual(failures, [])
+        self.assertEqual(self.draft(), "newer")
+
+    def test_the_newest_keystroke_survives_whatever_order_they_land_in(self):
+        """The property, rather than the two orderings that demonstrate it.
+
+        Twenty overlapping PATCHes with shuffled sequence numbers, against a
+        ThreadingHTTPServer that really does run them at once. Whatever order
+        they arrive in, the file has to end up holding the highest seq: the
+        comparison and the write it guards are one step under one lock, so
+        nothing lower can land after something higher.
+        """
+        import random
+
+        order = list(range(1, 21))
+        random.Random(20260825).shuffle(order)
+        failures = []
+
+        def send(seq):
+            try:
+                self.patch_seq("seq {}".format(seq), seq)
+            except Exception as exc:  # recorded, not raised, off the main thread
+                failures.append(exc)
+
+        threads = [threading.Thread(target=send, args=(seq,)) for seq in order]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive(), "a PATCH never finished")
+        self.assertEqual(failures, [])
+        self.assertEqual(self.draft(), "seq 20")
+        self.assertEqual(self.server.draft_seq(1), 20)
+
+
 if __name__ == "__main__":
     unittest.main()

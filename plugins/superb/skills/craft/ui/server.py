@@ -42,9 +42,20 @@ so the parts that are not stupid are all in one place and all here:
   the size, and the connection ends afterwards whatever happened. Two
   framings, or a length that turns out to be a lie, are the two ways a
   second request rides down a connection nobody authorised it on.
+* A ceiling on the request is not a ceiling on the write. The writer
+  indents, so every level of nesting a caller sends multiplies every byte
+  they send -- measured, 653x -- and the depth of an accepted body is
+  therefore bounded as well as its size. See MAX_BODY_DEPTH.
+* A body this server accepts is a body it can store, and that is checked
+  before anything is written rather than discovered while writing. Text a
+  UTF-8 file will not take, and nesting the JSON decoder will not read, are
+  both refused with an answer, because the alternative is no answer at all.
 * The server writes inside .craft/ and nowhere else. It never writes
   CRAFT.md: the brief is the agent's to author, and this process only ever
   reads it.
+* Starting a session sweeps the .tmp- files a killed one left in .craft/.
+  The atomic write cleans up in an except clause, and process death does
+  not run one.
 * An error tells the browser which of the agent's files is wrong by name and
   stops there: no absolute paths, no tracebacks, nothing about the machine.
 * The agent's terminal learns no more than the browser does. Request logging
@@ -69,6 +80,7 @@ import re
 import secrets
 import socket
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -92,6 +104,50 @@ KEY_BYTES = 32
 # the key can hand this process a body the size of the disk and watch it be
 # written into the user's project as a file they never asked for.
 MAX_BODY_BYTES = 1 << 20
+
+# The ceiling on what a body may BECOME, which the one above is not.
+#
+# write_json_atomic serialises with indent=2, and indentation is charged per
+# nesting level on every line of the file -- so a caller who nests deeply
+# multiplies every byte they send. Measured against a live server: a
+# 1,048,384-byte body (one byte under the ceiling above) nested 975 deep
+# wrote a 685,214,154-byte file into .craft/ in the user's project. 653x.
+#
+# That is word for word what MAX_BODY_BYTES' own comment says it exists to
+# prevent, and no byte ceiling can prevent it, because the amplification
+# factor is exactly the thing a byte ceiling does not bound. Bounding the
+# depth is what closes it: it is the multiplier itself, and it is the only
+# quantity here that a caller controls and the ceiling above cannot see.
+#
+# A round of answers is flat. The deepest thing the page sends is
+# {"round": 1, "answers": {"Q-1": {"choice": ["email"]}}} -- four levels,
+# counting the body itself. Six leaves two levels of headroom for an answer
+# shape the agent invents later, and holds the worst case to one line of
+# 2*6 indent plus a digit plus ",\n" per two bytes of "1," sent: 7.5 output
+# bytes per input byte. Measured against a live server, the worst body it
+# will now accept is 1,048,575 bytes and writes 7,864,149 -- 7.5x, and the
+# derivation and the measurement agree to the byte.
+#
+# Not solved by dropping indent=2. That is write_json_atomic's contract and
+# these files are read by humans; dropping it would only shrink the
+# constant, leaving a multiplier nothing bounds.
+MAX_BODY_DEPTH = 6
+
+# The temp file an unfinished write leaves behind, exactly as
+# session.write_json_atomic names it: tempfile.mkstemp(dir=path.parent,
+# prefix=".tmp-", suffix=".json"). Nothing else in .craft/ wears this name --
+# every file the tool writes is round-NNN.something.json.
+TMP_GLOB = ".tmp-*.json"
+
+# How long a .tmp- file must have sat untouched before the sweep will remove
+# it. The sweep cannot tell an orphan from a temp file another process is in
+# the middle of using: on disk they are the same file. So it does not try. A
+# write through write_json_atomic is one json.dump, one fsync and one
+# rename -- milliseconds -- and anything untouched for five seconds is not a
+# write in flight. The error is deliberately on the safe side: an orphan the
+# sweep skips is swept by the next start, while a temp file it removes by
+# mistake is somebody else's os.replace failing.
+TMP_GRACE_S = 5
 
 # The round numbers that can exist at all. session.ROUND_RE matches exactly
 # three digits, and every round file is named with "{:03d}", so a round of
@@ -143,6 +199,57 @@ def parse_round(value):
     if not MIN_ROUND <= value <= MAX_ROUND:
         return None
     return value
+
+
+def body_refusal(body):
+    """Why a decoded body must not be written, or None if it may be.
+
+    Two questions in one walk, because they are the same question: will the
+    thing that stores this survive storing it? Neither is about how many
+    bytes arrived, which is the only question MAX_BODY_BYTES can answer.
+
+    Depth, because the writer indents. Every nesting level a caller sends is
+    charged again on every line below it, so nesting is a multiplier on the
+    file and MAX_BODY_BYTES never sees it. See MAX_BODY_DEPTH for the
+    measurement.
+
+    Text, because json.loads accepts "\\ud800" and a UTF-8 file will not
+    take it. A browser produces that on its own -- ES2019 JSON.stringify
+    escapes a lone surrogate as \\ud800 and Python decodes it straight back
+    -- and json.dump into a UTF-8 file then raises UnicodeEncodeError, which
+    is a ValueError and NOT an OSError, so it went straight past _store's
+    guard and out of the handler with no response at all. Keys as well as
+    values: a question id is a key, and the writer encodes both.
+
+    Iterative on an explicit stack, never recursive. A recursive walk of a
+    body a caller chose is the RecursionError _read_body catches, moved into
+    our own code where nothing would catch it.
+    """
+    stack = [(body, 1)]
+    while stack:
+        value, level = stack.pop()
+        if isinstance(value, str):
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError:
+                # The offending text is not quoted back. It is the user's,
+                # and a refusal is not a place to print it.
+                return "the request body carries text that is not valid Unicode"
+            continue
+        if isinstance(value, dict):
+            # Keys and values both: the writer encodes both, and the
+            # surrogate was reproduced in a question id as well as in an
+            # answer. A dict at level N puts both one level further in.
+            children = list(value) + list(value.values())
+        elif isinstance(value, list):
+            children = value
+        else:
+            continue  # a number, a bool, a null: nothing to descend into
+        if level > MAX_BODY_DEPTH:
+            return "the request body nests deeper than {} levels".format(MAX_BODY_DEPTH)
+        for child in children:
+            stack.append((child, level + 1))
+    return None
 
 
 class _BadBody(Exception):
@@ -580,8 +687,24 @@ class _Handler(BaseHTTPRequestHandler):
             body = json.loads(raw.decode("utf-8"))
         except ValueError:
             raise _BadBody(400, "the request body is not valid JSON")
+        except RecursionError:
+            # Not a ValueError, so the arm above never saw this one. The
+            # decoder gives up somewhere past 980 levels of nesting --
+            # measured: 980 answered, 985 did not -- and the RecursionError
+            # left the handler with no response at all, on a body any caller
+            # holding the key can send. MAX_BODY_DEPTH does NOT close this:
+            # it is checked below, on a body that has already been decoded,
+            # so the decoder always runs first. A limit and a guard are not
+            # the same thing, and this arm is the guard.
+            raise _BadBody(400, "the request body nests too deeply to read")
         if not isinstance(body, dict):
             raise _BadBody(400, "the request body must be a JSON object")
+        refusal = body_refusal(body)
+        if refusal is not None:
+            # Refused here, before a path is named and before a temp file
+            # exists, rather than discovered by the writer. A body this
+            # server accepts is a body it can store.
+            raise _BadBody(400, refusal)
         return body
 
     def _write_request(self, endpoint):
@@ -638,9 +761,27 @@ class _Handler(BaseHTTPRequestHandler):
         all. The browser sees a reset connection, and the person at it has
         no reason to think the answers they just sent were not saved. The
         file is named; where it lives is not.
+
+        UnicodeEncodeError and RecursionError are the writer's own two
+        failures and neither is an OSError, so both escaped that guard and
+        produced exactly the silence the paragraph above is about.
+        body_refusal now refuses both shapes at the door, which should mean
+        nothing ever reaches these arms -- but "should mean" is the reason
+        they are here. A limit in front of a call is not a guard around it.
         """
         try:
             write_json_atomic(path, payload)
+        except (UnicodeEncodeError, RecursionError) as exc:
+            self._json(
+                {
+                    "ok": False,
+                    "error": "{} could not be written: {}".format(
+                        path.name, _reason(exc)
+                    ),
+                },
+                500,
+            )
+            return False
         except OSError as exc:
             self._json(
                 {
@@ -662,14 +803,59 @@ class _Handler(BaseHTTPRequestHandler):
         answer set in its own body rather than promoting this file -- a
         draft that is stale when Send arrives can then never become the
         submitted round.
+
+        Two of these overlap as a matter of course rather than as an edge
+        case: autosave fires per keystroke, protocol_version is HTTP/1.0 so
+        every one of them is its own connection, and ThreadingHTTPServer
+        runs them in parallel. Measured, `hello world` typed once left `hel`
+        on disk with two saves acknowledged 200 -- an older keystroke landing
+        on top of a newer one, both told they had won.
+
+        `seq` is the client saying which keystroke this is. A PATCH carrying
+        one lower than a seq already written is ignored, and ignored with a
+        success status: the newer draft is on disk, which is what the user
+        wanted, and the client did nothing wrong. A PATCH carrying no seq at
+        all keeps the last-writer-wins behaviour this had before, so nothing
+        breaks in the window before a client sends one.
+
+        The lock is held across the WRITE and not merely across the
+        comparison. Two PATCHes can pass an ordering check in the right
+        order and still reach os.replace in the wrong one, which is the same
+        bug with a smaller window. The 500 _store may send from inside the
+        lock is eighty bytes to a loopback socket; splitting the write from
+        its own error message to avoid that would cost more than it buys.
         """
         parsed = self._write_request("/api/draft")
         if parsed is None:
             return
-        number, answers, _ = parsed
+        number, answers, body = parsed
+        seq = body.get("seq")
+        if seq is not None and (isinstance(seq, bool) or not isinstance(seq, int)):
+            # bool is an int in Python, so True would order as seq 1. Any
+            # other spelling -- a float, a digit string -- is a client that
+            # believes it is sequencing and is not, which is worse than a
+            # client that does not try: it would be compared as unordered
+            # and silently keep the bug this exists to fix.
+            return self._json({"ok": False, "error": "seq must be a whole number"}, 400)
+        payload = {"round": number, "answers": answers}
+        if seq is not None:
+            # Only when one was carried, so a client that does not sequence
+            # writes the same two-key file it has always written.
+            payload["seq"] = seq
         path = self.server.session.draft_path(number)
-        if not self._store(path, {"round": number, "answers": answers}):
-            return
+        written = False
+        with self.server.draft_lock:
+            superseded = not self.server.draft_seq_is_current(number, seq)
+            if not superseded:
+                written = self._store(path, payload)
+                if written:
+                    # Recorded only once it is actually on disk. A write that
+                    # failed must not make the next one look out of date.
+                    self.server.record_draft_seq(number, seq)
+        if superseded:
+            return self._json({"ok": True, "stale": True})
+        if not written:
+            return  # _store has already said which file, and why
         return self._json({"ok": True})
 
     def do_POST(self):
@@ -737,6 +923,94 @@ class CraftServer(ThreadingHTTPServer):
         self.disconnects = 0
         self.handler_errors = 0
         self.timeouts = 0
+        # The highest draft seq written per round, and the lock that makes
+        # the comparison and the write it guards one indivisible step. See
+        # _Handler.do_PATCH.
+        self.draft_lock = threading.Lock()
+        self._draft_seq = {}
+        # Before the first request, and before this process has written a
+        # byte of its own, so nothing in flight here can be swept.
+        self.swept = self.sweep_stale_temp_files()
+
+    def sweep_stale_temp_files(self):
+        """Remove the .tmp- files a killed session left in .craft/.
+
+        write_json_atomic writes through mkstemp and unlinks the temp file in
+        an except clause, which process death does not run: not SIGKILL, not
+        SIGTERM, not SIGHUP, and not the Ctrl-C that raises KeyboardInterrupt
+        on the main thread while writer threads are elsewhere. Measured,
+        twelve SIGKILLs during writes left forty-four of them behind.
+        Nothing else ever removes one, session.ROUND_RE does not match one,
+        and each holds whatever the user had typed when the session died --
+        so the leak is both unbounded and made of their answers.
+
+        Only that name and only that directory: TMP_GLOB matches nothing the
+        tool itself writes, and the glob is anchored to .craft/ rather than
+        built from anything a request said.
+
+        A temp file another process is in the middle of using looks exactly
+        like an orphan, so this does not try to tell them apart -- see
+        TMP_GRACE_S. It also never follows or removes a symlink: mkstemp
+        cannot produce one, so anything wearing this name and pointing
+        somewhere else is not ours to delete.
+
+        Never raises, and returns how many it removed. A .craft/ that cannot
+        be listed, or a file another process unlinked first, must not be the
+        reason a session refuses to start.
+        """
+        cutoff = time.time() - TMP_GRACE_S
+        try:
+            candidates = list(self.session.craft_dir.glob(TMP_GLOB))
+        except OSError:
+            return 0
+        removed = 0
+        for path in candidates:
+            try:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                if path.stat().st_mtime > cutoff:
+                    continue
+                path.unlink()
+            except OSError:
+                continue  # gone already, or not ours to remove
+            removed += 1
+        return removed
+
+    def draft_seq_is_current(self, number, seq):
+        """Whether a PATCH carrying this seq is not already out of date.
+
+        A seq of None is always current: a client that does not sequence
+        keeps the last-writer-wins behaviour it had. Equal is current too --
+        a retry of one keystroke is not an older keystroke.
+
+        Call with draft_lock held. It reads the dict record_draft_seq
+        writes, and the pair is only atomic together.
+        """
+        if seq is None:
+            return True
+        highest = self._draft_seq.get(number)
+        return highest is None or seq >= highest
+
+    def draft_seq(self, number):
+        """The highest seq written for a round, or None. Per process.
+
+        Deliberately not seeded from the draft file on disk. A restart drops
+        every request that was in flight across it, so there is no older
+        PATCH left to arrive late; the browser's own counter keeps rising
+        and the first PATCH after a restart sets the mark again.
+        """
+        return self._draft_seq.get(number)
+
+    def record_draft_seq(self, number, seq):
+        """Remember a seq that has actually reached the disk.
+
+        Call with draft_lock held, and only after the write succeeded.
+        """
+        if seq is None:
+            return
+        highest = self._draft_seq.get(number)
+        if highest is None or seq > highest:
+            self._draft_seq[number] = seq
 
     def handle_error(self, request, client_address):
         """A client hanging up is not news. Anything else is, quietly.

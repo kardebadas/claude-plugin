@@ -212,9 +212,18 @@ free, reuse it; otherwise take an ephemeral one. Reuse is what lets a restarted
 server be picked up by the tab the user already has open, so a crash or an idle
 exit costs a reconnect rather than a new URL.
 
-**Session lock.** Before binding, `serve` takes `.craft/session.lock` —
-`{"pid": …, "started_at": …}`, written with `O_EXCL`. If the lock exists and
-its pid is alive, `serve` refuses:
+**Session lock.** Before binding, `serve` takes `.craft/session.lock`, which
+holds `{"pid": …, "started_at": …}`. The lock is written to a temp file in
+`.craft/` and then published with `os.link()`, which fails if the target already
+exists. **Publishing by link rather than by `O_EXCL` create is deliberate and
+load-bearing:** an `O_EXCL` create makes the lock visible while it is still zero
+bytes, and a second session arriving in that window reads an unreadable lock,
+concludes it is crash-orphaned, and takes it — so both sessions hold the project
+and both rewrite `CRAFT.md`. Linking a fully-written file means the lock never
+exists in an empty state, so there is no window to race. A crashed session still
+leaves a *complete* lock naming a dead pid, which the liveness check reclaims.
+
+If the lock exists and its pid is alive, `serve` refuses:
 
 ```
 LOCKED  another craft session (pid 44913, started 14:02) owns .craft/

@@ -11,6 +11,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 
 ROUND_RE = re.compile(r"^round-([0-9]{3})\.questions\.json\Z")
@@ -38,6 +39,27 @@ def write_json_atomic(path, obj):
 def read_json(path):
     """Read JSON. Raises ValueError (JSONDecodeError) if the file is malformed."""
     return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+class LockHeld(Exception):
+    """Raised when another live craft session owns this project directory."""
+
+    def __init__(self, pid, started_at):
+        self.pid = pid
+        self.started_at = started_at
+        super().__init__(
+            "craft session pid {} (started {}) owns this project".format(pid, started_at)
+        )
+
+
+def pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+    except (ProcessLookupError, ValueError, TypeError):
+        return False
+    except PermissionError:
+        return True  # exists, owned by someone else
+    return True
 
 
 class Session:
@@ -74,3 +96,49 @@ class Session:
             return self.brief_path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return ""
+
+    @property
+    def lock_path(self):
+        return self.craft_dir / "session.lock"
+
+    def _read_lock(self):
+        try:
+            return read_json(self.lock_path)
+        except (FileNotFoundError, ValueError):
+            return None
+
+    def acquire_lock(self, force=False):
+        """Take the session lock. CRAFT.md is rewritten whole every round, so two
+        sessions on one project silently lose one session's answers."""
+        self.ensure_dirs()
+        for _ in range(5):
+            try:
+                fd = os.open(str(self.lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            except FileExistsError:
+                holder = self._read_lock()
+                if holder and pid_alive(holder.get("pid")) and not force:
+                    raise LockHeld(holder.get("pid"), holder.get("started_at", "unknown"))
+                try:
+                    os.unlink(str(self.lock_path))
+                except FileNotFoundError:
+                    pass
+                continue
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "pid": os.getpid(),
+                        "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    },
+                    fh,
+                )
+            return
+        raise LockHeld("unknown", "unknown")
+
+    def release_lock(self):
+        """Remove the lock, but only if it is ours."""
+        holder = self._read_lock()
+        if holder is None or holder.get("pid") == os.getpid():
+            try:
+                os.unlink(str(self.lock_path))
+            except FileNotFoundError:
+                pass

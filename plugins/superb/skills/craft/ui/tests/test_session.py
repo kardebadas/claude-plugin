@@ -1,13 +1,24 @@
+import calendar
 import contextlib
 import json
 import os
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import session
-from session import ROUND_RE, Session, read_json, write_json_atomic
+from session import (
+    ROUND_RE,
+    LockHeld,
+    Session,
+    pid_alive,
+    read_json,
+    write_json_atomic,
+)
 
 
 def _mkstemp_dir(args, kwargs):
@@ -317,6 +328,305 @@ class SessionPathsTest(unittest.TestCase):
         self.assertIsNone(self.s.current_round())
         self._round(1)
         self.assertEqual(self.s.current_round(), 1)
+
+
+class SessionLockTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.s = Session(self._tmp.name)
+        self.s.ensure_dirs()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    @staticmethod
+    def _dead_pid():
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        return proc.pid
+
+    def test_acquiring_writes_our_pid(self):
+        self.s.acquire_lock()
+        self.assertEqual(read_json(self.s.lock_path)["pid"], os.getpid())
+
+    def test_a_live_lock_is_refused(self):
+        self.s.acquire_lock()
+        with self.assertRaises(LockHeld) as caught:
+            Session(self.s.project_dir).acquire_lock()
+        self.assertEqual(caught.exception.pid, os.getpid())
+        self.assertTrue(caught.exception.started_at)
+
+    def test_a_stale_lock_is_reclaimed(self):
+        write_json_atomic(self.s.lock_path, {"pid": self._dead_pid(), "started_at": "old"})
+        self.s.acquire_lock()
+        self.assertEqual(read_json(self.s.lock_path)["pid"], os.getpid())
+
+    def test_a_corrupt_lock_is_reclaimed(self):
+        self.s.lock_path.write_text("{not json", encoding="utf-8")
+        self.s.acquire_lock()
+        self.assertEqual(read_json(self.s.lock_path)["pid"], os.getpid())
+
+    def test_force_takes_over_a_live_lock(self):
+        write_json_atomic(self.s.lock_path, {"pid": os.getpid(), "started_at": "now"})
+        other = Session(self.s.project_dir)
+        other.acquire_lock(force=True)
+        self.assertEqual(read_json(self.s.lock_path)["pid"], os.getpid())
+
+    def test_release_removes_the_lock(self):
+        self.s.acquire_lock()
+        self.s.release_lock()
+        self.assertFalse(self.s.lock_path.exists())
+        Session(self.s.project_dir).acquire_lock()  # must not raise
+
+    def test_release_leaves_someone_elses_lock_alone(self):
+        write_json_atomic(self.s.lock_path, {"pid": 1, "started_at": "old"})
+        self.s.release_lock()
+        self.assertTrue(self.s.lock_path.exists())
+
+    def test_pid_alive_agrees_with_reality(self):
+        self.assertTrue(pid_alive(os.getpid()))
+        self.assertFalse(pid_alive(self._dead_pid()))
+
+
+class SessionLockHardeningTest(unittest.TestCase):
+    """Tests for the parts of the lock the happy-path tests above do not pin.
+
+    Each one names a single-line change to session.py that would otherwise
+    pass the whole suite: dropping O_EXCL, signalling the pid it asks about,
+    reclaiming a lock it should refuse, writing a timestamp nobody can read.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.s = Session(self.root)
+        self.s.ensure_dirs()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    @contextlib.contextmanager
+    def _sleeping_child(self):
+        """A real process, alive for the duration, owned by this user.
+
+        The only honest stand-in for "another craft session is running": a live
+        pid that is not ours, so force and refusal can be told apart from the
+        no-op they collapse into when the holder pid happens to be our own.
+        """
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            yield proc
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_the_lock_lives_in_the_session_directory(self):
+        self.assertEqual(self.s.lock_path, self.s.craft_dir / "session.lock")
+
+    def test_acquiring_creates_the_session_directory(self):
+        """The server takes the lock before anything else has run."""
+        fresh = Session(self.root / "never-used")
+        self.assertFalse(fresh.craft_dir.exists())
+        fresh.acquire_lock()
+        self.assertTrue(fresh.lock_path.is_file())
+        self.assertEqual(read_json(fresh.lock_path)["pid"], os.getpid())
+
+    def test_the_lock_file_is_created_exclusively(self):
+        """The whole guarantee rests on the create, not on a prior look.
+
+        A read-then-write implementation ("is there a lock? no -- write one")
+        passes every other test here and still lets two servers that start in
+        the same millisecond both believe they won. O_CREAT|O_EXCL makes the
+        kernel the arbiter, so this asserts the flags the lock is created with.
+        """
+        real_open = session.os.open
+        flags_seen = []
+
+        def recording_open(path, flags, *args, **kwargs):
+            if str(path) == str(self.s.lock_path):
+                flags_seen.append(flags)
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch("session.os.open", recording_open):
+            self.s.acquire_lock()
+
+        self.assertTrue(
+            flags_seen, "the lock file was never created through os.open"
+        )
+        for flags in flags_seen:
+            self.assertTrue(flags & os.O_CREAT, "O_CREAT missing from the lock open")
+            self.assertTrue(flags & os.O_EXCL, "O_EXCL missing from the lock open")
+
+    def test_acquire_gives_up_rather_than_spinning_forever(self):
+        """The reclaim path loops. A lock that keeps reappearing between the
+        unlink and the create must end in a refusal, not a hung server."""
+        real_open = session.os.open
+        attempts = []
+
+        def always_taken(path, flags, *args, **kwargs):
+            if str(path) == str(self.s.lock_path):
+                attempts.append(flags)
+                raise FileExistsError(17, "File exists", str(path))
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch("session.os.open", always_taken):
+            with self.assertRaises(LockHeld):
+                self.s.acquire_lock()
+
+        self.assertGreater(len(attempts), 1, "it never retried")
+        self.assertLess(len(attempts), 50, "the retry is not bounded tightly enough")
+
+    def test_the_refusal_names_the_holder_on_disk(self):
+        """The message is the whole user-facing value of the refusal: it is how
+        someone finds the other session and decides whether to --force."""
+        self.s.acquire_lock()
+        on_disk = read_json(self.s.lock_path)
+        with self.assertRaises(LockHeld) as caught:
+            Session(self.s.project_dir).acquire_lock()
+        self.assertEqual(caught.exception.pid, on_disk["pid"])
+        self.assertEqual(caught.exception.started_at, on_disk["started_at"])
+        message = str(caught.exception)
+        self.assertIn(str(on_disk["pid"]), message)
+        self.assertIn(on_disk["started_at"], message)
+
+    def test_a_lock_held_by_another_live_process_is_refused(self):
+        """The refusal, with a holder that is genuinely somebody else -- so it
+        cannot pass by accident on a check that compares pids to our own."""
+        with self._sleeping_child() as proc:
+            write_json_atomic(
+                self.s.lock_path, {"pid": proc.pid, "started_at": "old"}
+            )
+            with self.assertRaises(LockHeld) as caught:
+                self.s.acquire_lock()
+            self.assertEqual(caught.exception.pid, proc.pid)
+            self.assertEqual(read_json(self.s.lock_path)["pid"], proc.pid)
+
+    def test_force_takes_over_a_lock_held_by_another_live_process(self):
+        """force is the escape hatch, and it has to work against a real live
+        holder, replacing both fields rather than editing the pid in place."""
+        with self._sleeping_child() as proc:
+            write_json_atomic(
+                self.s.lock_path, {"pid": proc.pid, "started_at": "old"}
+            )
+            self.s.acquire_lock(force=True)
+            data = read_json(self.s.lock_path)
+            self.assertEqual(data["pid"], os.getpid())
+            self.assertNotEqual(data["started_at"], "old")
+
+    def test_a_lock_missing_its_pid_is_reclaimed(self):
+        """A half-written or hand-edited lock names nobody, so it holds nobody
+        out. It must not be read as a live holder, and must not raise."""
+        write_json_atomic(self.s.lock_path, {"started_at": "old"})
+        self.s.acquire_lock()
+        self.assertEqual(read_json(self.s.lock_path)["pid"], os.getpid())
+
+    def test_an_empty_lock_file_is_reclaimed(self):
+        """The exact shape a crash between create and write leaves behind."""
+        self.s.lock_path.write_text("", encoding="utf-8")
+        self.s.acquire_lock()
+        self.assertEqual(read_json(self.s.lock_path)["pid"], os.getpid())
+
+    def test_the_lock_records_when_it_was_taken_in_utc(self):
+        """started_at is shown to a human in the refusal, so it has to be a
+        real timestamp in a stated zone. The clock is moved off UTC for the
+        acquire: a local-time implementation writes a stamp hours away from now
+        and fails the recency check, while a UTC one is unaffected."""
+        if not hasattr(time, "tzset"):
+            self.skipTest("no tzset on this platform, so TZ cannot be moved")
+        previous = os.environ.get("TZ")
+        try:
+            os.environ["TZ"] = "Pacific/Kiritimati"  # UTC+14, no DST
+            time.tzset()
+            self.assertNotEqual(
+                time.strftime("%H", time.localtime()),
+                time.strftime("%H", time.gmtime()),
+                "TZ did not move the local clock, so this test proves nothing",
+            )
+            self.s.acquire_lock()
+        finally:
+            if previous is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = previous
+            time.tzset()
+
+        stamp = read_json(self.s.lock_path)["started_at"]
+        parsed = calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
+        self.assertLess(
+            abs(parsed - time.time()),
+            600,
+            "started_at {!r} is not close to now in UTC".format(stamp),
+        )
+
+    def test_pid_alive_does_not_signal_the_process_it_asks_about(self):
+        """It asks, it does not act. Signal 0 is the question; any real signal
+        number turns a liveness check into a way to kill the other session."""
+        with self._sleeping_child() as proc:
+            self.assertTrue(pid_alive(proc.pid))
+            with self.assertRaises(subprocess.TimeoutExpired):
+                proc.wait(timeout=0.5)
+
+    def test_pid_alive_says_yes_when_the_pid_is_someone_elses(self):
+        """EPERM means the process exists and is not ours -- the strongest
+        possible evidence of a live holder, and it must not read as absent."""
+        with mock.patch("session.os.kill", side_effect=PermissionError(1, "nope")):
+            self.assertTrue(pid_alive(os.getpid()))
+
+    def test_pid_alive_says_no_when_the_pid_is_not_a_pid(self):
+        """The value comes out of a JSON file anyone may edit."""
+        self.assertFalse(pid_alive(None))
+        self.assertFalse(pid_alive("not-a-pid"))
+        self.assertFalse(pid_alive([]))
+
+    def test_releasing_a_lock_that_is_not_there_is_not_an_error(self):
+        """Shutdown runs whether or not startup got as far as the lock."""
+        self.assertFalse(self.s.lock_path.exists())
+        self.s.release_lock()
+        self.assertFalse(self.s.lock_path.exists())
+
+    def test_releasing_clears_a_lock_nobody_can_read(self):
+        """An unreadable lock names no owner, so it would otherwise wedge the
+        project shut until someone deleted the file by hand."""
+        self.s.lock_path.write_text("{not json", encoding="utf-8")
+        self.s.release_lock()
+        self.assertFalse(self.s.lock_path.exists())
+
+    def test_release_leaves_a_live_holders_lock_alone(self):
+        """The pid-1 version of this cannot tell "not ours" from "not alive".
+        A live foreign holder can: releasing must not free somebody else."""
+        with self._sleeping_child() as proc:
+            write_json_atomic(
+                self.s.lock_path, {"pid": proc.pid, "started_at": "old"}
+            )
+            self.s.release_lock()
+            self.assertTrue(self.s.lock_path.exists())
+            self.assertEqual(read_json(self.s.lock_path)["pid"], proc.pid)
+
+    def test_the_lock_is_per_project(self):
+        """One lock per project directory, not one per machine."""
+        other_root = self.root / "other-project"
+        other = Session(other_root)
+        self.s.acquire_lock()
+        other.acquire_lock()  # must not raise
+        self.assertNotEqual(self.s.lock_path, other.lock_path)
+        self.assertTrue(self.s.lock_path.is_file())
+        self.assertTrue(other.lock_path.is_file())
+
+    def test_the_lock_file_is_not_mistaken_for_a_round(self):
+        """It lives in the same directory the round files do."""
+        self.s.acquire_lock()
+        self.assertIsNone(self.s.current_round())
+        self.assertIsNone(ROUND_RE.match(self.s.lock_path.name))
+
+    def test_the_lock_survives_a_round_trip_of_acquire_release_acquire(self):
+        """The ordinary server lifecycle, twice, in one project."""
+        self.s.acquire_lock()
+        first = read_json(self.s.lock_path)
+        self.s.release_lock()
+        self.s.acquire_lock()
+        second = read_json(self.s.lock_path)
+        self.assertEqual(first["pid"], second["pid"])
+        self.assertTrue(self.s.lock_path.is_file())
 
 
 if __name__ == "__main__":

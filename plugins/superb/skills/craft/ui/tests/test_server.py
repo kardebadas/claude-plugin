@@ -16,9 +16,12 @@ out -- because a deleted feature with deleted tests is a feature that comes
 back.
 """
 import contextlib
+import datetime
 import functools
 import io
 import json
+import os
+import re
 import socket
 import struct
 import tempfile
@@ -30,9 +33,10 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+import schema
 import server as server_module
 from server import APP_HTML, CraftServer, make_key
-from session import Session, write_json_atomic
+from session import Session, read_json, write_json_atomic
 
 # The name the session cookie used to have, and the name anything else on
 # 127.0.0.1 would plant if it wanted to be believed. Defined here rather than
@@ -266,16 +270,22 @@ class AuthTest(ServerTestCase):
         self.assertEqual(self.get("/").status, 200)  # still alive
 
     def test_every_endpoint_is_gated_not_just_the_page(self):
-        for path in ("/", "/api/round", "/api/brief"):
+        """Every URL this server answers, listed one by one. A list that
+        falls behind the routing table is how an endpoint ships ungated:
+        /api/draft was added in task 6 and a mutation run caught that this
+        list had not been."""
+        for path in ("/", "/api/round", "/api/brief", "/api/draft?round=1"):
             self.assertEqual(self.refused(path, key=False).code, 403, path)
 
     def test_an_unauthorised_caller_cannot_tell_a_real_path_from_a_fake_one(self):
         """Auth runs before routing, so /api/round and /nope look identical to
         somebody without the key. Otherwise the 404 is a filesystem probe."""
-        real = self.refused("/api/round", key=False)
         fake = self.refused("/nope", key=False)
-        self.assertEqual((real.code, fake.code), (403, 403))
-        self.assertEqual(real.read(), fake.read())
+        for path in ("/api/round", "/api/draft?round=1"):
+            real = self.refused(path, key=False)
+            self.assertEqual((real.code, fake.code), (403, 403), path)
+            self.assertEqual(real.read(), fake.read(), path)
+            fake = self.refused("/nope", key=False)
 
     def test_a_refusal_never_echoes_the_key(self):
         error = self.refused("/", key="deadbeef")
@@ -469,8 +479,14 @@ class PageTest(ServerTestCase):
         server_module.APP_HTML = APP_HTML
         self.assertEqual(self.get("/").status, 200)  # still alive
 
-    def test_writing_methods_are_not_served_yet(self):
-        for method in ("POST", "PUT", "DELETE"):
+    def test_a_write_method_aimed_at_a_read_endpoint_serves_nothing(self):
+        """POST and PATCH exist now, and each answers exactly one URL. A
+        handler that looked only at the METHOD would happily write a draft
+        from a PATCH sent to /api/round."""
+        for method in ("POST", "PATCH"):
+            error = self.refused("/api/round", method=method, data=b"{}")
+            self.assertEqual(error.code, 404, method)
+        for method in ("PUT", "DELETE"):
             error = self.refused("/api/round", method=method, data=b"{}")
             self.assertEqual(error.code, 501, method)
 
@@ -484,6 +500,12 @@ class MethodTest(ServerTestCase):
     """
 
     OTHERS = ("POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
+
+    # The ones that are still not implemented. POST and PATCH left this list
+    # in task 6; every OTHER assertion in this class still covers all six,
+    # because "gated first" is a property of every method and not only of the
+    # unimplemented ones.
+    UNIMPLEMENTED = ("PUT", "DELETE", "HEAD", "OPTIONS")
 
     # Methods with no do_* of their own. TRACE and CONNECT are real and in
     # RFC 9110; BREW is not, and that is the point of it -- "every method is
@@ -542,8 +564,8 @@ class MethodTest(ServerTestCase):
             error = self.refused("/api/round", key=False, method=method)
             self.assertEqual(error.code, 403, method)
 
-    def test_a_method_that_is_not_get_is_refused_even_with_the_key(self):
-        for method in self.OTHERS:
+    def test_a_method_that_is_not_implemented_is_refused_even_with_the_key(self):
+        for method in self.UNIMPLEMENTED:
             self.assertEqual(self.refused("/api/round", method=method).code, 501, method)
 
     def test_a_refused_method_carries_the_hardening_headers(self):
@@ -804,9 +826,10 @@ class ReadOnlyTest(ServerTestCase):
         self.session.brief_path.write_text("# Vision\n", encoding="utf-8")
         write_json_atomic(self.session.questions_path(1), VALID_ROUND)
         before = self.snapshot()
-        for path in ("/", "/api/round", "/api/brief"):
+        for path in ("/", "/api/round", "/api/brief", "/api/draft?round=1"):
             self.get(path).read()
         self.refused("/nope")
+        self.refused("/api/draft")
         self.refused("/", key=False)
         self.assertEqual(self.snapshot(), before)
 
@@ -1104,6 +1127,906 @@ class HandlerTimeoutTest(ServerTestCase):
         client.sendall(b"GET /?key=x HTTP/1.0\r\nX-Stall: ")
         self.assertEqual(client.recv(4096), b"")  # closed from the other end
         self.assertTrue(self.wait_until(lambda: self.server.timeouts == 1))
+
+
+# --------------------------------------------------------------------------
+# The write surface: PATCH /api/draft, POST /api/submit, GET /api/draft.
+#
+# Two things are being guarded here and they are not the same thing.
+#
+# The first is the product. The submitted answers are what the agent folds
+# into CRAFT.md, and four states have to survive the round trip apart:
+# answered, delegated ("you decide" -- record it and never ask again),
+# skipped ("ask me again") and absent. Collapsing delegated into skipped
+# nags the user about a decision they handed over; collapsing skipped into
+# delegated silently records one they did not make.
+#
+# The second is that this is the first code here that reads a request body,
+# which turns on a whole class of failure the read endpoints never had: how
+# the body is framed, how big it is allowed to be, and whether anything can
+# follow it down the same connection.
+# --------------------------------------------------------------------------
+
+
+class WriteTestCase(ServerTestCase):
+    """A live server, plus the shortest honest way to speak to it."""
+
+    def send(self, method, path, body=None, key=True, raw=None, headers=None):
+        data = raw if raw is not None else json.dumps(body).encode("utf-8")
+        request = urllib.request.Request(
+            self.url(path, key),
+            data=data,
+            headers=headers if headers is not None else {"Content-Type": "application/json"},
+            method=method,
+        )
+        return urllib.request.urlopen(request, timeout=5)
+
+    def send_json(self, method, path, body=None, **kw):
+        response = self.send(method, path, body, **kw)
+        self.assertIn("application/json", response.headers.get("Content-Type", ""))
+        return json.loads(response.read().decode("utf-8"))
+
+    def rejected(self, method, path, body=None, **kw):
+        """The HTTPError from a write that must not be performed."""
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.send(method, path, body, **kw)
+        return caught.exception
+
+    def patch(self, body, **kw):
+        return self.send_json("PATCH", "/api/draft", body, **kw)
+
+    def post(self, body, **kw):
+        return self.send_json("POST", "/api/submit", body, **kw)
+
+    def written(self):
+        """Every file under the project, so a stray write has somewhere to
+        show up. Path-safety is asserted by absence, not by hoping."""
+        return sorted(p for p in Path(self._tmp.name).rglob("*") if p.is_file())
+
+
+class DraftTest(WriteTestCase):
+    """Autosave. It fires on every keystroke, and it is crash insurance: a
+    closed tab must lose nothing, and nothing it saves is ever the thing the
+    agent reads as an answer."""
+
+    def test_a_patch_persists_the_draft(self):
+        self.assertEqual(self.patch({"round": 1, "answers": {"Q-1": {"text": "hi"}}}),
+                         {"ok": True})
+        self.assertEqual(
+            read_json(self.session.draft_path(1)),
+            {"round": 1, "answers": {"Q-1": {"text": "hi"}}},
+        )
+
+    def test_a_patch_writes_the_draft_and_not_the_answers(self):
+        """One character apart in server.py: draft_path vs answers_path. That
+        mutant turns every keystroke into a submitted round."""
+        self.patch({"round": 1, "answers": {"Q-1": {"text": "hi"}}})
+        self.assertTrue(self.session.draft_path(1).exists())
+        self.assertFalse(self.session.answers_path(1).exists())
+
+    def test_a_second_patch_replaces_the_first(self):
+        self.patch({"round": 1, "answers": {"Q-1": {"text": "one"}}})
+        self.patch({"round": 1, "answers": {"Q-1": {"text": "two"}}})
+        self.assertEqual(
+            read_json(self.session.draft_path(1))["answers"], {"Q-1": {"text": "two"}}
+        )
+
+    def test_a_patch_writes_the_round_it_was_given(self):
+        """Kills a hard-coded round, and a round read from current_round()
+        rather than from the request."""
+        self.patch({"round": 2, "answers": {"Q-1": {"text": "two"}}})
+        self.assertTrue(self.session.draft_path(2).exists())
+        self.assertFalse(self.session.draft_path(1).exists())
+        self.assertEqual(read_json(self.session.draft_path(2))["round"], 2)
+
+    def test_the_draft_can_be_read_back(self):
+        self.patch({"round": 1, "answers": {"Q-1": {"text": "hi"}}})
+        self.assertEqual(
+            self.get_json("/api/draft?round=1"),
+            {"round": 1, "answers": {"Q-1": {"text": "hi"}}},
+        )
+
+    def test_reading_the_draft_reads_the_round_that_was_asked_for(self):
+        self.patch({"round": 1, "answers": {"Q-1": {"text": "one"}}})
+        self.patch({"round": 2, "answers": {"Q-1": {"text": "two"}}})
+        self.assertEqual(self.get_json("/api/draft?round=2")["answers"]["Q-1"]["text"],
+                         "two")
+        self.assertEqual(self.get_json("/api/draft?round=1")["answers"]["Q-1"]["text"],
+                         "one")
+
+    def test_a_draft_that_does_not_exist_is_empty_and_not_an_error(self):
+        """Nothing typed yet is the ordinary case on every first load."""
+        payload = self.get_json("/api/draft?round=4")
+        self.assertEqual(payload, {"round": 4, "answers": {}})
+        self.assertNotIn("error", payload)
+
+    def test_a_draft_survives_a_server_restart(self):
+        """The whole point of autosave. A restart on the same project reuses
+        the port, so the open tab is expected to recover by itself."""
+        self.patch({"round": 1, "answers": {"Q-1": {"text": "hi"}}})
+        self.server.shutdown()
+        self.server = self.start_server()
+        self.base = "http://127.0.0.1:{}".format(self.server.port)
+        self.assertEqual(
+            self.get_json("/api/draft?round=1")["answers"]["Q-1"]["text"], "hi"
+        )
+
+    def test_non_ascii_survives_the_draft_round_trip(self):
+        self.patch({"round": 1, "answers": {"Q-1": {"text": "café — éè"}}})
+        self.assertEqual(
+            self.get_json("/api/draft?round=1")["answers"]["Q-1"]["text"],
+            "café — éè",
+        )
+
+    def test_reading_a_draft_without_a_round_is_a_400(self):
+        for query in ("", "?round=", "?round=abc", "?round=0", "?round=-1",
+                      "?round=1.0", "?round=1000", "?round=%201"):
+            error = self.refused("/api/draft" + query)
+            self.assertEqual(error.code, 400, query)
+
+    def test_a_patch_to_any_other_path_is_a_404(self):
+        for path in ("/api/submit", "/api/round", "/", "/nope"):
+            error = self.rejected("PATCH", path, {"round": 1, "answers": {}})
+            self.assertEqual(error.code, 404, path)
+        self.assertEqual(self.written(), [])
+
+
+class UnreadableDraftTest(WriteTestCase):
+    """A draft that exists and cannot be read is not the same as no draft.
+
+    Empty means "nothing typed yet" and the form starts blank, which is
+    correct. Silently showing that over the top of work that IS on disk
+    invites the user to retype it, so a draft that is there and unreadable
+    says so.
+    """
+
+    def test_a_malformed_draft_is_reported_rather_than_shown_as_empty(self):
+        self.session.draft_path(1).write_text("{not json", encoding="utf-8")
+        payload = self.get_json("/api/draft?round=1")
+        self.assertEqual(payload["answers"], {})
+        self.assertIn("round-001.draft.json", payload["error"])
+
+    def test_a_draft_whose_shape_drifted_is_reported_too(self):
+        """A hand-edited draft that is valid JSON but not a set of answers
+        must not reach the page as one -- and must not crash on the way."""
+        for content in ("[]", '"hello"', "3", "null", '{"answers": []}',
+                        '{"answers": "x"}', "{}"):
+            self.session.draft_path(1).write_text(content, encoding="utf-8")
+            payload = self.get_json("/api/draft?round=1")
+            self.assertEqual(payload["answers"], {}, content)
+            self.assertIn("round-001.draft.json", payload["error"], content)
+
+    def test_the_reply_is_a_shape_and_not_whatever_the_file_held(self):
+        """Handing the stored object back would leak whatever else is in it
+        and would answer with the round the FILE claims rather than the one
+        that was asked for -- so a hand-edited draft could tell the page it
+        is looking at a different round."""
+        write_json_atomic(
+            self.session.draft_path(1),
+            {"round": 9, "answers": {"Q-1": {"text": "hi"}}, "note": "hand-edited"},
+        )
+        self.assertEqual(
+            self.get_json("/api/draft?round=1"),
+            {"round": 1, "answers": {"Q-1": {"text": "hi"}}},
+        )
+
+    def test_an_unreadable_draft_names_the_file_and_not_where_it_lives(self):
+        directory = self.session.draft_path(1)
+        directory.mkdir()
+        payload = self.get_json("/api/draft?round=1")
+        self.assertIn("round-001.draft.json", payload["error"])
+        self.assertNamesNoPath(payload["error"].replace("round-001.draft.json", ""))
+        self.assertNotIn("Traceback", payload["error"])
+        self.assertEqual(self.get("/").status, 200)  # still alive
+
+
+class SubmitTest(WriteTestCase):
+    """Send to Claude. This is the product: what lands here is what the agent
+    folds into CRAFT.md."""
+
+    def test_submit_writes_the_answers_file_from_the_post_body(self):
+        """Not by promoting the draft. A draft that is stale or half-written
+        when Send arrives must never become the submitted round -- which is
+        why the two values here differ."""
+        self.patch({"round": 1, "answers": {"Q-1": {"text": "stale"}}})
+        result = self.post(
+            {"round": 1, "answers": {"Q-1": {"text": "fresh"}}, "finished": False}
+        )
+        self.assertEqual(result, {"ok": True, "finished": False})
+        stored = read_json(self.session.answers_path(1))
+        self.assertEqual(stored["answers"], {"Q-1": {"text": "fresh"}})
+        self.assertEqual(stored["round"], 1)
+        self.assertIs(stored["finished"], False)
+
+    def test_submit_leaves_the_draft_in_place_untouched(self):
+        self.patch({"round": 1, "answers": {"Q-1": {"text": "d"}}})
+        before = self.session.draft_path(1).read_bytes()
+        self.post({"round": 1, "answers": {}, "finished": False})
+        self.assertEqual(self.session.draft_path(1).read_bytes(), before)
+
+    def test_submit_writes_the_answers_and_not_the_draft(self):
+        self.post({"round": 1, "answers": {"Q-1": {"text": "a"}}, "finished": False})
+        self.assertTrue(self.session.answers_path(1).exists())
+        self.assertFalse(self.session.draft_path(1).exists())
+
+    def test_submit_writes_the_round_it_was_given(self):
+        self.post({"round": 7, "answers": {}, "finished": False})
+        self.assertTrue(self.session.answers_path(7).exists())
+        self.assertEqual(read_json(self.session.answers_path(7))["round"], 7)
+
+    def test_finish_is_recorded_and_reported_back(self):
+        """Finish ends the session, so it may not be inferred or defaulted --
+        it is carried, stored and echoed."""
+        self.assertIs(self.post({"round": 1, "answers": {}, "finished": True})["finished"],
+                      True)
+        self.assertIs(read_json(self.session.answers_path(1))["finished"], True)
+
+    def test_an_unfinished_round_is_recorded_as_unfinished(self):
+        self.assertIs(self.post({"round": 1, "answers": {}, "finished": False})["finished"],
+                      False)
+        self.assertIs(read_json(self.session.answers_path(1))["finished"], False)
+
+    def test_finished_defaults_to_false_when_it_is_not_carried(self):
+        """Absent is not finished. A default of True would end the interview
+        on the first Send."""
+        for body in ({"round": 1, "answers": {}}, {"round": 1, "answers": {}, "finished": None}):
+            self.assertIs(self.post(body)["finished"], False)
+            self.assertIs(read_json(self.session.answers_path(1))["finished"], False)
+
+    def test_the_four_answer_states_round_trip_distinctly(self):
+        """The one that matters most. schema.answer_state is what the agent
+        reads these back through, so the assertion is made in its terms:
+        anything that collapses delegated into skipped, or an absent key into
+        anything at all, fails here."""
+        answers = {
+            "Q-1": {"choice": ["email"], "other": None, "note": "passkeys later"},
+            "Q-2": {"delegated": True},
+            "Q-3": {"skipped": True},
+        }
+        self.post({"round": 1, "answers": answers, "finished": False})
+        stored = read_json(self.session.answers_path(1))["answers"]
+        self.assertEqual(schema.answer_state(stored.get("Q-1")), "answered")
+        self.assertEqual(schema.answer_state(stored.get("Q-2")), "delegated")
+        self.assertEqual(schema.answer_state(stored.get("Q-3")), "skipped")
+        self.assertNotIn("Q-4", stored)
+        self.assertEqual(schema.answer_state(stored.get("Q-4")), "skipped")
+        # Whole, not entry by entry. Comparing only the one entry with a
+        # note in it let a mutant that rewrote {"delegated": true} into
+        # {"delegated": true, "skipped": true} through -- answer_state reads
+        # delegated first, so every assertion above still held.
+        self.assertEqual(stored, answers)
+
+    def test_the_answers_are_stored_verbatim(self):
+        """No normalising, no dropping of keys the server does not know. The
+        agent owns the meaning of these; the server only moves them."""
+        answers = {
+            "Q-1": {"text": "", "note": None, "extra": [1, {"deep": True}], "n": 0},
+            "Q-2": {},
+        }
+        self.post({"round": 1, "answers": answers, "finished": False})
+        self.assertEqual(read_json(self.session.answers_path(1))["answers"], answers)
+
+    def test_submit_stamps_the_time_in_utc(self):
+        """`time.gmtime` -> `time.localtime` is a one-word change that keeps
+        the trailing Z and starts lying. The clock is moved fourteen hours so
+        that the two cannot agree by accident."""
+        if not hasattr(time, "tzset"):
+            self.skipTest("this platform has no time.tzset")
+        previous = os.environ.get("TZ")
+        self.addCleanup(time.tzset)
+        self.addCleanup(self._restore_tz, previous)
+        os.environ["TZ"] = "UTC-14"  # POSIX sign is inverted: local is UTC+14
+        time.tzset()
+        self.assertNotEqual(
+            time.strftime("%H", time.localtime()), time.strftime("%H", time.gmtime()),
+            "the premise failed: the clock was not moved, so this proves nothing",
+        )
+        self.post({"round": 1, "answers": {}, "finished": False})
+        stamp = read_json(self.session.answers_path(1))["submitted_at"]
+        self.assertRegex(stamp, r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
+        parsed = datetime.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+        drift = abs((parsed - datetime.datetime.now(datetime.timezone.utc)).total_seconds())
+        self.assertLess(drift, 120, "submitted_at is not UTC: {}".format(stamp))
+
+    def _restore_tz(self, previous):
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+
+    def test_the_draft_carries_no_submission_stamp(self):
+        """A draft is not a submission. A submitted_at on it would make a
+        half-typed round indistinguishable from a sent one to anything that
+        reads the directory."""
+        self.patch({"round": 1, "answers": {}})
+        self.assertNotIn("submitted_at", read_json(self.session.draft_path(1)))
+
+    def test_a_post_to_any_other_path_is_a_404(self):
+        for path in ("/api/draft", "/api/round", "/", "/nope"):
+            error = self.rejected("POST", path, {"round": 1, "answers": {}})
+            self.assertEqual(error.code, 404, path)
+        self.assertEqual(self.written(), [])
+
+    def test_a_resubmission_replaces_the_round(self):
+        """The user may correct and send again; last one wins, and it is
+        whole rather than merged into whatever was there."""
+        self.post({"round": 1, "answers": {"Q-1": {"text": "a"}}, "finished": False})
+        self.post({"round": 1, "answers": {"Q-2": {"text": "b"}}, "finished": True})
+        stored = read_json(self.session.answers_path(1))
+        self.assertEqual(stored["answers"], {"Q-2": {"text": "b"}})
+        self.assertIs(stored["finished"], True)
+
+
+class WriteScopeTest(WriteTestCase):
+    """Where the writes are allowed to land, asserted by absence."""
+
+    def test_a_write_creates_nothing_outside_the_session_directory(self):
+        """`round` comes from the request and names a file. This is the test
+        that says it cannot name any other one -- CRAFT.md included, which
+        the server must never write under any circumstances."""
+        self.session.brief_path.write_text("# Vision\n", encoding="utf-8")
+        write_json_atomic(self.session.questions_path(1), VALID_ROUND)
+        brief = self.session.brief_path.read_bytes()
+        questions = self.session.questions_path(1).read_bytes()
+        before = set(self.written())
+        self.patch({"round": 1, "answers": {"Q-1": {"text": "a"}}})
+        self.post({"round": 1, "answers": {"Q-1": {"text": "a"}}, "finished": False})
+        self.assertEqual(
+            set(self.written()) - before,
+            {self.session.draft_path(1), self.session.answers_path(1)},
+        )
+        self.assertEqual(self.session.brief_path.read_bytes(), brief)
+        self.assertEqual(self.session.questions_path(1).read_bytes(), questions)
+
+    def test_a_traversal_shaped_round_writes_nothing_anywhere(self):
+        """Rejected as a round number long before anything formats it into a
+        name -- and the assertion is that the whole project is untouched, not
+        merely that the status code was right."""
+        for value in ("../../etc/passwd", "1/../../x", "../001", "/etc/passwd",
+                      "1\x00", "٣", "0x1", "1e3", " 1", "1 "):
+            error = self.rejected("PATCH", "/api/draft", {"round": value, "answers": {}})
+            self.assertEqual(error.code, 400, repr(value))
+        self.assertEqual(self.written(), [])
+
+    def test_the_session_directory_is_rebuilt_if_it_went_missing(self):
+        """The agent owns .craft/; a user who deleted it mid-session must not
+        lose the round they are typing."""
+        import shutil
+
+        shutil.rmtree(str(self.session.craft_dir))
+        self.patch({"round": 1, "answers": {"Q-1": {"text": "a"}}})
+        self.assertTrue(self.session.draft_path(1).exists())
+
+
+class _UnwritableSession(Session):
+    """A session whose files land under a path that is a FILE, so every write
+    raises an OSError deterministically -- on every machine, and as root."""
+
+    def draft_path(self, n):
+        return self.craft_dir / "wall" / Session.draft_path(self, n).name
+
+    def answers_path(self, n):
+        return self.craft_dir / "wall" / Session.answers_path(self, n).name
+
+
+class FailedWriteTest(WriteTestCase):
+    """A write that cannot happen has to say so. Letting the OSError out
+    sends no response at all -- the browser sees a reset connection and the
+    user believes their answers were saved."""
+
+    def setUp(self):
+        WriteTestCase.setUp(self)
+        blocked = _UnwritableSession(self._tmp.name)
+        (blocked.craft_dir / "wall").write_text("not a directory", encoding="utf-8")
+        self.server.session = blocked
+
+    def test_a_draft_that_cannot_be_written_is_a_clean_500(self):
+        error = self.rejected("PATCH", "/api/draft", {"round": 1, "answers": {}})
+        self.assertEqual(error.code, 500)
+        body = error.read().decode("utf-8", "replace")
+        self.assertIn("round-001.draft.json", body)
+        self.assertNotIn("Traceback", body)
+
+    def test_a_submission_that_cannot_be_written_is_a_clean_500(self):
+        error = self.rejected("POST", "/api/submit", {"round": 1, "answers": {}})
+        self.assertEqual(error.code, 500)
+        self.assertIn("round-001.answers.json", error.read().decode("utf-8", "replace"))
+
+    def test_a_failed_write_names_the_file_and_not_where_it_lives(self):
+        error = self.rejected("POST", "/api/submit", {"round": 1, "answers": {}})
+        body = error.read().decode("utf-8", "replace")
+        self.assertNamesNoPath(body.replace("round-001.answers.json", ""))
+
+    def test_a_failed_write_does_not_report_success(self):
+        """The mutant that matters: swallowing the OSError and answering
+        {"ok": true} loses the round in silence."""
+        error = self.rejected("POST", "/api/submit", {"round": 1, "answers": {}})
+        self.assertNotIn('"ok": true', error.read().decode("utf-8", "replace").lower())
+
+    def test_the_server_survives_a_failed_write(self):
+        self.rejected("PATCH", "/api/draft", {"round": 1, "answers": {}})
+        self.assertEqual(self.get("/").status, 200)
+        self.assertEqual(self.server.handler_errors, 0)
+
+
+class WriteShapeTest(WriteTestCase):
+    """What a body has to be before anything is written from it.
+
+    Both endpoints, every case: a shape check that guards one of them and not
+    the other is a hole with a test in front of it.
+    """
+
+    ENDPOINTS = (("PATCH", "/api/draft"), ("POST", "/api/submit"))
+
+    def each(self, body=None, raw=None, headers=None):
+        for method, path in self.ENDPOINTS:
+            yield method, path, self.rejected(
+                method, path, body, raw=raw, headers=headers
+            )
+
+    def test_a_body_that_is_not_valid_json_is_a_400(self):
+        for raw in (b"{", b"", b"\xff\xfe", b'{"round": 1,}', b"{'round': 1}"):
+            for method, path, error in self.each(raw=raw):
+                self.assertEqual(error.code, 400, (method, raw))
+        self.assertEqual(self.written(), [])
+        self.assertEqual(self.get("/").status, 200)  # still alive
+
+    def test_a_body_that_is_not_a_json_object_is_a_400(self):
+        """`json.loads("[]").get(...)` is an AttributeError, which is a crash
+        reachable by anyone holding the key."""
+        for raw in (b"[]", b'"round"', b"3", b"null", b"true", b"[1,2]"):
+            for method, path, error in self.each(raw=raw):
+                self.assertEqual(error.code, 400, (method, raw))
+        self.assertEqual(self.written(), [])
+        self.assertEqual(self.server.handler_errors, 0)
+
+    def test_a_missing_round_is_a_400(self):
+        for method, path, error in self.each({"answers": {}}):
+            self.assertEqual(error.code, 400, method)
+        self.assertEqual(self.written(), [])
+
+    def test_a_round_that_is_not_a_whole_number_is_a_400(self):
+        """int() would take 1.9 for round 1 and write a round of answers over
+        the wrong one. bool is an int in Python, so True would be round 1."""
+        for value in (1.9, 1.0, 0.5, True, False, None, [], {}, [1], {"n": 1}):
+            for method, path, error in self.each({"round": value, "answers": {}}):
+                self.assertEqual(error.code, 400, (method, repr(value)))
+        self.assertEqual(self.written(), [])
+
+    def test_a_round_below_one_is_a_400(self):
+        for value in (0, -1, -999, "0", "-1", "00"):
+            for method, path, error in self.each({"round": value, "answers": {}}):
+                self.assertEqual(error.code, 400, (method, repr(value)))
+        self.assertEqual(self.written(), [])
+
+    def test_a_round_beyond_the_three_digit_filename_is_a_400(self):
+        """session.ROUND_RE matches exactly three digits, so a round of 1000
+        writes a file the rest of the tool can never find again -- and a big
+        enough one is a filename the kernel refuses, which would be an OSError
+        out of a request holding a valid key."""
+        for value in (1000, 10 ** 9, 10 ** 400, "1000", "9999", "10000"):
+            for method, path, error in self.each({"round": value, "answers": {}}):
+                self.assertEqual(error.code, 400, (method, repr(value)))
+        self.assertEqual(self.written(), [])
+        self.assertEqual(self.server.handler_errors, 0)
+
+    def test_a_round_spelled_with_leading_zeros_is_a_400(self):
+        """One round, one spelling. "0001" and "1" name the same file, so
+        accepting both is a way for two callers to believe they are looking
+        at different rounds."""
+        for value in ("01", "0001", "007", "00"):
+            for method, path, error in self.each({"round": value, "answers": {}}):
+                self.assertEqual(error.code, 400, (method, repr(value)))
+        self.assertEqual(self.written(), [])
+
+    def test_the_edges_of_the_round_range_are_accepted(self):
+        """The other half of the bound: a check that refuses everything is
+        not a check."""
+        for value in (1, 999, "1", "999"):
+            for method, path in self.ENDPOINTS:
+                self.send(method, path, {"round": value, "answers": {}}).read()
+        self.assertTrue(self.session.draft_path(999).exists())
+        self.assertTrue(self.session.answers_path(999).exists())
+
+    def test_answers_that_are_not_an_object_are_a_400(self):
+        """`body.get("answers") or {}` writes a bare string straight through
+        and turns [] into {} without saying so."""
+        for value in ([], "hi", 3, True, [{"Q-1": {}}]):
+            for method, path, error in self.each({"round": 1, "answers": value}):
+                self.assertEqual(error.code, 400, (method, repr(value)))
+        self.assertEqual(self.written(), [])
+
+    def test_answers_may_be_absent_or_null(self):
+        """An empty round is a legitimate thing to save and to send."""
+        for body in ({"round": 1}, {"round": 1, "answers": None}):
+            self.assertEqual(self.patch(body), {"ok": True})
+            self.assertEqual(read_json(self.session.draft_path(1))["answers"], {})
+            self.post(body)
+            self.assertEqual(read_json(self.session.answers_path(1))["answers"], {})
+
+    def test_finished_must_be_a_boolean(self):
+        """bool("false") is True. A string arriving here would end the
+        interview instead of saving a round."""
+        for value in ("false", "true", 0, 1, [], {}, "no"):
+            error = self.rejected(
+                "POST", "/api/submit", {"round": 1, "answers": {}, "finished": value}
+            )
+            self.assertEqual(error.code, 400, repr(value))
+        self.assertEqual(self.written(), [])
+
+    def test_a_refusal_names_no_path_and_carries_the_hardening_headers(self):
+        for method, path, error in self.each({"answers": {}}):
+            self.assertNamesNoPath(error.read().decode("utf-8", "replace"), method)
+            self.assertEqual(error.headers.get("X-Content-Type-Options"), "nosniff")
+            self.assertEqual(error.headers.get("Referrer-Policy"), "no-referrer")
+            self.assertIn("no-store", error.headers.get("Cache-Control", ""))
+            self.assertIsNone(error.headers.get("Set-Cookie"))
+
+
+class WriteAuthTest(WriteTestCase):
+    """The write endpoints are their own front door.
+
+    The stdlib answers a method with no do_* itself, before any handler runs,
+    so nothing upstream has authenticated a PATCH or a POST. Each has to call
+    _authed() first -- before touch(), before parsing, before a byte of body
+    is read.
+    """
+
+    def test_a_write_without_the_key_is_forbidden(self):
+        for method, path in (("PATCH", "/api/draft"), ("POST", "/api/submit")):
+            error = self.rejected(method, path, {"round": 1, "answers": {}}, key=False)
+            self.assertEqual(error.code, 403, method)
+        self.assertEqual(self.written(), [])
+
+    def test_a_write_with_the_wrong_key_is_forbidden(self):
+        for key in ("deadbeef", self.key[:-1], self.key + "x", "café☃"):
+            error = self.rejected(
+                "PATCH", "/api/draft", {"round": 1, "answers": {}}, key=key
+            )
+            self.assertEqual(error.code, 403, key)
+        self.assertEqual(self.written(), [])
+        self.assertEqual(self.get("/").status, 200)  # still alive
+
+    def test_a_write_with_only_the_cookie_is_forbidden(self):
+        """A cookie set by this server was readable by every other listener on
+        127.0.0.1. Nothing reads one now, and a write is where that would
+        have hurt most."""
+        request = urllib.request.Request(
+            "{}/api/submit".format(self.base),
+            data=b'{"round": 1, "answers": {}}',
+            headers={"Content-Type": "application/json",
+                     "Cookie": "{}={}".format(COOKIE, self.key)},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(caught.exception.code, 403)
+        self.assertEqual(self.written(), [])
+
+    def test_an_unauthorised_write_cannot_hold_the_session_open(self):
+        """touch() before the key check lets any process on the machine keep
+        an abandoned session -- and the project lock under it -- alive for
+        ever by POSTing at it. Task 5 shipped exactly that on do_GET."""
+        for method, path in (("PATCH", "/api/draft"), ("POST", "/api/submit")):
+            self.server._last -= 100
+            before = self.server.idle_seconds()
+            self.rejected(method, path, {"round": 1, "answers": {}}, key=False)
+            self.assertGreaterEqual(self.server.idle_seconds(), before, method)
+
+    def test_an_authorised_write_does_hold_the_session_open(self):
+        """The other half: autosave is what keeps a session alive while the
+        user is typing rather than requesting anything."""
+        self.server._last -= 100
+        self.assertGreater(self.server.idle_seconds(), 50)
+        self.patch({"round": 1, "answers": {}})
+        self.assertLess(self.server.idle_seconds(), 50)
+
+    def test_an_unauthorised_write_looks_the_same_whatever_it_aimed_at(self):
+        """Auth before routing, so a caller without the key cannot use the
+        404 to find out which URLs exist."""
+        real = self.rejected("POST", "/api/submit", {}, key=False)
+        fake = self.rejected("POST", "/nope", {}, key=False)
+        self.assertEqual((real.code, fake.code), (403, 403))
+        self.assertEqual(real.read(), fake.read())
+
+
+class RequestBodyTest(WriteTestCase):
+    """How a body is framed, and what may follow it.
+
+    Nothing here read a request body before task 6, and the module docstring
+    said so. Reading one turns on the whole class of failure this class is
+    about: a length that is a lie, a length that is enormous, two lengths, a
+    chunked encoding this server does not speak, and a second request riding
+    down the same connection behind any of them.
+    """
+
+    def raw(self, headers, body=b"", method="POST", path="/api/submit", key=True):
+        """One raw HTTP/1.1 request, and everything sent back before close.
+
+        HTTP/1.1 on purpose: it is the only version whose keep-alive the
+        stdlib would honour, so a connection that stays open would stay open
+        for this request and no other.
+        """
+        client = self.raw_connection()
+        target = self.url(path, key)[len(self.base):]
+        head = "{} {} HTTP/1.1\r\nHost: 127.0.0.1\r\n".format(method, target)
+        head += "".join(h + "\r\n" for h in headers) + "\r\n"
+        client.sendall(head.encode("utf-8") + body)
+        return self.read_answer(client)
+
+    def read_answer(self, client):
+        """Everything that arrived before the connection ended, reset or not.
+
+        ServerTestCase.read_to_close cannot be used here. A body this server
+        refused without reading is still sitting in the kernel's receive
+        queue when the socket closes, and closing on top of unread bytes is
+        an RST rather than a clean FIN. Linux hands over what it already
+        queued before reporting that, so the response is not lost -- but the
+        reset itself is expected here and is not a failure.
+        """
+        client.settimeout(5)
+        received = b""
+        while True:
+            try:
+                chunk = client.recv(4096)
+            except ConnectionResetError:
+                return received
+            if not chunk:
+                return received
+            received += chunk
+
+    def status(self, received):
+        self.assertTrue(received, "the server said nothing at all")
+        return received.splitlines()[0]
+
+    def test_a_body_with_no_content_length_is_refused(self):
+        """Nothing frames it, so nothing may be read from it."""
+        received = self.raw([])
+        self.assertIn(b"411", self.status(received), received)
+        self.assertEqual(self.written(), [])
+
+    def test_a_content_length_that_is_not_a_length_is_refused(self):
+        for value in ("abc", "-1", "+1", "1.5", "0x10", "", " ", "1 2", "1,1",
+                      "9" * 25, "٣"):
+            received = self.raw(["Content-Length: " + value], b'{"round": 1}')
+            self.assertIn(b"400", self.status(received), (value, received))
+        self.assertEqual(self.written(), [])
+        self.assertEqual(self.server.handler_errors, 0)
+
+    def test_two_content_length_headers_are_refused(self):
+        """Two answers to "how long is it" is the oldest smuggling primitive
+        there is, and this server picks neither."""
+        body = b'{"round": 1, "answers": {}}'
+        received = self.raw(
+            ["Content-Length: {}".format(len(body)), "Content-Length: 4"], body
+        )
+        self.assertIn(b"400", self.status(received), received)
+        self.assertEqual(self.written(), [])
+
+    def test_a_chunked_body_is_refused(self):
+        for headers in (["Transfer-Encoding: chunked"],
+                        ["Transfer-Encoding: Chunked"],
+                        ["Transfer-Encoding: gzip, chunked"]):
+            received = self.raw(headers, b"0\r\n\r\n")
+            self.assertIn(b"400", self.status(received), received)
+        self.assertEqual(self.written(), [])
+
+    def test_a_content_length_beside_a_transfer_encoding_is_refused(self):
+        """The classic desync: two framings, and an attacker choosing which
+        one the next reader believes."""
+        body = b'{"round": 1, "answers": {}}'
+        received = self.raw(
+            ["Content-Length: {}".format(len(body)), "Transfer-Encoding: chunked"], body
+        )
+        self.assertIn(b"400", self.status(received), received)
+        self.assertEqual(self.written(), [])
+
+    def test_a_body_larger_than_the_limit_is_refused_on_its_header_alone(self):
+        """Refused without reading a byte of it. No body is sent here at all,
+        which is the assertion: the answer comes from the announcement."""
+        received = self.raw(["Content-Length: {}".format(server_module.MAX_BODY_BYTES + 1)])
+        self.assertIn(b"413", self.status(received), received)
+        self.assertEqual(self.written(), [])
+
+    def test_the_limit_is_a_bounded_number_of_bytes(self):
+        """A ceiling of None, or of sys.maxsize, is no ceiling. This server
+        holds a lock on the user's project and runs on their laptop."""
+        limit = server_module.MAX_BODY_BYTES
+        self.assertIsInstance(limit, int)
+        self.assertGreater(limit, 64 * 1024)
+        self.assertLessEqual(limit, 16 * 1024 * 1024)
+
+    def test_a_body_of_exactly_the_limit_is_still_served(self):
+        """The other half of the bound, and the byte it turns on. A note the
+        size of a chapter is a thing a person may legitimately type, and a
+        ceiling written `>=` refuses the largest body it advertises."""
+        limit = server_module.MAX_BODY_BYTES
+        skeleton = json.dumps({"round": 1, "answers": {"Q-1": {"text": ""}}})
+        answers = {"Q-1": {"text": "x" * (limit - len(skeleton.encode("utf-8")))}}
+        body = json.dumps({"round": 1, "answers": answers}).encode("utf-8")
+        self.assertEqual(len(body), limit, "the test did not build a body of the limit")
+        self.assertEqual(
+            json.loads(self.send("PATCH", "/api/draft", raw=body).read().decode("utf-8")),
+            {"ok": True},
+        )
+        self.assertEqual(
+            len(read_json(self.session.draft_path(1))["answers"]["Q-1"]["text"]),
+            limit - len(skeleton.encode("utf-8")),
+        )
+
+    def test_a_body_one_byte_over_the_limit_is_refused(self):
+        limit = server_module.MAX_BODY_BYTES
+        received = self.raw(["Content-Length: {}".format(limit + 1)])
+        self.assertIn(b"413", self.status(received), received)
+
+    def test_a_body_shorter_than_its_content_length_writes_nothing(self):
+        """A length that over-promises must not be padded, truncated or
+        parsed from what did arrive."""
+        self.addCleanup(
+            setattr, server_module._Handler, "read_budget",
+            server_module._Handler.read_budget,
+        )
+        server_module._Handler.read_budget = 0.3
+        body = b'{"round": 1, "answers": {}}'
+        received = self.raw(["Content-Length: {}".format(len(body) + 50)], body)
+        self.assertEqual(self.written(), [])
+        self.assertIn(b"408", self.status(received), received)
+
+    def test_a_body_that_ends_early_is_refused_rather_than_parsed(self):
+        """The other way a length over-promises: the client stops sending and
+        half-closes, so the read ends at EOF rather than at the budget. What
+        arrived is valid JSON on its own, which is exactly why it must not be
+        parsed -- a length that lies is a lie about framing."""
+        whole = b'{"round": 1, "answers": {}}   '
+        client = self.raw_connection()
+        target = self.url("/api/submit")[len(self.base):]
+        client.sendall(
+            ("POST {} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n"
+             .format(target, len(whole) + 40)).encode("utf-8") + whole
+        )
+        client.shutdown(socket.SHUT_WR)
+        received = self.read_answer(client)
+        self.assertIn(b"400", self.status(received), received)
+        self.assertEqual(self.written(), [])
+
+    def test_a_body_that_never_arrives_cannot_outlive_the_read_budget(self):
+        """The read budget is lifted once the headers are parsed, on the
+        grounds that nothing here read a body. Something does now, so a body
+        that is announced and then trickled must be bounded by an absolute
+        clock and not by the idle one every byte resets."""
+        self.addCleanup(
+            setattr, server_module._Handler, "read_budget",
+            server_module._Handler.read_budget,
+        )
+        server_module._Handler.read_budget = 0.3
+        client = self.raw_connection()
+        target = self.url("/api/submit")[len(self.base):]
+        client.sendall(
+            ("POST {} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 4096\r\n\r\n"
+             .format(target)).encode("utf-8")
+        )
+        started = time.monotonic()
+        client.sendall(b"{")
+        received = self.read_answer(client)
+        self.assertLess(time.monotonic() - started, 5, "the body read was unbounded")
+        # Answered, not merely dropped. Letting the socket timeout out of the
+        # handler closes the connection with no response at all, and the page
+        # cannot tell that from the server having died.
+        self.assertIn(b"408", self.status(received), received)
+        self.assertTrue(self.wait_until(lambda: self.server.timeouts >= 1))
+        self.assertEqual(self.written(), [])
+
+    def test_nothing_follows_a_body_down_the_same_connection(self):
+        """Pipelining, which is what makes a mis-framed body dangerous: the
+        second request is the one that was never authorised as itself. It
+        must not execute, and the way to see that is that its write never
+        happened."""
+        first = b'{"round": 1, "answers": {}}'
+        second_target = self.url("/api/draft")[len(self.base):]
+        second_body = b'{"round": 2, "answers": {"Q-1": {"text": "smuggled"}}}'
+        second = (
+            "PATCH {} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n"
+            .format(second_target, len(second_body)).encode("utf-8")
+        ) + second_body
+        received = self.raw(
+            ["Content-Length: {}".format(len(first)), "Connection: keep-alive"],
+            first + second,
+        )
+        self.assertIn(b"200", self.status(received), received)
+        self.assertEqual(received.count(b"HTTP/1."), 1, received)
+        self.assertTrue(self.session.answers_path(1).exists())
+        self.assertFalse(self.session.draft_path(2).exists())
+
+    def test_the_connection_still_ends_if_this_server_ever_speaks_http_1_1(self):
+        """The guard, on its own.
+
+        Today the stdlib closes after every response because
+        protocol_version is HTTP/1.0, so the pipelining tests above pass
+        whether or not the write handlers close the connection themselves --
+        they are pinned by a class attribute in another file. Raise that
+        attribute to 1.1 and keep-alive becomes real: the second request
+        rides in on a connection nobody authorised it on, framed by whatever
+        the first one's Content-Length said. It must still never run.
+        """
+        self.addCleanup(
+            setattr, server_module._Handler, "protocol_version",
+            server_module._Handler.protocol_version,
+        )
+        server_module._Handler.protocol_version = "HTTP/1.1"
+        first = b'{"round": 1, "answers": {}}'
+        target = self.url("/api/draft")[len(self.base):]
+        smuggled = b'{"round": 5, "answers": {"Q-1": {"text": "smuggled"}}}'
+        rest = (
+            "PATCH {} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n"
+            .format(target, len(smuggled)).encode("utf-8")
+        ) + smuggled
+        received = self.raw(
+            ["Content-Length: {}".format(len(first)), "Connection: keep-alive"],
+            first + rest,
+        )
+        self.assertIn(b"200", self.status(received), received)
+        self.assertEqual(received.count(b"HTTP/1."), 1, received)
+        self.assertFalse(self.session.draft_path(5).exists())
+
+    def test_a_lie_about_the_length_smuggles_nothing_either(self):
+        """The same pipelining, framed by a Content-Length that stops short
+        so the rest of the bytes look like a fresh request."""
+        first = b'{"round": 1, "answers": {}}'
+        smuggled_target = self.url("/api/draft")[len(self.base):]
+        smuggled_body = b'{"round": 3, "answers": {}}'
+        rest = (
+            "PATCH {} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n"
+            .format(smuggled_target, len(smuggled_body)).encode("utf-8")
+        ) + smuggled_body
+        self.raw(["Content-Length: {}".format(len(first))], first + rest)
+        self.assertFalse(self.session.draft_path(3).exists())
+
+    def test_a_body_of_zero_length_is_refused_rather_than_invented(self):
+        """An empty body is not an empty object.
+
+        Both spellings answer 400, so the status code cannot tell them apart
+        and the message is what constrains it: `read(length) if length else
+        b"{}"` answers "a round number is required", having parsed a request
+        that carried nothing as one that carried {}.
+        """
+        received = self.raw(["Content-Length: 0"])
+        self.assertIn(b"400", self.status(received), received)
+        self.assertIn(b"not valid JSON", received, received)
+        self.assertNotIn(b"round number", received, received)
+        self.assertEqual(self.written(), [])
+
+
+class WriteTerminalTest(WriteTestCase):
+    """The agent's terminal learns no more from a write than from a read."""
+
+    @contextlib.contextmanager
+    def captured_stderr(self):
+        buffer = io.StringIO()
+        with contextlib.redirect_stderr(buffer):
+            yield buffer
+
+    def test_no_shape_of_write_reaches_the_terminal(self):
+        """Every refusal above is a branch that could have been an uncaught
+        exception instead, and an uncaught exception here is a traceback full
+        of absolute paths across the console of whoever started the session.
+
+        The wait is negative and bounded: handle_error runs after the
+        response is written, so the only honest way to say "and nothing
+        happened afterwards" is to give it a moment to happen in.
+        """
+        bodies = [b"{", b"[]", b"3", b'{"round": 0}', b'{"round": 1e999}',
+                  b'{"round": 1, "answers": []}', b'{"round": 1, "answers": {}}']
+        with self.captured_stderr() as buffer:
+            for raw in bodies:
+                for method, path in (("POST", "/api/submit"), ("PATCH", "/api/draft")):
+                    with contextlib.suppress(urllib.error.HTTPError):
+                        self.send(method, path, raw=raw).read()
+            self.assertFalse(
+                self.wait_until(lambda: self.server.handler_errors > 0, timeout=0.5)
+            )
+        self.assertEqual(buffer.getvalue(), "")
+        self.assertEqual(self.server.handler_errors, 0)
 
 
 if __name__ == "__main__":

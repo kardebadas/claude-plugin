@@ -11,10 +11,12 @@ so the parts that are not stupid are all in one place and all here:
   default argument, and enforced BEFORE the bind.
 * Every request carries the session key, whatever its method, checked
   before the path is even looked at -- so a caller without it cannot tell an
-  endpoint from a typo, and cannot use the 404 as a filesystem probe. GET is
-  the only method that goes anywhere; every other method, the ones nobody
-  here has heard of included, is refused behind the key rather than by the
-  stdlib in front of it.
+  endpoint from a typo, and cannot use the 404 as a filesystem probe. GET,
+  PATCH and POST go somewhere; every other method, the ones nobody here has
+  heard of included, is refused behind the key rather than by the stdlib in
+  front of it. The stdlib answers an unbound method with its own 501 before
+  any handler runs, which is why each write handler checks the key itself,
+  first, rather than inheriting a check from anywhere.
   The one thing that stays in front of it is a request the stdlib cannot
   parse at all -- a URL too long, too many headers, an HTTP version it does
   not speak -- which it answers itself with 414, 431 or 505 before any code
@@ -31,8 +33,18 @@ so the parts that are not stupid are all in one place and all here:
   offers for it.
 * Extracting that key is total: a request target that will not parse yields
   no key and the ordinary 403, never an exception in front of the gate.
-* Nothing derived from the request ever becomes a filesystem path. Exactly
-  three URLs are served and there is no static file handler at all.
+* Nothing derived from the request becomes a filesystem path except one
+  round NUMBER, which is an integer between 1 and 999 or the request is
+  refused, and which is then formatted into a fixed name inside .craft/.
+  Five URLs are served and there is no static file handler at all.
+* Two of those URLs read a request body, so the body is framed strictly:
+  one Content-Length, digits only, no Transfer-Encoding, a hard ceiling on
+  the size, and the connection ends afterwards whatever happened. Two
+  framings, or a length that turns out to be a lie, are the two ways a
+  second request rides down a connection nobody authorised it on.
+* The server writes inside .craft/ and nowhere else. It never writes
+  CRAFT.md: the brief is the agent's to author, and this process only ever
+  reads it.
 * An error tells the browser which of the agent's files is wrong by name and
   stops there: no absolute paths, no tracebacks, nothing about the machine.
 * The agent's terminal learns no more than the browser does. Request logging
@@ -42,6 +54,8 @@ so the parts that are not stupid are all in one place and all here:
   `timeout` is the idle one socketserver applies with settimeout(); the
   ceiling on reading a whole request is `read_budget`, an absolute deadline,
   because an idle clock every arriving byte resets is not a ceiling at all.
+  The budget is armed again for the body, which is a second thing an idle
+  clock cannot bound.
 """
 # Deliberate: kept so any annotation added later may use `int | None` syntax
 # while this project's floor is Python 3.9. Do not delete.
@@ -51,6 +65,7 @@ import hmac
 import io
 import ipaddress
 import json
+import re
 import secrets
 import socket
 import sys
@@ -61,7 +76,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import markdown
 import schema
-from session import describe_os_error, read_json
+from session import describe_os_error, read_json, write_json_atomic
 
 APP_HTML = Path(__file__).with_name("app.html")
 
@@ -69,6 +84,74 @@ APP_HTML = Path(__file__).with_name("app.html")
 # a browser, so it has to survive being seen without being guessable, and hex
 # survives copy-paste, shells and query strings without encoding.
 KEY_BYTES = 32
+
+# The ceiling on one request body. Nothing this server accepts is large: a
+# round of answers is text a person typed into a form, and a megabyte is
+# already a hundred times the longest honest one. The number is not the
+# point -- having one is. Without it, anything on this machine that holds
+# the key can hand this process a body the size of the disk and watch it be
+# written into the user's project as a file they never asked for.
+MAX_BODY_BYTES = 1 << 20
+
+# The round numbers that can exist at all. session.ROUND_RE matches exactly
+# three digits, and every round file is named with "{:03d}", so a round of
+# 1000 writes a file the rest of the tool can never find again -- and a big
+# enough one is a filename the kernel refuses outright, which would be an
+# OSError raised out of a request holding a perfectly valid key.
+MIN_ROUND = 1
+MAX_ROUND = 999
+
+# A round number as it may be written in a request: decimal digits, no sign,
+# no leading zero, and short enough that the range check below is what
+# actually decides. Not str.isdigit(), which is true of "٣" -- and int()
+# then turns that into 3, so a check written with isdigit() and one written
+# with int() disagree about the same string. No leading zeros because one
+# round has one spelling: "0001" and "1" naming the same file is a way for
+# two callers to think they are looking at different rounds.
+_ROUND_TEXT = re.compile(r"\A(?:0|[1-9][0-9]{0,3})\Z")
+
+# A Content-Length as it may be written in a request. Digits only: no sign,
+# no whitespace, no "1, 1", no hex. Nineteen of them is past any length a
+# 64-bit machine can have and is rejected as a size rather than as a
+# syntax error, which is the more useful thing to be told.
+_LENGTH_TEXT = re.compile(r"\A[0-9]{1,19}\Z")
+
+
+# Said the same way wherever a round number is missing or impossible, on the
+# query string and in a body alike, so the two cannot drift apart.
+_NO_ROUND = {"ok": False, "error": "a round number from 1 to 999 is required"}
+
+
+def parse_round(value):
+    """A round number from a request, or None if it is not one.
+
+    Total, and deliberately stricter than int(). int(1.9) is 1, so a round
+    number that arrived as a float would quietly write a round of answers
+    over a different round's file -- silent data loss, and the browser is
+    not the only thing that can send this. bool is an int in Python, so
+    True would be round 1 as well. A digit string is accepted because the
+    query string has no other way to carry a number.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        if not _ROUND_TEXT.match(value):
+            return None
+        value = int(value)
+    if not isinstance(value, int):
+        return None
+    if not MIN_ROUND <= value <= MAX_ROUND:
+        return None
+    return value
+
+
+class _BadBody(Exception):
+    """A request body that will not be read, and the answer it gets."""
+
+    def __init__(self, code, message):
+        Exception.__init__(self, message)
+        self.code = code
+        self.message = message
 
 
 def make_key():
@@ -118,6 +201,16 @@ def target_parts(target):
     except ValueError:
         return "", ""
     return parts.path, parts.query
+
+
+def query_value(target, name):
+    """The first value a request target offers for `name`, or "".
+
+    Total, like target_parts underneath it: a target that will not parse
+    offers nothing, which is the same as a parameter that is not there.
+    """
+    values = parse_qs(target_parts(target)[1], keep_blank_values=True).get(name, [])
+    return values[0] if values else ""
 
 
 def _reason(exc):
@@ -172,9 +265,15 @@ class _RequestReader(io.RawIOBase):
     the headers together are read inside `read_budget` seconds or the
     connection ends.
 
-    The budget is lifted the moment the headers are parsed, because nothing
-    in this server reads a body and an honest client may legitimately read a
-    response slowly. From there the idle clock alone bounds the write.
+    The budget is lifted the moment the headers are parsed, because an
+    honest client may legitimately read a response slowly. From there the
+    idle clock alone bounds the write.
+
+    It is armed a second time, by hand, around the one thing that reads
+    after the headers: a request body. That was not needed while nothing
+    here read one -- and the moment /api/draft and /api/submit did, the only
+    clock left on a body was the idle one, which is the exact bug this class
+    exists to fix, one layer further in.
     """
 
     def __init__(self, handler):
@@ -350,6 +449,11 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(self.server.round_payload())
         if path == "/api/brief":
             return self._json(self.server.brief_payload())
+        if path == "/api/draft":
+            number = parse_round(query_value(self.path, "round"))
+            if number is None:
+                return self._json(_NO_ROUND, 400)
+            return self._json(self.server.draft_payload(number))
         return self._text(404, "not found")
 
     def __getattr__(self, name):
@@ -385,8 +489,9 @@ class _Handler(BaseHTTPRequestHandler):
         is not; __getattr__ above is what makes sure nothing reaches that
         501, whatever the method is called.
 
-        Task 6 replaces the POST and PATCH arms with real handlers. Its rule
-        is this one: _authed() first, before anything is read or touched.
+        POST and PATCH left this path in task 6 and have real handlers
+        below. They keep its rule: _authed() first, before anything is read
+        or touched.
         """
         if self.headers.get("Content-Length") or self.headers.get("Transfer-Encoding"):
             # Nothing here reads the body, and an unread body is the start of
@@ -400,9 +505,208 @@ class _Handler(BaseHTTPRequestHandler):
         self.server.touch()
         return self._text(501, "not implemented")
 
-    # Named as well as caught by __getattr__: these are the ones task 6 comes
-    # back for, and a real handler wants a real assignment to replace.
-    do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = _unsupported
+    # Named as well as caught by __getattr__: the ones a browser is most
+    # likely to try, spelled out so the refusal is visible in this file
+    # rather than only inferable from __getattr__.
+    do_PUT = do_DELETE = do_HEAD = do_OPTIONS = _unsupported
+
+    # -- the write surface --------------------------------------------------
+    #
+    # Two endpoints, one shape. Both of them: check the key, then touch the
+    # session, then route, then frame and read the body, then check its
+    # shape, and only then write a file. Nothing before the key check may
+    # look at the request, and nothing before the shape check may name a
+    # path.
+
+    def _body_length(self):
+        """How many bytes of body to read, or a refusal to read any.
+
+        Framing, and only framing. Two answers to "how long is it" -- a
+        Content-Length beside a Transfer-Encoding, or two Content-Lengths --
+        is the oldest request-smuggling primitive there is, and the way it
+        does damage is that a SECOND request is found inside the first and
+        runs without ever being authorised as itself. This server picks
+        neither answer; it refuses the request and ends the connection.
+
+        Transfer-Encoding is refused outright rather than implemented. The
+        page this serves sends a Content-Length on every fetch, so chunked
+        is not something an honest client here produces, and a decoder for
+        it would be a second framing to keep correct for no caller at all.
+        """
+        if self.headers.get_all("Transfer-Encoding"):
+            raise _BadBody(400, "this server does not accept a chunked body")
+        lengths = self.headers.get_all("Content-Length") or []
+        if not lengths:
+            raise _BadBody(411, "a request body needs a Content-Length")
+        if len(lengths) > 1:
+            raise _BadBody(400, "a request body may only have one length")
+        text = lengths[0].strip()
+        if not _LENGTH_TEXT.match(text):
+            raise _BadBody(400, "the Content-Length is not a length")
+        length = int(text)
+        if length > MAX_BODY_BYTES:
+            raise _BadBody(413, "the request body is too large")
+        return length
+
+    def _read_body(self):
+        """The body, as a JSON object, read under its own absolute deadline.
+
+        The deadline is the point. _RequestReader.finished() lifts the read
+        budget once the headers are parsed, which was right while nothing
+        here read a body: what is left is the IDLE clock, and an idle clock
+        is reset by every byte that arrives. A client announcing a body and
+        then trickling it one byte per just-under-timeout seconds would hold
+        a thread and a descriptor for days at a cost of a byte a minute.
+
+        A body that stops short of its Content-Length is refused rather than
+        parsed from what did arrive: a length that over-promises is a lie
+        about framing, and half a JSON document is not a smaller one. A
+        length of zero is read as zero bytes and then fails as the invalid
+        JSON it is; nothing is substituted for it. Standing in b"{}" for an
+        absent body means a request that carried nothing is answered as
+        though it carried an empty object.
+        """
+        length = self._body_length()
+        self._reader.start()
+        try:
+            raw = self.rfile.read(length)
+        except OSError:
+            raise _BadBody(408, "the request body did not arrive")
+        finally:
+            self._reader.finished()
+        if raw is None or len(raw) != length:
+            raise _BadBody(400, "the request body was shorter than its length")
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except ValueError:
+            raise _BadBody(400, "the request body is not valid JSON")
+        if not isinstance(body, dict):
+            raise _BadBody(400, "the request body must be a JSON object")
+        return body
+
+    def _write_request(self, endpoint):
+        """Everything both write endpoints do before they write anything.
+
+        Returns (round, answers, body), or None once it has answered.
+
+        Auth FIRST -- before touch(), before the path is looked at, before a
+        byte of body is read. The stdlib answers a method with no do_* using
+        a 501 of its own from inside handle_one_request, so nothing upstream
+        has authenticated a PATCH or a POST: each of these is its own front
+        door. Task 5 shipped touch() ahead of the key check on do_GET and it
+        was caught in review -- an anonymous caller could otherwise hold an
+        abandoned session, and the project lock under it, open for as long
+        as it cared to keep polling. The same reasoning applies here with
+        more at stake, since these two write files.
+        """
+        # This connection carried a body and will not be reused, whatever
+        # happens below. Already true today -- protocol_version is HTTP/1.0,
+        # so the stdlib closes after every response -- but what makes a
+        # mis-framed body dangerous is a second request read off the same
+        # connection, and that must not rest on a class attribute in another
+        # file staying what it is.
+        self.close_connection = True
+        if not self._authed():
+            self._text(403, "forbidden")
+            return None
+        self.server.touch()
+        if target_parts(self.path)[0] != endpoint:
+            self._text(404, "not found")
+            return None
+        try:
+            body = self._read_body()
+        except _BadBody as bad:
+            self._json({"ok": False, "error": bad.message}, bad.code)
+            return None
+        number = parse_round(body.get("round"))
+        if number is None:
+            self._json(_NO_ROUND, 400)
+            return None
+        answers = body.get("answers")
+        if answers is None:
+            answers = {}  # nothing typed yet is a legitimate thing to save
+        if not isinstance(answers, dict):
+            self._json({"ok": False, "error": "answers must be a JSON object"}, 400)
+            return None
+        return number, answers, body
+
+    def _store(self, path, payload):
+        """Write one of the agent's files, or say which one could not be.
+
+        Letting the OSError out -- a full disk, a .craft/ that stopped being
+        a directory, a project that went read-only -- sends no response at
+        all. The browser sees a reset connection, and the person at it has
+        no reason to think the answers they just sent were not saved. The
+        file is named; where it lives is not.
+        """
+        try:
+            write_json_atomic(path, payload)
+        except OSError as exc:
+            self._json(
+                {
+                    "ok": False,
+                    "error": "{} could not be written: {}".format(
+                        path.name, _reason(exc)
+                    ),
+                },
+                500,
+            )
+            return False
+        return True
+
+    def do_PATCH(self):
+        """Autosave. Fires on every keystroke and every click.
+
+        It is crash insurance and nothing else: what it writes is never what
+        the agent reads as an answer. That is why Send carries the whole
+        answer set in its own body rather than promoting this file -- a
+        draft that is stale when Send arrives can then never become the
+        submitted round.
+        """
+        parsed = self._write_request("/api/draft")
+        if parsed is None:
+            return
+        number, answers, _ = parsed
+        path = self.server.session.draft_path(number)
+        if not self._store(path, {"round": number, "answers": answers}):
+            return
+        return self._json({"ok": True})
+
+    def do_POST(self):
+        """Send to Claude. This is the product.
+
+        What lands here is what the agent folds into CRAFT.md, and four
+        answer states have to survive apart: answered, delegated ("you
+        decide" -- record it and never ask again), skipped ("ask me again")
+        and absent, which means skipped. So the answers are stored exactly
+        as they arrived. Normalising them here, or dropping a key this file
+        does not recognise, is how a decision the user handed over becomes
+        one they get nagged about again next round.
+        """
+        parsed = self._write_request("/api/submit")
+        if parsed is None:
+            return
+        number, answers, body = parsed
+        finished = body.get("finished")
+        if finished is None:
+            finished = False
+        if not isinstance(finished, bool):
+            # bool("false") is True. Finish ends the session, so it is
+            # carried as a boolean or it is not carried at all.
+            return self._json(
+                {"ok": False, "error": "finished must be true or false"}, 400
+            )
+        payload = {
+            "round": number,
+            # UTC, said out loud with the Z. gmtime, not localtime: a stamp
+            # that carries a Z and a local clock is worse than no stamp.
+            "submitted_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "finished": finished,
+            "answers": answers,
+        }
+        if not self._store(self.server.session.answers_path(number), payload):
+            return
+        return self._json({"ok": True, "finished": finished})
 
     def _page(self):
         try:
@@ -515,6 +819,41 @@ class CraftServer(ThreadingHTTPServer):
         if errors:
             return {"ok": False, "error": "{} is invalid".format(name), "details": errors}
         return {"ok": True, "round": obj}
+
+    def draft_payload(self, number):
+        """A saved draft, or an empty one, and never a raised exception.
+
+        A draft that is not there is the ordinary case -- nothing has been
+        typed yet -- and comes back empty with no error at all, because a
+        first load must not look like a failure.
+
+        A draft that IS there and cannot be read is a different thing, and
+        the difference is the user's. Answering that with a silent empty
+        form invites them to retype work that is sitting on the disk, so the
+        form still opens (empty is the only shape it can open in) and the
+        file is named beside it. Named, not located: the person at the
+        browser is not always the person who started the session.
+        """
+        path = self.session.draft_path(number)
+        empty = {"round": number, "answers": {}}
+        try:
+            obj = read_json(path)
+        except FileNotFoundError:
+            return empty
+        except ValueError as exc:  # malformed JSON, or bytes that are not UTF-8
+            empty["error"] = "{} is not valid JSON: {}".format(path.name, exc)
+            return empty
+        except OSError as exc:
+            empty["error"] = "{} could not be read: {}".format(path.name, _reason(exc))
+            return empty
+        answers = obj.get("answers") if isinstance(obj, dict) else None
+        if not isinstance(answers, dict):
+            # Valid JSON of the wrong shape: hand-edited, half-written, or
+            # from a version of this tool that did not exist yet. The page
+            # gets the shape it was promised either way.
+            empty["error"] = "{} does not hold a set of answers".format(path.name)
+            return empty
+        return {"round": number, "answers": answers}
 
     def brief_payload(self):
         """CRAFT.md as HTML. Missing is empty; unreadable is said out loud.

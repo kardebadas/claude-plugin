@@ -5,6 +5,15 @@ standing between a page on the machine and the user's brief, so the auth tests
 are adversarial by construction: a prefix of the key, a superstring of it, a
 cookie whose NAME merely ends in the right letters, a key that is not ASCII.
 Each of those is a one-line change to server.py away from being accepted.
+
+The cookie tests read inverted, and that is the point of them. There was a
+session cookie; it was a whole credential, and cookies are scoped to a host
+and not to a port (RFC 6265 s8.5), so any other http://127.0.0.1:<port> page
+could pull one subresource off this server and read the key back. The cookie
+is gone. What is left in its place is the set of tests that say so -- a
+request carrying nothing but a cookie is refused, and no response hands one
+out -- because a deleted feature with deleted tests is a feature that comes
+back.
 """
 import contextlib
 import functools
@@ -22,8 +31,13 @@ import urllib.request
 from pathlib import Path
 
 import server as server_module
-from server import COOKIE, APP_HTML, CraftServer, make_key
+from server import APP_HTML, CraftServer, make_key
 from session import Session, write_json_atomic
+
+# The name the session cookie used to have, and the name anything else on
+# 127.0.0.1 would plant if it wanted to be believed. Defined here rather than
+# imported: server.py must no longer have it, and KeyTest asserts that.
+COOKIE = "craftkey"
 
 VALID_ROUND = {
     "round": 1,
@@ -193,27 +207,33 @@ class AuthTest(ServerTestCase):
         be a refusal either way, never a match against a missing value."""
         self.assertEqual(self.refused("/?key=", key=False).code, 403)
 
-    def test_the_cookie_alone_works(self):
-        self.assertEqual(self.get("/", key=False, cookie=True).status, 200)
+    def test_the_cookie_alone_is_forbidden(self):
+        """The inversion of "the cookie alone works", and the regression test
+        for the whole finding. A cookie set by this server was scoped to
+        127.0.0.1 as a HOST -- ports do not separate cookie jars -- so a page
+        on any other local port could make the browser fetch one subresource
+        from here and then read the key back. The stolen cookie was a
+        complete credential: GET /api/brief with no key in the URL was 200.
+        Now the URL is the only thing that authenticates."""
+        self.assertEqual(self.refused("/", key=False, cookie=True).code, 403)
+        for path in ("/api/round", "/api/brief"):
+            self.assertEqual(self.refused(path, key=False, cookie=True).code, 403, path)
 
-    def test_the_cookie_works_beside_other_cookies(self):
+    def test_the_cookie_is_forbidden_beside_other_cookies(self):
         header = "ga=1; {}={}; theme=dark".format(COOKIE, self.key)
-        self.assertEqual(self.get("/", key=False, cookie=header).status, 200)
+        self.assertEqual(self.refused("/", key=False, cookie=header).code, 403)
 
     def test_a_cookie_whose_name_merely_ends_in_the_right_letters_is_forbidden(self):
-        """The substring check `"craftkey=<key>" in header` accepts this.
-        A different local server on 127.0.0.1 can set a cookie for the whole
-        host -- cookies are not isolated by port -- so the name must match
-        exactly, not as a suffix of somebody else's."""
+        """Was about exact name matching; now about there being no matching
+        at all. Either way a different local server on 127.0.0.1 can set a
+        cookie for the whole host, so neither this nor the real name gets in."""
         header = "x{}={}".format(COOKIE, self.key)
         self.assertEqual(self.refused("/", key=False, cookie=header).code, 403)
 
     def test_a_cookie_name_in_the_wrong_case_is_forbidden(self):
-        """RFC 6265 cookie names are case-sensitive. Case-folding the two
-        sides of the comparison widens the set of cookies another 127.0.0.1
-        listener can plant on this host -- the exact axis cookie_values was
-        written to narrow, since cookies are scoped to a host and not a port.
-        """
+        """Case-folding a cookie name used to widen the set of cookies another
+        127.0.0.1 listener could plant. Nothing here reads a cookie now, so
+        every casing is refused for the same reason the exact one is."""
         for name in ("CraftKey", "CRAFTKEY", COOKIE.capitalize()):
             header = "{}={}".format(name, self.key)
             self.assertEqual(self.refused("/", key=False, cookie=header).code, 403, header)
@@ -223,22 +243,23 @@ class AuthTest(ServerTestCase):
         self.assertEqual(self.refused("/", key=False, cookie=header).code, 403)
 
     def test_a_padded_cookie_value_is_not_the_key(self):
-        """A cookie value has no spaces in it; the space after a ";" belongs
-        to the separator and is stripped off the NAME. Widening the value's
-        match by a strip() would accept a key that is not the key."""
         # Leading, not trailing: the header parser strips a trailing space off
         # the whole header value before this code ever sees it.
         for header in ("{}= {}", "{}=\t{}", "{}= {} ; x=1"):
             header = header.format(COOKIE, self.key)
             self.assertEqual(self.refused("/", key=False, cookie=header).code, 403, header)
 
-    def test_a_wrong_cookie_does_not_shadow_a_right_one(self):
-        """Last-wins cookie parsing turns a stray craftkey= from another
-        localhost app into a lockout. Every value carrying the name counts."""
-        header = "{0}=junk; {0}={1}".format(COOKIE, self.key)
-        self.assertEqual(self.get("/", key=False, cookie=header).status, 200)
-        header = "{0}={1}; {0}=junk".format(COOKIE, self.key)
-        self.assertEqual(self.get("/", key=False, cookie=header).status, 200)
+    def test_a_cookie_can_neither_grant_a_session_nor_take_one_away(self):
+        """The inversion of "a wrong cookie does not shadow a right one". A
+        stray craftkey= from another localhost app used to be a possible
+        lockout, and the right one used to be a way in. Now the Cookie header
+        decides nothing in either direction: the URL's key alone is read."""
+        for header in ("{0}=junk; {0}={1}", "{0}={1}; {0}=junk", "{0}=junk"):
+            header = header.format(COOKIE, self.key)
+            # With the key in the URL: served, whatever the cookies say.
+            self.assertEqual(self.get("/", cookie=header).status, 200, header)
+            # Without it: refused, whatever the cookies say.
+            self.assertEqual(self.refused("/", key=False, cookie=header).code, 403, header)
 
     def test_a_malformed_cookie_header_is_a_refusal_not_a_crash(self):
         self.assertEqual(self.refused("/", key=False, cookie="=;;;=x=").code, 403)
@@ -274,24 +295,94 @@ class AuthTest(ServerTestCase):
         self.assertGreaterEqual(self.server.idle_seconds(), before)
 
 
-class CookieTest(ServerTestCase):
-    def cookie_header(self):
-        return self.get("/").headers.get("Set-Cookie") or ""
+class RequestTargetTest(ServerTestCase):
+    """Request targets, including the ones urlsplit refuses to parse.
 
-    def test_the_page_sets_the_cookie(self):
-        self.assertIn("{}={}".format(COOKIE, self.key), self.cookie_header())
+    Key extraction reads self.path, and self.path is whatever the client put
+    on the request line. urlsplit raises ValueError("Invalid IPv6 URL") on an
+    unbalanced "[" or "]" in an authority, and that raise landed in FRONT of
+    the auth check: no response at all, on any method, to a caller with no
+    credential, plus a line on the agent's terminal per attempt.
+    """
 
-    def test_the_cookie_is_http_only(self):
-        """The page takes the key from the URL, never from document.cookie, so
-        script has no reason to read it -- and script that wants to read it is
-        script exfiltrating the key."""
-        self.assertIn("httponly", self.cookie_header().lower())
+    def raw_exchange(self, target, method="GET"):
+        """One request built from a raw target, and everything sent back."""
+        client = self.raw_connection()
+        line = "{} {} HTTP/1.0\r\n\r\n".format(method, target)
+        client.sendall(line.encode("utf-8"))
+        return self.read_to_close(client)
 
-    def test_the_cookie_is_samesite_strict(self):
-        self.assertIn("samesite=strict", self.cookie_header().lower().replace(" ", ""))
+    def assertForbidden(self, received, msg=None):
+        """A real 403 with a real body -- not silence, which is what the
+        ValueError produced and what a mutant would produce again."""
+        self.assertTrue(received, msg)  # zero bytes is the bug itself
+        headers, blank, body = received.partition(b"\r\n\r\n")
+        self.assertTrue(blank, received)
+        self.assertIn(b"403", headers.splitlines()[0], msg)
+        self.assertEqual(body, b"forbidden", msg)
 
-    def test_the_cookie_is_scoped_to_the_whole_app(self):
-        self.assertIn("path=/", self.cookie_header().lower())
+    def test_an_absolute_target_with_an_unbalanced_bracket_is_a_clean_403(self):
+        self.assertForbidden(self.raw_exchange("http://[::1/"))
+        self.assertEqual(self.server.handler_errors, 0)
+        self.assertEqual(self.get("/").status, 200)  # still alive
+
+    def test_every_unparseable_target_shape_is_a_clean_403(self):
+        for target in ("http://[::1/", "http://::1]/", "http://[::1]:x/",
+                       "http://[/?key=x", "//[::1/", "http://[]]/"):
+            self.assertForbidden(self.raw_exchange(target), target)
+        self.assertEqual(self.server.handler_errors, 0)
+
+    def test_no_method_can_reach_the_crash_either(self):
+        """The raise was in _supplied_keys, which every method calls, so the
+        denial of response was available on all of them."""
+        for method in ("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS",
+                       "TRACE", "BREW"):
+            self.assertForbidden(self.raw_exchange("http://[::1/", method), method)
+        # HEAD is the same path with the body suppressed, so it is checked
+        # for the status line alone rather than through assertForbidden.
+        received = self.raw_exchange("http://[::1/", "HEAD")
+        self.assertIn(b"403", received.splitlines()[0])
+        self.assertEqual(self.server.handler_errors, 0)
+
+    def test_an_unparseable_target_cannot_hold_the_session_open(self):
+        """It is refused, so it must be refused in every way a 403 is: the
+        idle clock is what eventually ends an abandoned session."""
+        self.server._last -= 100
+        before = self.server.idle_seconds()
+        self.raw_exchange("http://[::1/")
+        self.assertGreaterEqual(self.server.idle_seconds(), before)
+
+    def test_an_absolute_target_that_does_parse_is_still_served(self):
+        """RFC 9112 s3.2.2 says a server accepts absolute-form on any request,
+        and making the parser total must not have broken the form the fix was
+        found through. The path and the query both have to survive it."""
+        target = "http://127.0.0.1:{}/api/round?key={}".format(self.server.port, self.key)
+        received = self.raw_exchange(target)
+        headers, blank, body = received.partition(b"\r\n\r\n")
+        self.assertIn(b"200", headers.splitlines()[0], received)
+        self.assertIsNone(json.loads(body.decode("utf-8"))["round"])
+
+
+class ResponseHeaderTest(ServerTestCase):
+    """What every response carries, and the one header none of them may.
+
+    Three tests used to assert that the session cookie was HttpOnly, SameSite
+    and Path-scoped. Those three collapse into one that is strictly stronger
+    than all of them together: there is no cookie. SameSite=Strict was the
+    part that was doing real work, and on a developer machine "same site" is
+    every other port on 127.0.0.1, which is the whole finding.
+    """
+
+    def test_the_page_hands_out_no_cookie(self):
+        self.assertIsNone(self.get("/").headers.get("Set-Cookie"))
+
+    def test_no_response_at_all_carries_a_set_cookie(self):
+        for path in ("/", "/api/round", "/api/brief"):
+            self.assertIsNone(self.get(path).headers.get("Set-Cookie"), path)
+        for path, kw in (("/nope", {}), ("/", {"key": False}),
+                         ("/api/round", {"method": "POST", "data": b"{}"})):
+            error = self.refused(path, **kw)
+            self.assertIsNone(error.headers.get("Set-Cookie"), path)
 
     def test_responses_are_never_cached(self):
         """The page's URL carries the key. A cached copy is a leaked key."""
@@ -394,6 +485,58 @@ class MethodTest(ServerTestCase):
 
     OTHERS = ("POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
 
+    # Methods with no do_* of their own. TRACE and CONNECT are real and in
+    # RFC 9110; BREW is not, and that is the point of it -- "every method is
+    # gated" has to mean the ones nobody here has heard of too.
+    UNNAMED = ("TRACE", "CONNECT", "BREW", "PROPFIND", "x")
+
+    def raw_status(self, method, target="/api/round", key=True):
+        """The status line of a raw request, for methods urllib will not send.
+
+        http.client refuses a body-less CONNECT and rewrites the target, so
+        the socket is the only way to ask this server what it does with one.
+        """
+        client = self.raw_connection()
+        if key is True:
+            target = "{}?key={}".format(target, self.key)
+        client.sendall("{} {} HTTP/1.0\r\n\r\n".format(method, target).encode("utf-8"))
+        received = self.read_to_close(client)
+        self.assertTrue(received, method)
+        return received.splitlines()[0], received
+
+    def test_a_method_with_no_handler_of_its_own_is_gated_like_the_rest(self):
+        """The stdlib answers an unknown method with a 501 from inside
+        handle_one_request: before any handler runs, so with no key checked
+        and none of the four hardening headers. Nothing leaked through that,
+        but the docstring above said every method was gated and five of them
+        were not."""
+        for method in self.UNNAMED:
+            status, received = self.raw_status(method, key=False)
+            self.assertIn(b"403", status, received)
+            self.assertIn(b"X-Content-Type-Options: nosniff", received, method)
+            self.assertIn(b"Referrer-Policy: no-referrer", received, method)
+            self.assertIn(b"Cache-Control: no-store", received, method)
+            self.assertNotIn(b"Set-Cookie", received, method)
+
+    def test_a_method_with_no_handler_is_501_once_the_key_is_shown(self):
+        """Gated first, refused second -- the same two steps every named
+        method takes, so that holding the key changes nothing about what is
+        implemented."""
+        for method in self.UNNAMED:
+            status, received = self.raw_status(method)
+            self.assertIn(b"501", status, received)
+
+    def test_gating_every_method_did_not_gate_anything_else(self):
+        """__getattr__ catches do_*, and nothing else may fall into it. The
+        stdlib itself asks hasattr(self, "_headers_buffer"), and a handler
+        that answered yes to every attribute would break send_header."""
+        handler = server_module._Handler
+        instance = handler.__new__(handler)
+        self.assertFalse(hasattr(instance, "_headers_buffer"))
+        with self.assertRaises(AttributeError):
+            instance.not_a_do_method
+        self.assertEqual(self.get("/").status, 200)  # send_header still works
+
     def test_no_method_is_served_to_a_caller_without_the_key(self):
         for method in self.OTHERS:
             error = self.refused("/api/round", key=False, method=method)
@@ -458,7 +601,50 @@ class _RoundIsADirectory(Session):
         return 1
 
 
+class _SessionDirRefusesToBeListed(Session):
+    """A session whose .craft/ is a directory right up until it is read.
+
+    current_round() calls is_dir() and then iterdir(), and the second may
+    refuse where the first did not. Root reads a mode-000 directory, so the
+    real trigger below skips for root; this one raises the same OSError from
+    the same call on every machine, which is what keeps the guard covered.
+    """
+
+    def current_round(self):
+        raise PermissionError(13, "Permission denied", str(self.craft_dir))
+
+
 class RoundTest(ServerTestCase):
+    def test_an_unlistable_session_directory_reports_an_error(self):
+        """round_payload says "Never raises", and current_round() sat outside
+        the try while raising like everything else that touches a filesystem.
+        A .craft/ at mode 000 passes is_dir() and then refuses iterdir(), and
+        the browser got a reset connection -- the same failure _page is
+        already guarded against."""
+        self.session.craft_dir.chmod(0o000)
+        self.addCleanup(self.session.craft_dir.chmod, 0o755)
+        try:
+            list(self.session.craft_dir.iterdir())
+        except PermissionError:
+            pass
+        else:
+            self.skipTest("this user can list a mode-000 directory; probably root")
+        payload = self.get_json("/api/round")
+        self.assertFalse(payload["ok"])
+        self.assertIn(".craft", payload["error"])
+        self.assertEqual(self.get("/").status, 200)  # still alive
+
+    def test_an_unlistable_session_directory_names_no_path(self):
+        """The root-proof half, and the one that also checks the message. An
+        OSError's str() carries the path it failed on, so formatting exc
+        rather than _reason(exc) puts the agent's directory on the page."""
+        self.server.session = _SessionDirRefusesToBeListed(self._tmp.name)
+        payload = self.get_json("/api/round")
+        self.assertFalse(payload["ok"])
+        self.assertIn(".craft", payload["error"])
+        self.assertNamesNoPath(json.dumps(payload))
+        self.assertEqual(self.get("/").status, 200)  # still alive
+
     def test_no_rounds_yet(self):
         payload = self.get_json("/api/round")
         self.assertTrue(payload["ok"])
@@ -713,10 +899,17 @@ class KeyTest(unittest.TestCase):
     def test_two_keys_differ(self):
         self.assertNotEqual(make_key(), make_key())
 
-    def test_the_cookie_name_is_stable(self):
-        """Tasks 6 and 10 name this string too; changing it breaks them
-        silently, because a missing cookie merely falls back to the URL."""
-        self.assertEqual(COOKIE, "craftkey")
+    def test_there_is_no_cookie_machinery_left_to_name(self):
+        """The inversion of "the cookie name is stable". The name is stable
+        by being absent: nothing in server.py sets a cookie or reads one, and
+        the reason is that cookies are scoped to a host and not a port, so
+        every other http://127.0.0.1:<port> page shares this one's jar.
+
+        Behavioural tests cover a cookie coming back in and being believed;
+        this covers it coming back in at all, which is how the helpers would
+        reappear -- a name here is a name tasks 6 and 10 would then use."""
+        self.assertFalse(hasattr(server_module, "COOKIE"))
+        self.assertFalse(hasattr(server_module, "cookie_values"))
 
 
 class _BlockingSession(Session):
@@ -861,6 +1054,56 @@ class HandlerTimeoutTest(ServerTestCase):
         timeout = server_module._Handler.timeout
         self.assertIsInstance(timeout, (int, float))
         self.assertTrue(0 < timeout <= 120, timeout)
+
+    def test_the_read_budget_is_a_bounded_number_of_seconds(self):
+        budget = server_module._Handler.read_budget
+        self.assertIsInstance(budget, (int, float))
+        self.assertTrue(0 < budget <= 120, budget)
+
+    def test_a_trickled_request_cannot_outlive_the_read_budget(self):
+        """The ceiling `timeout` is not. socketserver applies it with
+        settimeout(), which is a per-read IDLE clock: every byte resets it, so
+        a client sending one byte at a time under it holds a thread and a
+        descriptor for as long as it likes -- readline(65537) will take 64 KiB
+        at that rate, and the header parser a hundred lines after that.
+
+        The idle clock here is left at its production value on purpose. What
+        ends this connection has to be the budget, not the clock, or the test
+        would pass against the very code that has no budget at all.
+        """
+        self.addCleanup(setattr, server_module._Handler, "read_budget",
+                        server_module._Handler.read_budget)
+        server_module._Handler.read_budget = 0.3
+        client = self.raw_connection()
+        client.settimeout(5)
+        started = time.monotonic()
+        # Three seconds of willing trickle against a 0.3 s budget: ten times
+        # over, so the assertions below cannot be met by a slow machine.
+        for _ in range(60):
+            try:
+                client.sendall(b"G")
+            except OSError:
+                break  # the far end went away mid-write, which is the point
+            if self.wait_until(lambda: self.server.timeouts == 1, timeout=0.05):
+                break
+        elapsed = time.monotonic() - started
+        self.assertEqual(self.server.timeouts, 1)
+        self.assertEqual(client.recv(4096), b"")  # closed from the other end
+        self.assertLess(elapsed, 2, "the budget did not bound the read")
+
+    def test_a_client_that_stalls_in_its_headers_is_counted_too(self):
+        """The request line arrived, so raw_requestline is set and the old
+        trick could not see this one: the connection closed and the count
+        missed it. Every read timeout is a read timeout, wherever it fell."""
+        self.addCleanup(
+            setattr, server_module._Handler, "timeout", server_module._Handler.timeout
+        )
+        server_module._Handler.timeout = 0.2
+        client = self.raw_connection()
+        # A whole request line, then a header that never ends.
+        client.sendall(b"GET /?key=x HTTP/1.0\r\nX-Stall: ")
+        self.assertEqual(client.recv(4096), b"")  # closed from the other end
+        self.assertTrue(self.wait_until(lambda: self.server.timeouts == 1))
 
 
 if __name__ == "__main__":

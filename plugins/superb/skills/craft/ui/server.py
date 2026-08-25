@@ -12,16 +12,25 @@ so the parts that are not stupid are all in one place and all here:
 * Every request carries the session key, whatever its method, checked
   before the path is even looked at -- so a caller without it cannot tell an
   endpoint from a typo, and cannot use the 404 as a filesystem probe. GET is
-  the only method that goes anywhere; the rest are refused, but refused here
-  and behind the key rather than by the stdlib in front of it.
+  the only method that goes anywhere; every other method, the ones nobody
+  here has heard of included, is refused behind the key rather than by the
+  stdlib in front of it.
   The one thing that stays in front of it is a request the stdlib cannot
   parse at all -- a URL too long, too many headers, an HTTP version it does
   not speak -- which it answers itself with 414, 431 or 505 before any code
   here runs. Those touch nothing and say nothing about the machine, but they
   are not gated, and claiming otherwise would be a lie in a docstring people
   will trust.
-* The key is compared in constant time, against every value that carries the
-  right cookie NAME, never as a substring of the Cookie header.
+* The key travels in the query string and nowhere else. There is no session
+  cookie and no code here that would read one: cookies are scoped to a HOST
+  and not to a port (RFC 6265 s8.5), so a cookie set by this server is a
+  cookie any other http://127.0.0.1:<port> page can make the browser fetch
+  and read back -- and a stolen one was a complete credential, since a
+  request carrying it needed no key in the URL at all.
+* The key is compared in constant time, against every value the query string
+  offers for it.
+* Extracting that key is total: a request target that will not parse yields
+  no key and the ordinary 403, never an exception in front of the gate.
 * Nothing derived from the request ever becomes a filesystem path. Exactly
   three URLs are served and there is no static file handler at all.
 * An error tells the browser which of the agent's files is wrong by name and
@@ -29,12 +38,17 @@ so the parts that are not stupid are all in one place and all here:
 * The agent's terminal learns no more than the browser does. Request logging
   is off, and a client hanging up mid-response -- which is all a reload is --
   is counted rather than printed as a traceback full of absolute paths.
+* A connection is bounded twice, by two clocks that are not the same clock.
+  `timeout` is the idle one socketserver applies with settimeout(); the
+  ceiling on reading a whole request is `read_budget`, an absolute deadline,
+  because an idle clock every arriving byte resets is not a ceiling at all.
 """
 # Deliberate: kept so any annotation added later may use `int | None` syntax
 # while this project's floor is Python 3.9. Do not delete.
 from __future__ import annotations
 
 import hmac
+import io
 import ipaddress
 import json
 import secrets
@@ -43,14 +57,13 @@ import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlsplit
 
 import markdown
 import schema
 from session import describe_os_error, read_json
 
 APP_HTML = Path(__file__).with_name("app.html")
-COOKIE = "craftkey"
 
 # 256 bits from the OS CSPRNG. The key travels in a URL the user pastes into
 # a browser, so it has to survive being seen without being guessable, and hex
@@ -83,31 +96,28 @@ def keys_match(supplied, expected):
     )
 
 
-def cookie_values(header, name):
-    """Every value in a Cookie header carrying exactly this name.
+def target_parts(target):
+    """A request target as (path, query), or ("", "") if it is not one.
 
-    Not a substring search over the raw header: `"craftkey=<key>" in header`
-    also accepts `xcraftkey=<key>`, and cookies are scoped to a host, NOT to
-    a port -- anything else listening on 127.0.0.1 can set a cookie this
-    server will be handed.
+    Total by construction, and that is the whole reason it exists. urlsplit
+    raises ValueError("Invalid IPv6 URL") on an unbalanced "[" or "]" in an
+    authority, and a request target reaches self.path verbatim: CPython
+    rewrites a leading "//" to "/", but an ABSOLUTE-form target -- which
+    RFC 9112 s3.2.2 says a server has to accept on any request -- is not
+    rewritten and arrives intact. `GET http://[::1/ HTTP/1.0` therefore
+    raised out of key extraction, which runs in front of the auth check: no
+    response at all, on every method, to a caller holding no credential, and
+    one line on the agent's terminal per attempt at whatever rate they liked.
 
-    Every match, not the last one, which is what a dict-shaped parser gives.
-    A browser may send several cookies of one name (differing paths, or a
-    host-only one beside a domain one), and a stray `craftkey=junk` from
-    another local app must not be able to shadow the real one and lock the
-    user out of their own session.
-
-    The NAME is stripped, because the separator is "; " and the space belongs
-    to the separator. The VALUE is not: RFC 6265 gives cookie-value no spaces
-    at all, so " <key>" and "<key> " are not this key, and widening the match
-    by a strip() is a loosening nobody asked for.
+    Anything that will not parse yields no path and no query, which is no
+    key, which is the same 403 a typo gets. That is the honest answer: an
+    unparseable target is not a request for anything this server has.
     """
-    values = []
-    for part in (header or "").split(";"):
-        crumb, sep, value = part.partition("=")
-        if sep and crumb.strip() == name:
-            values.append(value)
-    return values
+    try:
+        parts = urlsplit(target)
+    except ValueError:
+        return "", ""
+    return parts.path, parts.query
 
 
 def _reason(exc):
@@ -143,16 +153,107 @@ def require_loopback(host):
             )
 
 
+class _RequestReader(io.RawIOBase):
+    """The connection, read under one absolute deadline for the whole request.
+
+    `timeout` is applied by socketserver with settimeout(), which is an IDLE
+    clock and not a ceiling: every byte that arrives resets it. A client
+    trickling one byte per just-under-timeout seconds therefore holds a
+    thread and a descriptor for as long as it cares to -- readline(65537)
+    will take 64 KiB at that rate, and the header parser another hundred
+    lines after it -- which is days, from any unprivileged process on the
+    machine, at a cost of one byte a minute.
+
+    So the ceiling is an absolute deadline, and it is enforced HERE, on the
+    recv, rather than around the readline that loops over recvs: arming it
+    per readline would give the whole budget back to every byte, which is
+    the bug again with more steps. Each read gets whichever is smaller of
+    what is left of the budget and the idle clock, so the request line and
+    the headers together are read inside `read_budget` seconds or the
+    connection ends.
+
+    The budget is lifted the moment the headers are parsed, because nothing
+    in this server reads a body and an honest client may legitimately read a
+    response slowly. From there the idle clock alone bounds the write.
+    """
+
+    def __init__(self, handler):
+        io.RawIOBase.__init__(self)
+        self._handler = handler
+        self._deadline = None
+
+    def start(self):
+        """Begin one request's budget, now."""
+        self._deadline = time.monotonic() + self._handler.read_budget
+
+    def finished(self):
+        """The request is read; the response is the idle clock's problem."""
+        self._deadline = None
+        self._handler.connection.settimeout(self._handler.timeout)
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        connection = self._handler.connection
+        idle = self._handler.timeout
+        if self._deadline is not None:
+            left = self._deadline - time.monotonic()
+            if left <= 0:
+                self._handler.timed_out = True
+                raise socket.timeout("the request outlived its read budget")
+            connection.settimeout(left if idle is None else min(left, idle))
+        try:
+            return connection.recv_into(buffer)
+        except socket.timeout:
+            # Recorded rather than merely raised. BaseHTTPRequestHandler
+            # swallows this, and handle_one_request below could only ever
+            # observe a timeout on the request LINE -- so a client stalling
+            # inside its headers closed the connection and left no trace at
+            # all. Every read timeout is one read timeout, wherever it fell.
+            self._handler.timed_out = True
+            raise
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "craftui"
     sys_version = ""  # no free interpreter version for anything scanning ports
 
-    # A connection that is opened and then goes quiet holds a thread and a
-    # file descriptor for as long as the client likes; three hundred of them
-    # hold three hundred, and nothing here reaps them. This is the ceiling.
-    # Generous, because the same clock also bounds a client reading a
-    # response slowly, which is a thing an honest client may do.
+    # The IDLE clock, and only that: socketserver hands it to settimeout(),
+    # so it bounds the gap between two bytes and never a whole request. It is
+    # what ends a connection that is opened and then goes quiet -- three
+    # hundred of those hold three hundred threads and descriptors, and
+    # nothing here reaps them. Generous, because after the headers it is also
+    # what bounds a client reading a response slowly, which is a thing an
+    # honest client may do.
     timeout = 30
+
+    # The ceiling the line above is NOT. An absolute deadline for reading one
+    # whole request, enforced per recv by _RequestReader. Generous for the
+    # same reason and for one more: every request this server answers is a
+    # request line and a handful of headers, so thirty seconds is not a
+    # budget any honest client has ever needed to notice.
+    read_budget = 30
+
+    def setup(self):
+        BaseHTTPRequestHandler.setup(self)
+        self.timed_out = False
+        # The stdlib's rfile is a buffered reader over the socket, and its
+        # every read gets the idle clock afresh. Swap in one that reads the
+        # same socket under the budget above. Closing the old one releases
+        # makefile's reference and nothing else; the socket belongs to
+        # socketserver, which closes it in shutdown_request.
+        self.rfile.close()
+        self._reader = _RequestReader(self)
+        size = self.rbufsize if self.rbufsize > 0 else io.DEFAULT_BUFFER_SIZE
+        self.rfile = io.BufferedReader(self._reader, size)
+
+    def parse_request(self):
+        parsed = BaseHTTPRequestHandler.parse_request(self)
+        # Reached whether the request parsed or not, and in both cases the
+        # reading is over: a bad request is answered and the connection ends.
+        self._reader.finished()
+        return parsed
 
     def log_message(self, fmt, *args):
         pass  # the agent's terminal is not a web log
@@ -170,24 +271,28 @@ class _Handler(BaseHTTPRequestHandler):
         self.server.timeouts += 1
 
     def handle_one_request(self):
-        # raw_requestline is assigned from rfile.readline(), so a timeout
-        # waiting for the request line raises before the assignment -- and
-        # since the stdlib swallows the exception, an unset request line is
-        # the only trace a half-open connection leaves behind. A client that
-        # sends the request line and then stalls in its headers times out on
-        # the same clock, inside parse_headers where this cannot see it: the
-        # connection closes either way, only the count misses it.
+        # Two signals, because they see different halves of the same thing.
+        # _RequestReader sets timed_out on any read timeout, headers
+        # included, which is where the count used to be lost. raw_requestline
+        # stays as the backstop it always was: it is assigned from
+        # rfile.readline(), so anything that raises before the assignment --
+        # and the stdlib swallows it -- leaves the request line unset.
         self.raw_requestline = None
+        self.timed_out = False
+        self._reader.start()
         BaseHTTPRequestHandler.handle_one_request(self)
-        if self.raw_requestline is None:
+        if self.timed_out or self.raw_requestline is None:
             self.handle_timeout()
 
     def _supplied_keys(self):
-        """Every key this request offers: query string first, then cookies."""
-        query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
-        return list(query.get("key", [])) + cookie_values(
-            self.headers.get("Cookie"), COOKIE
-        )
+        """Every key this request's query string offers. Never raises.
+
+        The query string is the only place a key may come from -- see the
+        cookie paragraph in the module docstring -- and target_parts is what
+        keeps a malformed target from raising in front of the gate.
+        """
+        query = parse_qs(target_parts(self.path)[1], keep_blank_values=True)
+        return list(query.get("key", []))
 
     def _authed(self):
         expected = self.server.key
@@ -196,7 +301,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return True
         return False
 
-    def _send(self, code, body, ctype="application/json; charset=utf-8", set_cookie=False):
+    def _send(self, code, body, ctype="application/json; charset=utf-8"):
         data = body.encode("utf-8") if isinstance(body, str) else body
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -209,14 +314,12 @@ class _Handler(BaseHTTPRequestHandler):
         # chance to hand it to a third party in a Referer. markdown.py already
         # puts rel="noreferrer" on brief links; this covers everything else.
         self.send_header("Referrer-Policy", "no-referrer")
-        if set_cookie:
-            # HttpOnly: the page reads its key from the URL, never from
-            # document.cookie, so script has no business reading this -- and
-            # script that wants to is script carrying the key off the machine.
-            self.send_header(
-                "Set-Cookie",
-                "{}={}; Path=/; SameSite=Strict; HttpOnly".format(COOKIE, self.server.key),
-            )
+        # No Set-Cookie, deliberately, and this is the only place one could
+        # go. A cookie here was scoped to 127.0.0.1 as a HOST -- ports do not
+        # separate cookie jars -- so any other local port could pull one
+        # subresource off this server and read the key back out of the
+        # response it caused. Nothing needs it: the page is one file with no
+        # subresources and every fetch it makes appends ?key=.
         self.end_headers()
         # A HEAD is answered with the headers a GET would carry and none of
         # the body. protocol_version is HTTP/1.0, so a body written anyway is
@@ -240,7 +343,7 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._authed():
             return self._text(403, "forbidden")
         self.server.touch()
-        path = urlparse(self.path).path
+        path = target_parts(self.path)[0]
         if path == "/":
             return self._page()
         if path == "/api/round":
@@ -249,14 +352,38 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(self.server.brief_payload())
         return self._text(404, "not found")
 
+    def __getattr__(self, name):
+        """Any do_* at all, so that "every method is gated" is true.
+
+        Naming the six methods below was narrower than the docstring
+        claimed: TRACE, CONNECT and any three letters somebody invents have
+        no do_* of their own, so the stdlib answered them with a 501 from
+        inside handle_one_request -- no key checked, and none of the four
+        hardening headers every other response here carries. Nothing escaped
+        through that (the method name is escaped, and a 501 says nothing
+        about the machine), but the gap was in the one place this file says
+        there is no gap, and a docstring people trust is worth more than the
+        four lines it costs to make it true.
+
+        __getattr__ runs only when ordinary lookup has already failed, so
+        do_GET and the assignments below are untouched by it, and anything
+        that is not a do_* -- the stdlib's own hasattr(self,
+        "_headers_buffer") among them -- still gets its AttributeError.
+        """
+        if name.startswith("do_"):
+            return self._unsupported
+        raise AttributeError(name)
+
     def _unsupported(self):
         """Every method that is not GET: gated first, refused second.
 
-        The stdlib answers an unknown method with a 501 of its own, from
-        inside handle_one_request -- before any handler runs, so with no key
-        checked and none of the headers every other response here carries.
-        What this server does not implement it should not implement
-        differently for a caller holding the key and a caller who is not.
+        Left alone, the stdlib answers a method with no do_* by sending a 501
+        of its own from inside handle_one_request -- before any handler runs,
+        so with no key checked and none of the headers every other response
+        here carries. What this server does not implement it should not
+        implement differently for a caller holding the key and a caller who
+        is not; __getattr__ above is what makes sure nothing reaches that
+        501, whatever the method is called.
 
         Task 6 replaces the POST and PATCH arms with real handlers. Its rule
         is this one: _authed() first, before anything is read or touched.
@@ -273,6 +400,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.server.touch()
         return self._text(501, "not implemented")
 
+    # Named as well as caught by __getattr__: these are the ones task 6 comes
+    # back for, and a real handler wants a real assignment to replace.
     do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = _unsupported
 
     def _page(self):
@@ -283,7 +412,7 @@ class _Handler(BaseHTTPRequestHandler):
             # a reset connection -- and prints the absolute path in a
             # traceback across the agent's terminal.
             return self._text(500, "the craft UI page could not be read")
-        return self._send(200, body, "text/html; charset=utf-8", set_cookie=True)
+        return self._send(200, body, "text/html; charset=utf-8")
 
 
 class CraftServer(ThreadingHTTPServer):
@@ -346,11 +475,30 @@ class CraftServer(ThreadingHTTPServer):
     def round_payload(self):
         """The current round, or why it cannot be served.
 
-        Never raises. The agent writes these files while the browser is
-        polling them, and a half-written or hand-edited round has to come
-        back as a message on the page rather than as a dead connection.
+        Never raises, and that now includes finding out WHICH round it is.
+        current_round() sat outside the guard while raising like everything
+        else that touches a filesystem: it calls is_dir() and then
+        iterdir(), and a .craft/ that passes the first and refuses the
+        second -- mode 000, or any of the ways a directory can stop being
+        readable between two syscalls -- took the request down with it. The
+        browser got a reset connection, which is exactly the failure _page
+        is already guarded against.
+
+        The agent writes these files while the browser is polling them, and
+        a half-written, hand-edited or unreadable round has to come back as
+        a message on the page.
         """
-        number = self.session.current_round()
+        try:
+            number = self.session.current_round()
+        except OSError as exc:
+            # Named by the directory, not by where it is: the same rule the
+            # file-level messages below keep.
+            return {
+                "ok": False,
+                "error": "{} could not be read: {}".format(
+                    self.session.craft_dir.name, _reason(exc)
+                ),
+            }
         if number is None:
             return {"ok": True, "round": None}
         name = self.session.questions_path(number).name

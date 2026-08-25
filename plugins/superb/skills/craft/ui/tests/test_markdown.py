@@ -170,8 +170,32 @@ class LinkTargetTest(unittest.TestCase):
                     "a refused scheme still produced a tag",
                 )
                 # Refused, not silently swallowed: the user still sees what
-                # their brief said, as text.
+                # their brief said, as text. Asserting the label alone would
+                # not notice a refusal that returned group(1) and threw the
+                # target away; the whole original markdown has to survive.
                 self.assertIn("click", out)
+                self.assertIn("[click]({})".format(target), out)
+
+    def test_an_unlisted_scheme_is_refused_even_though_no_blocklist_names_it(self):
+        # The allowlist is the contract, not a three-name blocklist of
+        # javascript/data/vbscript -- which would pass every other test here
+        # and still link each of these, all of which run or reveal something
+        # in some browser.
+        for target in (
+            "jscript:location=name",
+            "livescript:location=name",
+            "about:blank",
+            "view-source:https://example.com",
+            "blob:https://example.com/x",
+        ):
+            with self.subTest(target=target):
+                out = render("[click]({})".format(target))
+                self.assertEqual(
+                    [tag for tag, _ in tags_of(out)],
+                    ["p"],
+                    "a scheme outside the allowlist still produced a tag",
+                )
+                self.assertIn("[click]({})".format(target), out)
 
     def test_control_characters_cannot_smuggle_a_dangerous_scheme(self):
         # Browsers strip leading C0 controls before parsing a URL, so a naive
@@ -188,6 +212,35 @@ class LinkTargetTest(unittest.TestCase):
                     "a refused target still produced a tag",
                 )
                 self.assertIn("click", out)
+
+    def test_a_control_character_inside_a_scheme_is_stripped_not_just_a_leading_one(self):
+        # Stripping only a leading run leaves java\x01script: intact, and the
+        # scheme regex then matches nothing at all -- so the allowlist is
+        # never consulted and the target links. The strip has to run
+        # everywhere, not anchored to the start.
+        out = render("[click](java\x01script:location=name)")
+        self.assertEqual(
+            [tag for tag, _ in tags_of(out)],
+            ["p"],
+            "a control character mid-scheme still produced a tag",
+        )
+
+    def test_whitespace_in_a_target_stops_it_being_a_link_at_all(self):
+        # The URL class excludes \s, so a target with a space is not a link
+        # even when its scheme is one we allow. Widening the class to [^)]
+        # would let the noise strip glue the halves back together.
+        out = render("[x](https://exa mple.com)")
+        self.assertNotIn("<a ", out)
+        self.assertIn("[x](https://exa mple.com)", out)
+
+    def test_a_tab_cannot_split_a_scheme_past_both_guards_at_once(self):
+        # The one that matters: mid-string stripping and the \s exclusion are
+        # each redundant alone, and together they are the whole defence. Undo
+        # both and this renders href="java&#9;script:location=name", which a
+        # browser strips the tab out of and runs.
+        out = render("[x](java\tscript:location=name)")
+        self.assertNotIn("<a ", out)
+        self.assertEqual([tag for tag, _ in tags_of(out)], ["p"])
 
     def test_ordinary_and_relative_targets_still_link(self):
         # The other half of the guarantee: the refusal must be narrow. A
@@ -358,9 +411,19 @@ class RobustnessTest(unittest.TestCase):
         elapsed = time.time() - start
         self.assertLess(elapsed, 2.0, "took {:.2f}s".format(elapsed))
         self.assertIn("<p>", out)
+        # Dropped from here: a 200k line of plain "x". Every rule is linear in
+        # text that matches none of them, bounds or no bounds, so it cost
+        # suite time and constrained nothing.
+
+    def test_a_pathological_link_target_terminates_quickly(self):
+        # The bracket line above exercises the label class only: remove the
+        # {1,2000} bound from the URL class alone and every other test stays
+        # green while 80k of "[a](" goes from ~0.4s to ~7.7s.
         start = time.time()
-        render("x" * 200000)
-        self.assertLess(time.time() - start, 2.0)
+        out = render("[a](" * 20000)
+        elapsed = time.time() - start
+        self.assertLess(elapsed, 2.0, "took {:.2f}s".format(elapsed))
+        self.assertIn("<p>", out)
 
     def test_an_indented_closing_fence_still_closes(self):
         # The closing scan strips before matching. Without that, an indented

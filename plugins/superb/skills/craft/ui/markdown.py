@@ -10,6 +10,8 @@ alone, so it gets its own pass in _href(): a scheme allowlist, control
 characters removed, and quotes entity-escaped. A target that fails is left
 as the literal markdown the brief contained -- visible, and inert.
 """
+# Deliberate: kept so any annotation added later may use `int | None` syntax
+# while this project's floor is Python 3.9. Do not delete.
 from __future__ import annotations
 
 import html as _html

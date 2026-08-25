@@ -326,9 +326,23 @@ then posts a final round containing no questions and a closing note, and stops.
 ## Server behaviour
 
 - **Binds `127.0.0.1` only.** The URL carries a session key the server requires
-  on every request; anything without it gets `403`. After first load the browser
-  holds the key in a cookie, so reloads and asset fetches carry it. This is the
-  same
+  on every request; anything without it gets `403`.
+
+  **There is no cookie, deliberately.** An earlier draft set one so reloads would
+  carry the key. An adversarial review drove headless Chromium and demonstrated
+  that a page on *any other* `http://127.0.0.1:<port>` can load a single
+  subresource from this server and read the cookie back — and that the stolen
+  cookie is a complete credential, since `/api/brief` with no `key=` in the URL
+  returned `200`. Cookies are scoped by host, not by port (RFC 6265 §8.5);
+  Chrome records `sourcePort` and does not enforce it. `SameSite=Strict` bounds
+  the leak to same-site, which on a developer machine means every other local
+  port — exactly the adversary the key exists to stop.
+
+  The page is a single self-contained file with no subresources, and its fetch
+  helper already appends `?key=` to every request, so the cookie was solving a
+  problem that does not exist. The key therefore lives only in the URL. Browser
+  history is not readable across origins, which is a far smaller exposure than a
+  credential handed to every process listening on loopback. This is the same
   posture as the superpowers brainstorming companion, and it exists so a stray
   tab or another machine on the LAN cannot read the user's product plans.
 - **Serves three things:** `app.html`, the current round JSON, and the brief

@@ -6,11 +6,15 @@ are adversarial by construction: a prefix of the key, a superstring of it, a
 cookie whose NAME merely ends in the right letters, a key that is not ASCII.
 Each of those is a one-line change to server.py away from being accepted.
 """
+import contextlib
 import functools
+import io
 import json
 import socket
+import struct
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.parse
@@ -97,6 +101,60 @@ class ServerTestCase(unittest.TestCase):
             self.get(path, **kw)
         return caught.exception
 
+    def raw_request(self, method, path, key=True):
+        """One HTTP/1.1 request as bytes, for what urllib will not do.
+
+        urllib hides the two things the tests below are about: the bytes that
+        followed a HEAD's headers, and a connection that is abandoned rather
+        than finished.
+        """
+        target = self.url(path, key)[len(self.base):]
+        return "{} {} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".format(
+            method, target
+        ).encode("utf-8")
+
+    def read_to_close(self, client):
+        """Everything the server sends before it closes the connection."""
+        client.settimeout(5)
+        received = b""
+        while True:
+            chunk = client.recv(4096)
+            if not chunk:
+                return received
+            received += chunk
+
+    def raw_connection(self):
+        """A socket to the server, closed however the test ends."""
+        client = socket.create_connection(("127.0.0.1", self.server.port), timeout=5)
+        self.addCleanup(client.close)
+        return client
+
+    def wait_until(self, predicate, timeout=5):
+        """Poll until something another thread did becomes visible.
+
+        Not a sleep: a passing run leaves the moment the condition holds and
+        the deadline is only how a failing one ends. Returns whether it held.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.005)
+        return False
+
+    def assertNamesNoPath(self, text, msg=None):
+        """Nothing in a response may say where anything on this machine is.
+
+        Three assertions rather than one because they fail differently and a
+        failure should name which leak it is: the session's own directory,
+        the directory the tool itself lives in, and then any absolute path at
+        all -- which the last catches, since every name a message is allowed
+        to carry (round-001.questions.json, CRAFT.md) has no slash in it.
+        """
+        self.assertNotIn(self._tmp.name, text, msg)
+        self.assertNotIn(str(APP_HTML), text, msg)
+        self.assertNotIn("/", text, msg)
+
 
 class AuthTest(ServerTestCase):
     def test_no_key_at_all_is_forbidden(self):
@@ -149,6 +207,16 @@ class AuthTest(ServerTestCase):
         exactly, not as a suffix of somebody else's."""
         header = "x{}={}".format(COOKIE, self.key)
         self.assertEqual(self.refused("/", key=False, cookie=header).code, 403)
+
+    def test_a_cookie_name_in_the_wrong_case_is_forbidden(self):
+        """RFC 6265 cookie names are case-sensitive. Case-folding the two
+        sides of the comparison widens the set of cookies another 127.0.0.1
+        listener can plant on this host -- the exact axis cookie_values was
+        written to narrow, since cookies are scoped to a host and not a port.
+        """
+        for name in ("CraftKey", "CRAFTKEY", COOKIE.capitalize()):
+            header = "{}={}".format(name, self.key)
+            self.assertEqual(self.refused("/", key=False, cookie=header).code, 403, header)
 
     def test_a_cookie_value_with_trailing_junk_is_forbidden(self):
         header = "{}={}junk".format(COOKIE, self.key)
@@ -271,6 +339,13 @@ class PageTest(ServerTestCase):
         self.assertNotIn(self._tmp.name, body)
         self.assertNotIn(str(APP_HTML), body)
 
+    def test_a_403_body_names_no_path(self):
+        """The 404 has this test above; the 403 is the one an UNAUTHENTICATED
+        caller gets, and comparing two 403 bodies to each other -- which is
+        what the auth test does -- cannot see a leak present in both."""
+        body = self.refused("/", key=False).read().decode("utf-8", "replace")
+        self.assertNamesNoPath(body)
+
     def test_a_missing_page_file_is_a_clean_500_and_the_server_survives(self):
         """A read that raises out of do_GET gets no response at all -- the
         client sees a reset connection and the traceback prints the absolute
@@ -285,10 +360,102 @@ class PageTest(ServerTestCase):
         server_module.APP_HTML = APP_HTML
         self.assertEqual(self.get("/").status, 200)
 
+    def test_an_unreadable_page_file_is_a_clean_500_too(self):
+        """Not just a MISSING one. Narrowing the guard to FileNotFoundError
+        passes the test above and still takes the request down -- no
+        response, a reset connection, a traceback -- when app.html is a
+        directory or has no read permission. A directory, because root
+        reads a mode-000 file and would skip the point."""
+        page = Path(self._tmp.name) / "app.html"
+        page.mkdir()
+        server_module.APP_HTML = page
+        self.addCleanup(setattr, server_module, "APP_HTML", APP_HTML)
+        error = self.refused("/")
+        self.assertEqual(error.code, 500)
+        body = error.read().decode("utf-8", "replace")
+        self.assertNamesNoPath(body)
+        self.assertNotIn("Traceback", body)
+        server_module.APP_HTML = APP_HTML
+        self.assertEqual(self.get("/").status, 200)  # still alive
+
     def test_writing_methods_are_not_served_yet(self):
         for method in ("POST", "PUT", "DELETE"):
             error = self.refused("/api/round", method=method, data=b"{}")
             self.assertEqual(error.code, 501, method)
+
+
+class MethodTest(ServerTestCase):
+    """Everything that is not a GET.
+
+    Left to the stdlib these are answered with a 501 from inside
+    handle_one_request, before any handler runs: no key checked, and none of
+    the four headers every other response here carries.
+    """
+
+    OTHERS = ("POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
+
+    def test_no_method_is_served_to_a_caller_without_the_key(self):
+        for method in self.OTHERS:
+            error = self.refused("/api/round", key=False, method=method)
+            self.assertEqual(error.code, 403, method)
+
+    def test_a_method_that_is_not_get_is_refused_even_with_the_key(self):
+        for method in self.OTHERS:
+            self.assertEqual(self.refused("/api/round", method=method).code, 501, method)
+
+    def test_a_refused_method_carries_the_hardening_headers(self):
+        for method in self.OTHERS:
+            headers = self.refused("/api/round", method=method).headers
+            self.assertEqual(headers.get("X-Content-Type-Options"), "nosniff", method)
+            self.assertEqual(headers.get("Referrer-Policy"), "no-referrer", method)
+            self.assertIn("no-store", headers.get("Cache-Control", ""), method)
+
+    def test_a_refused_method_hands_out_no_cookie(self):
+        for method in self.OTHERS:
+            error = self.refused("/api/round", key=False, method=method)
+            self.assertIsNone(error.headers.get("Set-Cookie"), method)
+
+    def test_an_unauthorised_method_cannot_hold_the_session_open(self):
+        """Same reasoning as the GET: any process on the machine could
+        otherwise keep an abandoned session, and the project lock under it,
+        alive for ever by POSTing at it."""
+        self.server._last -= 100
+        before = self.server.idle_seconds()
+        self.refused("/api/round", key=False, method="POST")
+        self.assertGreaterEqual(self.server.idle_seconds(), before)
+
+    def test_a_head_carries_the_headers_and_none_of_the_body(self):
+        """A HEAD is answered with the headers a GET would carry and nothing
+        after them. urllib cannot see this -- http.client knows a HEAD has no
+        body and stops reading -- so the socket says it instead.
+
+        Harmless today, because protocol_version is HTTP/1.0 and every
+        response is followed by a close. It stops being harmless the moment
+        anything here speaks 1.1, when a body nobody read is the start of the
+        next response on the connection.
+        """
+        client = self.raw_connection()
+        client.sendall(self.raw_request("HEAD", "/api/round"))
+        received = self.read_to_close(client)
+        headers, blank, body = received.partition(b"\r\n\r\n")
+        self.assertTrue(blank, received)
+        self.assertIn(b"501", headers)
+        self.assertIn(b"Content-Type", headers)
+        self.assertEqual(body, b"")
+
+
+class _RoundIsADirectory(Session):
+    """A session that insists round 1 exists, so that a directory sitting at
+    its name reaches read_json and raises an OSError naming a path.
+
+    current_round only counts entries is_file() accepts, and every OSError
+    whose str() carries a path is either that (EISDIR, ELOOP) or exempt for
+    root (EACCES). This is how the OSError arm gets exercised on every
+    machine rather than only on the ones where mode 000 means something.
+    """
+
+    def current_round(self):
+        return 1
 
 
 class RoundTest(ServerTestCase):
@@ -350,6 +517,21 @@ class RoundTest(ServerTestCase):
         self.assertFalse(payload["ok"])
         self.assertIn("round-001.questions.json", payload["error"])
 
+    def test_an_unreadable_round_names_the_file_and_not_where_it_lives(self):
+        """The OSError arm is the one that carries a path -- str() of one
+        reads "[Errno 21] Is a directory: '/tmp/.../round-001.questions.json'"
+        -- and three separate one-line mutations put the whole of that in the
+        JSON the browser renders: _reason returning str(exc), and either
+        payload formatting exc where it should format _reason(exc). The
+        ValueError test below cannot see any of them, because str() of a
+        JSONDecodeError names no path to begin with."""
+        self.session.questions_path(1).mkdir()
+        self.server.session = _RoundIsADirectory(self._tmp.name)
+        payload = self.get_json("/api/round")
+        self.assertFalse(payload["ok"])
+        self.assertIn("round-001.questions.json", payload["error"])
+        self.assertNamesNoPath(json.dumps(payload))
+
     def test_an_error_never_names_a_filesystem_path(self):
         """The file's name is useful; where the agent keeps its files is not,
         and the browser is not always the person who started the session."""
@@ -408,6 +590,20 @@ class BriefTest(ServerTestCase):
         self.assertEqual(self.get("/").status, 200)  # still alive
 
 
+class BriefErrorTest(ServerTestCase):
+    def test_an_unreadable_brief_names_it_and_not_where_it_lives(self):
+        """brief_payload's OSError arm, and the same three mutations. A
+        directory at CRAFT.md rather than a mode, so root sees it too; the
+        undecodable-brief test above takes the ValueError arm, whose str()
+        names no path however it is formatted."""
+        self.session.brief_path.mkdir()
+        payload = self.get_json("/api/brief")
+        self.assertEqual(payload["html"], "")
+        self.assertIn("CRAFT.md", payload["error"])
+        self.assertNamesNoPath(json.dumps(payload))
+        self.assertEqual(self.get("/").status, 200)  # still alive
+
+
 class ReadOnlyTest(ServerTestCase):
     def snapshot(self):
         state = {}
@@ -443,7 +639,11 @@ class BindingTest(ServerTestCase):
         self.assertEqual(port, self.server.socket.getsockname()[1])
 
     def test_a_non_loopback_host_is_refused(self):
-        for host in ("0.0.0.0", "", "192.168.1.10", "example.com"):
+        for host in ("0.0.0.0", "", "192.168.1.10", "example.com",
+                     # Loosening the exact match to `"localhost" not in host`
+                     # accepts all three of these, and the first two are
+                     # names somebody else gets to point wherever they like.
+                     "localhost.evil.example", "evil.localhost", "notlocalhost"):
             with self.assertRaises(ValueError, msg=host):
                 CraftServer(self.session, self.key, host=host, port=0)
 
@@ -495,11 +695,6 @@ class IdleTest(ServerTestCase):
         self.get("/api/round").read()
         self.assertLess(self.server.idle_seconds(), 5)
 
-    def test_touch_is_what_resets_it(self):
-        self.server._last -= 100
-        self.server.touch()
-        self.assertLess(self.server.idle_seconds(), 1)
-
     def test_the_idle_timeout_is_four_hours_by_default(self):
         self.assertEqual(self.server.idle_timeout_s, 14400)
         other = CraftServer(self.session, self.key, port=0, idle_timeout_s=5)
@@ -524,32 +719,148 @@ class KeyTest(unittest.TestCase):
         self.assertEqual(COOKIE, "craftkey")
 
 
+class _BlockingSession(Session):
+    """A session whose round read parks inside the handler until released.
+
+    A barrier across two clients only synchronises the START of two requests,
+    and both of these finish in microseconds either way -- so a plain
+    HTTPServer, handling one request at a time, passed that. Holding the
+    first request open until the second has been ANSWERED is what actually
+    tells the two servers apart.
+    """
+
+    def __init__(self, project_dir):
+        Session.__init__(self, project_dir)
+        self.holding = threading.Event()
+        self.release = threading.Event()
+
+    def current_round(self):
+        self.holding.set()
+        self.release.wait(timeout=10)
+        return None
+
+
 class ConcurrencyTest(ServerTestCase):
-    def test_two_requests_at_once_are_both_served(self):
+    def test_a_request_in_flight_does_not_hold_up_the_next_one(self):
         """ThreadingHTTPServer, not HTTPServer: a poll in one tab must not
-        block the other. Serialised handling would still pass every test
-        above."""
-        write_json_atomic(self.session.questions_path(1), VALID_ROUND)
+        block the other."""
+        blocking = _BlockingSession(self._tmp.name)
+        self.server.session = blocking
+        # Before anything that can fail: a parked handler thread outlives the
+        # assertion that let it park.
+        self.addCleanup(blocking.release.set)
         results = []
-        barrier = threading.Barrier(3, timeout=5)
 
         def hit():
             try:
-                barrier.wait()
-                results.append(self.get_json("/api/round")["round"]["round"])
+                results.append(self.get_json("/api/round")["round"])
             except Exception as exc:  # recorded, not raised, off the main thread
                 results.append(exc)
 
-        threads = [threading.Thread(target=hit) for _ in range(2)]
-        for thread in threads:
-            thread.start()
+        thread = threading.Thread(target=hit)
+        thread.start()
         try:
-            barrier.wait()
+            self.assertTrue(blocking.holding.wait(timeout=5), "the first request never arrived")
+            # The second request, made while the first is still in a handler.
+            self.assertEqual(self.get_json("/api/brief")["html"], "")
         finally:
-            for thread in threads:
-                thread.join(timeout=5)
-                self.assertFalse(thread.is_alive())
-        self.assertEqual(results, [1, 1])
+            blocking.release.set()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(results, [None])
+
+
+class TerminalTest(ServerTestCase):
+    """What the agent's console is allowed to learn from a request.
+
+    The same invariant as the responses: no absolute paths, no tracebacks.
+    socketserver's own handle_error breaks it on an ordinary reload, with a
+    perfectly valid key, by printing the traceback of the BrokenPipeError a
+    client that stopped reading leaves behind.
+    """
+
+    def stderr_from(self, exc):
+        """Whatever handle_error prints for one exception, and nothing else."""
+        captured = io.StringIO()
+        try:
+            raise exc
+        except BaseException:
+            with contextlib.redirect_stderr(captured):
+                self.server.handle_error(None, ("127.0.0.1", 0))
+        return captured.getvalue()
+
+    def test_a_client_hanging_up_prints_nothing(self):
+        hangups = (
+            BrokenPipeError(32, "Broken pipe"),
+            ConnectionResetError(104, "Connection reset by peer"),
+            ConnectionAbortedError(103, "Software caused connection abort"),
+            socket.timeout("timed out"),
+        )
+        for exc in hangups:
+            self.assertEqual(self.stderr_from(exc), "", repr(exc))
+        self.assertEqual(self.server.disconnects, len(hangups))
+        self.assertEqual(self.server.handler_errors, 0)
+
+    def test_a_real_failure_is_named_but_not_described(self):
+        """Swallowing everything would hide a bug in a handler, so the type
+        and a count survive. The message does not: an OSError's carries the
+        path it failed on, which is the thing this is all about."""
+        printed = self.stderr_from(FileNotFoundError(2, "No such file", str(APP_HTML)))
+        self.assertIn("FileNotFoundError", printed)
+        self.assertEqual(len(printed.strip().splitlines()), 1)
+        self.assertNotIn("Traceback", printed)
+        self.assertNamesNoPath(printed)
+        self.assertEqual(self.server.handler_errors, 1)
+        self.assertEqual(self.server.disconnects, 0)
+
+    def test_a_client_that_hangs_up_mid_response_prints_no_traceback(self):
+        """The reachable case, end to end: a browser reloading or navigating
+        away stops reading and goes. Left alone, that prints server.py's
+        absolute path across the terminal of whoever started the session."""
+        page = Path(self._tmp.name) / "big.html"
+        # Big enough that the response cannot fit in the socket buffers and
+        # be gone before the abort lands. A small one races, and the race is
+        # won often enough that the test would pass without proving anything.
+        page.write_bytes(b"x" * (1 << 20))
+        server_module.APP_HTML = page
+        self.addCleanup(setattr, server_module, "APP_HTML", APP_HTML)
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            client = self.raw_connection()
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
+            client.sendall(self.raw_request("GET", "/"))
+            # A reset rather than a polite close, so the write already in
+            # flight fails instead of being quietly discarded.
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            client.close()
+            self.wait_until(lambda: self.server.disconnects or captured.getvalue())
+        self.assertEqual(captured.getvalue(), "")
+        self.assertEqual(self.server.disconnects, 1)
+        self.assertEqual(self.server.handler_errors, 0)
+
+
+class HandlerTimeoutTest(ServerTestCase):
+    def test_a_half_open_connection_is_closed_rather_than_held_for_ever(self):
+        """Three hundred connections that begin a request and stop hold three
+        hundred threads and file descriptors, with no ceiling and no reaper.
+        Thread and descriptor exhaustion by any unprivileged process on the
+        machine is the adversary the session key exists for."""
+        # The test's own clock, not the production 30 s: what is asserted
+        # here is that a ceiling exists, not what it has been set to.
+        self.addCleanup(
+            setattr, server_module._Handler, "timeout", server_module._Handler.timeout
+        )
+        server_module._Handler.timeout = 0.2
+        client = self.raw_connection()
+        client.sendall(b"GET / HTTP/1.1")  # a request line that never ends
+        self.assertEqual(client.recv(4096), b"")  # closed from the other end
+        self.assertTrue(self.wait_until(lambda: self.server.timeouts == 1))
+
+    def test_the_timeout_is_a_bounded_number_of_seconds(self):
+        """A None here is what "no ceiling" looks like written down."""
+        timeout = server_module._Handler.timeout
+        self.assertIsInstance(timeout, (int, float))
+        self.assertTrue(0 < timeout <= 120, timeout)
 
 
 if __name__ == "__main__":

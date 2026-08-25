@@ -9,15 +9,26 @@ so the parts that are not stupid are all in one place and all here:
 
 * Loopback only, enforced in the constructor rather than assumed from a
   default argument, and enforced BEFORE the bind.
-* Every request carries the session key, checked before the path is even
-  looked at -- so a caller without it cannot tell an endpoint from a typo,
-  and cannot use the 404 as a filesystem probe.
+* Every request carries the session key, whatever its method, checked
+  before the path is even looked at -- so a caller without it cannot tell an
+  endpoint from a typo, and cannot use the 404 as a filesystem probe. GET is
+  the only method that goes anywhere; the rest are refused, but refused here
+  and behind the key rather than by the stdlib in front of it.
+  The one thing that stays in front of it is a request the stdlib cannot
+  parse at all -- a URL too long, too many headers, an HTTP version it does
+  not speak -- which it answers itself with 414, 431 or 505 before any code
+  here runs. Those touch nothing and say nothing about the machine, but they
+  are not gated, and claiming otherwise would be a lie in a docstring people
+  will trust.
 * The key is compared in constant time, against every value that carries the
   right cookie NAME, never as a substring of the Cookie header.
 * Nothing derived from the request ever becomes a filesystem path. Exactly
   three URLs are served and there is no static file handler at all.
 * An error tells the browser which of the agent's files is wrong by name and
   stops there: no absolute paths, no tracebacks, nothing about the machine.
+* The agent's terminal learns no more than the browser does. Request logging
+  is off, and a client hanging up mid-response -- which is all a reload is --
+  is counted rather than printed as a traceback full of absolute paths.
 """
 # Deliberate: kept so any annotation added later may use `int | None` syntax
 # while this project's floor is Python 3.9. Do not delete.
@@ -28,6 +39,7 @@ import ipaddress
 import json
 import secrets
 import socket
+import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -135,8 +147,40 @@ class _Handler(BaseHTTPRequestHandler):
     server_version = "craftui"
     sys_version = ""  # no free interpreter version for anything scanning ports
 
+    # A connection that is opened and then goes quiet holds a thread and a
+    # file descriptor for as long as the client likes; three hundred of them
+    # hold three hundred, and nothing here reaps them. This is the ceiling.
+    # Generous, because the same clock also bounds a client reading a
+    # response slowly, which is a thing an honest client may do.
+    timeout = 30
+
     def log_message(self, fmt, *args):
         pass  # the agent's terminal is not a web log
+
+    def handle_timeout(self):
+        """The client went quiet mid-request, so the connection ends.
+
+        socketserver puts `timeout` on the socket and BaseHTTPRequestHandler
+        catches the socket.timeout that follows, silences it through
+        log_error and returns -- so the connection does close, but no policy
+        was chosen and nothing can see that it happened. This is the policy,
+        and the count is how a test says the ceiling above is real.
+        """
+        self.close_connection = True
+        self.server.timeouts += 1
+
+    def handle_one_request(self):
+        # raw_requestline is assigned from rfile.readline(), so a timeout
+        # waiting for the request line raises before the assignment -- and
+        # since the stdlib swallows the exception, an unset request line is
+        # the only trace a half-open connection leaves behind. A client that
+        # sends the request line and then stalls in its headers times out on
+        # the same clock, inside parse_headers where this cannot see it: the
+        # connection closes either way, only the count misses it.
+        self.raw_requestline = None
+        BaseHTTPRequestHandler.handle_one_request(self)
+        if self.raw_requestline is None:
+            self.handle_timeout()
 
     def _supplied_keys(self):
         """Every key this request offers: query string first, then cookies."""
@@ -174,7 +218,13 @@ class _Handler(BaseHTTPRequestHandler):
                 "{}={}; Path=/; SameSite=Strict; HttpOnly".format(COOKIE, self.server.key),
             )
         self.end_headers()
-        self.wfile.write(data)
+        # A HEAD is answered with the headers a GET would carry and none of
+        # the body. protocol_version is HTTP/1.0, so a body written anyway is
+        # merely discarded by the close that follows -- but it is bytes the
+        # protocol says are not there, and it becomes the start of the next
+        # response the day anything here speaks 1.1.
+        if self.command != "HEAD":
+            self.wfile.write(data)
 
     def _text(self, code, body):
         self._send(code, body, "text/plain; charset=utf-8")
@@ -198,6 +248,32 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/brief":
             return self._json(self.server.brief_payload())
         return self._text(404, "not found")
+
+    def _unsupported(self):
+        """Every method that is not GET: gated first, refused second.
+
+        The stdlib answers an unknown method with a 501 of its own, from
+        inside handle_one_request -- before any handler runs, so with no key
+        checked and none of the headers every other response here carries.
+        What this server does not implement it should not implement
+        differently for a caller holding the key and a caller who is not.
+
+        Task 6 replaces the POST and PATCH arms with real handlers. Its rule
+        is this one: _authed() first, before anything is read or touched.
+        """
+        if self.headers.get("Content-Length") or self.headers.get("Transfer-Encoding"):
+            # Nothing here reads the body, and an unread body is the start of
+            # the next request as far as the connection is concerned. Already
+            # true today, since protocol_version is HTTP/1.0 and every
+            # response is followed by a close; said out loud so that it stays
+            # true, because task 6's handlers arrive on this same path.
+            self.close_connection = True
+        if not self._authed():
+            return self._text(403, "forbidden")
+        self.server.touch()
+        return self._text(501, "not implemented")
+
+    do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = _unsupported
 
     def _page(self):
         try:
@@ -223,6 +299,39 @@ class CraftServer(ThreadingHTTPServer):
         self.key = key
         self.idle_timeout_s = idle_timeout_s
         self._last = time.monotonic()
+        # What has gone wrong and how often. A count is the whole of the
+        # record, because nothing here prints a traceback -- see handle_error.
+        self.disconnects = 0
+        self.handler_errors = 0
+        self.timeouts = 0
+
+    def handle_error(self, request, client_address):
+        """A client hanging up is not news. Anything else is, quietly.
+
+        socketserver's own handle_error prints a whole traceback to stderr,
+        absolute paths and all, and an ordinary browser produces one every
+        time a page is reloaded or navigated away from mid-response. That is
+        the invariant every response here keeps, spilled onto the agent's
+        terminal by a reload -- and reachable with a perfectly valid key.
+
+        Not a blanket pass, though: a genuine bug in a handler still has to
+        be findable, so it is counted and one terse line names the exception
+        TYPE. Not its message and not the request line: an OSError's message
+        carries the path it failed on, and the request line carries the
+        session key. A type and a count are enough to know a bug is there and
+        to go and reproduce it, and neither of them is about this machine.
+        """
+        exc = sys.exc_info()[1]
+        # ConnectionError is the whole family: broken pipe, reset by peer,
+        # aborted. socket.timeout is separate, and is TimeoutError from 3.10.
+        if isinstance(exc, (ConnectionError, socket.timeout)):
+            self.disconnects += 1
+            return
+        self.handler_errors += 1
+        print(
+            "craft ui: a request failed with {}".format(type(exc).__name__),
+            file=sys.stderr,
+        )
 
     @property
     def port(self):

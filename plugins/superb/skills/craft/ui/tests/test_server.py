@@ -21,9 +21,12 @@ import functools
 import io
 import json
 import os
+import random
 import re
+import shutil
 import socket
 import struct
+import subprocess
 import tempfile
 import threading
 import time
@@ -2789,6 +2792,434 @@ class WriteGateTest(WriteTestCase):
         self.server.end_write()
         self.assertTrue(self.server.drain_writes(5.0))
 
+
+# ---------------------------------------------------------------------------
+# The page itself. Three layers, because no one of them can carry it alone.
+#
+#   PageContractTest      reads the served source. Cheap, always runs, and
+#                         proves only that the text says what it should.
+#   AnswerStateMirrorTest runs the page's own answerState in node against
+#                         schema.answer_state. Real behaviour; skipped where
+#                         node is absent.
+#   RenderedPageTest      loads the page in a headless browser and reads the
+#                         DOM the page built. Real behaviour, end to end;
+#                         skipped where no browser is installed.
+#
+# Both skips are silent by design in unittest's dot output, so read them here:
+# a machine with neither node nor a browser runs the string layer ONLY, and
+# the string layer cannot catch a syntax error in the page's script.
+# ---------------------------------------------------------------------------
+
+# The markers app.html puts around the one function that has a Python twin.
+# Slicing the real file is what makes the differential test differential: a
+# copy of the function in this file would pass for ever while the page rotted.
+MIRROR_BEGIN = "// ---- mirror of schema.answer_state: begin ----"
+MIRROR_END = "// ---- mirror of schema.answer_state: end ----"
+
+# Every browser name that would do. The test skips rather than fails when none
+# of them is installed: a laptop with no chromium must not turn red.
+BROWSERS = ("chromium", "chromium-browser", "google-chrome",
+            "google-chrome-stable", "chrome")
+
+
+def find_browser():
+    for name in BROWSERS:
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+class PageContractTest(ServerTestCase):
+    """The page's wiring contract: it is self-contained, it exposes the mount
+    points Task 11 attaches to, and it references the endpoints it depends on.
+
+    These assert on the served source, so they catch a deleted mount point, a
+    renamed hook, or a smuggled-in CDN script. They do NOT prove the page
+    behaves -- a page whose script throws on line one passes every one of
+    them. That is what the two classes below are for.
+    """
+
+    def page(self):
+        return self.get("/").read().decode("utf-8")
+
+    def test_the_page_is_self_contained(self):
+        html = self.page()
+        self.assertNotIn("<script src=", html)
+        self.assertNotIn("https://", html.split("</head>")[0])
+
+    def test_the_page_has_every_mount_point(self):
+        html = self.page()
+        for element_id in ("questions", "brief", "ledger", "filters",
+                           "counts", "send", "finish", "overlay", "waiting"):
+            self.assertIn('id="{}"'.format(element_id), html)
+
+    def test_the_page_declares_the_four_importance_levels(self):
+        html = self.page()
+        for level in ("REQUIRED", "IMPORTANT", "PREFERENCE", "OPTIONAL"):
+            self.assertIn(level, html)
+
+    def test_the_page_offers_delegation_and_notes(self):
+        html = self.page()
+        self.assertIn("you decide", html)
+        self.assertIn("data-note", html)
+
+    def test_contradictions_link_to_the_questions_they_are_between(self):
+        html = self.page()
+        self.assertIn('"#q-" + ref', html)
+        self.assertIn("c.between", html)
+
+    def test_the_page_exports_the_hooks_task_11_calls(self):
+        html = self.page()
+        for name in ("function renderRound(", "function applyFilter(",
+                     "function collectAnswers("):
+            self.assertIn(name, html)
+
+    def test_the_only_innerhtml_is_the_server_rendered_brief(self):
+        """A lint, and the most valuable one here.
+
+        markdown.py escapes before it transforms and allowlists link schemes,
+        so the brief is the one string on this page that may be assigned as
+        HTML. Everything else -- a question title, an option label, a line of
+        the ledger -- is text the agent wrote into a JSON file, and a second
+        innerHTML is how it stops being text.
+        """
+        # Comment lines are dropped first: this file explains the rule in
+        # prose beside the one line that keeps it, and a lint that cannot
+        # tell an explanation from an assignment is a lint nobody can write
+        # a comment near.
+        code = "\n".join(line for line in self.page().splitlines()
+                         if not line.strip().startswith("//"))
+        assigns = [line.strip() for line in code.splitlines()
+                   if re.search(r"\.(inner|outer)HTML\s*=", line)]
+        self.assertEqual(len(assigns), 1, assigns)
+        self.assertIn("brief", assigns[0])
+        for banned in ("insertAdjacentHTML", "document.write", "outerHTML"):
+            self.assertNotIn(banned, code)
+
+    def test_every_fetch_carries_the_session_key(self):
+        """There is no cookie -- see the module docstring -- so a fetch that
+        forgets the key is a 403 the user sees as an empty panel. api() is the
+        only thing that appends it, so every fetch must go through it."""
+        calls = re.findall(r"fetch\(\s*([^\s,)]+)", self.page())
+        self.assertTrue(calls, "no fetch call found at all")
+        for call in calls:
+            self.assertTrue(call.startswith("api("), call)
+
+    def test_the_page_does_not_erase_the_key_from_its_own_url(self):
+        """history.replaceState tidying the key away looks like hygiene and
+        costs the user every reload: there is no cookie to fall back on."""
+        self.assertNotIn("replaceState", self.page())
+
+
+@unittest.skipUnless(shutil.which("node"), "node is not installed")
+class AnswerStateMirrorTest(unittest.TestCase):
+    """The page's answerState against schema.answer_state, case for case.
+
+    This is the one piece of the page with a Python twin, and the twin decides
+    what the agent is told the user meant. The two must agree on every shape a
+    draft file can hold -- and a draft file is JSON on disk that a person may
+    have hand-edited, so "the page only ever writes strings and arrays" is not
+    a defence.
+
+    The function is sliced out of the real app.html between the markers above
+    and run in node. What this does NOT cover: everything else on the page.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        source = APP_HTML.read_text(encoding="utf-8")
+        begin = source.find(MIRROR_BEGIN)
+        end = source.find(MIRROR_END)
+        if begin < 0 or end < 0:
+            raise AssertionError(
+                "app.html no longer marks the mirror of schema.answer_state; "
+                "the markers are {!r} and {!r}".format(MIRROR_BEGIN, MIRROR_END)
+            )
+        cls.mirror = source[begin:end]
+
+    HARNESS = """
+const chunks = [];
+process.stdin.on("data", (c) => chunks.push(c));
+process.stdin.on("end", () => {
+  const cases = JSON.parse(chunks.join(""));
+  const out = cases.map((c) => {
+    try { return answerState(c); }
+    catch (e) { return "threw " + e.constructor.name + ": " + e.message; }
+  });
+  process.stdout.write(JSON.stringify(out));
+});
+"""
+
+    def states(self, cases):
+        """What the page's answerState says about each case."""
+        script = self.mirror + "\n" + self.HARNESS
+        proc = subprocess.run(
+            ["node", "-e", script],
+            input=json.dumps(cases).encode("utf-8"),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
+        )
+        self.assertEqual(
+            proc.returncode, 0,
+            "node refused the page's answerState: {}".format(
+                proc.stderr.decode("utf-8", "replace")),
+        )
+        return json.loads(proc.stdout.decode("utf-8"))
+
+    def assertMirrors(self, cases):
+        got = self.states(cases)
+        self.assertEqual(len(got), len(cases))
+        for case, state in zip(cases, got):
+            with self.subTest(answer=case):
+                self.assertEqual(state, schema.answer_state(case))
+
+    # The cases test_schema.py pins, restated here so that the JS is held to
+    # the same line rather than to a looser one somebody wrote for it.
+    NAMED_CASES = [
+        None, "yes", ["email"], {}, 0, False, True, 1.5, "",
+        {"skipped": True},
+        {"delegated": True},
+        {"delegated": True, "choice": ["a"]},
+        {"delegated": True, "skipped": True},
+        {"delegated": True, "text": "maybe email"},
+        {"delegated": False, "text": "yes"},
+        {"delegated": "yes", "text": "email"},
+        {"delegated": 1},
+        {"skipped": False, "choice": ["a"]},
+        {"skipped": "true", "text": "email"},
+        {"skipped": True, "text": "old draft"},
+        {"skipped": True, "choice": ["a"]},
+        {"choice": ["email"]},
+        {"choice": []},
+        {"choice": "email"},
+        {"choice": "   "},
+        {"choice": ""},
+        {"choice": [""]},
+        {"choice": ["", "   ", "\n\t"]},
+        {"choice": ["", "email"]},
+        {"choice": ["email", ""]},
+        {"choice": [""], "other": "passkeys"},
+        {"choice": 0},
+        {"choice": {"value": "email"}},
+        {"choice": [None]},
+        {"choice": [0]},
+        {"choice": [False]},
+        {"choice": [{"value": "email"}]},
+        {"text": "yes"},
+        {"text": "   "},
+        {"text": ""},
+        {"text": "0"},
+        {"text": 0},
+        {"text": False},
+        {"text": True},
+        {"text": ["yes"]},
+        {"text": {"a": 1}},
+        {"other": "   "},
+        {"other": 7},
+        {"note": "thinking about it"},
+        {"note": "   "},
+        {"note": "x", "choice": ["a"]},
+        {"choice": [], "other": "passkeys"},
+    ]
+
+    def test_the_named_cases_agree(self):
+        self.assertMirrors(self.NAMED_CASES)
+
+    def test_a_thousand_generated_answers_agree(self):
+        """Seeded, so a disagreement is reproducible and is not a flake.
+
+        The generator is the point: the three divergences a review found in
+        this function were all shapes nobody thought to write a case for.
+        """
+        rng = random.Random(20260826)
+        values = [None, True, False, 0, 1, "", "   ", "\n\t", "email", "0",
+                  [], [""], ["email"], ["", "email"], ["email", None], [None],
+                  [0], [{"value": "email"}], {"value": "email"}, {}, 1.5]
+        keys = ["choice", "text", "other", "note", "delegated", "skipped",
+                "answered", "value"]
+        cases = []
+        for _ in range(1000):
+            case = {}
+            for key in keys:
+                if rng.random() < 0.4:
+                    case[key] = rng.choice(values)
+            cases.append(case)
+        self.assertMirrors(cases)
+
+    def test_the_harness_would_notice_a_divergence(self):
+        """Teeth. If the slice ever came back empty, or node quietly returned
+        the same string for everything, every assertion above would pass."""
+        got = self.states([{"delegated": True}, {"text": "yes"}, {}])
+        self.assertEqual(got, ["delegated", "answered", "skipped"])
+
+
+class RenderedPageTest(ServerTestCase):
+    """The page in a real browser, reading back the DOM it built.
+
+    Everything here is downstream of the script having run at all, so this is
+    the layer that catches a syntax error, a fetch that forgot the key, and a
+    title the page wrote as HTML instead of as text. It is skipped when no
+    browser is installed, which is a hole -- see the note at the top of this
+    section.
+
+    Not covered: anything needing a click. The importance filter, the "you
+    decide" latch and the counter's response to typing are verified by hand.
+    """
+
+    HOSTILE = '<img src=x onerror="document.title=\'pwned\'">'
+
+    ROUND = {
+        "round": 1,
+        "project": "music-app",
+        "questions": [
+            {"id": "Q-1", "importance": "REQUIRED", "area": "Accounts",
+             "title": "How should users authenticate?",
+             "why": "Decides onboarding, recovery and identity for good.",
+             "type": "single", "allow_other": True,
+             "options": [
+                 {"value": "email", "label": "Email and password",
+                  "detail": "Simplest. Needs a reset flow."},
+                 {"value": "magic", "label": "Magic link",
+                  "detail": "No passwords. Needs outbound email."}]},
+            {"id": "Q-2", "importance": "OPTIONAL", "area": "Accounts",
+             "title": HOSTILE, "type": "longtext"},
+        ],
+        "ledger": {
+            "contradictions": [
+                {"id": "CON-002", "between": ["Q-1", "Q-404"],
+                 "text": "Offline-first conflicts with streaming-only."}],
+            "decisions": [{"id": "DEC-014", "title": "Playlists are private"}],
+        },
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls.browser = find_browser()
+        if not cls.browser:
+            raise unittest.SkipTest("no chromium or chrome on this machine")
+
+    def dump_dom(self):
+        """The DOM after the page's script has run and its fetches returned.
+
+        --user-data-dir is a throwaway on purpose: the URL carries the session
+        key, and the default profile would keep it in a history file.
+        """
+        with tempfile.TemporaryDirectory() as profile:
+            proc = subprocess.run(
+                [self.browser, "--headless", "--no-sandbox", "--disable-gpu",
+                 "--no-first-run", "--no-default-browser-check",
+                 "--disable-extensions", "--user-data-dir=" + profile,
+                 "--virtual-time-budget=8000", "--dump-dom", self.url("/")],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180,
+            )
+        self.assertEqual(
+            proc.returncode, 0,
+            "the browser failed: {}".format(proc.stderr.decode("utf-8", "replace")))
+        return proc.stdout.decode("utf-8", "replace")
+
+    def rendered(self):
+        """The dumped DOM with the page's own source removed.
+
+        This is not tidying. --dump-dom includes the <script> element's text,
+        so "No questions yet" -- a string the script CONTAINS -- was found in
+        the dump of a page whose script had a syntax error and never ran. An
+        assertion that a string appears somewhere in a file is not an
+        assertion that a browser built it, and every check below is only
+        worth writing if it can tell those two apart.
+        """
+        dom = self.dump_dom()
+        cleaned = re.sub(r"(?s)<script>.*?</script>", "<script></script>", dom)
+        cleaned = re.sub(r"(?s)<style>.*?</style>", "<style></style>", cleaned)
+        return re.sub(r"(?s)<!--.*?-->", "", cleaned)
+
+    def test_the_reader_cannot_see_the_page_source(self):
+        """Teeth for rendered(). These three strings exist in app.html and
+        nowhere in the DOM a working page builds; if any of them survives,
+        every assertion in this class has stopped meaning anything.
+
+        A round is posted first so that "No questions yet" is a string the
+        working page does NOT build -- which is the state the syntax-error
+        mutant was caught in."""
+        write_json_atomic(self.session.questions_path(1), self.ROUND)
+        cleaned = self.rendered()
+        for source_only in ("function renderRound(", "addEventListener",
+                            "No questions yet"):
+            self.assertNotIn(source_only, cleaned, source_only)
+
+    def test_a_round_becomes_cards_a_ledger_and_a_brief(self):
+        write_json_atomic(self.session.questions_path(1), self.ROUND)
+        self.session.brief_path.write_text(
+            "# Vision\n\nA small music player.\n\n- local files\n",
+            encoding="utf-8")
+        dom = self.rendered()
+
+        # The script ran, the fetch carried the key, and renderRound built
+        # cards. None of this is reachable without all three.
+        self.assertIn('id="q-Q-1"', dom)
+        self.assertIn("How should users authenticate?", dom)
+        self.assertIn("Decides onboarding, recovery and identity for good.", dom)
+        self.assertIn('value="magic"', dom)
+        self.assertIn("Needs outbound email.", dom)
+        self.assertIn("you decide", dom)
+        self.assertIn('data-importance="OPTIONAL"', dom)
+
+        # The contradiction pins to the top of the ledger and links to the
+        # question it is between -- and not to the one that is not on the page.
+        self.assertIn('href="#q-Q-1"', dom)
+        self.assertIn("Offline-first conflicts with streaming-only.", dom)
+        self.assertNotIn("#q-Q-404", dom)
+        self.assertIn("DEC-014", dom)
+
+        # The brief is the one thing rendered as HTML, and it did render.
+        self.assertIn("<h1>Vision</h1>", dom)
+        self.assertIn("<li>local files</li>", dom)
+
+        # The counter ran, which means answerState and the round agreed.
+        self.assertIn("0 answered", dom)
+        self.assertIn("1 REQUIRED", dom)
+
+    def test_a_question_title_is_never_parsed_as_html(self):
+        """The agent writes the round file; the page must treat every string
+        in it as text. A title is the shortest path from a JSON file in the
+        project to script execution in a page holding the session key."""
+        write_json_atomic(self.session.questions_path(1), self.ROUND)
+        dom = self.rendered()
+        # The escaped text is allowed to READ like an attack -- that is what
+        # inert means. What must not exist is the element: no <img> node, and
+        # a document.title the injected handler never got to change.
+        self.assertIn("&lt;img", dom)
+        self.assertNotIn("<img", dom)
+        self.assertIn("<title>craft</title>", dom)
+
+    def test_the_brief_is_escaped_before_it_is_rendered(self):
+        """innerHTML is used on exactly one string. markdown.py escapes it
+        first; this is the end-to-end proof that it does, in a browser."""
+        write_json_atomic(self.session.questions_path(1), self.ROUND)
+        self.session.brief_path.write_text(
+            "# Vision\n\n<script>document.title='pwned'</script>\n",
+            encoding="utf-8")
+        raw = self.dump_dom()
+        dom = re.sub(r"(?s)<!--.*?-->", "", raw)
+        self.assertIn("&lt;script&gt;", dom)
+        # One <script> element in the document: the page's own. The brief's
+        # is text inside #brief, and text does not run.
+        self.assertEqual(dom.count("<script>"), 1)
+        self.assertIn("<title>craft</title>", dom)
+
+    def test_an_unreadable_round_is_shown_to_the_user_not_swallowed(self):
+        """The failure the agent causes most often: a half-written or
+        hand-edited round file. A blank page would be indistinguishable from
+        'no questions yet', and the user would sit and wait for ever."""
+        self.session.questions_path(1).write_text("{not json", encoding="utf-8")
+        dom = self.rendered()
+        self.assertIn("is not valid JSON", dom)
+
+    def test_no_round_yet_says_so(self):
+        """An empty .craft/ is the state the page opens in, and a blank panel
+        would be indistinguishable from a page that failed to load."""
+        dom = self.rendered()
+        self.assertIn("No questions yet", dom)
+        self.assertIn("Nothing recorded yet.", dom)
 
 if __name__ == "__main__":
     unittest.main()

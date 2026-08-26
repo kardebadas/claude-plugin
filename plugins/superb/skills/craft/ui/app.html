@@ -2,10 +2,440 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<!-- Defence in depth, and cheap: this page loads nothing and talks to nobody
+     but the server that served it. default-src 'none' with connect-src 'self'
+     means that a string this page mishandled could not carry the session key
+     off the machine even if it did execute. 'unsafe-inline' twice is the
+     price of a single-file page with no build step; it is the part this does
+     NOT protect, and the reason every agent-written string below goes in as
+     textContent. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>craft</title>
+<!-- An empty data: icon, so the browser does not fire an unauthenticated
+     /favicon.ico at the server on every load. Self-contained: it fetches
+     nothing. -->
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg:#f4f6f8; --panel:#fff; --line:#dfe4ea; --ink:#14181f; --dim:#6b7482;
+    --accent:#2f6bd8; --req:#b3261e; --imp:#a8560a; --pref:#3f4b5b; --opt:#5b6673;
+    --warn-bg:#fdecea; --warn-line:#e5a49d;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { position:sticky; top:0; z-index:5; display:flex; gap:14px; align-items:center;
+           flex-wrap:wrap; padding:10px 16px; background:#2b2f36; color:#cfd6e0; }
+  header b { color:#fff; letter-spacing:.08em; }
+  #status { margin-left:auto; }
+  main { display:flex; align-items:flex-start; gap:16px; padding:16px;
+         max-width:1400px; margin:0 auto; }
+  #stream { flex:1 1 62%; min-width:0; }
+  aside { flex:0 0 34%; position:sticky; top:56px; max-height:calc(100vh - 76px);
+          overflow:auto; }
+  /* Narrow windows stack rather than squeeze: a 34% sidebar on a laptop half
+     screen leaves the questions -- which carry the page -- unreadable. */
+  @media (max-width:900px) {
+    main { display:block; }
+    aside { position:static; max-height:none; margin-top:16px; }
+  }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+          padding:14px 16px; margin-bottom:12px; }
+  .chip { display:inline-block; padding:2px 8px; border-radius:999px; color:#fff;
+          font-size:10px; font-weight:700; letter-spacing:.05em; }
+  .chip.REQUIRED{background:var(--req)} .chip.IMPORTANT{background:var(--imp)}
+  .chip.PREFERENCE{background:var(--pref)} .chip.OPTIONAL{background:var(--opt)}
+  .area { font-size:10px; letter-spacing:.12em; text-transform:uppercase;
+          color:var(--dim); font-weight:700; margin:18px 0 6px; }
+  h3 { margin:8px 0 4px; font-size:16px; }
+  /* Never folded behind a disclosure triangle. "Why this matters" is most of
+     what separates a craft question from a form field. */
+  .why { color:var(--dim); margin:0 0 10px; }
+  label.opt { display:block; padding:5px 0; cursor:pointer; }
+  label.opt .detail { display:block; color:var(--dim); font-size:12.5px;
+                      margin-left:22px; }
+  input[type=text], textarea { width:100%; padding:7px 9px; border:1px solid var(--line);
+                               border-radius:5px; font:inherit; }
+  textarea { min-height:80px; resize:vertical; }
+  .note { margin-top:8px; }
+  .note input { font-size:13px; }
+  button { font:inherit; cursor:pointer; border-radius:5px; }
+  .delegate { margin-top:10px; padding:4px 10px; background:none; color:var(--dim);
+              border:1px dashed #a9b3c0; }
+  .delegate[aria-pressed=true] { background:#eef3fd; color:var(--accent);
+                                 border-style:solid; border-color:var(--accent); }
+  .hint { display:none; margin-left:8px; font-size:12.5px; color:var(--accent); }
+  .question[data-delegated=true] .hint { display:inline; }
+  /* Set aside, not thrown away: the fields stay editable and their contents
+     stay on the wire, so un-latching "you decide" gives the answer back. */
+  .question[data-delegated=true] label.opt,
+  .question[data-delegated=true] [data-text],
+  .question[data-delegated=true] [data-other] { opacity:.45; }
+  #filters button { margin-right:6px; padding:3px 9px; border:1px solid #4a525e;
+                    background:none; color:#cfd6e0; font-size:11px; font-weight:600; }
+  #filters button[aria-pressed=false] { opacity:.4; }
+  footer { position:sticky; bottom:0; display:flex; gap:12px; align-items:center;
+           padding:12px 16px; background:var(--panel); border-top:1px solid var(--line); }
+  #send { padding:9px 18px; background:var(--accent); color:#fff; border:none;
+          font-weight:650; }
+  #finish { padding:9px 14px; background:none; border:1px solid var(--line);
+            color:var(--dim); }
+  #counts { color:var(--dim); }
+  .ledger-item { border-top:1px solid var(--line); padding:6px 0; font-size:13px; }
+  .contradiction { background:var(--warn-bg); border:1px solid var(--warn-line);
+                   border-radius:6px; padding:8px 10px; margin-bottom:8px; }
+  .contradiction .jump { display:inline-block; margin-top:4px; margin-right:6px;
+                         padding:1px 7px; border:1px solid var(--warn-line);
+                         border-radius:999px; font-size:11px; font-weight:600;
+                         color:var(--req); text-decoration:none; }
+  /* The jumped-to card outlines itself. A jump link that scrolls into a wall
+     of identical cards has told the reader nothing. */
+  .question:target { outline:2px solid var(--accent); outline-offset:3px; }
+  /* ...and stops clear of the sticky header, which otherwise eats the chip
+     and the first line of the title of the very card the jump was for. */
+  .question { scroll-margin-top:64px; }
+  #overlay, #waiting { position:fixed; inset:0; display:none; place-items:center;
+                       background:rgba(20,24,31,.72); color:#fff; z-index:20;
+                       text-align:center; padding:24px; }
+  #overlay[data-on], #waiting[data-on] { display:grid; }
+  .hidden { display:none !important; }
+  #brief h1,#brief h2,#brief h3 { margin:14px 0 6px; }
+  #brief h1 { font-size:19px; } #brief h2 { font-size:16px; } #brief h3 { font-size:14px; }
+  #brief pre { background:#f0f2f5; padding:8px; border-radius:5px; overflow-x:auto; }
+  #brief ul, #brief ol { margin:6px 0; padding-left:20px; }
+  #brief blockquote { margin:6px 0; padding-left:10px; border-left:3px solid var(--line);
+                      color:var(--dim); }
+</style>
 </head>
 <body>
-<div id="app">loading…</div>
+
+<header>
+  <b>CRAFT</b>
+  <span id="roundlabel">—</span>
+  <span id="filters">
+    <button data-level="REQUIRED"   aria-pressed="true">REQUIRED</button>
+    <button data-level="IMPORTANT"  aria-pressed="true">IMPORTANT</button>
+    <button data-level="PREFERENCE" aria-pressed="true">PREFERENCE</button>
+    <button data-level="OPTIONAL"   aria-pressed="true">OPTIONAL</button>
+  </span>
+  <span id="status"></span>
+</header>
+
+<main>
+  <section id="stream">
+    <div id="questions"></div>
+  </section>
+  <aside>
+    <div class="card"><div class="area">Current brief</div><div id="brief"></div></div>
+    <div class="card"><div class="area">Ledger</div><div id="ledger"></div></div>
+  </aside>
+</main>
+
+<footer>
+  <button id="send">Send to Claude</button>
+  <button id="finish">Finish</button>
+  <span id="counts" aria-live="polite"></span>
+</footer>
+
+<div id="overlay"><div><h2>Connection paused</h2>
+  <p>The craft server stopped responding. This page will reconnect on its own.</p></div></div>
+<div id="waiting"><div><h2>Claude is folding your answers in…</h2>
+  <p>The next round will appear here when it is ready.</p></div></div>
+
+<script>
+// The key travels in the URL and nowhere else. There is no cookie: one was
+// tried and removed, because cookies are scoped to a host and not to a port,
+// so any other page on 127.0.0.1 could have read this session's key back out
+// of a subresource it caused. Two consequences live here: every fetch appends
+// the key itself, and nothing tidies it out of location.search -- a reload
+// with the key gone is a page that can no longer talk to its own server.
+const KEY = new URLSearchParams(location.search).get("key") || "";
+const api = (path) => path + (path.includes("?") ? "&" : "?") + "key=" + encodeURIComponent(KEY);
+const LEVELS = ["REQUIRED", "IMPORTANT", "PREFERENCE", "OPTIONAL"];
+
+let currentRound = null;
+const hidden = new Set();
+
+// Everything the agent wrote -- a title, an option label, a line of the
+// ledger -- reaches the DOM through here, and `text` is assigned as
+// textContent. There is exactly one innerHTML on this page and it is the
+// brief, which markdown.py escaped before it transformed.
+function el(tag, attrs, ...kids) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === false || v === null || v === undefined) continue;
+    if (k === "text") node.textContent = v; else node.setAttribute(k, v);
+  }
+  kids.filter(Boolean).forEach(kid => node.append(kid));
+  return node;
+}
+
+function questionCard(q) {
+  const card = el("div", { class: "card question", id: "q-" + q.id, "data-id": q.id,
+                           "data-importance": q.importance });
+  card.append(el("span", { class: "chip " + q.importance, text: q.importance }));
+  card.append(el("h3", { text: q.title }));
+  if (q.why) card.append(el("p", { class: "why", text: q.why }));
+
+  if (q.type === "single" || q.type === "multi") {
+    const kind = q.type === "single" ? "radio" : "checkbox";
+    (q.options || []).forEach(opt => {
+      const label = el("label", { class: "opt" });
+      label.append(el("input", { type: kind, name: q.id, value: opt.value }));
+      label.append(" " + (opt.label || opt.value));
+      if (opt.detail) label.append(el("span", { class: "detail", text: opt.detail }));
+      card.append(label);
+    });
+    if (q.allow_other) {
+      card.append(el("input", { type: "text", "data-other": "1",
+                                placeholder: "Other — in your own words" }));
+    }
+  } else if (q.type === "longtext") {
+    card.append(el("textarea", { "data-text": "1", placeholder: "Your answer" }));
+  } else {
+    card.append(el("input", { type: "text", "data-text": "1", placeholder: "Your answer" }));
+  }
+
+  // Every question gets one, whatever its type. "Email, but I want passkeys
+  // later" is the most valuable sentence a user can write and a radio button
+  // destroys it.
+  const note = el("div", { class: "note" });
+  note.append(el("input", { type: "text", "data-note": "1",
+                            placeholder: "Note — anything the options above miss" }));
+  card.append(note);
+
+  if (q.delegable !== false) {
+    card.append(el("button", { class: "delegate", type: "button",
+                               "aria-pressed": "false", text: "you decide" }));
+    card.append(el("span", { class: "hint",
+                             text: "Claude decides this one — your note still travels with it." }));
+  }
+  return card;
+}
+
+function renderRound(round) {
+  currentRound = round;
+  const host = document.getElementById("questions");
+  host.textContent = "";
+  document.getElementById("roundlabel").textContent =
+    round ? ("round " + round.round + (round.project ? " · " + round.project : "")) : "—";
+  if (!round) {
+    // Not a blank page. A blank page and a broken page look the same, and a
+    // user who cannot tell them apart waits for a round that is not coming.
+    host.append(el("div", { class: "card" },
+      el("h3", { text: "No questions yet" }),
+      el("p", { class: "why",
+                text: "Claude has not posted a round. This page will show it when it lands." })));
+    renderLedger({});
+    updateCounts();
+    return;
+  }
+
+  let area = null;
+  (round.questions || []).forEach(q => {
+    if (q.area && q.area !== area) {
+      area = q.area;
+      host.append(el("div", { class: "area", text: area }));
+    }
+    host.append(questionCard(q));
+  });
+  renderLedger(round.ledger || {});
+  applyFilter();
+  updateCounts();
+}
+
+function renderLedger(ledger) {
+  const host = document.getElementById("ledger");
+  host.textContent = "";
+  (ledger.contradictions || []).forEach(c => {
+    const box = el("div", { class: "contradiction" });
+    box.append(el("strong", { text: c.id + " " }));
+    box.append(document.createTextNode(c.text || ""));
+    (c.between || []).forEach(ref => {
+      // Jump link, but only to a question actually on this round's page.
+      if (!document.getElementById("q-" + ref)) return;
+      box.append(" ");
+      box.append(el("a", { href: "#q-" + ref, class: "jump", text: ref }));
+    });
+    host.append(box);
+  });
+  const rows = [
+    ...(ledger.decisions || []).map(d => d.id + " ✓ " + (d.title || d.summary || "")),
+    ...(ledger.delegated || []).map(d => d.id + " → " + (d.title || "")),
+    ...(ledger.assumptions || []).map(a => a.id + " ? " + (a.text || "")),
+  ];
+  rows.forEach(text => host.append(el("div", { class: "ledger-item", text })));
+  if (!rows.length && !(ledger.contradictions || []).length) {
+    host.append(el("div", { class: "why", text: "Nothing recorded yet." }));
+  }
+}
+
+// Class toggling, no round trip: filtering is a reading aid used dozens of
+// times an hour, and a fetch for it would put the server between a user and
+// their own page.
+function applyFilter() {
+  document.querySelectorAll("#questions .question").forEach(card => {
+    card.classList.toggle("hidden", hidden.has(card.dataset.importance));
+  });
+}
+
+function collectAnswers() {
+  const answers = {};
+  document.querySelectorAll("#questions .question").forEach(card => {
+    const id = card.dataset.id;
+    const note = card.querySelector("[data-note]");
+    const written = note && note.value.trim() ? note.value.trim() : null;
+    const delegate = card.querySelector(".delegate");
+    if (delegate && delegate.getAttribute("aria-pressed") === "true") {
+      // Delegation beats every other field -- schema.answer_state says so --
+      // but the note rides along. It is the sentence that tells Claude WHY it
+      // was handed the decision, and dropping it would be the one deletion
+      // this page makes on the user's behalf.
+      answers[id] = written ? { delegated: true, note: written } : { delegated: true };
+      return;
+    }
+    const answer = {};
+    const checked = [...card.querySelectorAll("input[type=radio],input[type=checkbox]")]
+      .filter(i => i.checked).map(i => i.value);
+    if (checked.length) answer.choice = checked;
+    const other = card.querySelector("[data-other]");
+    if (other && other.value.trim()) answer.other = other.value.trim();
+    const text = card.querySelector("[data-text]");
+    if (text && text.value.trim()) answer.text = text.value.trim();
+    if (written) answer.note = written;
+    // An untouched question is an explicit skip rather than an absence: both
+    // read as "skipped", and saying it out loud makes a draft file legible.
+    answers[id] = Object.keys(answer).length ? answer : { skipped: true };
+  });
+  return answers;
+}
+
+// ---- mirror of schema.answer_state: begin ----
+//
+// This function and schema.answer_state must agree on every shape, because
+// between them they decide what the agent is told the user meant -- and a
+// Delegated Decision is never asked again. Do not "simplify" either half
+// without the other; tests/test_server.py runs THIS text against the Python
+// one on a thousand generated answers.
+//
+// Every check below is here because the obvious JavaScript is wrong:
+//   * `if (a.delegated)` is truthiness; Python requires `is True`. A
+//     malformed flag must not manufacture a decision the user never made.
+//   * typeof "object" is true of null and of arrays; Python's isinstance
+//     dict is true of neither.
+//   * `(a.text || "").trim()` throws on a number and answers "0" wrongly;
+//     Python asks whether it is a string first, and "0" is a real answer.
+//   * a blank or whitespace choice entry is not an answer, and neither null
+//     nor undefined is one.
+//   * `(a.choice || []).some(...)` throws on the string form, which a
+//     single-choice draft may legitimately hold.
+// The values reaching this are read from a draft file on disk that a person
+// may have hand-edited, so none of these shapes is hypothetical.
+function choiceHasContent(entry) {
+  if (typeof entry === "string") return entry.trim() !== "";
+  return entry !== null && entry !== undefined;
+}
+
+function answerState(a) {
+  if (a === null || typeof a !== "object" || Array.isArray(a)) return "skipped";
+  if (a.delegated === true) return "delegated";
+  if (a.skipped === true) return "skipped";
+  const choice = a.choice;
+  if (Array.isArray(choice) && choice.some(choiceHasContent)) return "answered";
+  if (typeof choice === "string" && choice.trim() !== "") return "answered";
+  for (const key of ["text", "other"]) {
+    const value = a[key];
+    if (typeof value === "string" && value.trim() !== "") return "answered";
+  }
+  return "skipped";
+}
+// ---- mirror of schema.answer_state: end ----
+
+function updateCounts() {
+  if (!currentRound) { document.getElementById("counts").textContent = ""; return; }
+  const answers = collectAnswers();
+  let settled = 0;
+  const open = Object.fromEntries(LEVELS.map(l => [l, 0]));
+  (currentRound.questions || []).forEach(q => {
+    const state = answerState(answers[q.id]);
+    // Drop an unrecognised importance rather than inventing a key for it --
+    // schema.count_open does the same, and the two must not disagree.
+    if (state !== "skipped") settled += 1;
+    else if (Object.prototype.hasOwnProperty.call(open, q.importance)) open[q.importance] += 1;
+  });
+  const trailing = LEVELS.filter(l => open[l]).map(l => open[l] + " " + l).join(" · ");
+  document.getElementById("counts").textContent =
+    settled + " answered" + (trailing ? " · " + trailing + " still open" : "");
+}
+
+document.getElementById("filters").addEventListener("click", event => {
+  const button = event.target.closest("button[data-level]");
+  if (!button) return;
+  const level = button.dataset.level;
+  const on = button.getAttribute("aria-pressed") === "true";
+  button.setAttribute("aria-pressed", String(!on));
+  if (on) hidden.add(level); else hidden.delete(level);
+  applyFilter();
+});
+
+document.getElementById("questions").addEventListener("click", event => {
+  const button = event.target.closest(".delegate");
+  if (!button) return;
+  const on = button.getAttribute("aria-pressed") === "true";
+  button.setAttribute("aria-pressed", String(!on));
+  const card = button.closest(".question");
+  if (card) card.dataset.delegated = String(!on);
+  updateCounts();
+});
+
+// The counter is the only feedback that an answer registered, so it follows
+// typing and clicking rather than waiting for a save.
+document.getElementById("questions").addEventListener("input", updateCounts);
+document.getElementById("questions").addEventListener("change", updateCounts);
+
+function panel(id, message) {
+  const host = document.getElementById(id);
+  host.textContent = "";
+  host.append(el("div", { class: "why", text: message }));
+}
+
+async function loadBrief() {
+  try {
+    const payload = await (await fetch(api("/api/brief"))).json();
+    if (payload.error) return panel("brief", payload.error);
+    // The one innerHTML on this page. markdown.py escapes the brief before it
+    // transforms it, allowlists link schemes, and refuses control characters.
+    document.getElementById("brief").innerHTML = payload.html || "";
+  } catch (e) {
+    panel("brief", "The craft server did not answer. Reload this page.");
+  }
+}
+
+async function loadRound() {
+  let payload;
+  try {
+    payload = await (await fetch(api("/api/round"))).json();
+  } catch (e) {
+    return panel("questions", "The craft server did not answer. Reload this page.");
+  }
+  if (!payload.ok) {
+    // The agent writes these files while this page is reading them, so a
+    // half-written or hand-edited round is an ordinary event and has to be
+    // legible rather than blank.
+    const host = document.getElementById("questions");
+    host.textContent = "";
+    host.append(
+      el("div", { class: "card contradiction" },
+         el("strong", { text: payload.error }),
+         el("pre", { text: (payload.details || []).join("\n") })));
+    return;
+  }
+  renderRound(payload.round);
+}
+
+loadRound();
+loadBrief();
+</script>
 </body>
 </html>

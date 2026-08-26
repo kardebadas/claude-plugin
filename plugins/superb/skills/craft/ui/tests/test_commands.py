@@ -19,6 +19,7 @@ import functools
 import io
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -524,7 +525,13 @@ class ServeTest(CommandTestCase):
 
 class HelperTest(unittest.TestCase):
     """read_server_info and server_alive are imported by Tasks 8 and 9, so
-    every way they can be handed rubbish is part of their contract."""
+    every way they can be handed rubbish is part of their contract.
+
+    server_alive wants two things now -- a live pid, and something listening
+    where server-info says the server bound -- so every case that is about
+    the pid carries a real listening socket. Without one they would all be
+    False for the port's sake and none of them would be about the pid.
+    """
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -532,6 +539,19 @@ class HelperTest(unittest.TestCase):
         self.session = Session(self._tmp.name)
         self.session.ensure_dirs()
         self.path = Path(self._tmp.name) / ".craft" / "server-info"
+
+    def listening_port(self):
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(5)
+        self.addCleanup(sock.close)
+        return sock.getsockname()[1]
+
+    def record(self, **fields):
+        """server-info for a server whose port really is answering."""
+        body = {"port": self.listening_port()}
+        body.update(fields)
+        self.path.write_text(json.dumps(body), encoding="utf-8")
 
     def test_no_file_is_no_info_and_no_server(self):
         self.assertIsNone(craftui.read_server_info(self.session))
@@ -551,14 +571,34 @@ class HelperTest(unittest.TestCase):
         self.assertIsNone(craftui.read_server_info(self.session))
         self.assertFalse(craftui.server_alive(self.session))
 
-    def test_a_live_pid_is_a_live_server(self):
-        self.path.write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
+    def test_a_live_pid_whose_port_answers_is_a_live_server(self):
+        self.record(pid=os.getpid())
         self.assertTrue(craftui.server_alive(self.session))
 
+    def test_a_live_pid_whose_port_answers_nothing_is_not_a_server(self):
+        """The recycled pid, and the reason this asks two questions. Nothing
+        unlinks server-info, so hours after a session ends the pid in it is a
+        number the kernel is free to have handed to the user's editor.
+        `stop` stopped trusting a pid alone because the cost there is a
+        SIGTERM to a stranger; while the other commands still trusted one,
+        `status` called that editor a running server and handed out its URL,
+        and `wait` never struck out at all."""
+        self.path.write_text(
+            json.dumps({"pid": os.getpid(), "port": free_port()}),
+            encoding="utf-8")
+        self.assertFalse(craftui.server_alive(self.session))
+
+    def test_a_live_pid_with_no_port_recorded_is_not_a_server(self):
+        """Nothing to corroborate against is not corroboration."""
+        self.path.write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
+        self.assertFalse(craftui.server_alive(self.session))
+
     def test_a_pid_that_is_not_a_pid_is_not_a_server(self):
+        """The port answers in every one of these, so the pid is what makes
+        each of them False."""
         for value in (None, "unknown", -1, 0, [], 2 ** 70):
             with self.subTest(pid=value):
-                self.path.write_text(json.dumps({"pid": value}), encoding="utf-8")
+                self.record(pid=value)
                 self.assertFalse(craftui.server_alive(self.session))
 
     def test_a_process_we_may_not_signal_still_counts_as_alive(self):
@@ -570,13 +610,13 @@ class HelperTest(unittest.TestCase):
             self.skipTest("running as root, so nothing is unsignalable")
         with self.assertRaises(PermissionError):
             os.kill(1, 0)  # the premise, so this cannot pass vacuously
-        self.path.write_text(json.dumps({"pid": 1}), encoding="utf-8")
+        self.record(pid=1)
         self.assertTrue(craftui.server_alive(self.session))
 
     def test_a_dead_pid_is_not_a_server(self):
         dead = subprocess.Popen([sys.executable, "-c", "pass"])
         dead.wait()
-        self.path.write_text(json.dumps({"pid": dead.pid}), encoding="utf-8")
+        self.record(pid=dead.pid)
         self.assertFalse(craftui.server_alive(self.session))
 
 
@@ -1800,6 +1840,29 @@ class CmdWaitTest(unittest.TestCase):
         self.assertEqual(code, 3, line)
         self.assertEqual(line, "NOSERVER")
 
+    def test_a_recycled_pid_does_not_hold_the_wait_open(self):
+        """The consequence that made this worth fixing everywhere.
+
+        cmd_wait resets its strike count from the same liveness question, so
+        against a pid that is alive and is not our server it never reached
+        NOSERVER: it burned its whole timeout and returned TIMEOUT -- the one
+        outcome the skill answers by arming another wait. The agent waited on
+        a session that had ended hours ago, for ever.
+
+        This process stands in for the recycled pid: unmistakably alive, and
+        unmistakably not a craft server."""
+        self.real_alive()
+        port = free_port()
+        write_json_atomic(
+            Path(self.root) / ".craft" / "server-info",
+            {"type": "server-started", "port": port, "pid": os.getpid(),
+             "key": "k", "url": "http://127.0.0.1:{}/?key=k".format(port)},
+        )
+        code, line, _ = self.wait(timeout=30)
+        self.assertEqual(code, 3, line)
+        self.assertEqual(line, "NOSERVER")
+        self.assertLess(self.elapsed, 30, "it waited out the timeout instead")
+
     def test_wait_writes_nothing_into_the_project(self):
         """It is a reader. Creating .craft, or touching a lock, would make a
         wait against a project no server ever ran in leave a trace of one."""
@@ -2117,6 +2180,15 @@ class CmdStatusTest(unittest.TestCase):
         body.update(extra)
         return self.write(path, json.dumps(body))
 
+    def listening_port(self):
+        """A real socket, answering, for as long as the test runs. `server`
+        is two questions now and this is the fixture for the second."""
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(5)
+        self.addCleanup(sock.close)
+        return sock.getsockname()[1]
+
     def pretend_server(self, pid=None, port=1, url="http://127.0.0.1:1/?key=k"):
         pid = os.getpid() if pid is None else pid
         write_json_atomic(
@@ -2165,11 +2237,45 @@ class CmdStatusTest(unittest.TestCase):
     # -- the server ------------------------------------------------------
 
     def test_a_recorded_server_that_is_running_is_reported_as_up(self):
-        self.pretend_server(port=4321, url="http://127.0.0.1:4321/?key=k")
+        """A live pid AND a port that answers, which is why the port here is
+        a real listening socket rather than a number. Pinned against a port
+        nothing was listening on, this test said `server` was true on exactly
+        the evidence `stop` refuses to act on."""
+        port = self.listening_port()
+        self.pretend_server(
+            port=port, url="http://127.0.0.1:{}/?key=k".format(port))
         report = self.report()
         self.assertTrue(report["server"])
-        self.assertEqual(report["port"], 4321)
-        self.assertEqual(report["url"], "http://127.0.0.1:4321/?key=k")
+        self.assertEqual(report["port"], port)
+        self.assertEqual(report["url"], "http://127.0.0.1:{}/".format(port))
+
+    def test_a_live_pid_whose_port_has_gone_is_not_a_server(self):
+        """This process is alive and is not a craft server, which is what a
+        recycled pid looks like. Reported as a running server, `status` hands
+        the agent a URL for somebody else's process while `stop`, reading the
+        same file, says NOSERVER."""
+        self.pretend_server(pid=os.getpid(), port=free_port())
+        report = self.report()
+        self.assertFalse(report["server"])
+
+    def test_the_session_key_never_reaches_the_report(self):
+        """The mirror of test_the_log_never_carries_the_key, and the reason
+        is the same only more so. The key is a live credential; the log it is
+        kept out of is an ordinary 0644 file, and this is an agent's stdout,
+        which lands in transcripts, task reports and pull request bodies.
+        `status` is advertised as the safe read-only glance an agent runs
+        repeatedly and quotes.
+
+        `serve` printing it is a different act -- a person ran it once,
+        deliberately, and the URL is the deliverable. Copying it into a
+        stream designed to be pasted is not."""
+        key = "K" * 43
+        self.pretend_server(
+            port=4321, url="http://127.0.0.1:4321/?key={}".format(key))
+        report = self.report()
+        self.assertNotIn(key, self.raw)
+        self.assertEqual(report["url"], "http://127.0.0.1:4321/")
+        self.assertEqual(report["port"], 4321, "the port is still reported")
 
     def test_a_server_info_left_behind_by_a_dead_session_is_not_a_server(self):
         """server-info survives a clean exit so the next `serve` can reuse
@@ -2401,15 +2507,32 @@ class StatusTest(CommandTestCase):
         report = json.loads(result.stdout)
         self.assertTrue(report["server"], result.stdout + self.log())
         self.assertEqual(report["port"], self.info()["port"])
-        self.assertEqual(report["url"], self.info()["url"])
+        # The recorded URL, minus the query string the key lives in.
+        self.assertEqual(
+            report["url"], self.info()["url"].split("?")[0])
+        self.assertTrue(
+            report["url"].endswith(":{}/".format(report["port"])), report["url"])
+
+    def test_the_key_of_a_real_running_server_is_not_printed(self):
+        """The real key, from a real server, through the real command line --
+        which is where an agent copies it from. CmdStatusTest asserts the
+        same property against a key it wrote itself; this one asserts that
+        the thing being kept out is the credential that actually works."""
+        self.serve()
+        key = self.info()["key"]
+        result = run("status", "--project-dir", self.root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertGreaterEqual(len(key), 32, "the premise: a key to leak")
+        self.assertNotIn(key, result.stdout)
+        self.assertNotIn(key, result.stderr)
 
 
 # ----------------------------------------------------------------------- stop
 
 
 class ListeningTest(unittest.TestCase):
-    """`stop` corroborates a recorded pid against the recorded port before it
-    signals anything. This is that probe."""
+    """Every command corroborates a recorded pid against the recorded port
+    before it believes in the server. This is that probe."""
 
     def listening_port(self):
         sock = socket.socket()
@@ -2417,6 +2540,51 @@ class ListeningTest(unittest.TestCase):
         sock.listen(5)
         self.addCleanup(sock.close)
         return sock.getsockname()[1]
+
+    def saturated_listener(self):
+        """A listening socket whose accept queue is full at this instant.
+
+        Filled by connecting to it until a connection cannot get in, which is
+        what a server momentarily behind on accept() looks like from outside.
+        The connections are held open for the test, because closing one
+        drains the queue and un-does the fixture.
+        """
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        self.addCleanup(sock.close)
+        port = sock.getsockname()[1]
+        for _ in range(20):
+            try:
+                client = socket.create_connection(("127.0.0.1", port), 0.1)
+            except OSError:
+                return sock, port
+            self.addCleanup(client.close)
+        self.skipTest("this kernel's accept queue did not fill in 20 tries")
+
+    def drain_after(self, sock, delay):
+        """Start accepting `delay` seconds from now, and go on for a while.
+
+        The delay is the whole fixture. The probe's first SYN has to arrive
+        while the queue is still full so that it is DROPPED -- the thing a
+        refusal is not -- and the retransmit has to arrive after the queue
+        has room. That is a server that was busy for a moment, which is the
+        only case widening the timeout was ever about.
+        """
+        def accept_everything():
+            time.sleep(delay)
+            sock.settimeout(0.5)
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    client, _ = sock.accept()
+                except OSError:
+                    return
+                client.close()
+
+        thread = threading.Thread(target=accept_everything, daemon=True)
+        thread.start()
+        return thread
 
     def test_a_port_being_listened_on_is_listening(self):
         self.assertTrue(craftui._something_is_listening(self.listening_port()))
@@ -2434,6 +2602,91 @@ class ListeningTest(unittest.TestCase):
     def test_a_port_written_as_a_string_of_digits_is_still_a_port(self):
         port = self.listening_port()
         self.assertTrue(craftui._something_is_listening(str(port)))
+
+    def test_the_probe_asks_the_address_it_was_given(self):
+        """::1 and 127.0.0.1 are two addresses, not two names for one: a
+        server bound to either is unreachable on the other. CraftServer takes
+        a host already and require_loopback admits ::1, so the day anything
+        passes one, a probe with 127.0.0.1 written into it answers False for
+        every live server -- and every `stop` reports NOSERVER at one."""
+        if not socket.has_ipv6:
+            self.skipTest("no IPv6 on this machine")
+        sock = socket.socket(socket.AF_INET6)
+        try:
+            sock.bind(("::1", 0))
+        except OSError as exc:
+            sock.close()
+            self.skipTest("::1 is not bindable here: {}".format(exc))
+        self.addCleanup(sock.close)
+        sock.listen(5)
+        port = sock.getsockname()[1]
+        self.assertTrue(craftui._something_is_listening(port, "::1"))
+        self.assertFalse(
+            craftui._something_is_listening(port),
+            "127.0.0.1 reached a server bound to ::1, so nothing here is "
+            "evidence about the host the probe was given")
+
+    def test_a_full_accept_queue_is_not_a_dead_server(self):
+        """A SYN arriving at a full accept queue is DROPPED, not refused, so
+        the probe waits for a retransmit instead of getting an answer. At a
+        tenth of a second it therefore called an unmistakably live listener
+        dead, which is a `stop` that prints NOSERVER and leaves the session
+        running.
+
+        The premise is asserted first, so this cannot pass vacuously on a
+        kernel that refuses where this one drops.
+        """
+        sock, port = self.saturated_listener()
+        with self.assertRaises(OSError):
+            # What LISTEN_PROBE_S used to be, against the queue as it stands.
+            socket.create_connection(("127.0.0.1", port), 0.1).close()
+        self.drain_after(sock, 0.2)
+        self.assertTrue(craftui._something_is_listening(port))
+
+    def test_the_probe_outlasts_one_dropped_syn(self):
+        """Why the number is not the "about a second" it looks like it should
+        be. A dropped SYN is retransmitted at the initial RTO, which is 1 s,
+        and the connect completes at 1.005-1.019 s -- measured over eight
+        runs against a queue that drains meanwhile. One second misses that by
+        twenty milliseconds and fixes nothing.
+
+        The other end is the second retransmit, at 3 s. A probe that waits
+        past it is waiting out a server that dropped two SYNs in a row, and
+        `status` -- which an agent runs to glance -- blocks for all of it."""
+        self.assertGreater(craftui.LISTEN_PROBE_S, 1.02)
+        self.assertLess(craftui.LISTEN_PROBE_S, 3.0)
+
+
+class RecordedHostTest(unittest.TestCase):
+    """Where the probe is sent, which is read back out of the URL the server
+    advertised rather than assumed."""
+
+    def test_the_url_a_server_advertises_is_one_its_host_can_be_read_from(self):
+        """Writer and reader are one property, so they are asserted as one. A
+        bare IPv6 literal makes `http://::1:8000/`, which urlsplit answers
+        with a hostname of None -- so the URL has to bracket it, and the two
+        halves have to be checked against each other rather than each against
+        a string somebody typed twice."""
+        for host in ("127.0.0.1", "::1", "localhost"):
+            with self.subTest(host=host):
+                url = craftui._advertised_url(host, 8000, "k")
+                self.assertEqual(craftui._recorded_host(url), host)
+
+    def test_a_url_that_says_nothing_readable_is_the_loopback_default(self):
+        for url in (None, "", 42, [], "not a url", "http://",
+                    "http://[::1", "http://::1:8000/?key=k"):
+            with self.subTest(url=url):
+                self.assertEqual(craftui._recorded_host(url), "127.0.0.1")
+
+    def test_a_url_naming_somewhere_that_is_not_loopback_is_refused(self):
+        """server-info is an ordinary file in the user's project. A probe
+        that dialled whatever it found in one would be a connection to a
+        stranger made on the say-so of a file -- and, in `stop`, a SIGTERM
+        authorised by whatever answered it."""
+        for host in ("example.com", "10.0.0.1", "0.0.0.0", "169.254.169.254"):
+            with self.subTest(host=host):
+                url = "http://{}:8000/?key=k".format(host)
+                self.assertEqual(craftui._recorded_host(url), "127.0.0.1")
 
 
 class _KillRefused:
@@ -2610,13 +2863,34 @@ class CmdStopTest(unittest.TestCase):
     def test_the_wait_is_the_wait_it_was_given(self):
         """A lower bound, so a loaded machine can only make it pass. What is
         being asserted is that the constant is what bounds the wait -- an
-        implementation that gave up after one look would return at once."""
+        implementation that gave up after one look would return at once.
+
+        The bound is read out of the ERROR line rather than out of the
+        constant, and WRITE_DRAIN_TIMEOUT_S is patched far below it, because
+        the line and the deadline are two separate references to
+        STOP_SIGTERM_WAIT_S and only one of them was checked: swapping the
+        deadline for WRITE_DRAIN_TIMEOUT_S left the whole suite green. Now
+        the wait `stop` took has to be at least the wait it told the user it
+        took, so a deadline built from the other constant comes back in ten
+        milliseconds still promising four hundred, and says so here.
+
+        An upper bound would be the obvious other half and is deliberately
+        not here: it is wall-clock, it would be the fifth flaky timing
+        assertion in this project, and the failure it would catch -- a wait
+        longer than advertised -- is caught by this one as soon as the two
+        constants are on the wrong sides of each other."""
         stubborn = self.sleeper(ignore_sigterm=True)
         self.record(stubborn.pid, self.listening_port())
         self.patch("STOP_SIGTERM_WAIT_S", 0.4)
+        self.patch("WRITE_DRAIN_TIMEOUT_S", 0.01)
         started = time.monotonic()
-        self.assertEqual(self.stop()[0], 1)
-        self.assertGreaterEqual(time.monotonic() - started, 0.4)
+        code, line = self.stop()
+        elapsed = time.monotonic() - started
+        self.assertEqual(code, 1)
+        promised = re.search(r"within ([0-9.]+)s", line)
+        self.assertIsNotNone(promised, line)
+        self.assertEqual(float(promised.group(1)), 0.4, line)
+        self.assertGreaterEqual(elapsed, float(promised.group(1)))
 
     def test_a_server_that_goes_on_sigterm_is_stopped(self):
         """A real process, a real SIGTERM, and a stop that does not return

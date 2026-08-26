@@ -76,6 +76,7 @@ import socket  # noqa: E402
 import subprocess  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
+import urllib.parse  # noqa: E402
 import webbrowser  # noqa: E402
 from pathlib import Path  # noqa: E402
 
@@ -87,6 +88,7 @@ from server import (  # noqa: E402
     CraftServer,
     make_key,
     parse_round,
+    require_loopback,
 )
 from session import (  # noqa: E402
     LockHeld,
@@ -109,12 +111,34 @@ SERVE_START_TIMEOUT_S = 15
 # large enough that the wait is not a spin.
 SERVE_POLL_S = 0.02
 
-# How long the listening probe waits for a loopback connection. The peer is
-# on this machine and its socket is already listening or it is not, so this
-# is a bound on a kernel that has stopped answering rather than a budget for
-# a handshake -- which is why it is a tenth of a second and not a timeout a
-# person would notice.
-LISTEN_PROBE_S = 0.1
+# How long the listening probe waits for a loopback connection.
+#
+# It reads as a bound on a kernel that has stopped answering, and a tenth of
+# a second was chosen against that reading. It is also, and this is what the
+# reading missed, the budget for the server to ACCEPT. When the accept queue
+# is full Linux drops the SYN rather than refusing it, and two unaccepted
+# connections against a listen(1) backlog were enough to fill it -- so the
+# probe called an unmistakably live listener dead, which is a `stop` that
+# prints NOSERVER and walks away from a running session.
+#
+# The number is what the retransmit says it has to be, and this is the whole
+# reason it is not the "about a second" the finding asked for. A dropped SYN
+# is retransmitted at the initial RTO, which is 1 s, and the connect then
+# completes at 1.005-1.019 s measured over eight runs against a queue that
+# drains meanwhile. One second therefore misses by twenty milliseconds and
+# fixes nothing. The second retransmit is at 3 s, so anything in (1.02, 3)
+# covers exactly one drop; two is the middle of that band.
+#
+# It costs nothing on the answer that matters. A refused loopback connect
+# returns ECONNREFUSED immediately whatever this says, so a server that has
+# gone is still reported gone at once, and only a server that is there and
+# briefly behind is ever waited for.
+LISTEN_PROBE_S = 2.0
+
+# The address every server this file has ever started was bound to, and what
+# the probe falls back to when server-info does not say. Not a default that
+# permits others: see _recorded_host.
+LOOPBACK_HOST = "127.0.0.1"
 
 # How often `stop` looks to see whether the server has gone. The same trade
 # as SERVE_POLL_S, and the same number: a `stop` that has finished should not
@@ -222,11 +246,6 @@ def _pid_alive(pid):
     return True
 
 
-def server_alive(session):
-    info = read_server_info(session)
-    return bool(info and _pid_alive(info.get("pid")))
-
-
 def _port_free(port):
     """Could a server bind this port right now?
 
@@ -263,8 +282,80 @@ def _pick_port(session, requested):
     return 0
 
 
-def _something_is_listening(port):
-    """Is anything accepting connections on this loopback port right now?
+def _advertised_url(host, port, key):
+    """The URL server-info hands out for a server bound to (host, port).
+
+    An IPv6 literal is bracketed, because a bare one is not a URL: `::1` and
+    the `:port` after it run together into `http://::1:8000/`, which urlsplit
+    answers with a hostname of None. _recorded_host reads this back to decide
+    where to send the probe, so an unreadable URL is a probe sent to the
+    wrong address and a live server reported dead. The writer and the reader
+    are a pair, and test_commands asserts the round trip rather than each
+    half separately.
+    """
+    if ":" in host:
+        host = "[{}]".format(host)
+    return "http://{}:{}/?key={}".format(host, port, key)
+
+
+def _url_without_key(url):
+    """The recorded URL with its query string, and so the session key, gone.
+
+    The key is a live credential: anything holding it can read and rewrite
+    the round. That is why server-info is written 0600 and why the key is
+    kept out of .craft/server.log, which is an ordinary 0644 file. An agent's
+    stdout is lower-integrity than either -- it lands in transcripts, task
+    reports and pull request bodies -- and `status` is the read-only glance
+    an agent is told to run repeatedly and quote.
+
+    Nothing loses anything by it. `serve --open` opens the tab, `serve`
+    prints the whole URL to the person who ran it deliberately, a human who
+    wants it again reads server-info, and the port is reported here anyway.
+
+    A url that is not a string is None and not itself: string-or-None is the
+    shape this key has always had, and a hand-edited server-info is exactly
+    where the other shapes come from.
+    """
+    if not isinstance(url, str):
+        return None
+    return url.split("?", 1)[0]
+
+
+def _recorded_host(url):
+    """The loopback address the recorded server said it bound.
+
+    Read back out of the URL it advertised rather than assumed. CraftServer
+    already takes a host and switches to AF_INET6 for one containing a colon,
+    and require_loopback admits `::1` and `localhost` beside 127.0.0.1;
+    _build_server passes none of that today, so a literal here is unreachable
+    rather than wrong. The day a --host flag arrives it becomes a probe that
+    asks the wrong address, which is every `stop` printing NOSERVER at a live
+    server with nothing failing to say so.
+
+    Anything it cannot read is 127.0.0.1, which is what every server this
+    file has ever started was bound to. That includes a URL naming a host
+    that is not loopback: server-info is an ordinary file in the user's
+    project, and a probe that dialled whatever it found in one would be a
+    connection to a stranger made on the say-so of a file.
+    """
+    if not isinstance(url, str):
+        return LOOPBACK_HOST
+    try:
+        host = urllib.parse.urlsplit(url).hostname
+    except ValueError:
+        # "http://[::1" -- an unclosed bracket is a ValueError, not a None.
+        return LOOPBACK_HOST
+    if not host:
+        return LOOPBACK_HOST
+    try:
+        require_loopback(host)
+    except ValueError:
+        return LOOPBACK_HOST
+    return host
+
+
+def _something_is_listening(port, host=LOOPBACK_HOST):
+    """Is anything accepting connections on this loopback address right now?
 
     `stop` uses this to corroborate a recorded pid before it signals it, so
     every answer it cannot confirm is a no: a port that is not a port, a
@@ -282,7 +373,12 @@ def _something_is_listening(port):
 
     The connection is closed without a word. log_message is silenced and the
     idle clock is only touched behind the key check, so this leaves no trace
-    in the server it just poked.
+    in the server it just poked -- which is what lets `wait` ask this four
+    times a second without keeping a session alive that should have timed out
+    idle.
+
+    The host is a parameter and not a literal because the server has always
+    been able to bind `::1`; see _recorded_host for where callers get it.
     """
     try:
         number = int(port)
@@ -291,10 +387,44 @@ def _something_is_listening(port):
     if not 0 < number < 65536:
         return False
     try:
-        with socket.create_connection(("127.0.0.1", number), LISTEN_PROBE_S):
+        with socket.create_connection((host, number), LISTEN_PROBE_S):
             return True
     except OSError:
         return False
+
+
+def _server_is_up(info):
+    """Is the server this server-info describes running right now?
+
+    Two pieces of evidence, because neither is enough alone. The pid says a
+    process with that number exists; server-info outlives the session that
+    wrote it, so hours later that number is one the kernel is free to have
+    handed to the user's editor. The port says something is listening where
+    this session's server bound itself for its whole life.
+
+    Every command asks it here, and asks it the same way. `stop` asked for
+    the port first, because the cost of being wrong there is a SIGTERM to a
+    stranger -- but pid-only was not merely weaker elsewhere, it was a
+    different answer to the same question: against a recycled pid `status`
+    reported a running server and printed its URL while `stop`, on the same
+    server-info, said NOSERVER. `wait` was the one that hurt. It resets its
+    strike count from this, so it never reached NOSERVER at all: it burned
+    its whole timeout and returned TIMEOUT, and TIMEOUT is the one outcome
+    the skill answers by arming another wait -- for ever.
+
+    The error in the other direction is bounded, and was weighed rather than
+    ignored: a probe that misses while the server is briefly wedged costs
+    `wait` one strike out of DEAD_SERVER_STRIKES, and a wedge long enough to
+    spend all eight is a session that is genuinely ending.
+    """
+    if not info or not _pid_alive(info.get("pid")):
+        return False
+    host = _recorded_host(info.get("url"))
+    return _something_is_listening(info.get("port"), host)
+
+
+def server_alive(session):
+    return _server_is_up(read_server_info(session))
 
 
 # --------------------------------------------------------------------- serve
@@ -593,10 +723,11 @@ def _run_server(session, args):
                 "key": key,
                 # The address that was actually bound, not a name for it. This
                 # server binds 127.0.0.1 only, and "localhost" resolves to ::1
-                # first on plenty of machines.
-                "url": "http://{}:{}/?key={}".format(
-                    server.server_address[0], server.port, key
-                ),
+                # first on plenty of machines. Every command after this one
+                # reads the host back out of this string to know where to
+                # send its probe, so it is built by _advertised_url and not
+                # by a format string of its own.
+                "url": _advertised_url(server.server_address[0], server.port, key),
             },
         )
     except OSError as exc:
@@ -708,9 +839,13 @@ def cmd_serve(args):
 # How often `wait` looks.
 #
 # It runs for hours and it ends a person's silence, so it is pulled both
-# ways. A look is a read of the answers file, a read of server-info and one
-# kill(pid, 0): measured at 18.9 us of cpu, so four a second is 0.008% of a
-# core and 2.2 s of cpu across an eight-hour wait. That is the cheap half.
+# ways. A look is a read of the answers file, a read of server-info, one
+# kill(pid, 0) and -- since a pid stopped being evidence enough on its own --
+# one loopback connect that is closed at once. The connect is most of what a
+# look now costs: 33 us of cpu without it against 139 us with it, measured
+# over 4,000 looks against a listener in another process. Four a second is
+# 0.06% of a core and 16 s of cpu across an eight-hour wait, so it is still
+# the cheap half; it is no longer the 18.9 us this comment used to name.
 # The other half is that a quarter of a second is under the ~1 s at which a
 # person notices that something waited, so pressing Send and having the agent
 # wake reads as immediate.
@@ -736,6 +871,12 @@ POLL_S = 0.25
 # claim was the whole justification for the number, since a serve spawn from
 # launch to server-info measured 0.112-0.144 s over five runs and the window
 # has to stay an order of magnitude clear of that.
+#
+# 1.75 s is now a floor rather than the figure. A miss whose pid is dead or
+# whose port is refused still costs nothing measurable, which is the miss a
+# restart produces; a miss that has to wait out LISTEN_PROBE_S only happens
+# to a server that is there and not answering, and widening the window for
+# that one is the direction that is safe.
 #
 # The consequence at the other end, and it is deliberate: a `wait` started
 # before any server exists does not sit there hoping one appears. It reports
@@ -917,6 +1058,16 @@ def cmd_status(args):
     failed. Which of the two it was is not something the reader could then
     tell apart.
 
+    It asks the same liveness question `stop` and `wait` ask, which since
+    the pid alone stopped being enough means it opens one loopback connection
+    to the recorded port. That is the only syscall here that is not a read of
+    the project, and it is not a write to anything: the server touches
+    neither its log nor its idle clock for a connection that says nothing.
+
+    The url it reports is the recorded one with the query string removed,
+    because the key in that query string is a live credential and this
+    command's output is written to be pasted. See _url_without_key.
+
     Deliberately NOT reported: who holds the lock. The lock file is never
     unlinked, so its contents outlive the session that wrote them -- a pid
     read out of it names a process that died hours ago and, once the kernel
@@ -931,7 +1082,9 @@ def cmd_status(args):
         # false these describe the session that was, and the port is the one
         # the next `serve` will try to reuse so that an open tab reconnects.
         "port": info.get("port"),
-        "url": info.get("url"),
+        # Without its query string, which is where the session key lives.
+        # See _url_without_key: this line is quoted into transcripts.
+        "url": _url_without_key(info.get("url")),
         "round": None,
         "has_draft": False,
         "total_questions": 0,
@@ -1014,12 +1167,14 @@ def cmd_stop(args):
     -- and signalling that is killing a stranger's process. The port has to
     be listening too: this server binds it for its whole life, so "the pid is
     alive AND its port is answering" is as near to identity as this can get
-    without a round trip and a key.
+    without a round trip and a key. That pair is _server_is_up, and it is now
+    what `status` and `wait` ask as well -- one question, one answer, three
+    commands.
     """
     session = Session(args.project_dir)
     info = read_server_info(session) or {}
     pid = info.get("pid")
-    if not _pid_alive(pid) or not _something_is_listening(info.get("port")):
+    if not _server_is_up(info):
         print("NOSERVER")
         return 3
 

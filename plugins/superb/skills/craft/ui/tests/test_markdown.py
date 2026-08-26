@@ -5,6 +5,81 @@ from html.parser import HTMLParser
 from markdown import render
 
 
+# How much bigger the second input is than the first. Four rather than two,
+# because the two hypotheses have to be told apart on a machine that is
+# fighting for cache as well as for CPU: quadrupling the input costs 4x if
+# the cost is linear in it and 16x if it is quadratic, which is twice the
+# separation a doubling gives and the margin is what this test lives on.
+GROWTH_FACTOR = 4
+
+# Halfway between the two, on the log scale: sqrt(4 * 16) = 8. Measured
+# ratios with the bounds in place run 3.8-5.1, on a quiet machine and under
+# five times CPU oversubscription alike; with either bound removed they run
+# 16.5-19.1. Both sides clear this by roughly a factor of two.
+LINEARISH = 8.0
+
+# Passes over the pair before the ratio is believed, and the ceiling on
+# re-sampling when it is not. See growth_ratio for why more samples cannot
+# turn a quadratic regex green.
+GROWTH_TRIALS = 3
+GROWTH_TRIAL_CAP = 8
+
+
+def growth_ratio(build, n, threshold=LINEARISH):
+    """Render `build(n)` and `build(GROWTH_FACTOR * n)`; measure the growth.
+
+    Returns (ratio, cost_n, cost_big, output_at_big) -- the output too, so a
+    caller can assert the rendering was still correct without paying for
+    another pass over the larger input.
+
+    A ratio near GROWTH_FACTOR means the cost grew with the input; near its
+    square means it grew with the square of the input. That, and not any
+    number of seconds, is the property these tests exist to hold: a
+    wall-clock bound measures the machine as much as the code, passing a
+    quadratic regex on a fast idle box and failing a linear one on a loaded
+    one -- which is the flake the absolute bound here actually produced.
+
+    Two things make the measurement survive a loaded machine.
+
+    It is CPU time, not wall time. `time.process_time` does not tick while
+    this process sits off the run queue waiting its turn, which is most of
+    what contention does to a pure-regex workload. Measured against six
+    suites and thirty-six busy loops on twelve cores, wall-clock ratios for
+    the same unchanged regex ranged 1.2-2.9 on a doubling while CPU ratios
+    stayed 1.9-2.4.
+
+    And it is the minimum of several interleaved passes, re-sampled while
+    the ratio still looks quadratic, up to GROWTH_TRIAL_CAP. Sampling until
+    the answer is believed sounds like sampling until it passes, but the
+    estimator is a minimum: every extra pass can only lower one of the two
+    readings toward the cost with no interference in it, so more samples
+    converge on the true ratio rather than drift toward the threshold. A
+    regex that is genuinely quadratic measures ~16 however long you look,
+    and burns the whole budget failing.
+
+    What is left is the one asymmetry CPU time does not remove: the larger
+    input has the larger working set, so heavy cache contention inflates its
+    reading more than the small one's. It is bounded and it is why the
+    threshold sits at the geometric mean of the two hypotheses rather than
+    anywhere nearer the linear one.
+    """
+    small = large = out = None
+    for trial in range(GROWTH_TRIAL_CAP):
+        one, _ = _render_cpu_seconds(build(n))
+        two, out = _render_cpu_seconds(build(GROWTH_FACTOR * n))
+        small = one if small is None else min(small, one)
+        large = two if large is None else min(large, two)
+        if trial + 1 >= GROWTH_TRIALS and large / small < threshold:
+            break
+    return large / small, small, large, out
+
+
+def _render_cpu_seconds(source):
+    started = time.process_time()
+    out = render(source)
+    return time.process_time() - started, out
+
+
 class _Tags(HTMLParser):
     """Reads the rendered fragment the way a browser's tokenizer does.
 
@@ -402,27 +477,42 @@ class RobustnessTest(unittest.TestCase):
         source = "# H\n\n- a\n- b\n\n```\ncode\n```\n\n> q\n\n[l](https://e.com)"
         self.assertEqual(render(source), render(source))
 
-    def test_a_pathological_line_terminates_quickly(self):
-        # The link regex is quadratic in a line of unmatched brackets: 40k of
-        # them took ~6s unbounded, which is a hang for a single-threaded
+    def test_a_pathological_line_grows_linearly_not_quadratically(self):
+        # The link regex was quadratic in a line of unmatched brackets: 40k of
+        # them cost ~5s unbounded, which is a hang for a single-threaded
         # server rendering on every poll.
-        start = time.time()
-        out = render("[" * 40000)
-        elapsed = time.time() - start
-        self.assertLess(elapsed, 2.0, "took {:.2f}s".format(elapsed))
+        #
+        # The property is growth, not duration. An absolute bound on the wall
+        # clock measures the machine as much as the code -- it passes a
+        # quadratic regex on a fast idle box and fails a linear one on a
+        # loaded one, which is exactly the flake it produced here. Growing
+        # the input is what separates the two, and growth_ratio explains why
+        # the measurement holds on a machine under load.
+        ratio, small, large, out = growth_ratio(lambda n: "[" * n, 10000)
+        self.assertLess(
+            ratio, LINEARISH,
+            "{}x the brackets multiplied the CPU cost by {:.2f} "
+            "({:.3f}s -> {:.3f}s); linear is ~{}, quadratic is ~{}".format(
+                GROWTH_FACTOR, ratio, small, large,
+                GROWTH_FACTOR, GROWTH_FACTOR ** 2))
         self.assertIn("<p>", out)
         # Dropped from here: a 200k line of plain "x". Every rule is linear in
         # text that matches none of them, bounds or no bounds, so it cost
-        # suite time and constrained nothing.
+        # suite time and constrained nothing. It is no use as a baseline for a
+        # ratio either -- 40k of "x" renders in well under a millisecond, so
+        # the comparison would be against timer noise.
 
-    def test_a_pathological_link_target_terminates_quickly(self):
+    def test_a_pathological_link_target_grows_linearly_not_quadratically(self):
         # The bracket line above exercises the label class only: remove the
         # {1,2000} bound from the URL class alone and every other test stays
-        # green while 80k of "[a](" goes from ~0.4s to ~7.7s.
-        start = time.time()
-        out = render("[a](" * 20000)
-        elapsed = time.time() - start
-        self.assertLess(elapsed, 2.0, "took {:.2f}s".format(elapsed))
+        # green while "[a](" repeated goes quadratic on its own.
+        ratio, small, large, out = growth_ratio(lambda n: "[a](" * n, 2500)
+        self.assertLess(
+            ratio, LINEARISH,
+            "{}x the link targets multiplied the CPU cost by {:.2f} "
+            "({:.3f}s -> {:.3f}s); linear is ~{}, quadratic is ~{}".format(
+                GROWTH_FACTOR, ratio, small, large,
+                GROWTH_FACTOR, GROWTH_FACTOR ** 2))
         self.assertIn("<p>", out)
 
     def test_an_indented_closing_fence_still_closes(self):

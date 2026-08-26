@@ -92,9 +92,11 @@ from session import (  # noqa: E402
     LockHeld,
     LockUnavailable,
     Session,
+    describe_os_error,
     read_json,
     write_json_atomic,
 )
+import schema  # noqa: E402
 
 # How long the parent waits for the child to say what happened. Everything
 # the child does before it answers is local: take a lock, bind a loopback
@@ -106,6 +108,18 @@ SERVE_START_TIMEOUT_S = 15
 # How often the parent looks. Small enough that `serve` feels immediate,
 # large enough that the wait is not a spin.
 SERVE_POLL_S = 0.02
+
+# How long the listening probe waits for a loopback connection. The peer is
+# on this machine and its socket is already listening or it is not, so this
+# is a bound on a kernel that has stopped answering rather than a budget for
+# a handshake -- which is why it is a tenth of a second and not a timeout a
+# person would notice.
+LISTEN_PROBE_S = 0.1
+
+# How often `stop` looks to see whether the server has gone. The same trade
+# as SERVE_POLL_S, and the same number: a `stop` that has finished should not
+# sit there, and this is not a wait long enough to spin on.
+STOP_POLL_S = 0.02
 
 # How often the server checks that it still holds the project and that it is
 # not idle. Four times a second: two fstats and a subtraction, and it is also
@@ -247,6 +261,40 @@ def _pick_port(session, requested):
     if info and _port_free(info.get("port")):
         return int(info["port"])
     return 0
+
+
+def _something_is_listening(port):
+    """Is anything accepting connections on this loopback port right now?
+
+    `stop` uses this to corroborate a recorded pid before it signals it, so
+    every answer it cannot confirm is a no: a port that is not a port, a
+    connection refused, a machine that will not let us ask. The cost of a
+    wrong False is a `stop` that reports NOSERVER; the cost of a wrong True
+    is a SIGTERM to somebody else's process.
+
+    A connect and not a bind, which is what _port_free does. They ask
+    opposite questions and only one of them is this one. A bind probe reads
+    "nothing holds this port", which is what _pick_port wants and is a fair
+    proxy for "not listening" on Linux -- but SO_REUSEADDR on Windows lets a
+    bind succeed over a socket another process already holds, so the probe
+    would call a live server's port free and `stop` would refuse to stop it.
+    A successful connect means a listener, on every platform.
+
+    The connection is closed without a word. log_message is silenced and the
+    idle clock is only touched behind the key check, so this leaves no trace
+    in the server it just poked.
+    """
+    try:
+        number = int(port)
+    except (TypeError, ValueError):
+        return False
+    if not 0 < number < 65536:
+        return False
+    try:
+        with socket.create_connection(("127.0.0.1", number), LISTEN_PROBE_S):
+            return True
+    except OSError:
+        return False
 
 
 # --------------------------------------------------------------------- serve
@@ -811,6 +859,197 @@ def cmd_wait(args):
         time.sleep(POLL_S)
 
 
+# --------------------------------------------------------------- status/stop
+
+
+def _why_unreadable(exc):
+    """Why a file could not be read, without saying where it lives.
+
+    `status` prints one JSON object that an agent parses and may quote into a
+    transcript, and an OSError's str() carries the absolute path of the file
+    it failed on. The file is already named, by its basename, in the message
+    this goes into; the directory around it is the user's filesystem and adds
+    nothing the caller did not already supply. describe_os_error is this
+    project's phrasing for exactly that, errno name included. A
+    JSONDecodeError names no path and speaks for itself.
+    """
+    if isinstance(exc, OSError):
+        return describe_os_error(exc)
+    return str(exc)
+
+
+def _cannot_be_read(path, exc=None):
+    return "{} could not be read{}".format(
+        Path(path).name, "" if exc is None else ": " + _why_unreadable(exc))
+
+
+def _answer_map(path):
+    """(state, mapping) for a round's answers or draft. Never raises.
+
+    read_answers is the reader `wait` uses -- one file format, one parser --
+    and it has already reduced every unreadable shape to UNREADABLE. What is
+    added here is the `answers` member itself: count_open and count_answered
+    index it, so a file whose answers are a list is an AttributeError out of
+    a command whose whole job is to print one object, and a hand-edited
+    answers file is exactly where that comes from.
+    """
+    state, payload = read_answers(path)
+    if state != READY:
+        return state, {}
+    answers = payload.get("answers")
+    if not isinstance(answers, dict):
+        return UNREADABLE, {}
+    return READY, answers
+
+
+def cmd_status(args):
+    """One JSON object saying where this session has got to.
+
+    It writes nothing: no .craft, no lock, no file of any kind. This is what
+    an agent runs to look, and looking at a project no session was ever
+    started in must leave no trace of one -- the same rule `wait` obeys, for
+    the same reason.
+
+    It exits 0 for every project it can describe, including the ones that are
+    in a mess. A round that is corrupt, a draft that cannot be read, a server
+    that has gone: each of those is a state the caller acts on by reading the
+    object, and a non-zero exit would say instead that the command itself
+    failed. Which of the two it was is not something the reader could then
+    tell apart.
+
+    Deliberately NOT reported: who holds the lock. The lock file is never
+    unlinked, so its contents outlive the session that wrote them -- a pid
+    read out of it names a process that died hours ago and, once the kernel
+    recycles the number, somebody else's. `server` is the liveness question,
+    and it asks the process rather than a file.
+    """
+    session = Session(args.project_dir)
+    info = read_server_info(session) or {}
+    report = {
+        "server": server_alive(session),
+        # From server-info, which survives a clean exit: when `server` is
+        # false these describe the session that was, and the port is the one
+        # the next `serve` will try to reuse so that an open tab reconnects.
+        "port": info.get("port"),
+        "url": info.get("url"),
+        "round": None,
+        "has_draft": False,
+        "total_questions": 0,
+        "answered": 0,
+        "open": dict((level, 0) for level in schema.IMPORTANCES),
+    }
+
+    def said(code=0):
+        print(json.dumps(report))
+        return code
+
+    try:
+        number = session.current_round()
+    except OSError as exc:
+        report["error"] = _cannot_be_read(session.craft_dir, exc)
+        return said()
+    if number is None:
+        return said()
+
+    report["round"] = number
+    questions = session.questions_path(number)
+    try:
+        round_obj = read_json(questions)
+    except (OSError, ValueError) as exc:
+        # Zeroes would be a lie an agent acts on: total_questions 0 reads as
+        # a round with nothing in it, and the next thing the agent does is
+        # write another round over the top of the one the user is answering.
+        report["error"] = _cannot_be_read(questions, exc)
+        return said()
+
+    errors = schema.validate_round(round_obj)
+    if errors:
+        report["error"] = "{} is not a valid round".format(questions.name)
+        report["details"] = errors
+        return said()
+
+    # Past validate_round, which is count_open and count_answered's stated
+    # precondition, and which guarantees `questions` is a list.
+    report["total_questions"] = len(round_obj["questions"])
+
+    # Submitted answers beat a draft: once a round is sent the draft is
+    # history, and counting it instead would report a round as unfinished
+    # after the user had finished it. has_draft is true only when the draft
+    # is what the counts were computed from.
+    state, answers = _answer_map(session.answers_path(number))
+    if state == UNREADABLE:
+        report["error"] = _cannot_be_read(session.answers_path(number))
+    elif state == ABSENT:
+        state, draft = _answer_map(session.draft_path(number))
+        if state == READY:
+            answers, report["has_draft"] = draft, True
+        elif state == UNREADABLE:
+            report["error"] = _cannot_be_read(session.draft_path(number))
+
+    report["answered"] = schema.count_answered(round_obj, answers)
+    report["open"] = schema.count_open(round_obj, answers)
+    return said()
+
+
+def cmd_stop(args):
+    """End the session server-info names, and leave the project free.
+
+    Three things it will not do, and each of them is the point of a paragraph
+    somewhere else in this file.
+
+    It does not unlink server-info. The recorded port is how the next `serve`
+    lands on the same port, and how a tab the user still has open reconnects
+    itself instead of showing them a dead page.
+
+    It does not escalate to SIGKILL. SIGTERM is what runs the shutdown drain,
+    and the drain is what stops a write that was already in flight from
+    landing in a project another session has since taken -- see
+    shutdown_and_release. A server that will not go on SIGTERM is reported,
+    not shot: skipping the drain is the harm the drain exists to prevent, and
+    whether it is worth it is a person's call and not this command's.
+
+    It does not trust a pid on its own. server-info outlives the session that
+    wrote it, so hours later the pid in it is a number the kernel is free to
+    have handed to something else -- the user's editor, their own dev server
+    -- and signalling that is killing a stranger's process. The port has to
+    be listening too: this server binds it for its whole life, so "the pid is
+    alive AND its port is answering" is as near to identity as this can get
+    without a round trip and a key.
+    """
+    session = Session(args.project_dir)
+    info = read_server_info(session) or {}
+    pid = info.get("pid")
+    if not _pid_alive(pid) or not _something_is_listening(info.get("port")):
+        print("NOSERVER")
+        return 3
+
+    try:
+        os.kill(int(pid), signal.SIGTERM)
+    except ProcessLookupError:
+        # It went between the look and the signal. Nothing was stopped here,
+        # and there is nothing left to stop.
+        print("NOSERVER")
+        return 3
+    except (OSError, OverflowError, ValueError) as exc:
+        print("ERROR   the craft UI server (pid {}) could not be signalled: "
+              "{}".format(pid, _why_unreadable(exc)))
+        return 1
+
+    deadline = time.monotonic() + STOP_SIGTERM_WAIT_S
+    while _pid_alive(pid):
+        if time.monotonic() >= deadline:
+            # Never STOPPED. STOPPED means the project is free, and the
+            # agent's next move on reading it is to start another session on
+            # a project this one still holds.
+            print("ERROR   the craft UI server (pid {}) did not stop within "
+                  "{:g}s of SIGTERM and still holds this project".format(
+                      pid, STOP_SIGTERM_WAIT_S))
+            return 1
+        time.sleep(STOP_POLL_S)
+    print("STOPPED")
+    return 0
+
+
 # ----------------------------------------------------------------------- cli
 
 
@@ -975,6 +1214,14 @@ def build_parser():
     # session which ended in the browser is noticed the same afternoon.
     wait.add_argument("--timeout", type=_timeout_seconds, default=900.0)
     wait.set_defaults(func=cmd_wait)
+
+    status = subs.add_parser("status", help="print a read-only session summary")
+    status.add_argument("--project-dir", type=_project_dir, default=".")
+    status.set_defaults(func=cmd_status)
+
+    stop = subs.add_parser("stop", help="stop the server and free the project")
+    stop.add_argument("--project-dir", type=_project_dir, default=".")
+    stop.set_defaults(func=cmd_stop)
 
     return parser
 

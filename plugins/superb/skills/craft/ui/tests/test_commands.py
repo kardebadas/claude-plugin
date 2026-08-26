@@ -41,8 +41,11 @@ UI_DIR = Path(__file__).resolve().parent.parent
 CRAFTUI = str(UI_DIR / "craftui.py")
 
 # Long enough that a loaded machine does not fail a test that would pass, and
-# short enough that a hung child ends the run rather than the suite.
-PATIENCE_S = 30
+# short enough that a hung child ends the run rather than the suite. Sixty and
+# not thirty: `serve --open` measured 19.19 s at 5x cpu oversubscription and
+# tripped a 30 s timeout there, which is 1.6x headroom on a harness knob that
+# asserts nothing about the product.
+PATIENCE_S = 60
 
 # What has to be left over after the drain has run to its full bound: the
 # lock release, the log line, and the interpreter shutting down. "Comfortably
@@ -109,8 +112,11 @@ class CommandTestCase(unittest.TestCase):
         self.log_path = Path(self.root) / ".craft" / "server.log"
         self._pids = []
         # Registered before anything that can fail, and LIFO: the children go
-        # first, then the tree they were writing into. `stop` does not exist
-        # until Task 9, so this is the whole of the reaping.
+        # first, then the tree they were writing into. Signals and not
+        # `stop`, now that `stop` exists: this has to reap a server whatever
+        # state it is in, including one whose server-info was never written
+        # or was written by the test itself, and `stop` is a command under
+        # test rather than an instrument to test it with.
         self.addCleanup(self._tmp.cleanup)
         self.addCleanup(self._reap)
 
@@ -1962,6 +1968,10 @@ class UsageExitTest(unittest.TestCase):
             ["serve", "--port", "banana"],
             ["serve", "--idle-timeout-minutes", "0"],
             ["serve", "--nonsense"],
+            ["status", "--nonsense"],
+            ["status", "extra"],
+            ["stop", "--nonsense"],
+            ["stop", "--project-dir"],
         ):
             with self.subTest(argv=argv):
                 code, err = self.refused(argv)
@@ -1997,6 +2007,8 @@ class UsageExitTest(unittest.TestCase):
             ["wait", "--project-dir", "/tmp/a\nb", "--round", "1"],
             ["serve", "--project-dir", "/tmp/a\nb"],
             ["serve", "--project-dir", "/tmp/a\x1bb"],
+            ["status", "--project-dir", "/tmp/a\nb"],
+            ["stop", "--project-dir", "/tmp/a\nb"],
         ):
             with self.subTest(argv=argv):
                 code, err = self.refused(argv)
@@ -2029,10 +2041,652 @@ class UsageExitTest(unittest.TestCase):
 
     def test_help_still_exits_zero(self):
         """Asking how to call it is not calling it wrong."""
-        for argv in (["--help"], ["wait", "--help"], ["serve", "--help"]):
+        for argv in (["--help"], ["wait", "--help"], ["serve", "--help"],
+                     ["status", "--help"], ["stop", "--help"]):
             with self.subTest(argv=argv):
                 self.assertEqual(self.refused(argv)[0], 0)
 
+
+# --------------------------------------------------------------------- status
+
+ROUND_FIXTURE = {
+    "round": 1,
+    "questions": [
+        {"id": "Q-1", "importance": "REQUIRED", "title": "a", "type": "text"},
+        {"id": "Q-2", "importance": "REQUIRED", "title": "b", "type": "text"},
+        {"id": "Q-3", "importance": "IMPORTANT", "title": "c", "type": "text"},
+    ],
+}
+
+# The keys `status` prints, every time, whatever state the project is in. An
+# agent reads this object and branches on it, so it is a contract in the same
+# way server-info is: a key that appears only sometimes is a key every caller
+# has to guard, and a key that quietly disappears is a caller that quietly
+# stops asking the question.
+STATUS_KEYS = ["answered", "has_draft", "open", "port", "round", "server",
+               "total_questions", "url"]
+
+
+class CmdStatusTest(unittest.TestCase):
+    """`status` in this process. It spawns nothing and it starts nothing.
+
+    Every property here is a property of the report, not of the process
+    boundary: what it says about a project in each of the states a project
+    can be in, and that it says something useful about the broken ones. The
+    two that really are about the boundary -- a real exit code and a real
+    running server -- are in StatusTest.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = self._tmp.name
+        self.session = Session(self.root)
+
+    def status(self):
+        args = craftui.build_parser().parse_args(
+            ["status", "--project-dir", self.root])
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = craftui.cmd_status(args)
+        self.assertEqual(
+            out.getvalue().count("\n"), 1,
+            "status must print exactly one JSON object, and printed {!r}".format(
+                out.getvalue()))
+        self.raw = out.getvalue()
+        return code, json.loads(out.getvalue())
+
+    def report(self):
+        code, report = self.status()
+        self.assertEqual(code, 0, self.raw)
+        return report
+
+    def write(self, path, text):
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def write_round(self, number=1, payload=None):
+        return self.write(
+            self.session.questions_path(number),
+            json.dumps(ROUND_FIXTURE if payload is None else payload))
+
+    def write_answers(self, path, answers, **extra):
+        body = {"round": 1, "answers": answers}
+        body.update(extra)
+        return self.write(path, json.dumps(body))
+
+    def pretend_server(self, pid=None, port=1, url="http://127.0.0.1:1/?key=k"):
+        pid = os.getpid() if pid is None else pid
+        write_json_atomic(
+            Path(self.root) / ".craft" / "server-info",
+            {"type": "server-started", "port": port, "pid": pid, "key": "k",
+             "url": url},
+        )
+
+    # -- the shape of the report -----------------------------------------
+
+    def test_a_project_with_nothing_in_it_still_gets_a_full_report(self):
+        """Not an empty object and not a failure. "Nothing has happened here
+        yet" is a state the agent acts on, so it has to be said in the same
+        shape as every other state."""
+        report = self.report()
+        self.assertEqual(sorted(report), STATUS_KEYS)
+        self.assertFalse(report["server"])
+        self.assertIsNone(report["round"])
+        self.assertIsNone(report["port"])
+        self.assertIsNone(report["url"])
+        self.assertFalse(report["has_draft"])
+        self.assertEqual(report["total_questions"], 0)
+        self.assertEqual(report["answered"], 0)
+        self.assertEqual(
+            report["open"],
+            {"REQUIRED": 0, "IMPORTANT": 0, "PREFERENCE": 0, "OPTIONAL": 0})
+
+    def test_the_keys_are_the_same_whatever_state_the_project_is_in(self):
+        self.write_round()
+        self.write_answers(self.session.draft_path(1), {"Q-1": {"text": "y"}})
+        self.pretend_server()
+        self.assertEqual(sorted(self.report()), STATUS_KEYS)
+
+    def test_who_holds_the_lock_is_never_reported(self):
+        """The lock file is never unlinked, so its contents outlive the
+        session that wrote them: a pid read out of it names a process that
+        died hours ago and, once the kernel recycles the number, somebody
+        else's. `server` is the liveness question and it asks the running
+        process, not a file."""
+        self.write(Path(self.root) / ".craft" / "session.lock",
+                   json.dumps({"pid": 4242, "started_at": "1999-01-01T00:00:00Z"}))
+        report = self.report()
+        self.assertNotIn("locked_by", report)
+        self.assertNotIn("4242", self.raw)
+
+    # -- the server ------------------------------------------------------
+
+    def test_a_recorded_server_that_is_running_is_reported_as_up(self):
+        self.pretend_server(port=4321, url="http://127.0.0.1:4321/?key=k")
+        report = self.report()
+        self.assertTrue(report["server"])
+        self.assertEqual(report["port"], 4321)
+        self.assertEqual(report["url"], "http://127.0.0.1:4321/?key=k")
+
+    def test_a_server_info_left_behind_by_a_dead_session_is_not_a_server(self):
+        """server-info survives a clean exit so the next `serve` can reuse
+        the port, so its presence says a server WAS started here. The port
+        and url still describe that session -- the next `serve` will try to
+        land on the same port -- and `server` is what says it has gone."""
+        dead = subprocess.Popen([sys.executable, "-c", ""])
+        dead.wait()
+        self.pretend_server(pid=dead.pid, port=4321)
+        report = self.report()
+        self.assertFalse(report["server"])
+        self.assertEqual(report["port"], 4321)
+
+    def test_a_server_info_that_cannot_be_read_is_no_server(self):
+        (Path(self.root) / ".craft" / "server-info").mkdir(parents=True)
+        report = self.report()
+        self.assertFalse(report["server"])
+        self.assertIsNone(report["port"])
+
+    # -- the counts ------------------------------------------------------
+
+    def test_open_questions_are_counted_by_importance(self):
+        self.write_round()
+        report = self.report()
+        self.assertEqual(report["round"], 1)
+        self.assertEqual(report["total_questions"], 3)
+        self.assertEqual(report["answered"], 0)
+        self.assertEqual(report["open"]["REQUIRED"], 2)
+        self.assertEqual(report["open"]["IMPORTANT"], 1)
+
+    def test_the_highest_round_written_is_the_one_reported(self):
+        self.write_round(1)
+        self.write_round(2, {"round": 2, "questions": [
+            {"id": "Q-9", "importance": "OPTIONAL", "title": "z", "type": "text"}]})
+        report = self.report()
+        self.assertEqual(report["round"], 2)
+        self.assertEqual(report["total_questions"], 1)
+
+    def test_a_draft_is_counted_and_flagged_as_a_draft(self):
+        """A draft is what the user has typed and not sent. It is worth
+        counting -- it is how the agent knows somebody is working -- but the
+        round is not settled, so the report says which it counted."""
+        self.write_round()
+        self.write_answers(
+            self.session.draft_path(1),
+            {"Q-1": {"text": "yes"}, "Q-2": {"delegated": True}})
+        report = self.report()
+        self.assertTrue(report["has_draft"])
+        self.assertEqual(report["answered"], 2)
+        self.assertEqual(report["open"]["REQUIRED"], 0)
+        self.assertEqual(report["open"]["IMPORTANT"], 1)
+
+    def test_submitted_answers_beat_a_draft(self):
+        """Once a round is sent the draft is history, and counting the draft
+        instead would report a round as unfinished after the user finished
+        it. has_draft is true only when the draft is what was counted."""
+        self.write_round()
+        self.write_answers(self.session.draft_path(1), {"Q-1": {"text": "old"}})
+        self.write_answers(
+            self.session.answers_path(1),
+            {"Q-1": {"text": "a"}, "Q-2": {"text": "b"}, "Q-3": {"text": "c"}})
+        report = self.report()
+        self.assertFalse(report["has_draft"])
+        self.assertEqual(report["answered"], 3)
+        self.assertEqual(report["open"]["REQUIRED"], 0)
+
+    def test_a_skipped_answer_is_still_open(self):
+        self.write_round()
+        self.write_answers(
+            self.session.draft_path(1),
+            {"Q-1": {"skipped": True}, "Q-2": {"text": "   "}})
+        report = self.report()
+        self.assertEqual(report["answered"], 0)
+        self.assertEqual(report["open"]["REQUIRED"], 2)
+
+    # -- the states a project can be in when things have gone wrong -------
+
+    def test_a_round_that_is_not_json_is_reported_not_hidden(self):
+        """The one thing status must never do here is print zeroes. An agent
+        reading total_questions 0 concludes the round is empty and writes the
+        next one, over the top of a file the user is answering."""
+        self.write(self.session.questions_path(1), "{not json")
+        code, report = self.status()
+        self.assertEqual(code, 0)
+        self.assertEqual(report["round"], 1)
+        self.assertIn("round-001.questions.json", report["error"])
+
+    @unittest.skipIf(getattr(os, "geteuid", lambda: 0)() == 0,
+                     "root reads a file whatever its mode says")
+    def test_a_round_that_cannot_be_read_says_why_without_saying_where(self):
+        """The reason, from describe_os_error, and not the OSError's own str,
+        which carries the absolute path of the file it failed on. This object
+        is parsed by an agent and quoted into a transcript; the file is
+        already named, and the directory it sits in is the user's filesystem.
+        """
+        path = self.write_round()
+        path.chmod(0o000)
+        self.addCleanup(path.chmod, 0o644)
+        report = self.report()
+        self.assertIn("round-001.questions.json", report["error"])
+        self.assertIn("EACCES", report["error"])
+        self.assertNotIn(self.root, self.raw)
+        self.assertNotIn(str(self.session.craft_dir), self.raw)
+
+    def test_a_round_that_fails_validation_says_what_is_wrong_with_it(self):
+        self.write_round(1, {"round": 1, "questions": [
+            {"id": "Q-1", "title": "a", "type": "text"}]})
+        report = self.report()
+        self.assertIn("round-001.questions.json", report["error"])
+        self.assertTrue(any("importance" in line for line in report["details"]))
+
+    def test_a_round_that_is_not_an_object_is_an_error_not_a_traceback(self):
+        self.write(self.session.questions_path(1), "[1, 2, 3]")
+        self.assertIn("round-001.questions.json", self.report()["error"])
+
+    def test_a_draft_that_cannot_be_read_does_not_hide_the_round(self):
+        """The round is still worth reporting, and the counts are still worth
+        having -- computed as though nothing had been answered, which is what
+        an unreadable draft tells you. What must not happen is a traceback
+        out of a command whose whole job is to print one object."""
+        self.write_round()
+        self.session.draft_path(1).mkdir(parents=True)
+        report = self.report()
+        self.assertEqual(report["total_questions"], 3)
+        self.assertFalse(report["has_draft"])
+        self.assertEqual(report["open"]["REQUIRED"], 2)
+        self.assertIn("round-001.draft.json", report["error"])
+        self.assertNotIn(self.root, self.raw)
+
+    def test_an_answers_file_that_cannot_be_read_is_reported(self):
+        self.write_round()
+        self.write(self.session.answers_path(1), "{half")
+        report = self.report()
+        self.assertIn("round-001.answers.json", report["error"])
+        self.assertEqual(report["answered"], 0)
+
+    def test_answers_that_are_not_a_mapping_are_not_answers(self):
+        """count_open and count_answered index this. A file whose `answers`
+        is a list is an AttributeError, and a hand-edited answers file is
+        exactly where that comes from."""
+        self.write_round()
+        self.write(self.session.answers_path(1),
+                   json.dumps({"round": 1, "answers": ["Q-1"]}))
+        report = self.report()
+        self.assertIn("round-001.answers.json", report["error"])
+        self.assertEqual(report["answered"], 0)
+
+    def test_a_craft_directory_that_is_not_a_directory_is_not_a_traceback(self):
+        self.write(Path(self.root) / ".craft", "not a directory at all")
+        self.assertIsNone(self.report()["round"])
+
+    @unittest.skipIf(getattr(os, "geteuid", lambda: 0)() == 0,
+                     "root reads a directory whatever its mode says")
+    def test_a_craft_directory_that_cannot_be_listed_is_reported(self):
+        """current_round() lists the directory, and a directory that exists
+        and cannot be listed raises. Reported, without the path, rather than
+        arriving as a traceback."""
+        craft = Path(self.root) / ".craft"
+        craft.mkdir()
+        craft.chmod(0o000)
+        self.addCleanup(craft.chmod, 0o755)
+        report = self.report()
+        self.assertIsNone(report["round"])
+        self.assertIn(".craft", report["error"])
+        self.assertIn("EACCES", report["error"])
+        self.assertNotIn(self.root, self.raw)
+
+    # -- read-only -------------------------------------------------------
+
+    def test_status_writes_nothing_into_the_project(self):
+        """It is a glance. Creating .craft, or touching a lock, would make a
+        look at a project no session was ever started in leave a trace of
+        one -- and the agent runs this before it runs anything else."""
+        self.assertEqual(snapshot(self.root), {}, "the fixture was not empty")
+        self.report()
+        self.assertEqual(snapshot(self.root), {})
+
+    def test_status_changes_nothing_it_reads(self):
+        self.write_round()
+        self.write_answers(self.session.draft_path(1), {"Q-1": {"text": "y"}})
+        self.pretend_server()
+        self.write(Path(self.root) / ".craft" / "session.lock", "{}")
+        before = snapshot(self.root)
+        self.report()
+        self.assertEqual(snapshot(self.root), before)
+
+    def test_status_neither_makes_the_directory_nor_takes_the_lock(self):
+        """The snapshot above sees a write that lands. This sees the call:
+        `Session.ensure_dirs()` on a project that already has a .craft leaves
+        the snapshot identical, and taking the lock and giving it back leaves
+        a lock file that a serve would have left anyway. Both are refused at
+        the source instead."""
+        self.write_round()
+        self.session.ensure_dirs()
+
+        def explode(*_args, **_kw):
+            raise AssertionError("status is read-only and called this")
+
+        for owner, name in ((session_module.Session, "ensure_dirs"),
+                            (session_module.Session, "acquire_lock"),
+                            (session_module.Session, "release_lock"),
+                            (craftui, "write_json_atomic"),
+                            (session_module, "write_json_atomic")):
+            previous = getattr(owner, name)
+            self.addCleanup(setattr, owner, name, previous)
+            setattr(owner, name, explode)
+        self.assertEqual(self.report()["total_questions"], 3)
+
+
+class StatusTest(CommandTestCase):
+    """`status` through argv, which is how the craft skill runs it.
+
+    Two things only, because everything else about the report is asserted in
+    CmdStatusTest for the price of a function call: that a real shell sees 0
+    and one JSON object, and that a real running server is what `server` is
+    true about.
+    """
+
+    def test_status_prints_one_json_object_and_exits_zero(self):
+        result = run("status", "--project-dir", self.root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.count("\n"), 1, result.stdout)
+        self.assertFalse(json.loads(result.stdout)["server"])
+
+    def test_status_reports_a_real_running_server(self):
+        self.serve()
+        result = run("status", "--project-dir", self.root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertTrue(report["server"], result.stdout + self.log())
+        self.assertEqual(report["port"], self.info()["port"])
+        self.assertEqual(report["url"], self.info()["url"])
+
+
+# ----------------------------------------------------------------------- stop
+
+
+class ListeningTest(unittest.TestCase):
+    """`stop` corroborates a recorded pid against the recorded port before it
+    signals anything. This is that probe."""
+
+    def listening_port(self):
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(5)
+        self.addCleanup(sock.close)
+        return sock.getsockname()[1]
+
+    def test_a_port_being_listened_on_is_listening(self):
+        self.assertTrue(craftui._something_is_listening(self.listening_port()))
+
+    def test_a_port_nobody_is_listening_on_is_not(self):
+        self.assertFalse(craftui._something_is_listening(free_port()))
+
+    def test_a_port_that_is_not_a_port_is_not_listening(self):
+        """False and not an exception, and False rather than True: this
+        answer authorises a SIGTERM, so anything it cannot confirm is a no."""
+        for value in (None, "", "banana", 0, -1, 70000, 1.5, [1]):
+            with self.subTest(port=value):
+                self.assertFalse(craftui._something_is_listening(value))
+
+    def test_a_port_written_as_a_string_of_digits_is_still_a_port(self):
+        port = self.listening_port()
+        self.assertTrue(craftui._something_is_listening(str(port)))
+
+
+class _KillRefused:
+    """craftui's `os`, with signalling replaced by one failure.
+
+    Signal 0 goes through to the real os.kill, so a pid is alive when `stop`
+    checks; every real signal raises. That is the shape of the two races that
+    matter -- the process went, or it is not ours to signal -- and neither
+    can be produced on demand with a real process.
+    """
+
+    def __init__(self, error):
+        self.error = error
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+    def kill(self, pid, sig):
+        if sig == 0:
+            return os.kill(pid, 0)
+        raise self.error
+
+
+class CmdStopTest(unittest.TestCase):
+    """`stop` in this process, against real processes and real sockets.
+
+    The wait for the death is collapsed. What the real one has to be is not a
+    number this class knows: it is bounded below by the drain it has to
+    outlast, and ShutdownOrderTest asserts that relationship against the two
+    constants themselves.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = self._tmp.name
+        self.session = Session(self.root)
+        self.patch("STOP_SIGTERM_WAIT_S", 0.5)
+
+    def patch(self, name, value):
+        previous = getattr(craftui, name)
+        self.addCleanup(setattr, craftui, name, previous)
+        setattr(craftui, name, value)
+
+    def stop(self):
+        args = craftui.build_parser().parse_args(
+            ["stop", "--project-dir", self.root])
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = craftui.cmd_stop(args)
+        self.assertEqual(
+            out.getvalue().count("\n"), 1,
+            "stop must print exactly one line, and printed {!r}".format(
+                out.getvalue()))
+        return code, out.getvalue().strip()
+
+    def listening_port(self):
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(5)
+        self.addCleanup(sock.close)
+        return sock.getsockname()[1]
+
+    def sleeper(self, ignore_sigterm=False):
+        """A live process that is not a craft server.
+
+        It says so before it sleeps, and this waits to hear it. Without the
+        handshake the SIGTERM lands while the interpreter is still starting
+        and an ignore_sigterm=True fixture dies of the signal it was written
+        to survive -- measured, not imagined: that is how the first run of
+        this failed.
+
+        A thread reaps it, because this one IS our child and a real server is
+        not. A dead child stays in the process table as a zombie until its
+        parent waits for it, and os.kill(pid, 0) on a zombie succeeds -- so
+        without the reaper a process that died instantly on SIGTERM looks,
+        to `stop`, exactly like one that ignored it. The detached server
+        `stop` is really for has been reparented away from whoever runs
+        `stop`, so nothing there holds a zombie open.
+        """
+        code = "import signal, sys, time\n"
+        if ignore_sigterm:
+            code += "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        code += "sys.stdout.write('ready\\n')\nsys.stdout.flush()\n"
+        code += "time.sleep(120)\n"
+        child = subprocess.Popen(
+            [sys.executable, "-c", code], stdout=subprocess.PIPE)
+
+        def reap():
+            if child.poll() is None:
+                child.kill()
+            child.wait()
+            child.stdout.close()
+
+        self.addCleanup(reap)
+        self.assertEqual(child.stdout.readline(), b"ready\n",
+                         "the fixture process never started")
+        threading.Thread(target=child.wait, daemon=True).start()
+        return child
+
+    def record(self, pid, port):
+        write_json_atomic(
+            Path(self.root) / ".craft" / "server-info",
+            {"type": "server-started", "port": port, "pid": pid, "key": "k",
+             "url": "http://127.0.0.1:{}/?key=k".format(port)},
+        )
+
+    # -- nothing to stop --------------------------------------------------
+
+    def test_a_project_that_never_had_a_server_is_noserver(self):
+        self.assertEqual(self.stop(), (3, "NOSERVER"))
+
+    def test_a_server_info_that_cannot_be_read_is_noserver(self):
+        (Path(self.root) / ".craft" / "server-info").mkdir(parents=True)
+        self.assertEqual(self.stop(), (3, "NOSERVER"))
+
+    def test_a_recorded_pid_that_has_gone_is_noserver(self):
+        dead = subprocess.Popen([sys.executable, "-c", ""])
+        dead.wait()
+        self.record(dead.pid, self.listening_port())
+        self.assertEqual(self.stop(), (3, "NOSERVER"))
+
+    def test_a_live_pid_whose_port_is_dead_is_not_signalled(self):
+        """The one that matters. server-info survives a clean exit, so hours
+        later the pid in it is a number the kernel is free to have given to
+        something else -- the user's editor, their dev server. `stop` will
+        not send a signal to a process it cannot corroborate, and our server
+        holds its port for its whole life, so a port nobody is listening on
+        means the session that recorded it has gone."""
+        innocent = self.sleeper(ignore_sigterm=True)
+        self.record(innocent.pid, free_port())
+        self.assertEqual(self.stop(), (3, "NOSERVER"))
+        self.assertIsNone(innocent.poll(), "stop signalled an unrelated process")
+
+    def test_nothing_is_written_when_there_is_nothing_to_stop(self):
+        self.assertEqual(snapshot(self.root), {}, "the fixture was not empty")
+        self.stop()
+        self.assertEqual(snapshot(self.root), {})
+
+    # -- when the signal cannot be delivered -------------------------------
+
+    def test_a_process_that_goes_between_the_look_and_the_signal_is_noserver(self):
+        self.record(os.getpid(), self.listening_port())
+        self.patch("os", _KillRefused(ProcessLookupError(3, "No such process")))
+        self.assertEqual(self.stop(), (3, "NOSERVER"))
+
+    def test_a_process_we_may_not_signal_is_an_error_not_a_stop(self):
+        """It is alive, it is not ours, and it has not been stopped. Saying
+        STOPPED here would tell the agent the project is free while another
+        process holds the lock on it."""
+        self.record(os.getpid(), self.listening_port())
+        self.patch("os", _KillRefused(
+            PermissionError(errno.EPERM, "Operation not permitted")))
+        code, line = self.stop()
+        self.assertEqual(code, 1)
+        self.assertNotIn("STOPPED", line)
+        self.assertIn("EPERM", line)
+        self.assertIn(str(os.getpid()), line)
+
+    # -- when it will not die ---------------------------------------------
+
+    def test_a_server_that_will_not_die_is_never_reported_as_stopped(self):
+        """STOPPED means the project is free, and the agent's next move is to
+        start another session on it. A `stop` that printed it after a wait
+        that ran out would hand a live server's project to a second one."""
+        stubborn = self.sleeper(ignore_sigterm=True)
+        self.record(stubborn.pid, self.listening_port())
+        code, line = self.stop()
+        self.assertEqual(code, 1)
+        self.assertNotIn("STOPPED", line)
+        self.assertIn(str(stubborn.pid), line)
+        self.assertIsNone(stubborn.poll(), "the fixture died on SIGTERM")
+
+    def test_the_wait_is_the_wait_it_was_given(self):
+        """A lower bound, so a loaded machine can only make it pass. What is
+        being asserted is that the constant is what bounds the wait -- an
+        implementation that gave up after one look would return at once."""
+        stubborn = self.sleeper(ignore_sigterm=True)
+        self.record(stubborn.pid, self.listening_port())
+        self.patch("STOP_SIGTERM_WAIT_S", 0.4)
+        started = time.monotonic()
+        self.assertEqual(self.stop()[0], 1)
+        self.assertGreaterEqual(time.monotonic() - started, 0.4)
+
+    def test_a_server_that_goes_on_sigterm_is_stopped(self):
+        """A real process, a real SIGTERM, and a stop that does not return
+        until the process has actually gone."""
+        going = self.sleeper()
+        self.record(going.pid, self.listening_port())
+        self.patch("STOP_SIGTERM_WAIT_S", 10.0)
+        self.assertEqual(self.stop(), (0, "STOPPED"), "SIGTERM went nowhere")
+        self.assertFalse(
+            pid_alive(going.pid),
+            "stop said STOPPED while the process was still running")
+
+
+class StopTest(CommandTestCase):
+    """`stop` through argv, against the real server it exists to stop."""
+
+    def stop(self):
+        return run("stop", "--project-dir", self.root)
+
+    def test_stop_without_a_server_exits_3(self):
+        result = self.stop()
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertEqual(result.stdout.strip(), "NOSERVER")
+
+    def test_stop_ends_the_session_and_frees_the_project(self):
+        self.serve()
+        pid = self.info()["pid"]
+        result = self.stop()
+        self.assertEqual(result.returncode, 0, result.stderr + self.log())
+        self.assertEqual(result.stdout.strip(), "STOPPED")
+        self.assertFalse(
+            pid_alive(pid),
+            "STOPPED was printed while the server was still running")
+        self.assertFalse(self.locked_out(), "the project is still locked")
+        # Never unlinked, by design: release_lock drops the kernel lock and
+        # leaves the file, and removing a lock by path is what let one session
+        # delete another's.
+        self.assertTrue(self.lock_path.exists())
+
+    def test_stop_lets_the_server_shut_down_rather_than_shooting_it(self):
+        """SIGTERM is what runs the drain, and the drain is what keeps a
+        write that was already in flight from landing in a project the next
+        session has taken. The log line is the only difference between a
+        session that went through it and one that was killed where it stood.
+        """
+        self.serve()
+        self.assertEqual(self.stop().returncode, 0)
+        self.assertIn("session ended cleanly", self.log())
+
+    def test_a_fresh_serve_after_stop_needs_no_force(self):
+        self.serve()
+        self.assertEqual(self.stop().returncode, 0)
+        result = self.serve()
+        self.assertEqual(result.returncode, 0, result.stdout + self.log())
+
+    def test_the_port_is_reused_after_a_stop(self):
+        """Deferred from Task 7: an open tab must survive a restart, which it
+        only does if the second server lands on the first one's port."""
+        self.serve()
+        port = self.info()["port"]
+        self.assertEqual(self.stop().returncode, 0)
+        self.serve()
+        self.assertEqual(self.info()["port"], port)
+
+    def test_stopping_a_session_that_has_already_stopped_is_noserver(self):
+        self.serve()
+        self.assertEqual(self.stop().returncode, 0)
+        result = self.stop()
+        self.assertEqual(result.returncode, 3, result.stdout)
+        self.assertEqual(result.stdout.strip(), "NOSERVER")
 
 if __name__ == "__main__":
     unittest.main()

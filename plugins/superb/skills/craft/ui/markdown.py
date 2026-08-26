@@ -4,6 +4,12 @@ Escaping happens first, before any transformation, so a brief containing
 angle brackets is safe. Covers headings, bold, italic, inline and fenced
 code, links, bullet and numbered lists, blockquotes and rules. Not tables.
 
+A brief is hard-wrapped prose, so a block spans lines. Consecutive non-blank
+lines accumulate into one paragraph, and a plain line under a list item is a
+lazy continuation of that item rather than the end of the list. Both
+accumulate into a list and join once, never by re-slicing a growing string:
+the cost of a block stays linear in its length.
+
 A link target is the one piece of brief-derived text that lands in an HTML
 attribute rather than in text, and html.escape(quote=False) leaves quotes
 alone, so it gets its own pass in _href(): a scheme allowlist, control
@@ -73,24 +79,49 @@ def render(text):
     lines = _html.escape(text or "", quote=False).split("\n")
     out = []
     list_tag = [None]
+    # The two blocks that span lines. At most one is ever non-empty: a plain
+    # line under an open list joins the item, so no paragraph starts there,
+    # and a bullet closes the paragraph before the list opens. Both are lists
+    # appended to and joined once -- the accumulation is O(1) per line, so a
+    # long block costs its length and not its square.
+    para = []
+    item = []
+
+    def close_item():
+        if item:
+            out.append("<li>{}</li>".format("\n".join(item)))
+            del item[:]
+
+    def close_para():
+        if para:
+            out.append("<p>{}</p>".format("\n".join(para)))
+            del para[:]
 
     def close_list():
+        close_item()
         if list_tag[0]:
             out.append("</{}>".format(list_tag[0]))
             list_tag[0] = None
 
+    def close_blocks():
+        close_para()
+        close_list()
+
     def open_list(tag):
+        close_para()
         if list_tag[0] != tag:
             close_list()
             out.append("<{}>".format(tag))
             list_tag[0] = tag
+        else:
+            close_item()
 
     i = 0
     while i < len(lines):
         stripped = lines[i].strip()
 
         if _FENCE.match(stripped):
-            close_list()
+            close_blocks()
             i += 1
             buffer = []
             while i < len(lines) and not _FENCE.match(lines[i].strip()):
@@ -101,26 +132,26 @@ def render(text):
             continue
 
         if not stripped:
-            close_list()
+            close_blocks()
             i += 1
             continue
 
         heading = _HEADING.match(stripped)
         if heading:
-            close_list()
+            close_blocks()
             level = len(heading.group(1))
             out.append("<h{0}>{1}</h{0}>".format(level, _inline(heading.group(2))))
             i += 1
             continue
 
         if _RULE.match(stripped):
-            close_list()
+            close_blocks()
             out.append("<hr>")
             i += 1
             continue
 
         if stripped.startswith("&gt;"):
-            close_list()
+            close_blocks()
             out.append("<blockquote>{}</blockquote>".format(_inline(stripped[4:].strip())))
             i += 1
             continue
@@ -128,20 +159,27 @@ def render(text):
         bullet = _BULLET.match(stripped)
         if bullet:
             open_list("ul")
-            out.append("<li>{}</li>".format(_inline(bullet.group(1))))
+            item.append(_inline(bullet.group(1)))
             i += 1
             continue
 
         number = _NUMBER.match(stripped)
         if number:
             open_list("ol")
-            out.append("<li>{}</li>".format(_inline(number.group(1))))
+            item.append(_inline(number.group(1)))
             i += 1
             continue
 
-        close_list()
-        out.append("<p>{}</p>".format(_inline(stripped)))
+        # A plain line continues whatever is already open: the current list
+        # item if a list is, otherwise the paragraph -- starting one if this
+        # is the first line of it. _inline runs per line and the results are
+        # joined, so no rule can match across the wrap; the newline in the
+        # output keeps the brief's own line breaks readable in the source.
+        if list_tag[0]:
+            item.append(_inline(stripped))
+        else:
+            para.append(_inline(stripped))
         i += 1
 
-    close_list()
+    close_blocks()
     return "\n".join(out)

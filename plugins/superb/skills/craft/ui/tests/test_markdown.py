@@ -350,15 +350,22 @@ class LinkTargetTest(unittest.TestCase):
 
 class BlockRuleTest(unittest.TestCase):
     def test_every_block_kind_closes_an_open_list(self):
-        # Five separate close_list() calls in the source; deleting any one
+        # Five separate block-closing calls in the source; deleting any one
         # leaks a <ul> that never closes and swallows the rest of the brief
         # into the list. Each case here kills exactly one of them.
+        #
+        # The paragraph case is a blank line and THEN prose, not bare prose
+        # on the next line. A bare plain line under a list item is that
+        # item's lazy continuation now -- it joins the item and the list
+        # stays open, which is the wrap-aware behaviour HardWrapTest pins.
+        # What survives is the property this case was really testing: once
+        # something has ended the list, a paragraph starts outside it.
         cases = {
             "heading": ("- a\n# H", "<h1>H</h1>"),
             "fence": ("- a\n```\nc\n```", "<pre><code>c</code></pre>"),
             "rule": ("- a\n---", "<hr>"),
             "blockquote": ("- a\n> q", "<blockquote>q</blockquote>"),
-            "paragraph": ("- a\nplain", "<p>plain</p>"),
+            "blank line then paragraph": ("- a\n\nplain", "<p>plain</p>"),
         }
         for name, (source, follower) in cases.items():
             with self.subTest(closed_by=name):
@@ -445,6 +452,104 @@ class BlockRuleTest(unittest.TestCase):
         self.assertNotIn("<p></p>", render("a\n\nb"))
 
 
+class HardWrapTest(unittest.TestCase):
+    """A brief is hard-wrapped prose. Every test above this class feeds the
+    renderer a single line, which is how one <p> per source line survived
+    four review rounds: it is invisible until an input wraps."""
+
+    def test_consecutive_lines_are_one_paragraph_not_one_each(self):
+        out = render("A music player for people who\nalready own their music.")
+        self.assertEqual(out.count("<p>"), 1)
+        self.assertEqual(
+            out,
+            "<p>A music player for people who\nalready own their music.</p>",
+        )
+
+    def test_a_blank_line_ends_the_paragraph(self):
+        out = render("one\ntwo\n\nthree\nfour")
+        self.assertEqual(out, "<p>one\ntwo</p>\n<p>three\nfour</p>")
+
+    def test_a_list_item_continuation_joins_the_item(self):
+        # The bug in one input: the second line escaped the list entirely and
+        # rendered as a paragraph below the closed </ul>.
+        out = render(
+            "- Playlists are private by default.\n"
+            "  Sharing is a separate decision."
+        )
+        self.assertEqual(
+            out,
+            "<ul>\n<li>Playlists are private by default.\n"
+            "Sharing is a separate decision.</li>\n</ul>",
+        )
+        self.assertNotIn("<p>", out)
+
+    def test_a_continuation_does_not_reopen_the_list_or_add_an_item(self):
+        # Closing and reopening around each continuation would still show the
+        # text inside a list, and count("<li>") alone would not see it. This
+        # does: a wrapped two-item list is one <ul> and exactly two items.
+        out = render("- one\n  wrapped\n- two\n  wrapped")
+        self.assertEqual(out.count("<ul>"), 1)
+        self.assertEqual(out.count("</ul>"), 1)
+        self.assertEqual(out.count("<li>"), 2)
+
+    def test_a_numbered_list_keeps_its_continuations_in_one_ol(self):
+        # A restarted <ol> renumbers from 1 in the browser, so an item that
+        # wraps silently changes what the reader sees the steps to be.
+        out = render("1. scan the tree\n   in parallel\n2. write the index")
+        self.assertEqual(out.count("<ol>"), 1)
+        self.assertEqual(out.count("<li>"), 2)
+
+    def test_every_block_kind_still_ends_an_open_paragraph(self):
+        # The other half of joining: a paragraph that never ends swallows the
+        # heading, fence, rule, quote or list that should have followed it.
+        cases = {
+            "blank line": ("para\n\nx", "<p>x</p>"),
+            "heading": ("para\n# H", "<h1>H</h1>"),
+            "fence": ("para\n```\nc\n```", "<pre><code>c</code></pre>"),
+            "rule": ("para\n---", "<hr>"),
+            "blockquote": ("para\n> q", "<blockquote>q</blockquote>"),
+            "bullet": ("para\n- b", "<li>b</li>"),
+            "number": ("para\n1. b", "<li>b</li>"),
+        }
+        for name, (source, follower) in cases.items():
+            with self.subTest(ended_by=name):
+                out = render(source)
+                self.assertIn("<p>para</p>", out)
+                self.assertLess(out.index("<p>para</p>"), out.index(follower))
+
+    def test_a_differently_typed_list_still_ends_the_open_item(self):
+        out = render("- a\n  wrapped\n1. b")
+        self.assertEqual(out.count("<ul>"), 1)
+        self.assertEqual(out.count("<ol>"), 1)
+        self.assertLess(out.index("</ul>"), out.index("<ol>"))
+        self.assertIn("<li>a\nwrapped</li>", out)
+
+    def test_end_of_input_closes_a_paragraph(self):
+        self.assertTrue(render("a\nb").endswith("</p>"))
+
+    def test_inline_rules_do_not_reach_across_the_wrap(self):
+        # Joining happens after each line is transformed, not before. If a
+        # block's lines were concatenated and then passed through _inline,
+        # emphasis and links would fuse across the brief's line breaks --
+        # and the link label class, [^\]]{1,500}, does match a newline.
+        out = render("**bold\ntext**")
+        self.assertNotIn("<strong>", out)
+        self.assertIn("<p>**bold\ntext**</p>", out)
+        out = render("[label\n](https://example.com)")
+        self.assertNotIn("<a ", out)
+
+    def test_escaping_still_runs_first_on_a_wrapped_paragraph(self):
+        # The XSS defence has to survive the block that spans lines too: a
+        # tag split across the wrap must still be text.
+        out = render("beware <script>\nalert(1)</script>")
+        self.assertNotIn("<script>", out)
+        self.assertIn("&lt;script&gt;\nalert(1)&lt;/script&gt;", out)
+
+    def test_a_wrapped_block_does_not_leave_an_empty_paragraph(self):
+        self.assertNotIn("<p></p>", render("a\nb\n\n\n   \nc"))
+        self.assertEqual(render("- a\n  b\n\n   \n"), "<ul>\n<li>a\nb</li>\n</ul>")
+
+
 class InlineTest(unittest.TestCase):
     def test_italic_does_not_fire_inside_a_word(self):
         # Product briefs are full of file_names and 2*3 arithmetic; the
@@ -514,6 +619,40 @@ class RobustnessTest(unittest.TestCase):
                 GROWTH_FACTOR, ratio, small, large,
                 GROWTH_FACTOR, GROWTH_FACTOR ** 2))
         self.assertIn("<p>", out)
+
+    def test_a_hard_wrapped_paragraph_grows_linearly_not_quadratically(self):
+        # Joining a block that spans lines is where quadratic cost gets
+        # reintroduced: appending each line onto an accumulated string, or
+        # re-slicing the "<p>...</p>" already in the output to splice the
+        # next line in, copies the whole block once per line and costs its
+        # square. Accumulating into a list and joining once costs its length.
+        #
+        # Same estimator as the two regex tests above, and for the same
+        # reason -- the property is growth, not seconds.
+        line = "the brief wraps at seventy-two columns like every other one\n"
+        ratio, small, large, out = growth_ratio(lambda n: line * n, 5000)
+        self.assertLess(
+            ratio, LINEARISH,
+            "{}x the wrapped lines multiplied the CPU cost by {:.2f} "
+            "({:.3f}s -> {:.3f}s); linear is ~{}, quadratic is ~{}".format(
+                GROWTH_FACTOR, ratio, small, large,
+                GROWTH_FACTOR, GROWTH_FACTOR ** 2))
+        self.assertEqual(out.count("<p>"), 1)
+
+    def test_a_hard_wrapped_list_item_grows_linearly_not_quadratically(self):
+        # The item accumulator is a second, separate buffer; a fix applied to
+        # the paragraph path alone would leave this one quadratic and every
+        # other test green.
+        line = "the brief wraps at seventy-two columns like every other one\n"
+        ratio, small, large, out = growth_ratio(
+            lambda n: "- first\n" + line * n, 5000)
+        self.assertLess(
+            ratio, LINEARISH,
+            "{}x the continuation lines multiplied the CPU cost by {:.2f} "
+            "({:.3f}s -> {:.3f}s); linear is ~{}, quadratic is ~{}".format(
+                GROWTH_FACTOR, ratio, small, large,
+                GROWTH_FACTOR, GROWTH_FACTOR ** 2))
+        self.assertEqual(out.count("<li>"), 1)
 
     def test_an_indented_closing_fence_still_closes(self):
         # The closing scan strips before matching. Without that, an indented

@@ -208,9 +208,16 @@ Defaults: `--project-dir .`, idle timeout 240 minutes. `--open` launches the
 user's browser.
 
 **Port selection:** if `.craft/server-info` records a port and that port is
-free, reuse it; otherwise take an ephemeral one. Reuse is what lets a restarted
-server be picked up by the tab the user already has open, so a crash or an idle
-exit costs a reconnect rather than a new URL.
+free, reuse it; otherwise take an ephemeral one.
+
+**The original rationale for this was wrong and is recorded here so it is not
+repeated.** It said reuse lets a restarted server be picked up by the tab the
+user already has open. It cannot: `make_key()` is called fresh on every start,
+the key travels only in the query string, and there is no cookie — so a tab
+sitting at `…?key=OLD` gets a 403 on every request regardless of the port. The
+port is the wrong half of the URL to preserve. Reuse is kept because it costs one
+probe syscall and keeps the URL stable across a restart *within* one session,
+where the agent re-reads `server-info` anyway; it buys nothing for the browser.
 
 **Session lock — held by the kernel, not by a pid file.** Before binding,
 `serve` opens `.craft/session.lock` and takes an exclusive non-blocking lock on

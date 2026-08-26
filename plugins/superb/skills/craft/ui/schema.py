@@ -10,6 +10,71 @@ IMPORTANCES = ("REQUIRED", "IMPORTANT", "PREFERENCE", "OPTIONAL")
 TYPES = ("single", "multi", "text", "longtext")
 CHOICE_TYPES = ("single", "multi")
 
+# The ledger's four sections, each a list of entries the page renders as its
+# own kind of line. Anything else under `ledger` is left alone: this is a
+# shape check, not a vocabulary.
+LEDGER_SECTIONS = ("contradictions", "decisions", "delegated", "assumptions")
+# The fields a ledger line puts on screen. Absent is fine -- a decision with
+# no title is a bare id, which is legible -- but a dict or a list where a
+# sentence belongs renders as "[object Object]" in the user's sidebar.
+LEDGER_TEXT_FIELDS = ("text", "title", "summary")
+
+
+def _validate_ledger(ledger, errors):
+    """Append every problem in the round's `ledger` to `errors`.
+
+    An absent ledger is valid and is the ordinary case: most rounds have
+    nothing recorded yet. What is not valid is a section that is not a list.
+    The page iterates all four of them, and a string iterates -- by character
+    -- rather than raising, so `contradictions: "none"` renders four hundred
+    empty boxes and a contradiction's `between: "Q-1"` throws outright.
+
+    The page defends itself against all of this (renderLedger is total), and
+    that is not a reason to stay quiet here: the page can only decline to
+    draw what it was given, while the agent that wrote the round is the one
+    who can fix it, and it only learns from this list.
+    """
+    if ledger is None:
+        return
+    if not isinstance(ledger, dict):
+        errors.append("ledger: not an object")
+        return
+
+    for section in LEDGER_SECTIONS:
+        entries = ledger.get(section)
+        if entries is None:
+            continue
+        where = "ledger.{}".format(section)
+        if not isinstance(entries, list):
+            errors.append("{}: not a list".format(where))
+            continue
+        for index, entry in enumerate(entries):
+            at = "{}[{}]".format(where, index)
+            if not isinstance(entry, dict):
+                errors.append("{}: not an object".format(at))
+                continue
+
+            entry_id = entry.get("id")
+            if not isinstance(entry_id, str) or not entry_id:
+                errors.append("{}: id missing".format(at))
+            for field in LEDGER_TEXT_FIELDS:
+                if field in entry and not isinstance(entry[field], str):
+                    errors.append("{}.{}: not a string".format(at, field))
+
+            if section != "contradictions":
+                continue
+            # Only a contradiction is between anything, and each reference is
+            # a question id the page turns into a jump link.
+            between = entry.get("between")
+            if between is None:
+                continue
+            if not isinstance(between, list):
+                errors.append("{}.between: not a list".format(at))
+                continue
+            for j, ref in enumerate(between):
+                if not isinstance(ref, str) or not ref:
+                    errors.append("{}.between[{}]: not a question id".format(at, j))
+
 
 def validate_round(obj):
     """Return a list of human-readable problems. Empty list means valid."""
@@ -23,8 +88,17 @@ def validate_round(obj):
     questions = obj.get("questions")
     if not isinstance(questions, list):
         errors.append("questions: missing or not a list")
-        return errors
+    else:
+        _validate_questions(questions, errors)
+    # After the questions and outside their branch: a round whose questions
+    # are unusable still has a ledger, and reporting one problem per fix is
+    # how a round takes four attempts to land.
+    _validate_ledger(obj.get("ledger"), errors)
+    return errors
 
+
+def _validate_questions(questions, errors):
+    """Append every problem in the round's questions to `errors`."""
     seen = set()
     for index, question in enumerate(questions):
         where = "questions[{}]".format(index)
@@ -64,8 +138,6 @@ def validate_round(obj):
                         errors.append("{}.options[{}]: needs a string value".format(where, j))
                     elif not option["value"].strip():
                         errors.append("{}.options[{}]: needs a non-blank value".format(where, j))
-
-    return errors
 
 
 def _choice_has_content(entry):

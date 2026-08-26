@@ -227,7 +227,7 @@ function renderRound(round) {
       el("h3", { text: "No questions yet" }),
       el("p", { class: "why",
                 text: "Claude has not posted a round. This page will show it when it lands." })));
-    renderLedger({});
+    showLedger(null);
     updateCounts();
     return;
   }
@@ -240,33 +240,62 @@ function renderRound(round) {
     }
     host.append(questionCard(q));
   });
-  renderLedger(round.ledger || {});
+  // Before applyFilter and updateCounts, and it must not be able to stop
+  // them: see showLedger.
+  showLedger(round.ledger);
   applyFilter();
   updateCounts();
 }
 
+// The ledger panel, and the second lock on it. renderLedger below is written
+// to be total, so this catch should be unreachable -- which is exactly why it
+// is here. Everything renderRound does AFTER the ledger is what the page is
+// for: applyFilter puts the user's chosen levels back, updateCounts is the
+// only feedback that an answer registered. A throw in one sidebar panel used
+// to take both with it and leave a page whose cards looked perfectly fine.
+function showLedger(ledger) {
+  try {
+    renderLedger(ledger);
+  } catch (e) {
+    panel("ledger", "The ledger could not be shown.");
+  }
+}
+
+// Total by construction: every list is Array.isArray'd, every entry is
+// checked for being an object, and every field that reaches the screen goes
+// through str(). The server validates a round's ledger before serving it
+// (schema._validate_ledger), and that is not enough on its own -- validation
+// tells the AGENT what it got wrong, while this decides whether the person
+// at the browser keeps their filter and their counter. A panel must never be
+// able to cost the page its controls.
 function renderLedger(ledger) {
   const host = document.getElementById("ledger");
   host.textContent = "";
-  (ledger.contradictions || []).forEach(c => {
+  const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  const entries = (v) => (Array.isArray(v) ? v.filter(isObject) : []);
+  const str = (v) => (typeof v === "string" ? v : "");
+  const safe = isObject(ledger) ? ledger : {};
+
+  const contradictions = entries(safe.contradictions);
+  contradictions.forEach(c => {
     const box = el("div", { class: "contradiction" });
-    box.append(el("strong", { text: c.id + " " }));
-    box.append(document.createTextNode(c.text || ""));
-    (c.between || []).forEach(ref => {
+    box.append(el("strong", { text: str(c.id) + " " }));
+    box.append(document.createTextNode(str(c.text)));
+    (Array.isArray(c.between) ? c.between : []).forEach(ref => {
       // Jump link, but only to a question actually on this round's page.
-      if (!document.getElementById("q-" + ref)) return;
+      if (typeof ref !== "string" || !document.getElementById("q-" + ref)) return;
       box.append(" ");
       box.append(el("a", { href: "#q-" + ref, class: "jump", text: ref }));
     });
     host.append(box);
   });
   const rows = [
-    ...(ledger.decisions || []).map(d => d.id + " ✓ " + (d.title || d.summary || "")),
-    ...(ledger.delegated || []).map(d => d.id + " → " + (d.title || "")),
-    ...(ledger.assumptions || []).map(a => a.id + " ? " + (a.text || "")),
+    ...entries(safe.decisions).map(d => str(d.id) + " ✓ " + (str(d.title) || str(d.summary))),
+    ...entries(safe.delegated).map(d => str(d.id) + " → " + str(d.title)),
+    ...entries(safe.assumptions).map(a => str(a.id) + " ? " + str(a.text)),
   ];
   rows.forEach(text => host.append(el("div", { class: "ledger-item", text })));
-  if (!rows.length && !(ledger.contradictions || []).length) {
+  if (!rows.length && !contradictions.length) {
     host.append(el("div", { class: "why", text: "Nothing recorded yet." }));
   }
 }
@@ -330,10 +359,26 @@ function collectAnswers() {
 //     nor undefined is one.
 //   * `(a.choice || []).some(...)` throws on the string form, which a
 //     single-choice draft may legitimately hold.
+//   * String.prototype.trim() is NOT str.strip(). The two disagree on six
+//     codepoints -- see PY_BLANK below -- and each disagreement is a question
+//     one side calls answered and the other calls open.
 // The values reaching this are read from a draft file on disk that a person
 // may have hand-edited, so none of these shapes is hypothetical.
+//
+// Exactly the 29 codepoints Python's str.strip() removes, and no others.
+// JavaScript's \s is a different set: it includes U+FEFF, which Python does
+// not strip, and it omits U+001C-001F and U+0085, which Python does. Writing
+// the set out is the only way the two sides can agree, and Python is the side
+// that decides: schema.count_open is what the agent is told, and a question
+// this page called answered while count_open called it open is a question
+// asked again after the user answered it.
+const PY_BLANK = /^[\t\n\v\f\r\x1c-\x1f\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]*$/;
+function isBlank(value) {
+  return PY_BLANK.test(value);
+}
+
 function choiceHasContent(entry) {
-  if (typeof entry === "string") return entry.trim() !== "";
+  if (typeof entry === "string") return !isBlank(entry);
   return entry !== null && entry !== undefined;
 }
 
@@ -343,10 +388,10 @@ function answerState(a) {
   if (a.skipped === true) return "skipped";
   const choice = a.choice;
   if (Array.isArray(choice) && choice.some(choiceHasContent)) return "answered";
-  if (typeof choice === "string" && choice.trim() !== "") return "answered";
+  if (typeof choice === "string" && !isBlank(choice)) return "answered";
   for (const key of ["text", "other"]) {
     const value = a[key];
-    if (typeof value === "string" && value.trim() !== "") return "answered";
+    if (typeof value === "string" && !isBlank(value)) return "answered";
   }
   return "skipped";
 }
@@ -429,6 +474,11 @@ async function loadRound() {
       el("div", { class: "card contradiction" },
          el("strong", { text: payload.error }),
          el("pre", { text: (payload.details || []).join("\n") })));
+    // The same argument as the empty state, one panel over: an empty box and
+    // a broken box look identical, and the ledger is beside a message saying
+    // the round could not be read, which is where a reader is most likely to
+    // wonder whether anything on this page still works.
+    showLedger(null);
     return;
   }
   renderRound(payload.round);

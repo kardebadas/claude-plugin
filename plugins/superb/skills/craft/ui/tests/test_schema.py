@@ -394,6 +394,168 @@ class OptionsTest(unittest.TestCase):
         self.assertNotEqual(blank, absent)
 
 
+class ValidateLedgerTest(unittest.TestCase):
+    """The ledger, which validation did not look at at all.
+
+    Four shapes passed with `errors: []` and then threw inside the page's
+    renderLedger, taking the counter and the importance filter down with them
+    while the question cards rendered and looked fine. The page defends itself
+    now, and that is not a substitute for this: the page can only decline to
+    draw what it was handed, while the agent that wrote the round is the one
+    who can fix it, and it learns from nothing but this list.
+    """
+
+    LEDGER = {
+        "contradictions": [{"id": "CON-002", "between": ["Q-1", "Q-2"],
+                            "text": "Offline-first conflicts with streaming."}],
+        "decisions": [{"id": "DEC-014", "title": "Playlists are private"}],
+        "delegated": [{"id": "DEL-003", "title": "Retry backoff"}],
+        "assumptions": [{"id": "ASM-007", "text": "One user per account"}],
+    }
+
+    def with_ledger(self, ledger):
+        obj = a_round(question())
+        obj["ledger"] = ledger
+        return validate_round(obj)
+
+    def test_a_full_ledger_is_valid(self):
+        self.assertEqual(self.with_ledger(self.LEDGER), [])
+
+    def test_an_absent_ledger_is_valid(self):
+        """The ordinary case, and the one every session opens in: nothing has
+        been recorded yet."""
+        self.assertEqual(validate_round(a_round(question())), [])
+
+    def test_an_empty_ledger_is_valid(self):
+        self.assertEqual(self.with_ledger({}), [])
+
+    def test_a_null_ledger_is_valid(self):
+        """JSON null reads the same as the key not being there, and the page
+        renders it the same way."""
+        self.assertEqual(self.with_ledger(None), [])
+
+    def test_a_ledger_that_is_not_an_object_is_reported(self):
+        self.assertEqual(self.with_ledger("none yet"), ["ledger: not an object"])
+        self.assertEqual(self.with_ledger([]), ["ledger: not an object"])
+        self.assertEqual(self.with_ledger(7), ["ledger: not an object"])
+
+    # The four shapes a review reproduced against a real server in a real
+    # browser. Each one rendered its cards and then blanked the counter.
+
+    def test_contradictions_as_a_string_is_reported(self):
+        self.assertEqual(self.with_ledger({"contradictions": "CON-002"}),
+                         ["ledger.contradictions: not a list"])
+
+    def test_decisions_as_a_string_is_reported(self):
+        self.assertEqual(self.with_ledger({"decisions": "DEC-014"}),
+                         ["ledger.decisions: not a list"])
+
+    def test_assumptions_as_a_dict_is_reported(self):
+        self.assertEqual(self.with_ledger({"assumptions": {"ASM-1": "guessed"}}),
+                         ["ledger.assumptions: not a list"])
+
+    def test_a_contradictions_between_as_a_string_is_reported(self):
+        """A bare question id where a list of them belongs. It iterates by
+        character in the page and throws outright in the forEach, and it is
+        the easiest of the four to write by hand."""
+        self.assertEqual(
+            self.with_ledger({"contradictions": [{"id": "CON-1", "between": "Q-1"}]}),
+            ["ledger.contradictions[0].between: not a list"])
+
+    def test_delegated_as_a_string_is_reported_like_the_others(self):
+        """No section is special-cased; all four are iterated by the page."""
+        self.assertEqual(self.with_ledger({"delegated": "DEL-003"}),
+                         ["ledger.delegated: not a list"])
+
+    def test_an_entry_that_is_not_an_object_is_reported_at_its_index(self):
+        self.assertEqual(
+            self.with_ledger({"decisions": [{"id": "DEC-1"}, "DEC-2"]}),
+            ["ledger.decisions[1]: not an object"])
+
+    def test_an_entry_without_an_id_is_reported(self):
+        """The id is what the line is called on screen and what the user says
+        back to Claude. A line with none is a line nobody can refer to."""
+        self.assertEqual(self.with_ledger({"assumptions": [{"text": "guessed"}]}),
+                         ["ledger.assumptions[0]: id missing"])
+        self.assertEqual(self.with_ledger({"assumptions": [{"id": "", "text": "x"}]}),
+                         ["ledger.assumptions[0]: id missing"])
+        self.assertEqual(self.with_ledger({"assumptions": [{"id": 7}]}),
+                         ["ledger.assumptions[0]: id missing"])
+
+    def test_a_field_that_should_be_a_sentence_is_reported(self):
+        self.assertEqual(
+            self.with_ledger({"decisions": [{"id": "DEC-1", "title": {"a": 1}}]}),
+            ["ledger.decisions[0].title: not a string"])
+        self.assertEqual(
+            self.with_ledger({"assumptions": [{"id": "ASM-1", "text": ["x"]}]}),
+            ["ledger.assumptions[0].text: not a string"])
+        self.assertEqual(
+            self.with_ledger({"decisions": [{"id": "DEC-1", "summary": 3}]}),
+            ["ledger.decisions[0].summary: not a string"])
+
+    def test_a_line_needs_no_words_only_an_id(self):
+        """A bare id renders as a bare id, which is legible. Absent is not the
+        same complaint as present-and-the-wrong-type."""
+        self.assertEqual(self.with_ledger({"decisions": [{"id": "DEC-1"}]}), [])
+
+    def test_a_bad_reference_inside_between_is_reported_at_its_index(self):
+        self.assertEqual(
+            self.with_ledger({"contradictions": [
+                {"id": "CON-1", "between": ["Q-1", 7, ""]}]}),
+            ["ledger.contradictions[0].between[1]: not a question id",
+             "ledger.contradictions[0].between[2]: not a question id"])
+
+    def test_between_is_optional(self):
+        self.assertEqual(
+            self.with_ledger({"contradictions": [{"id": "CON-1", "text": "x"}]}), [])
+
+    def test_only_a_contradiction_is_between_anything(self):
+        """A decision carrying a `between` is not a shape the page reads, and
+        complaining about it would send the author to fix a line that works."""
+        self.assertEqual(
+            self.with_ledger({"decisions": [{"id": "DEC-1", "between": "Q-1"}]}), [])
+
+    def test_a_key_the_ledger_does_not_define_is_left_alone(self):
+        """A shape check, not a vocabulary: the four sections are what the
+        page draws, and rejecting everything else would make any addition to
+        the wire format a breaking change."""
+        self.assertEqual(self.with_ledger({"notes": "anything at all"}), [])
+
+    def test_every_problem_is_reported_not_just_the_first(self):
+        """The same rule the question loop keeps. One problem per attempt is
+        how a round takes four attempts to land."""
+        self.assertEqual(
+            sorted(self.with_ledger({"contradictions": "no",
+                                     "decisions": [7],
+                                     "assumptions": [{"text": "guessed"}]})),
+            sorted(["ledger.contradictions: not a list",
+                    "ledger.decisions[0]: not an object",
+                    "ledger.assumptions[0]: id missing"]))
+
+    def test_a_ledger_problem_is_reported_beside_a_question_problem(self):
+        obj = a_round(question(title=""))
+        obj["ledger"] = {"decisions": "DEC-014"}
+        self.assertEqual(validate_round(obj),
+                         ["questions[0]: title missing",
+                          "ledger.decisions: not a list"])
+
+    def test_a_ledger_problem_survives_the_questions_early_return(self):
+        """questions-not-a-list used to return before anything else ran. A
+        round broken in both places must report both, or fixing the questions
+        reveals the ledger and the round takes two attempts instead of one."""
+        self.assertEqual(
+            validate_round({"round": 1, "questions": "nope",
+                            "ledger": {"decisions": "DEC-014"}}),
+            ["questions: missing or not a list", "ledger.decisions: not a list"])
+
+    def test_validation_does_not_mutate_the_ledger_it_was_given(self):
+        obj = a_round(question())
+        obj["ledger"] = copy.deepcopy(self.LEDGER)
+        before = copy.deepcopy(obj)
+        validate_round(obj)
+        self.assertEqual(obj, before)
+
+
 class VocabularyTest(unittest.TestCase):
     """The constants are a wire contract shared with the browser and with the
     agent writing rounds. Reordering them silently rewrites error messages."""
@@ -488,6 +650,59 @@ class AnswerStateContentTest(unittest.TestCase):
 
     def test_a_whitespace_only_note_is_still_not_an_answer(self):
         self.assertEqual(answer_state({"note": "   "}), "skipped")
+
+
+class BlankIsWhatStripCallsBlankTest(unittest.TestCase):
+    """Which codepoints count as nothing at all, named rather than assumed.
+
+    `str.strip()` is the definition and this module is where the definition
+    lives: count_open is what the agent is told, and the page's answerState
+    mirrors THIS rather than the other way round. Six codepoints separate
+    str.strip() from JavaScript's trim(), and each of them is a question one
+    side would call answered while the other left it open -- so each is
+    written down here, where the definition is, rather than left to whichever
+    runtime happened to read the draft.
+    """
+
+    # Python strips these; JavaScript's trim() leaves them.
+    STRIPPED_NOT_TRIMMED = ("\x1c", "\x1d", "\x1e", "\x1f", "\x85")
+    # ...and the reverse: trim() removes the byte-order mark, strip() does not.
+    BOM = "﻿"
+
+    def test_the_separators_python_strips_are_blank_everywhere(self):
+        for blank in self.STRIPPED_NOT_TRIMMED:
+            for key in ("text", "other"):
+                self.assertEqual(answer_state({key: blank}), "skipped", repr(blank))
+            self.assertEqual(answer_state({"choice": blank}), "skipped", repr(blank))
+            self.assertEqual(answer_state({"choice": [blank]}), "skipped", repr(blank))
+
+    def test_a_byte_order_mark_is_content_because_strip_leaves_it(self):
+        """Not obviously desirable read on its own -- a lone BOM is nobody's
+        answer. It is what str.strip() does, and one side has to define blank:
+        a page calling this question answered while count_open called it open
+        is a question the user answered and Claude asks again."""
+        self.assertEqual(answer_state({"text": self.BOM}), "answered")
+        self.assertEqual(answer_state({"other": self.BOM}), "answered")
+        self.assertEqual(answer_state({"choice": self.BOM}), "answered")
+        self.assertEqual(answer_state({"choice": [self.BOM]}), "answered")
+
+    def test_a_real_answer_wearing_one_of_them_is_still_an_answer(self):
+        """The over-correction to guard against: none of the six may swallow
+        the answer it is sitting beside."""
+        for odd in self.STRIPPED_NOT_TRIMMED + (self.BOM,):
+            self.assertEqual(answer_state({"text": odd + "email" + odd}),
+                             "answered", repr(odd))
+            self.assertEqual(answer_state({"choice": [odd, "email"]}),
+                             "answered", repr(odd))
+
+    def test_blank_is_exactly_what_strip_removes(self):
+        """Teeth, and the reason the page can mirror this at all: the rule is
+        `str.strip()` and nothing hand-written beside it, so a codepoint list
+        in the page can be checked against the language rather than against
+        somebody's memory of it."""
+        for text in ("", "﻿", " \t\n", "\x1c", "\x85", "email", "0", " "):
+            self.assertEqual(answer_state({"text": text}) == "answered",
+                             bool(text.strip()), repr(text))
 
 
 class AnswerStateFlagTest(unittest.TestCase):

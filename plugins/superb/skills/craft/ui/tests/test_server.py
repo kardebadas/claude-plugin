@@ -34,6 +34,7 @@ import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
+from html import unescape
 from pathlib import Path
 
 import schema
@@ -756,6 +757,26 @@ class RoundTest(ServerTestCase):
         payload = self.get_json("/api/round")
         self.assertFalse(payload["ok"])
         self.assertTrue(any("type must be one of" in d for d in payload["details"]))
+
+    def test_a_mistyped_ledger_is_reported_like_any_other_schema_problem(self):
+        """The ledger used to pass validation whatever shape it was in, and
+        the page it reached threw while rendering it. Both ends are fixed;
+        this is the one that keeps the agent from having to guess."""
+        round_obj = dict(VALID_ROUND, ledger={"contradictions": "CON-002"})
+        write_json_atomic(self.session.questions_path(1), round_obj)
+        payload = self.get_json("/api/round")
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["details"], ["ledger.contradictions: not a list"])
+
+    def test_a_valid_ledger_is_served_with_its_round(self):
+        ledger = {"contradictions": [{"id": "CON-1", "between": ["Q-1"],
+                                      "text": "conflict"}],
+                  "decisions": [{"id": "DEC-1", "title": "Playlists are private"}]}
+        round_obj = dict(VALID_ROUND, ledger=ledger)
+        write_json_atomic(self.session.questions_path(1), round_obj)
+        payload = self.get_json("/api/round")
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["round"]["ledger"], ledger)
 
     def test_a_schema_invalid_round_is_not_served_as_content(self):
         """The page must never render a round the validator rejected."""
@@ -2805,9 +2826,15 @@ class WriteGateTest(WriteTestCase):
 #                         DOM the page built. Real behaviour, end to end;
 #                         skipped where no browser is installed.
 #
-# Both skips are silent by design in unittest's dot output, so read them here:
-# a machine with neither node nor a browser runs the string layer ONLY, and
-# the string layer cannot catch a syntax error in the page's script.
+# unittest DOES report a skip -- an `s` in the dot stream and `OK (skipped=N)`
+# on the last line -- so a machine running the string layer only says so, and
+# nothing here needs a mechanism to make it say so. What IS lossy is the
+# shape of the skip: RenderedPageTest and DrivenPageTest raise SkipTest in
+# setUpClass, so each collapses its whole class into a single `s`. A reader
+# counting skips is counting classes, not tests, and the number is smaller
+# than the coverage that went missing. Read it here: with neither node nor a
+# browser installed, the string layer is all that runs, and the string layer
+# cannot catch a syntax error in the page's script.
 # ---------------------------------------------------------------------------
 
 # The markers app.html puts around the one function that has a Python twin.
@@ -2815,6 +2842,18 @@ class WriteGateTest(WriteTestCase):
 # copy of the function in this file would pass for ever while the page rotted.
 MIRROR_BEGIN = "// ---- mirror of schema.answer_state: begin ----"
 MIRROR_END = "// ---- mirror of schema.answer_state: end ----"
+
+# An assignment to innerHTML or outerHTML, however it is spelled. This was
+# `\.(inner|outer)HTML\s*=`, and `h3.innerHTML += q.title` -- a second
+# injection sink, reachable from a title the agent wrote into a JSON file --
+# passed it, caught only by the browser layer, which is the layer that skips.
+# So: the dot form and the bracket form that reaches the same setter without
+# ever writing a dot, plain `=` and every compound assignment, and never a
+# comparison.
+HTML_SINK = re.compile(
+    r"""(?:\.\s*|\[\s*["'`]\s*)(?:inner|outer)HTML(?:\s*["'`]\s*\])?\s*"""
+    r"""(?:\*\*|<<|>>>?|\|\||&&|\?\?|[-+*/%&|^])?=(?!=)"""
+)
 
 # Every browser name that would do. The test skips rather than fails when none
 # of them is installed: a laptop with no chromium must not turn red.
@@ -2828,6 +2867,22 @@ def find_browser():
         if found:
             return found
     return None
+
+
+def run_headless(browser, url):
+    """One headless chromium run over `url`, returning what it printed.
+
+    --user-data-dir is a throwaway on purpose: the URL carries the session
+    key, and the default profile would keep it in a history file.
+    """
+    with tempfile.TemporaryDirectory() as profile:
+        return subprocess.run(
+            [browser, "--headless", "--no-sandbox", "--disable-gpu",
+             "--no-first-run", "--no-default-browser-check",
+             "--disable-extensions", "--user-data-dir=" + profile,
+             "--virtual-time-budget=8000", "--dump-dom", url],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180,
+        )
 
 
 class PageContractTest(ServerTestCase):
@@ -2860,9 +2915,24 @@ class PageContractTest(ServerTestCase):
             self.assertIn(level, html)
 
     def test_the_page_offers_delegation_and_notes(self):
+        """Assert on the writer, not on the reader.
+
+        `data-note` appears twice in this page -- on the input that creates
+        the field and on the querySelector that reads it back -- so deleting
+        the note input from every card left the two loose assertions below
+        green while removing one of the two things the brief insisted on.
+        The rest of this test names the calls that BUILD them.
+        """
         html = self.page()
         self.assertIn("you decide", html)
         self.assertIn("data-note", html)
+        # The note input, at the point questionCard builds it.
+        self.assertIn('"data-note": "1"', html)
+        self.assertIn('placeholder: "Note', html)
+        # ...and the delegate button, likewise. A reader of either would be
+        # satisfied by the querySelector that goes looking for one.
+        self.assertIn('class: "delegate"', html)
+        self.assertIn('text: "you decide"', html)
 
     def test_contradictions_link_to_the_questions_they_are_between(self):
         html = self.page()
@@ -2891,11 +2961,44 @@ class PageContractTest(ServerTestCase):
         code = "\n".join(line for line in self.page().splitlines()
                          if not line.strip().startswith("//"))
         assigns = [line.strip() for line in code.splitlines()
-                   if re.search(r"\.(inner|outer)HTML\s*=", line)]
+                   if HTML_SINK.search(line)]
         self.assertEqual(len(assigns), 1, assigns)
         self.assertIn("brief", assigns[0])
         for banned in ("insertAdjacentHTML", "document.write", "outerHTML"):
             self.assertNotIn(banned, code)
+
+    # Every spelling of an assignment to innerHTML, and the reads and
+    # comparisons that are not one. `+=` is here because it was the mutant
+    # that walked past the first version of the lint.
+    SINKS = (
+        "node.innerHTML = x;",
+        "node.innerHTML=x;",
+        "h3.innerHTML += q.title;",
+        "node . innerHTML = x;",
+        'node["innerHTML"] = x;',
+        "node['innerHTML'] += x;",
+        'node[ "innerHTML" ] = x;',
+        "node.outerHTML = x;",
+        'node["outerHTML"] += x;',
+        "node.innerHTML ||= x;",
+        "node.innerHTML ??= x;",
+    )
+    NOT_SINKS = (
+        'if (node.innerHTML === "") return;',
+        "const held = node.innerHTML;",
+        "const same = a.innerHTML == b.innerHTML;",
+        "node.textContent = x;",
+        'const key = "innerHTML";',
+    )
+
+    def test_the_innerhtml_lint_catches_every_spelling_of_the_sink(self):
+        """Teeth for the lint above, which is the only always-running defence
+        against a second injection sink: the browser layer that would also
+        catch one is the layer that skips when chromium is absent."""
+        for line in self.SINKS:
+            self.assertTrue(HTML_SINK.search(line), line)
+        for line in self.NOT_SINKS:
+            self.assertIsNone(HTML_SINK.search(line), line)
 
     def test_every_fetch_carries_the_session_key(self):
         """There is no cookie -- see the module docstring -- so a fetch that
@@ -3020,6 +3123,29 @@ process.stdin.on("end", () => {
         {"note": "   "},
         {"note": "x", "choice": ["a"]},
         {"choice": [], "other": "passkeys"},
+        # The six codepoints str.strip() and String.prototype.trim() disagree
+        # about, one per line so that a failure names the one that moved.
+        # U+001C-001F and U+0085 are blank to Python and content to
+        # JavaScript; U+FEFF is the reverse. Nothing the page can type
+        # reaches them -- collectAnswers trims -- but a hand-edited or
+        # agent-written draft is read by the same two functions, which is
+        # what this whole class is about.
+        {"text": "\u001c"},
+        {"text": "\u001d"},
+        {"text": "\u001e"},
+        {"text": "\u001f"},
+        {"text": "\u0085"},
+        {"text": "\ufeff"},
+        {"other": "\u0085"},
+        {"other": "\ufeff"},
+        {"choice": "\u001c"},
+        {"choice": "\ufeff"},
+        {"choice": ["\u001f"]},
+        {"choice": ["\ufeff"]},
+        {"choice": ["\u0085", "\u001c"]},
+        {"choice": ["\u001c", "email"]},
+        {"text": "\ufeffemail"},
+        {"text": "email\u0085"},
     ]
 
     def test_the_named_cases_agree(self):
@@ -3032,8 +3158,16 @@ process.stdin.on("end", () => {
         this function were all shapes nobody thought to write a case for.
         """
         rng = random.Random(20260826)
+        # Every value here used to be ASCII, which made the whitespace
+        # divergence unreachable by construction: the two functions disagree
+        # on six codepoints and not one of them could ever be generated. A
+        # corpus that cannot express the bug cannot find it in a thousand
+        # tries or in a million.
         values = [None, True, False, 0, 1, "", "   ", "\n\t", "email", "0",
+                  "\u001c", "\u001d", "\u001e", "\u001f", "\u0085", "\ufeff",
+                  "\ufeff email", "email\u001e", "\u0085\ufeff",
                   [], [""], ["email"], ["", "email"], ["email", None], [None],
+                  ["\u001c"], ["\ufeff"], ["\u0085", ""], ["\u001f", "email"],
                   [0], [{"value": "email"}], {"value": "email"}, {}, 1.5]
         keys = ["choice", "text", "other", "note", "delegated", "skipped",
                 "answered", "value"]
@@ -3099,19 +3233,8 @@ class RenderedPageTest(ServerTestCase):
             raise unittest.SkipTest("no chromium or chrome on this machine")
 
     def dump_dom(self):
-        """The DOM after the page's script has run and its fetches returned.
-
-        --user-data-dir is a throwaway on purpose: the URL carries the session
-        key, and the default profile would keep it in a history file.
-        """
-        with tempfile.TemporaryDirectory() as profile:
-            proc = subprocess.run(
-                [self.browser, "--headless", "--no-sandbox", "--disable-gpu",
-                 "--no-first-run", "--no-default-browser-check",
-                 "--disable-extensions", "--user-data-dir=" + profile,
-                 "--virtual-time-budget=8000", "--dump-dom", self.url("/")],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180,
-            )
+        """The DOM after the page's script has run and its fetches returned."""
+        proc = run_headless(self.browser, self.url("/"))
         self.assertEqual(
             proc.returncode, 0,
             "the browser failed: {}".format(proc.stderr.decode("utf-8", "replace")))
@@ -3213,6 +3336,11 @@ class RenderedPageTest(ServerTestCase):
         self.session.questions_path(1).write_text("{not json", encoding="utf-8")
         dom = self.rendered()
         self.assertIn("is not valid JSON", dom)
+        # ...and the panel beside it says what it is, for the same reason.
+        # The error path wrote into #questions and left the Ledger an empty
+        # box -- next to a message saying the round could not be read, which
+        # is exactly where a reader starts wondering what else is broken.
+        self.assertIn("Nothing recorded yet.", dom)
 
     def test_no_round_yet_says_so(self):
         """An empty .craft/ is the state the page opens in, and a blank panel
@@ -3220,6 +3348,229 @@ class RenderedPageTest(ServerTestCase):
         dom = self.rendered()
         self.assertIn("No questions yet", dom)
         self.assertIn("Nothing recorded yet.", dom)
+
+
+# The driver appended to a copy of the page. It runs after the page's own
+# script, waits for renderRound to have built the cards -- loadRound is a
+# fetch, so the first tick is always too early -- runs the test's body, and
+# leaves the result where --dump-dom can read it back. A throw is RECORDED
+# rather than lost: an error nobody sees is the failure this whole class was
+# added for, and a driver that swallowed one would be repeating it.
+DRIVER = """
+<pre id="probe"></pre>
+<script>
+(function () {
+  const probe = document.getElementById("probe");
+  const run = () => {
+// DRIVER BODY
+  };
+  let tries = 0;
+  const step = () => {
+    if (!document.querySelector("#questions .question") && tries++ < 80) {
+      setTimeout(step, 25);
+      return;
+    }
+    try {
+      probe.textContent = JSON.stringify({ ok: run() });
+    } catch (e) {
+      probe.textContent = JSON.stringify({ driverError: String(e) });
+    }
+  };
+  step();
+})();
+</script>
+"""
+
+
+class DrivenPageTest(ServerTestCase):
+    """The page after something has been clicked, which --dump-dom cannot see.
+
+    chromium's headless dump renders a page and prints the DOM; it does not
+    interact with one. The alternative was a browser-automation dependency in
+    a tool whose whole pitch is the standard library, so the server is instead
+    pointed at a COPY of app.html -- the real file, byte for byte, with the
+    driver above appended -- which clicks what a user would click and writes
+    what the page then produced into a node the dump reads back. The page's
+    own script is the one under test; the driver only presses things.
+
+    What that buys is the three failures no other layer here can see. A
+    delegate latch that never sets aria-pressed ships {skipped: true} for a
+    question the user believes they handed over, so it is ASKED AGAIN -- the
+    exact opposite of a Delegated Decision, and invisible without opening the
+    draft file. A delegated answer that quietly loses its note drops the one
+    sentence saying why Claude was handed the decision. And a ledger the page
+    could not render used to take the counter and the filter down with it.
+    """
+
+    ROUND = {
+        "round": 1,
+        "questions": [
+            {"id": "Q-1", "importance": "REQUIRED", "title": "How should users authenticate?",
+             "type": "single",
+             "options": [{"value": "email"}, {"value": "magic"}]},
+            {"id": "Q-2", "importance": "OPTIONAL", "title": "Anything else?",
+             "type": "text"},
+        ],
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls.browser = find_browser()
+        if not cls.browser:
+            raise unittest.SkipTest("no chromium or chrome on this machine")
+
+    def drive(self, body):
+        """Serve the page with `body` appended as a driver, and return what
+        it recorded."""
+        write_json_atomic(self.session.questions_path(1), self.ROUND)
+        source = APP_HTML.read_text(encoding="utf-8")
+        self.assertEqual(source.count("</body>"), 1, "cannot place the driver")
+        pages = tempfile.TemporaryDirectory()
+        self.addCleanup(pages.cleanup)
+        page = Path(pages.name) / "driven.html"
+        page.write_text(
+            source.replace("</body>",
+                           DRIVER.replace("// DRIVER BODY", body) + "</body>"),
+            encoding="utf-8")
+        server_module.APP_HTML = page
+        self.addCleanup(setattr, server_module, "APP_HTML", APP_HTML)
+
+        proc = run_headless(self.browser, self.url("/"))
+        self.assertEqual(
+            proc.returncode, 0,
+            "the browser failed: {}".format(proc.stderr.decode("utf-8", "replace")))
+        dom = proc.stdout.decode("utf-8", "replace")
+        found = re.search(r'(?s)<pre id="probe">(.*?)</pre>', dom)
+        self.assertIsNotNone(found, "the driven page built no probe at all")
+        recorded = unescape(found.group(1))
+        self.assertTrue(recorded, "the driver never ran: the page's own script threw")
+        result = json.loads(recorded)
+        self.assertNotIn("driverError", result, result)
+        return result["ok"]
+
+    LATCH = """
+    const card = document.querySelector('.question[data-id="Q-1"]');
+    const button = card.querySelector(".delegate");
+    const before = collectAnswers()["Q-1"];
+    button.click();
+    return {
+      before: before,
+      pressed: button.getAttribute("aria-pressed"),
+      delegated: card.dataset.delegated,
+      after: collectAnswers()["Q-1"],
+      counts: document.getElementById("counts").textContent,
+      hint: getComputedStyle(card.querySelector(".hint")).display,
+    };
+    """
+
+    def test_the_delegate_latch_records_a_delegated_answer(self):
+        """A latch that never sets aria-pressed leaves collectAnswers reading
+        `false` and posting {skipped: true} for a question the user believes
+        they handed over. Claude then asks it again, and nothing anywhere on
+        the page says the button did not take."""
+        got = self.drive(self.LATCH)
+        self.assertEqual(got["before"], {"skipped": True})
+        self.assertEqual(got["pressed"], "true")
+        self.assertEqual(got["delegated"], "true")
+        self.assertEqual(got["after"], {"delegated": True})
+        # The counter is the only feedback the press produced, and the hint
+        # is the only thing on the card that says what the state means.
+        self.assertIn("1 answered", got["counts"])
+        self.assertEqual(got["hint"], "inline")
+
+    NOTE = """
+    const cards = ["Q-1", "Q-2"].map(
+      (id) => document.querySelector('.question[data-id="' + id + '"]'));
+    const note = cards[0].querySelector("[data-note]");
+    note.value = "  budget, not taste  ";
+    cards.forEach((card) => card.querySelector(".delegate").click());
+    return { withNote: collectAnswers()["Q-1"], without: collectAnswers()["Q-2"] };
+    """
+
+    def test_a_delegated_answer_carries_the_note_written_beside_it(self):
+        """Replacing the delegated answer with a bare {delegated: true} left
+        every other layer green. The note is the sentence that tells Claude
+        WHY it was handed the decision, and dropping it would be the only
+        deletion this page makes on the user's behalf -- so it is pinned, and
+        so is its absence when nothing was written."""
+        got = self.drive(self.NOTE)
+        self.assertEqual(got["withNote"],
+                         {"delegated": True, "note": "budget, not taste"})
+        self.assertEqual(got["without"], {"delegated": True})
+
+    LEDGER = """
+    const questions = currentRound.questions;
+    const filter = document.querySelector('#filters button[data-level="OPTIONAL"]');
+    // The fifth shape is the one renderLedger cannot be written to survive:
+    // reading the property is what throws. No JSON file holds this, and that
+    // is the point -- it is the only way to ask, from inside the page,
+    // whether the SECOND lock works when the first one has been defeated.
+    const unreadable = {};
+    Object.defineProperty(unreadable, "contradictions", {
+      enumerable: true,
+      get() { throw new Error("a ledger this page cannot even read"); },
+    });
+    const shapes = [
+      { contradictions: "CON-002 conflicts with DEC-014" },
+      { decisions: "DEC-014" },
+      { assumptions: { "ASM-1": "guessed" } },
+      { contradictions: [{ id: "CON-002", text: "conflict", between: "Q-1" }] },
+      unreadable,
+    ];
+    return shapes.map((ledger) => {
+      renderRound({ round: 1, questions: questions, ledger: ledger });
+      const optional = document.querySelector('.question[data-id="Q-2"]');
+      filter.click();
+      const hiddenNow = optional.classList.contains("hidden");
+      filter.click();
+      return {
+        counts: document.getElementById("counts").textContent,
+        ledger: document.getElementById("ledger").textContent,
+        hiddenNow: hiddenNow,
+        shownAgain: !optional.classList.contains("hidden"),
+      };
+    });
+    """
+
+    def test_a_mistyped_ledger_leaves_the_counter_and_the_filter_working(self):
+        """The finding this round exists for.
+
+        Four ledger shapes threw inside renderLedger, and the throw escaped
+        before applyFilter and updateCounts ran -- so the counter stayed blank
+        for the whole hour and the filter never applied, on a page whose cards
+        had rendered and looked entirely fine. loadRound is fire-and-forget,
+        so it surfaced as an unhandled rejection nobody sees.
+
+        The server now rejects all four before serving them, which is why
+        this drives renderRound directly: the server is not the page's only
+        caller, and a panel must not be able to cost the page its controls.
+
+        The panel text is asserted too, and that is the half that tells the
+        two locks apart. renderLedger being total gives "Nothing recorded
+        yet."; renderLedger throwing and showLedger catching gives the
+        apology instead; and a driverError -- which drive() refuses -- means
+        the throw escaped both and reached renderRound's caller.
+        """
+        got = self.drive(self.LEDGER)
+        self.assertEqual(len(got), 5)
+        for index, result in enumerate(got):
+            with self.subTest(shape=index):
+                self.assertTrue(result["counts"].startswith("0 answered"), result)
+                self.assertIn("1 REQUIRED", result["counts"])
+                self.assertTrue(result["hiddenNow"], result)
+                self.assertTrue(result["shownAgain"], result)
+        # Three of the shapes carry nothing renderable, so the panel says so.
+        for index in (0, 1, 2):
+            self.assertEqual(got[index]["ledger"], "Nothing recorded yet.")
+        # The fourth carries a real contradiction beside its bad `between`,
+        # and the contradiction still renders: guarding is not discarding.
+        self.assertIn("CON-002", got[3]["ledger"])
+        self.assertIn("conflict", got[3]["ledger"])
+        # The fifth is the one renderLedger cannot survive, so showLedger
+        # catches it and the panel apologises -- while the counter and the
+        # filter, which are the page itself, carry on above.
+        self.assertEqual(got[4]["ledger"], "The ledger could not be shown.")
+
 
 if __name__ == "__main__":
     unittest.main()

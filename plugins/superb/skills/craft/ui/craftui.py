@@ -112,11 +112,22 @@ WATCHDOG_INTERVAL_S = 0.25
 # which is milliseconds on any working filesystem. Five seconds is three
 # orders of magnitude of headroom.
 #
-# Five and not more because of what is downstream: `stop` sends SIGTERM and
-# waits ten seconds for the process to go before it reports. A drain that ran
-# to the full bound plus the release after it has to finish comfortably
-# inside that, or `stop` starts lying about what it did.
+# Five and not more because of what is downstream: STOP_SIGTERM_WAIT_S. A
+# drain that ran to its full bound plus the release after it has to finish
+# comfortably inside that, or `stop` starts lying about what it did.
 WRITE_DRAIN_TIMEOUT_S = 5.0
+
+# How long `stop` will wait after SIGTERM for the server to go before it
+# reports the session dead.
+#
+# Task 9 owns `stop` and is where this is spent; it lives here because it is
+# half of a relationship, and the other half is WRITE_DRAIN_TIMEOUT_S above.
+# Written as a bare 10 in a test instead, the coupling was asserted against a
+# number rather than against the wait it stands for: shorten the wait in Task
+# 9 and the assertion goes on passing while `stop` starts reporting a death
+# that has not happened. Named here so that the two constants can be compared
+# to each other, which is the thing that actually has to hold.
+STOP_SIGTERM_WAIT_S = 10.0
 
 
 def info_path(session):
@@ -250,6 +261,14 @@ def shutdown_and_release(server, session, drain_timeout_s):
     said out loud: at that point the process is about to exit, and the kernel
     would drop the flock regardless.
 
+    The line saying how the session ended is written here, before the
+    release, for the same reason and not merely for tidiness. In the detached
+    child sys.stderr IS .craft/server.log, so that line is a write into the
+    project like any other, and "a write cannot outlive the session's claim
+    on the project" has to include it or it is a rule with an unwritten
+    exception. It used to sit in _run_server's finally, after this function
+    had already let go.
+
     Returns whether the drain completed. Safe to call twice, and safe to call
     from inside the thread that was serving -- shutdown() returns at once once
     serve_forever has already stopped.
@@ -274,6 +293,19 @@ def shutdown_and_release(server, session, drain_timeout_s):
                 server.writes_in_flight, drain_timeout_s
             )
         )
+    # The log is the only record a detached process leaves, and this line is
+    # the difference between a session that went through the drain and one
+    # that was killed where it stood. Without it, a SIGTERM handler that was
+    # never installed looks exactly like one that worked: the default action
+    # kills the process, the kernel drops the flock, and every observable
+    # outside the process is the same -- while the drain this task exists for
+    # has been skipped entirely.
+    sys.stderr.write(
+        "craftui: session ended {}; the project is free.\n".format(
+            "cleanly" if drained else "with writes still running"
+        )
+    )
+    sys.stderr.flush()
     session.release_lock()
     return drained
 
@@ -360,32 +392,92 @@ def _build_server(session, args, key):
         raise
 
 
+def _stop_serving(server):
+    """Refuse new writes, then end serve_forever. Idempotent.
+
+    The gate shuts first for the same reason it does in shutdown_and_release:
+    nothing new may start writing during the wind-down.
+    """
+    server.close_writes()
+    server.shutdown()
+
+
+def _say_then_stop(server, message):
+    """Say why the session is ending, then end it -- and end it regardless.
+
+    Both halves are load-bearing and they were learned in that order.
+
+    The message goes FIRST because shutdown() frees the main thread to run
+    the exit path, and this is a daemon thread with no promise of another
+    instruction after that. Announcing afterwards lost the announcement in 12
+    runs out of 20 on a loaded machine: the server exited cleanly and the log
+    said only that, with nothing to say the project had been taken. This
+    notice is the entire point of the check that produces it.
+
+    The write sits under a finally because it must not be able to prevent the
+    shutdown it is announcing. A full filesystem -- exactly the sort of state
+    a project directory is in when things are going wrong -- raised here,
+    skipped the shutdown, and killed the one thread able to end the session,
+    leaving the server holding a project another session already owned for
+    the rest of the four-hour idle default.
+    """
+    try:
+        try:
+            sys.stderr.write(message)
+            sys.stderr.flush()
+        finally:
+            _stop_serving(server)
+    except Exception:
+        # There is nowhere left to say it, and saying it was never the job --
+        # ending the session is, and the finally above has already done it.
+        pass
+
+
 def _watchdog(server, session):
     """The two reasons a running session stops on its own.
 
     Runs on its own thread; server.shutdown() from here is what ends
     serve_forever on the main one.
+
+    This thread is the ONLY thing that can end a session that nobody signals,
+    which is what makes an exception in here different from an exception
+    anywhere else: it does not fail a request, it removes the one party able
+    to notice that the project has been taken. So the loop body fails closed.
+    A raise ends the session rather than the thread, because a watchdog that
+    cannot decide must not go on watching in name only -- the alternative,
+    measured, is a server holding somebody else's project for the whole
+    four-hour idle default with nothing in the log to say why.
+
+    That is one of the two remedies here and it is deliberately not the only
+    one; see _say_then_stop for the other, and for why the two are worth
+    having separately.
     """
     while True:
-        time.sleep(WATCHDOG_INTERVAL_S)
-        # If our lock file was removed or replaced under us, another session
-        # can already have acquired the project and be rewriting CRAFT.md.
-        # No acquirer-side check can prevent that -- once the name is gone
-        # there is nothing left to compare against -- so the holder is the
-        # only party that can still notice. Say so loudly and get out.
-        if not session.verify_lock_still_ours():
-            sys.stderr.write(
-                "craftui: {} was removed or replaced; another session may now "
-                "hold this project. Shutting down rather than risk two writers "
-                "on CRAFT.md.\n".format(session.lock_path)
+        try:
+            time.sleep(WATCHDOG_INTERVAL_S)
+            # If our lock file was removed or replaced under us, another
+            # session can already have acquired the project and be rewriting
+            # CRAFT.md. No acquirer-side check can prevent that -- once the
+            # name is gone there is nothing left to compare against -- so the
+            # holder is the only party that can still notice. Say so loudly,
+            # and get out whether or not saying it worked.
+            if not session.verify_lock_still_ours():
+                _say_then_stop(
+                    server,
+                    "craftui: {} was removed or replaced; another session may "
+                    "now hold this project. Shutting down rather than risk two "
+                    "writers on CRAFT.md.\n".format(session.lock_path),
+                )
+                return
+            if server.idle_seconds() > server.idle_timeout_s:
+                _stop_serving(server)
+                return
+        except BaseException as exc:  # noqa: BLE001 -- deliberate, see above
+            _say_then_stop(
+                server,
+                "craftui: the session watchdog stopped with {!r}; shutting "
+                "down rather than hold this project unwatched.\n".format(exc),
             )
-            sys.stderr.flush()
-            server.close_writes()
-            server.shutdown()
-            return
-        if server.idle_seconds() > server.idle_timeout_s:
-            server.close_writes()
-            server.shutdown()
             return
 
 
@@ -424,8 +516,7 @@ def _run_server(session, args):
         return 1
 
     def stop():
-        server.close_writes()
-        server.shutdown()
+        _stop_serving(server)
 
     def on_signal(signum, frame):
         # Off the signal handler entirely: shutdown() waits for the serving
@@ -469,20 +560,10 @@ def _run_server(session, args):
     try:
         server.serve_forever()
     finally:
-        drained = shutdown_and_release(server, session, WRITE_DRAIN_TIMEOUT_S)
-        # The log is the only record a detached process leaves, and this line
-        # is the difference between a session that went through the drain and
-        # one that was killed where it stood. Without it, a SIGTERM handler
-        # that was never installed looks exactly like one that worked: the
-        # default action kills the process, the kernel drops the flock, and
-        # every observable outside the process is the same -- while the drain
-        # this task exists for has been skipped entirely.
-        sys.stderr.write(
-            "craftui: session ended {}; the project is free.\n".format(
-                "cleanly" if drained else "with writes still running"
-            )
-        )
-        sys.stderr.flush()
+        # This says how the session ended as well as ending it -- the notice
+        # is written in there, ahead of the release, so that no write of ours
+        # outlives our claim on the project.
+        shutdown_and_release(server, session, WRITE_DRAIN_TIMEOUT_S)
     return 0
 
 

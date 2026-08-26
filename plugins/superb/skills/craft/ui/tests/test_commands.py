@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import errno
 import functools
 import io
 import json
@@ -42,6 +43,20 @@ CRAFTUI = str(UI_DIR / "craftui.py")
 # Long enough that a loaded machine does not fail a test that would pass, and
 # short enough that a hung child ends the run rather than the suite.
 PATIENCE_S = 30
+
+# What has to be left over after the drain has run to its full bound: the
+# lock release, the log line, and the interpreter shutting down. "Comfortably
+# inside" from craftui's own comment, written as a number so the two
+# constants it relates can be compared rather than each checked against a
+# literal of its own.
+HEADROOM_AFTER_THE_DRAIN_S = 2.0
+
+# How long a stolen lock may go unnoticed before the holder is running on a
+# project somebody else owns. Measured over twenty runs each way: 0.225-0.241 s
+# idle, 0.199-0.235 s with twelve spinners on twelve cpus. Eight times the
+# worst of that, so a loaded machine passes -- and well under the five seconds
+# a widened WATCHDOG_INTERVAL_S would cost, so widening it does not.
+NOTICE_DEADLINE_S = 2.0
 
 
 def run(*args, **kw):
@@ -194,9 +209,17 @@ class ServeTest(CommandTestCase):
         self.assertGreaterEqual(len(info["key"]), 32)
 
     def test_two_sessions_do_not_share_a_key(self):
-        first = json.loads(self.serve().stdout)
+        # Both return codes are asserted before either parse. Without them a
+        # serve that failed arrives as `JSONDecodeError: Expecting value:
+        # line 1 column 1` naming neither the cause nor which of the two
+        # commands produced it -- which is exactly how the one flaky failure
+        # this file has ever produced presented itself.
+        started = self.serve()
+        self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+        first = json.loads(started.stdout)
         with tempfile.TemporaryDirectory() as other_root:
             other = run("serve", "--project-dir", other_root)
+            self.assertEqual(other.returncode, 0, other.stdout + other.stderr)
             second = json.loads(other.stdout)
             self._pids.append(second["pid"])
             self.assertNotEqual(first["key"], second["key"])
@@ -330,6 +353,29 @@ class ServeTest(CommandTestCase):
         )
         self.assertIn("session.lock", self.log())
         self.assertIn("another session", self.log())
+
+    def test_a_stolen_lock_is_noticed_within_a_couple_of_seconds(self):
+        """WATCHDOG_INTERVAL_S is the width of the window in which two
+        sessions can both believe they own the project, and nothing else in
+        the suite fails if it is widened: at five seconds every other test
+        stays green while that window grows twentyfold. This is what the
+        constant is for, asserted as the delay a user would actually suffer
+        rather than as the number itself.
+        """
+        self.serve()
+        pid = self.info()["pid"]
+        started = time.monotonic()
+        self.lock_path.unlink()
+        self.assertTrue(
+            wait_until(lambda: "another session" in self.log()),
+            "the holder never noticed that its lock file had gone",
+        )
+        self.assertLess(
+            time.monotonic() - started, NOTICE_DEADLINE_S,
+            "the window in which two sessions can both own this project is "
+            "wider than WATCHDOG_INTERVAL_S is written to make it",
+        )
+        self.assertTrue(wait_until(lambda: not pid_alive(pid)))
 
     def test_a_replaced_lock_file_shuts_the_server_down(self):
         """Removal is not the only way the name stops meaning our inode."""
@@ -652,6 +698,16 @@ class ShutdownTestCase(unittest.TestCase):
     """A real server, holding the real lock, exactly as the child does."""
 
     def setUp(self):
+        # shutdown_and_release says how the session ended, and in the child
+        # that line goes to .craft/server.log because the child's stderr IS
+        # that file. Here it would go to the runner's, so it is captured --
+        # registered first, and so undone last, which also keeps anything
+        # written during the cleanups out of the run's output.
+        self.noise = io.StringIO()
+        capture = contextlib.redirect_stderr(self.noise)
+        capture.__enter__()
+        self.addCleanup(capture.__exit__, None, None, None)
+        self._parked = []
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = self._tmp.name
@@ -679,6 +735,7 @@ class ShutdownTestCase(unittest.TestCase):
         server_module.write_json_atomic = parked
         self.addCleanup(setattr, server_module, "write_json_atomic", real)
         self.addCleanup(parked.release.set)
+        self._parked.append(parked)
         return parked
 
     def submit(self, number=1):
@@ -704,8 +761,24 @@ class ShutdownTestCase(unittest.TestCase):
 
         thread = threading.Thread(target=send, daemon=True)
         thread.start()
-        self.addCleanup(thread.join, 10)
+        self.addCleanup(self._join_sender, thread)
         return thread, outcome
+
+    def _join_sender(self, thread):
+        """Join a sender, having first let go of anything holding it up.
+
+        Cleanups run LIFO and park_writes always runs before submit, so its
+        release lands AFTER this join -- and the sender cannot answer until
+        that release happens. A test that left a write parked therefore paid
+        this join's full ten seconds every run, waiting on an event a later
+        cleanup was going to set. It was 10.318 s of a 46 s suite, for a
+        drain the test bounds at 0.3 s. Releasing here rather than relying on
+        the ordering keeps the trap shut for every test that parks a write,
+        not just the one that fell into it.
+        """
+        for parked in self._parked:
+            parked.release.set()
+        thread.join(10)
 
     def locked_out(self):
         other = Session(self.root)
@@ -769,16 +842,17 @@ class ShutdownDrainTest(ShutdownTestCase):
         parked = self.park_writes()
         self.submit()
         self.assertTrue(parked.entered.wait(PATIENCE_S))
-        noise = io.StringIO()
         started = time.monotonic()
-        with contextlib.redirect_stderr(noise):
-            drained = craftui.shutdown_and_release(self.server, self.session, 0.3)
+        drained = craftui.shutdown_and_release(self.server, self.session, 0.3)
         elapsed = time.monotonic() - started
+        noise = self.noise
         self.assertFalse(drained, "a parked write reported itself drained")
         self.assertLess(elapsed, 10, "the bound on the wait is not a bound")
         self.assertGreaterEqual(elapsed, 0.3, "the wait was not waited")
         self.assertIn("1", noise.getvalue())
         self.assertIn("did not finish", noise.getvalue())
+        self.assertIn("session ended with writes still running", noise.getvalue(),
+                      "an exit that skipped the drain reported itself as clean")
         self.assertFalse(self.locked_out(), "a wedged write held the project forever")
 
     def test_a_shutdown_with_nothing_in_flight_does_not_wait(self):
@@ -786,6 +860,8 @@ class ShutdownDrainTest(ShutdownTestCase):
         self.assertTrue(craftui.shutdown_and_release(self.server, self.session, PATIENCE_S))
         self.assertLess(time.monotonic() - started, 5)
         self.assertFalse(self.locked_out())
+        self.assertIn("session ended cleanly", self.noise.getvalue(),
+                      "a drained exit did not say so")
 
     def test_shutting_down_twice_is_not_an_error(self):
         self.assertTrue(craftui.shutdown_and_release(self.server, self.session, 1.0))
@@ -826,6 +902,187 @@ class ShutdownDrainTest(ShutdownTestCase):
         self.assertTrue(done.wait(PATIENCE_S))
         self.assertFalse(self.session.answers_path(2).exists(),
                          "a refused write wrote anyway")
+
+
+class _NotingStderr(io.StringIO):
+    """A stderr that records WHEN it was written into somebody's call list.
+
+    A write to stderr leaves no trace in a _Recorder's calls, so an ordering
+    that puts it on the wrong side of release_lock is invisible to a test
+    that only watches the recorder. This puts the two on one timeline.
+    """
+
+    def __init__(self, calls):
+        io.StringIO.__init__(self)
+        self._calls = calls
+
+    def write(self, text):
+        if text.strip():
+            self._calls.append("stderr")
+        return io.StringIO.write(self, text)
+
+
+class _FullDiskStderr(io.StringIO):
+    """A .craft/server.log on a filesystem with no room left.
+
+    Not a hypothetical: the stolen-lock notice is written at exactly the
+    moment a session is in trouble, and ENOSPC is one of the ways a project
+    directory gets into that state in the first place.
+    """
+
+    def write(self, text):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+
+class _WatchdogSession:
+    """A session that answers the one question the watchdog asks it."""
+
+    def __init__(self, ours=True, error=None):
+        self.lock_path = "/nowhere/.craft/session.lock"
+        self.ours = ours  # public: a test flips it to end a running watchdog
+        self._error = error
+
+    def verify_lock_still_ours(self):
+        if self._error is not None:
+            raise self._error
+        return self.ours
+
+
+class _WatchdogServer:
+    """Enough of a server for the watchdog, remembering what it was told.
+
+    The real one cannot be used here: shutdown() on a server that never
+    entered serve_forever waits for an event nothing will set, and these
+    cases are all about what happens on the way to that call rather than
+    inside it.
+    """
+
+    def __init__(self, calls=None, idle_seconds=0.0, idle_timeout_s=3600.0,
+                 error=None):
+        self.calls = [] if calls is None else calls
+        self.stopped = threading.Event()
+        self.idle_timeout_s = idle_timeout_s
+        self._idle_seconds = idle_seconds
+        self._error = error
+
+    def close_writes(self):
+        self.calls.append("close_writes")
+
+    def shutdown(self):
+        self.calls.append("shutdown")
+        self.stopped.set()
+
+    def idle_seconds(self):
+        if self._error is not None:
+            raise self._error
+        return self._idle_seconds
+
+
+class WatchdogTest(unittest.TestCase):
+    """The watchdog thread is the only thing that can end a session nobody
+    signals, so an exception in it does not fail a request -- it removes the
+    one party able to notice that another session has taken the project.
+
+    Three properties, and each has a case of its own because each was got
+    wrong once. The notice is written before the shutdown, or it is lost --
+    shutdown() frees the main thread to exit the process out from under this
+    daemon thread. The write cannot prevent the shutdown it announces, which
+    is what the finally is for. And the loop body fails closed, so anything
+    that raises ends the session rather than only this thread.
+    """
+
+    def run_watchdog(self, server, session, stderr=None):
+        """Run the real watchdog against fakes until it ends the session."""
+        with contextlib.redirect_stderr(stderr or io.StringIO()):
+            thread = threading.Thread(
+                target=craftui._watchdog, args=(server, session), daemon=True)
+            thread.start()
+            self.assertTrue(
+                server.stopped.wait(PATIENCE_S),
+                "the watchdog never ended the session: {}".format(server.calls))
+            thread.join(PATIENCE_S)
+        self.assertFalse(thread.is_alive(), "the watchdog thread outlived the session")
+
+    def test_a_stolen_lock_ends_the_session(self):
+        server = _WatchdogServer()
+        noise = io.StringIO()
+        self.run_watchdog(server, _WatchdogSession(ours=False), stderr=noise)
+        self.assertEqual(server.calls, ["close_writes", "shutdown"])
+        self.assertIn("session.lock", noise.getvalue())
+        self.assertIn("another session", noise.getvalue())
+
+    def test_a_stolen_lock_ends_the_session_when_the_notice_cannot_be_written(self):
+        """The full filesystem is the case the whole check exists for, and it
+        was the one case that defeated it: the notice is written first, ENOSPC
+        raised there, and the shutdown it was announcing never happened. The
+        thread died with it, so nothing was left that could end the session,
+        and the server held a project another session already owned for the
+        rest of the four-hour idle default."""
+        server = _WatchdogServer()
+        self.run_watchdog(
+            server, _WatchdogSession(ours=False), stderr=_FullDiskStderr())
+        self.assertEqual(server.calls, ["close_writes", "shutdown"])
+
+    def test_the_stolen_lock_notice_is_written_before_the_shutdown_it_announces(self):
+        """Not tidiness -- the notice is lost otherwise.
+
+        shutdown() releases the main thread, which runs the exit path, and
+        this is a daemon thread with no promise of another instruction after
+        that. Announcing afterwards was measured on a loaded machine at 12
+        losses in 20 runs: the server exited cleanly and .craft/server.log
+        said only that, with nothing in it to say the project had been taken.
+        On an idle machine it passed every time, which is why the loss is
+        asserted as an order rather than waited for.
+        """
+        server = _WatchdogServer()
+        noise = _NotingStderr(server.calls)
+        self.run_watchdog(server, _WatchdogSession(ours=False), stderr=noise)
+        self.assertEqual(server.calls, ["stderr", "close_writes", "shutdown"])
+
+    def test_a_watchdog_that_cannot_check_the_lock_ends_the_session(self):
+        """An unreadable .craft/, an fstat that failed, a bug added later:
+        the watchdog cannot tell those from a stolen lock, and a watchdog
+        that cannot decide must fail closed rather than stop watching."""
+        server = _WatchdogServer()
+        session = _WatchdogSession(error=OSError(errno.EIO, "I/O error"))
+        noise = io.StringIO()
+        self.run_watchdog(server, session, stderr=noise)
+        self.assertEqual(server.calls, ["close_writes", "shutdown"])
+        self.assertIn("watchdog stopped", noise.getvalue())
+
+    def test_a_watchdog_that_cannot_check_the_clock_ends_the_session(self):
+        """The second arm of the loop, reached only once the lock check has
+        passed -- so this also proves the fake session's true branch."""
+        server = _WatchdogServer(error=RuntimeError("no clock"))
+        noise = io.StringIO()
+        self.run_watchdog(server, _WatchdogSession(ours=True), stderr=noise)
+        self.assertEqual(server.calls, ["close_writes", "shutdown"])
+        self.assertIn("no clock", noise.getvalue())
+
+    def test_an_idle_session_is_ended_and_a_busy_one_is_not(self):
+        """The fakes are only worth what they exercise: without this, every
+        case above could pass against a watchdog whose ordinary arms were
+        broken."""
+        idle = _WatchdogServer(idle_seconds=99.0, idle_timeout_s=1.0)
+        self.run_watchdog(idle, _WatchdogSession(ours=True))
+        self.assertEqual(idle.calls, ["close_writes", "shutdown"])
+
+        busy = _WatchdogServer(idle_seconds=0.0, idle_timeout_s=3600.0)
+        session = _WatchdogSession(ours=True)
+        with contextlib.redirect_stderr(io.StringIO()):
+            thread = threading.Thread(
+                target=craftui._watchdog, args=(busy, session), daemon=True)
+            thread.start()
+            # A negative, so it is worth a fixed wait: several watchdog
+            # ticks, in which a watchdog that always shut down would have.
+            self.assertFalse(busy.stopped.wait(craftui.WATCHDOG_INTERVAL_S * 4))
+            self.assertEqual(busy.calls, [])
+            # Not left running. A daemon thread that never ends outlives this
+            # test and ticks through everybody else's.
+            session.ours = False
+            self.assertTrue(busy.stopped.wait(PATIENCE_S))
+            thread.join(PATIENCE_S)
+        self.assertFalse(thread.is_alive())
 
 
 class _Recorder:
@@ -889,18 +1146,47 @@ class ShutdownOrderTest(unittest.TestCase):
 
     def test_the_lock_goes_last_and_the_gate_shuts_first(self):
         recorder = _Recorder()
-        craftui.shutdown_and_release(recorder, recorder, 1.0)
+        with contextlib.redirect_stderr(io.StringIO()):
+            craftui.shutdown_and_release(recorder, recorder, 1.0)
         self.assertEqual(
             recorder.calls,
             ["close_writes", "shutdown", "server_close", "drain_writes", "release_lock"],
         )
 
+    def test_the_notice_that_the_session_ended_is_written_before_the_lock_goes(self):
+        """In the child, stderr IS .craft/server.log, so this line is a write
+        into the project and the rule it has to obey is the same one the
+        drain exists for: nothing of ours may land after we have let go. It
+        sat in _run_server's finally, after the release, on every clean exit.
+        """
+        recorder = _Recorder()
+        with contextlib.redirect_stderr(_NotingStderr(recorder.calls)) as noise:
+            craftui.shutdown_and_release(recorder, recorder, 1.0)
+        self.assertEqual(
+            recorder.calls,
+            ["close_writes", "shutdown", "server_close", "drain_writes",
+             "stderr", "release_lock"],
+        )
+        self.assertIn("session ended cleanly", noise.getvalue())
+
     def test_the_drain_bound_fits_inside_what_stop_will_wait(self):
-        """Task 9's `stop` sends SIGTERM and waits ten seconds before it
-        reports. A drain that ran to its full bound plus the release after it
-        has to finish comfortably inside that, or `stop` reports a lie."""
+        """Task 9's `stop` sends SIGTERM and waits STOP_SIGTERM_WAIT_S before
+        it reports. A drain that ran to its full bound plus the release after
+        it has to finish comfortably inside that, or `stop` reports a lie.
+
+        The two constants are compared to each other and not to the number
+        either happens to hold today. Written as `<= 8`, this passed happily
+        while Task 9 shortened its wait to five -- so the coupling it was
+        written to protect could break with the test still green.
+        """
         self.assertGreater(craftui.WRITE_DRAIN_TIMEOUT_S, 0)
-        self.assertLessEqual(craftui.WRITE_DRAIN_TIMEOUT_S, 8)
+        self.assertGreater(craftui.STOP_SIGTERM_WAIT_S, 0)
+        self.assertLessEqual(
+            craftui.WRITE_DRAIN_TIMEOUT_S + HEADROOM_AFTER_THE_DRAIN_S,
+            craftui.STOP_SIGTERM_WAIT_S,
+            "the drain plus the release after it no longer fits inside what "
+            "stop waits, so stop will report a death that has not happened",
+        )
 
 
 class VersionFloorTest(unittest.TestCase):
@@ -927,7 +1213,14 @@ class VersionFloorTest(unittest.TestCase):
 
     def test_an_old_interpreter_is_refused_with_one_clear_sentence(self):
         env = self.fake_version((3, 8, 10, "final", 0))
-        result = run("serve", "--project-dir", ".", env=env)
+        # A temporary directory and not ".", which is the source tree this
+        # suite is run from. This case is safe only for as long as the guard
+        # above works; the day it regresses, `--project-dir .` starts a real
+        # detached server holding a kernel lock on the repository's own
+        # .craft/ and leaks it for the four-hour idle default -- so the test
+        # for the guard would take the repository down with it.
+        with tempfile.TemporaryDirectory() as project:
+            result = run("serve", "--project-dir", project, env=env)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
         self.assertIn("3.9", result.stderr)

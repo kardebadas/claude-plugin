@@ -518,6 +518,15 @@ let saveTimer = null;
 // 200. A PATCH carrying a seq lower than one already written is now ignored,
 // and that only works if this rises.
 let saveSeq = 0;
+// Saves STARTED and EDITS MADE are two different counts, and the difference
+// is a data-loss path. A keystroke landing while a PATCH is in flight starts
+// no save -- it only restarts the debounce -- so saveSeq does not move, and a
+// guard that compares against saveSeq clears `dirty` for an edit that has
+// been nowhere. The pagehide flush below is gated on `dirty`, so that edit is
+// then never sent anywhere: measured as ONE PATCH carrying the older text.
+// The question a landed save must answer is "does a newer edit exist?", so
+// edits are counted here and that is the question the guard asks.
+let editSeq = 0;
 let dirty = false;            // typing this page has not seen reach the disk
 let waiting = false;          // Send is done; the next round is Claude's move
 let lastSeenRound = null;
@@ -573,6 +582,7 @@ async function refusal(response) {
 
 function scheduleSave() {
   if (!currentRound || waiting) return;
+  editSeq += 1;
   dirty = true;
   setStatus("saving…", "saving");
   clearTimeout(saveTimer);
@@ -585,10 +595,13 @@ function scheduleSave() {
 // only catches rejections tells the user their work is safe while the server
 // is refusing to store it.
 async function saveDraft(keepalive) {
-  if (!currentRound) return;
+  if (!currentRound) return false;
   clearTimeout(saveTimer);
   saveSeq += 1;
   const seq = saveSeq;
+  // The edit this save is carrying. Anything typed after this line is NOT in
+  // the body below, whatever the server answers.
+  const edits = editSeq;
   let response;
   try {
     response = await fetch(api("/api/draft"), {
@@ -613,9 +626,19 @@ async function saveDraft(keepalive) {
   // `{"ok": true, "stale": true}` is a success and not a failure: a newer
   // keystroke than this one is already on the disk, which is what the user
   // wanted, and this client did nothing wrong.
-  if (seq === saveSeq) dirty = false;
-  setStatus("saved", "saved");
-  clearProblem("save");
+  //
+  // The guard is on EDITS, not on saves. A keystroke during this request
+  // started no save, so `seq === saveSeq` would still hold and would clear
+  // `dirty` for text that has been nowhere -- and "saved" would be on screen
+  // over it, which is the failure reported as a success. If a newer edit
+  // exists, everything below is that edit's news to deliver: its own debounce
+  // is already running and the header still reads "saving…".
+  if (editSeq === edits) {
+    dirty = false;
+    setStatus("saved", "saved");
+    clearProblem("save");
+  }
+  return true;
 }
 
 // The server's messages are written to be embedded and do not end in a full
@@ -770,8 +793,10 @@ async function submit(finished) {
   setStatus("sending…", "saving");
   // The draft first, and awaited. This is NOT how the answers travel -- POST
   // carries its own body and the server never promotes a draft -- it is what
-  // is left on the disk if the POST below fails.
-  await saveDraft();
+  // is left on the disk if the POST below fails. Whether it LANDED is the
+  // fact sendBroke needs: a Send refused for size was preceded by a draft
+  // refused for the same size, and the disk holds nothing.
+  const drafted = await saveDraft();
   let response;
   try {
     response = await fetch(api("/api/submit"), {
@@ -783,9 +808,9 @@ async function submit(finished) {
                              finished: finished === true }),
     });
   } catch (err) {
-    return sendBroke("the craft server did not answer.");
+    return sendBroke("the craft server did not answer.", drafted);
   }
-  if (!response.ok) return sendBroke(await refusal(response));
+  if (!response.ok) return sendBroke(await refusal(response), drafted);
 
   lastSeenRound = round;
   waiting = true;
@@ -802,12 +827,23 @@ async function submit(finished) {
   box.setAttribute("data-on", "1");
 }
 
-function sendBroke(reason) {
+// `drafted` is whether the flush inside submit() actually reached the disk,
+// and the reassurance is only true when it did. A Send refused for size was
+// preceded by a draft refused for the same size, so telling that user their
+// work is in the draft file is false in exactly the case it is shown -- and
+// the half of the sentence they act on is the half that says it is safe to
+// close the tab.
+function sendBroke(reason, drafted) {
   setBusy(false);
   setStatus("not sent — " + reason, "error");
   setProblem("Your answers were NOT sent to Claude: " + sentence(reason) +
-             " Nothing has been lost — they are still on this page and in " +
-             "this round's draft file. Try Send again.", "send");
+             (drafted
+               ? " Nothing has been lost — they are still on this page and in " +
+                 "this round's draft file."
+               : " They are still on this page and NOWHERE ELSE — this " +
+                 "round's draft file could not be written either, so do not " +
+                 "close this page.") +
+             " Try Send again.", "send");
 }
 
 document.getElementById("send").addEventListener("click", () => submit(false));

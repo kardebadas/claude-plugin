@@ -76,14 +76,35 @@ def _validate_ledger(ledger, errors):
                     errors.append("{}.between[{}]: not a question id".format(at, j))
 
 
-def validate_round(obj):
-    """Return a list of human-readable problems. Empty list means valid."""
+def validate_round(obj, expected_round=None):
+    """Return a list of human-readable problems. Empty list means valid.
+
+    `expected_round`, when given, is the round number the CALLER knows this
+    object to be -- for both callers in this tool, the number in the filename
+    it was just read from. Nothing else ties the two together: the page picks
+    a round by filename, so a `round-004.questions.json` carrying `"round": 2`
+    is served as round 2, and every PATCH and POST the page then sends
+    addresses round 2 -- overwriting an already-submitted `.answers.json`.
+
+    It is optional and defaults to not checking, because a round number is a
+    fact about a FILE and this function validates a wire object. Most callers
+    -- every test here, and any future one holding a round that never came
+    from a file -- have no filename to be consistent with, and a required
+    parameter would make them invent one. The two callers that DO know it
+    pass it, which is where the check has any meaning.
+    """
     if not isinstance(obj, dict):
         return ["round must be a JSON object"]
 
     errors = []
     if not isinstance(obj.get("round"), int):
         errors.append("round: missing or not an integer")
+    elif expected_round is not None and obj["round"] != expected_round:
+        # Reported, not corrected. The agent that wrote the file is the one
+        # who can fix it, and guessing which of the two numbers was meant
+        # would serve the user a round nobody wrote.
+        errors.append("round: says {}, but this is round {}".format(
+            obj["round"], expected_round))
 
     questions = obj.get("questions")
     if not isinstance(questions, list):

@@ -2387,6 +2387,18 @@ class CmdStatusTest(unittest.TestCase):
         self.assertIn("round-001.questions.json", report["error"])
         self.assertTrue(any("importance" in line for line in report["details"]))
 
+    def test_a_round_whose_number_disagrees_with_its_filename_is_an_error(self):
+        """`status` is what the AGENT reads, and the agent is who writes these
+        files -- so it is the one place the mistake can be reported back to
+        the party who can fix it. Reported, not corrected: guessing which of
+        the two numbers was meant would hand a user a round nobody wrote.
+        """
+        self.write_round(2, {"round": 1, "questions": [
+            {"id": "Q-1", "importance": "REQUIRED", "title": "a", "type": "text"}]})
+        report = self.report()
+        self.assertIn("round-002.questions.json", report["error"])
+        self.assertEqual(report["details"], ["round: says 1, but this is round 2"])
+
     def test_a_round_that_is_not_an_object_is_an_error_not_a_traceback(self):
         self.write(self.session.questions_path(1), "[1, 2, 3]")
         self.assertIn("round-001.questions.json", self.report()["error"])

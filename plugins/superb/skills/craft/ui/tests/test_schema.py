@@ -175,6 +175,76 @@ class ValidateRoundShapeTest(unittest.TestCase):
         self.assertEqual(obj, before)
 
 
+class ValidateRoundAgainstItsFilenameTest(unittest.TestCase):
+    """`expected_round`: the one thing nothing else here ties together.
+
+    The page selects a round by FILENAME and then addresses every PATCH and
+    POST to the `round` field it was served. So `round-004.questions.json`
+    carrying `"round": 2` -- an agent copying the previous round's envelope,
+    which is how it happens -- is served to the page AS round 2, and the next
+    autosave overwrites `round-002.draft.json` while the next Send overwrites
+    an already-submitted `round-002.answers.json`. Nothing downstream can
+    detect that, because by then the two numbers agree.
+    """
+
+    def test_a_round_that_agrees_with_its_filename_is_valid(self):
+        self.assertEqual(validate_round(a_round(question()), 1), [])
+
+    def test_a_round_that_disagrees_with_its_filename_is_rejected(self):
+        obj = a_round(question())
+        obj["round"] = 2
+        self.assertEqual(validate_round(obj, 4),
+                         ["round: says 2, but this is round 4"])
+
+    def test_a_lower_round_number_is_the_case_that_overwrites_answers(self):
+        obj = a_round(question())
+        obj["round"] = 1
+        self.assertEqual(validate_round(obj, 4),
+                         ["round: says 1, but this is round 4"])
+
+    def test_zero_is_checked_like_any_other_number(self):
+        """`if expected_round:` would skip round 0 -- and 0 is below every
+        round the page has seen, which is the direction that overwrites."""
+        obj = a_round(question())
+        obj["round"] = 0
+        self.assertEqual(validate_round(obj, 4),
+                         ["round: says 0, but this is round 4"])
+        self.assertEqual(validate_round(obj, 0), [])
+
+    def test_the_check_is_off_by_default(self):
+        """The default is deliberate and is not an oversight. A round number
+        is a fact about a FILE, and this function validates a wire object; a
+        caller holding one that never came from a file has no filename to be
+        consistent with. Every other caller here relies on that."""
+        obj = a_round(question())
+        obj["round"] = 2
+        self.assertEqual(validate_round(obj), [])
+
+    def test_a_non_integer_round_is_not_reported_twice(self):
+        """"missing or not an integer" already says everything there is to
+        say, and `"2" != 2` would add a second line naming the same field."""
+        obj = a_round(question())
+        obj["round"] = "2"
+        self.assertEqual(validate_round(obj, 2),
+                         ["round: missing or not an integer"])
+
+    def test_every_problem_is_still_reported(self):
+        """The mismatch does not short-circuit the rest. A round that is
+        broken twice must report both, or it takes two attempts to land."""
+        obj = a_round(question(importance="CRITICAL"))
+        obj["round"] = 1
+        errors = validate_round(obj, 3)
+        self.assertIn("round: says 1, but this is round 3", errors)
+        self.assertTrue(any("importance must be one of" in e for e in errors))
+
+    def test_the_check_does_not_mutate_the_round(self):
+        obj = a_round(question())
+        obj["round"] = 9
+        before = copy.deepcopy(obj)
+        validate_round(obj, 1)
+        self.assertEqual(obj, before)
+
+
 class ValidateQuestionTest(unittest.TestCase):
     """Every per-question rule, one test each, asserting the whole error list.
 

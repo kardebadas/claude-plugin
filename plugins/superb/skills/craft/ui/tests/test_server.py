@@ -701,6 +701,37 @@ class RoundTest(ServerTestCase):
         payload = self.get_json("/api/round")
         self.assertEqual(payload["round"]["questions"][0]["title"], "Café ☃?")
 
+    def test_a_round_whose_number_disagrees_with_its_filename_is_refused(self):
+        """The only place the two numbers are ever compared.
+
+        current_round() picks the file by NAME; the page is then served the
+        object and addresses every PATCH and POST to the `round` field inside
+        it. An agent that writes round-002.questions.json while copying round
+        1's envelope therefore has the user's round 2 answers land in
+        round-001.draft.json -- and Send overwrite round-001.answers.json,
+        which has already been submitted and folded in. Both numbers agree
+        from then on, so nothing downstream can notice.
+        """
+        write_json_atomic(self.session.questions_path(1), VALID_ROUND)
+        write_json_atomic(self.session.questions_path(2), dict(VALID_ROUND, round=1))
+        payload = self.get_json("/api/round")
+        self.assertFalse(payload["ok"], payload)
+        # Named, and said in the words a person can act on: which file, and
+        # which two numbers disagree.
+        self.assertIn("round-002.questions.json", payload["error"])
+        self.assertEqual(payload["details"], ["round: says 1, but this is round 2"])
+        # Refused, not silently re-served as round 1. A page handed round 1
+        # here would overwrite answers the user has already sent.
+        self.assertNotIn("round", payload)
+        self.assertEqual(self.get("/").status, 200)  # still alive
+
+    def test_a_round_that_agrees_with_its_filename_is_still_served(self):
+        """The other half, so the check is not simply refusing everything."""
+        write_json_atomic(self.session.questions_path(2), dict(VALID_ROUND, round=2))
+        payload = self.get_json("/api/round")
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["round"]["round"], 2)
+
     def test_malformed_json_reports_an_error_and_the_server_survives(self):
         self.session.questions_path(1).write_text("{not json", encoding="utf-8")
         payload = self.get_json("/api/round")
@@ -3671,6 +3702,40 @@ class PageWiringContractTest(ServerTestCase):
         and bool("false") is True, so the coercion has to happen here."""
         self.assertIn("finished: finished === true", self.page())
 
+    def test_the_closing_tab_flush_is_sent_with_keepalive(self):
+        """keepalive IS the pagehide flush. Without it the browser cancels an
+        in-flight request when the page that started it goes away, so the
+        400 ms debounce window costs the user their last sentence -- and the
+        deviation that added a pagehide listener at all bought nothing.
+
+        No behavioural test can see this: a driven page is never actually
+        closed, so the request completes either way and every one of these
+        tests stays green with the flag stripped. The source is where it can
+        be held down, the same way `saveSeq += 1` and `response.ok` are.
+        """
+        html = self.page()
+        self.assertIn("keepalive: keepalive === true", html)
+        self.assertIn('window.addEventListener("pagehide"', html)
+        # ...and that the listener is the caller that asks for it. A flush
+        # that passes nothing gets keepalive: false and is cancelled.
+        self.assertIn("saveDraft(true)", html)
+
+    def test_the_dirty_flag_is_cleared_by_the_edit_that_was_saved(self):
+        """The guard has to ask whether a NEWER EDIT exists, not whether a
+        newer SAVE has begun. A keystroke during an in-flight PATCH starts no
+        save, so `seq === saveSeq` still holds when the older one lands and
+        clears `dirty` for text that has been nowhere.
+
+        LivePageTest drives the whole path against a real server; this pins
+        the one comparison it turns on, because the two spellings differ by a
+        single identifier.
+        """
+        html = self.page()
+        self.assertIn("editSeq += 1", html)
+        self.assertIn("const edits = editSeq;", html)
+        self.assertIn("if (editSeq === edits) {", html)
+        self.assertNotIn("if (seq === saveSeq) dirty = false;", html)
+
 
 class LivePageTest(DrivenTestCase):
     """The page driven against the real server, with the disk as the witness.
@@ -3958,8 +4023,16 @@ class LivePageTest(DrivenTestCase):
         got = self.drive(self.SEND_REFUSED, budget=30000)
         self.assertTrue(got["refused"], got)
         self.assertIn("too large", got["problem"])
-        self.assertIn("Nothing has been lost", got["problem"])
         self.assertIn("not sent", got["status"])
+        # ...and what it says about WHERE the work is has to be true for the
+        # case it is shown in. The draft flush moments earlier was refused for
+        # the same size, so the draft file does not hold this round -- and the
+        # disk below is the witness for that, not the wording.
+        self.assertIn("still on this page", got["problem"])
+        self.assertIn("NOWHERE ELSE", got["problem"])
+        self.assertIn("draft file could not be written", got["problem"])
+        self.assertNotIn("Nothing has been lost", got["problem"])
+        self.assertFalse(self.session.draft_path(1).exists())
         # No waiting state, and the button works again, because Send is still
         # the thing the user has to do.
         self.assertFalse(got["waiting"], got)
@@ -4177,6 +4250,246 @@ class LivePageTest(DrivenTestCase):
         got = self.drive(self.EXPIRED, budget=60000)
         self.assertTrue(got["ended"], got)
         self.assertNotIn("reconnect on its own", got["text"])
+
+
+    # ------------------------------------------------------------------
+    # Fix round 1. The four paths a mutant walked through the suite green.
+    # ------------------------------------------------------------------
+
+    # F1. The first PATCH is held open, a second keystroke lands while it is
+    # in flight, and then it is released. The second keystroke starts no save
+    # -- it only restarts the debounce -- so `saveSeq` does not move, and a
+    # guard that compares against it clears `dirty` for text that has been
+    # nowhere. The tab then closes and the pagehide flush, which is gated on
+    # `dirty`, does nothing at all.
+    HELD_PATCH = """
+    return (async () => {
+      const status = document.getElementById("status");
+      const field = document.querySelector('.question[data-id="Q-2"] [data-text]');
+      const real = window.fetch.bind(window);
+      let release = null;
+      const held = new Promise((resolve) => { release = resolve; });
+      let started = 0, landed = 0;
+      window.fetch = (url, init) => {
+        const patch = init && init.method === "PATCH";
+        const go = () => real(url, init).then((r) => {
+          if (patch) landed += 1;
+          return r;
+        });
+        if (!patch) return go();
+        started += 1;
+        return started === 1 ? held.then(go) : go();
+      };
+      // Keystroke one. Its debounce fires and the PATCH it starts is HELD.
+      field.value = "first";
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      await waitFor(() => started === 1, 8000);
+      // Keystroke two, while that request is still open. Nothing about
+      // saveSeq changes here, which is the whole point.
+      field.value = "the sentence that must not be lost";
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      const dirtyWhileHeld = dirty;
+      release();
+      await waitFor(() => landed >= 1, 8000);
+      const dirtyAfterTheOlderSaveLanded = dirty;
+      const statusAfterTheOlderSaveLanded = status.textContent;
+      // A closed tab runs no timers. The debounce keystroke two restarted
+      // would fire 400 ms later in a page that is still open, and that is
+      // exactly what a closed tab does not have -- so it is cancelled, which
+      // leaves the pagehide flush as the only route the second sentence has
+      // to the disk. That is the real closing tab, reproduced.
+      clearTimeout(saveTimer);
+      window.dispatchEvent(new Event("pagehide"));
+      const flushed = await waitFor(() => landed >= 2, 8000);
+      return {
+        dirtyWhileHeld: dirtyWhileHeld,
+        dirtyAfterTheOlderSaveLanded: dirtyAfterTheOlderSaveLanded,
+        statusAfterTheOlderSaveLanded: statusAfterTheOlderSaveLanded,
+        flushed: !!flushed,
+        started: started,
+        landed: landed,
+      };
+    })();
+    """
+
+    def test_a_keystroke_during_an_in_flight_save_still_reaches_the_disk(self):
+        """The data-loss path, driven end to end and settled on the disk.
+
+        `saveSeq` counts saves STARTED. A keystroke landing while a PATCH is
+        in flight starts no save, so when that older PATCH resolves the guard
+        `seq === saveSeq` passes and clears `dirty` -- and `setStatus("saved")`
+        beside it puts the word "saved" over an edit that has been nowhere,
+        which is a failure reported as a success in the only indicator the
+        user has. The pagehide flush is gated on `dirty`, so closing the tab
+        then sends nothing: measured as ONE PATCH, carrying the older text.
+        """
+        got = self.drive(self.HELD_PATCH, budget=40000)
+        self.assertTrue(got["dirtyWhileHeld"], got)
+        # The older save landing is not news about the newer edit.
+        self.assertTrue(got["dirtyAfterTheOlderSaveLanded"], got)
+        self.assertEqual(got["statusAfterTheOlderSaveLanded"], "saving\u2026")
+        # ...so the closing tab flushes, which is what the flag is for.
+        self.assertTrue(got["flushed"], got)
+        self.assertEqual(got["started"], 2)
+        # The disk is the witness. This is the assertion the older text fails.
+        self.assertEqual(
+            read_json(self.session.draft_path(1))["answers"]["Q-2"],
+            {"text": "the sentence that must not be lost"})
+
+    # F3. A Send that failed, and then an autosave that lands.
+    SEND_REFUSED_THEN_A_SAVE_LANDS = """
+    return (async () => {
+      const status = document.getElementById("status");
+      const problem = document.getElementById("problem");
+      const field = document.querySelector('.question[data-id="Q-2"] [data-text]');
+      field.value = "x".repeat(1100000);
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      await waitFor(() => status.textContent.indexOf("not saved") === 0, 10000);
+      document.getElementById("send").click();
+      const refused = await waitFor(
+        () => problem.textContent.indexOf("Your answers were NOT sent") === 0,
+        12000);
+      // Now shrink it, so a draft save LANDS. That is news about the draft
+      // file and about nothing else.
+      field.value = "small again";
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      const saved = await waitFor(() => status.textContent === "saved", 10000);
+      return {
+        refused: !!refused,
+        saved: !!saved,
+        problemAfter: problem.textContent,
+        problemOn: problem.hasAttribute("data-on"),
+      };
+    })();
+    """
+
+    def test_a_landed_save_does_not_take_down_the_send_alarm(self):
+        """What `problemKind` is for, and the reason an unconditional
+        `setProblem("")` in saveDraft leaves every other test green.
+
+        "Your answers were NOT sent to Claude" is the only thing on the page
+        saying this round never reached the agent. A draft reaching the disk
+        four hundred milliseconds later says nothing about that, and erasing
+        the warning with it leaves a page that looks entirely healthy over a
+        round Claude will never see -- so the user closes the tab and waits.
+        """
+        got = self.drive(self.SEND_REFUSED_THEN_A_SAVE_LANDS, budget=40000)
+        self.assertTrue(got["refused"], got)
+        self.assertTrue(got["saved"], got)
+        self.assertTrue(got["problemOn"], got)
+        self.assertTrue(
+            got["problemAfter"].startswith("Your answers were NOT sent"), got)
+        self.assertFalse(self.session.answers_path(1).exists())
+        # The save really did land, so the alarm survived a success rather
+        # than an absence of one.
+        self.assertEqual(
+            read_json(self.session.draft_path(1))["answers"]["Q-2"],
+            {"text": "small again"})
+
+    # F2, the other branch. Only the POST fails, so the draft flush inside
+    # submit() reaches the real server and the reassurance is TRUE.
+    SEND_BROKE_DRAFT_LANDED = """
+    return (async () => {
+      const status = document.getElementById("status");
+      const problem = document.getElementById("problem");
+      const field = document.querySelector('.question[data-id="Q-2"] [data-text]');
+      field.value = "an hour of thinking";
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      await waitFor(() => status.textContent === "saved", 8000);
+      const real = window.fetch.bind(window);
+      window.fetch = (url, init) =>
+        (init && init.method === "POST")
+          ? Promise.reject(new TypeError("Failed to fetch"))
+          : real(url, init);
+      document.getElementById("send").click();
+      const refused = await waitFor(
+        () => problem.textContent.indexOf("Your answers were NOT sent") === 0,
+        12000);
+      return {
+        refused: !!refused,
+        problem: problem.textContent,
+        waiting: document.getElementById("waiting").hasAttribute("data-on"),
+        sendDisabled: document.getElementById("send").disabled,
+      };
+    })();
+    """
+
+    def test_a_send_that_fails_over_a_draft_that_landed_says_so(self):
+        """The pair to the refusal above, and what makes the difference a
+        real one rather than a rewording: here the draft flush DID reach the
+        disk, so "and in this round's draft file" is true and is said. There
+        the flush was refused for the same size that refused the Send, and
+        the sentence that would have invited closing the tab is not said.
+        """
+        got = self.drive(self.SEND_BROKE_DRAFT_LANDED, budget=30000)
+        self.assertTrue(got["refused"], got)
+        self.assertIn("Nothing has been lost", got["problem"])
+        self.assertIn("draft file", got["problem"])
+        self.assertNotIn("NOWHERE ELSE", got["problem"])
+        self.assertFalse(got["waiting"], got)
+        self.assertFalse(got["sendDisabled"], got)
+        self.assertFalse(self.session.answers_path(1).exists())
+        # The claim, checked against the disk it is a claim about.
+        self.assertEqual(
+            read_json(self.session.draft_path(1))["answers"]["Q-2"],
+            {"text": "an hour of thinking"})
+
+    # F4. A round whose number is LOWER than the one already sent.
+    DRAGGED = """
+    return (async () => {
+      const card = document.querySelector('.question[data-id="Q-1"]');
+      card.querySelector('input[value="email"]').checked = true;
+      card.dispatchEvent(new Event("change", { bubbles: true }));
+      document.getElementById("send").click();
+      const waiting = document.getElementById("waiting");
+      await waitFor(() => waiting.hasAttribute("data-on"), 6000);
+      const label = document.getElementById("roundlabel");
+      const dragged = await waitFor(
+        () => label.textContent.indexOf("round 1") !== 0, 12000);
+      return {
+        dragged: dragged,
+        label: label.textContent,
+        waiting: waiting.hasAttribute("data-on"),
+        heading: document.querySelector("#questions h3").textContent,
+      };
+    })();
+    """
+
+    def test_a_lower_round_number_does_not_drag_the_page_backwards(self):
+        """Higher, not merely different -- one character, and it is reachable.
+
+        `validate_round` now refuses a round whose `round` field disagrees
+        with the filename it was read from, which closes the class at the
+        server. The server is not this page's only caller, so the payload is
+        served straight from a replaced `round_payload` here: what is under
+        test is the page's own gate.
+
+        Under `!==` the page renders the lower round and every PATCH and POST
+        after it addresses that number -- overwriting the `.answers.json` the
+        user has already submitted, which is the file the agent folds in.
+        """
+        original = self.server.round_payload
+
+        def post_a_lower_round():
+            if self.session.answers_path(1).exists():
+                second = json.loads(json.dumps(self.ROUND))
+                second["round"] = 0
+                second["questions"][0]["title"] = "Which store fronts matter?"
+                return {"ok": True, "round": second}
+            return original()
+
+        self.server.round_payload = post_a_lower_round
+        got = self.drive(self.DRAGGED, budget=40000)
+        self.assertIsNone(got["dragged"], got)
+        self.assertEqual(got["label"], "round 1")
+        self.assertEqual(got["heading"], "How should users authenticate?")
+        # Still waiting for a round that is actually newer, which is the
+        # correct state: nothing newer has arrived.
+        self.assertTrue(got["waiting"], got)
+        # ...and round 1's answers are untouched.
+        self.assertEqual(
+            read_json(self.session.answers_path(1))["answers"]["Q-1"],
+            {"choice": ["email"]})
 
 
 if __name__ == "__main__":

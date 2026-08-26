@@ -1202,7 +1202,7 @@ class CraftServer(ThreadingHTTPServer):
                 "ok": False,
                 "error": "{} could not be read: {}".format(name, _reason(exc)),
             }
-        errors = schema.validate_round(obj)
+        errors = schema.validate_round(obj, number)
         if errors:
             return {"ok": False, "error": "{} is invalid".format(name), "details": errors}
         return {"ok": True, "round": obj}

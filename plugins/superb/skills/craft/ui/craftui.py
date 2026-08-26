@@ -1115,7 +1115,7 @@ def cmd_status(args):
         report["error"] = _cannot_be_read(questions, exc)
         return said()
 
-    errors = schema.validate_round(round_obj)
+    errors = schema.validate_round(round_obj, number)
     if errors:
         report["error"] = "{} is not a valid round".format(questions.name)
         report["details"] = errors

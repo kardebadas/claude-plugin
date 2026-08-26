@@ -516,6 +516,13 @@ class HardWrapTest(unittest.TestCase):
                 out = render(source)
                 self.assertIn("<p>para</p>", out)
                 self.assertLess(out.index("<p>para</p>"), out.index(follower))
+                # Relative order alone is not the property. A paragraph the
+                # list never closed is emitted INSIDE the <ul>, still ahead of
+                # its own <li> -- which passes the assertion above while the
+                # browser renders a <p> as a child of a list. The paragraph
+                # has to be CLOSED before the block that ended it OPENS, so
+                # it is the first thing in the output and nothing precedes it.
+                self.assertTrue(out.startswith("<p>para</p>"), out)
 
     def test_a_differently_typed_list_still_ends_the_open_item(self):
         out = render("- a\n  wrapped\n1. b")

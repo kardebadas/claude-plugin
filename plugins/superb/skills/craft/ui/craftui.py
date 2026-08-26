@@ -6,7 +6,9 @@ the project lock for its whole life, and writes .craft/server-info so that
 the commands after it can find the thing it started.
 
 Exit codes: 0 ok, 2 TIMEOUT, 3 NOSERVER, 4 LOCKED. 1 is everything else that
-stopped a command from doing its job.
+stopped a command from doing its job, and 64 is "you called me wrong" -- see
+CraftParser for why that one may not be 2, which is what argparse would
+otherwise use for it.
 
 Two properties are worth stating outside a function, because both were bugs
 before they were properties:
@@ -79,7 +81,13 @@ from pathlib import Path  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from server import CraftServer, make_key  # noqa: E402
+from server import (  # noqa: E402
+    MAX_ROUND,
+    MIN_ROUND,
+    CraftServer,
+    make_key,
+    parse_round,
+)
 from session import (  # noqa: E402
     LockHeld,
     LockUnavailable,
@@ -647,28 +655,209 @@ def cmd_serve(args):
         time.sleep(SERVE_POLL_S)
 
 
+# ---------------------------------------------------------------------- wait
+
+# How often `wait` looks.
+#
+# It runs for hours and it ends a person's silence, so it is pulled both
+# ways. A look is a read of the answers file, a read of server-info and one
+# kill(pid, 0): measured at 18.9 us of cpu, so four a second is 0.008% of a
+# core and 2.2 s of cpu across an eight-hour wait. That is the cheap half.
+# The other half is that a quarter of a second is under the ~1 s at which a
+# person notices that something waited, so pressing Send and having the agent
+# wake reads as immediate.
+#
+# Faster buys nothing anybody can perceive. Slower is what actually costs:
+# it stretches DEAD_SERVER_STRIKES, so a dead session goes unreported for
+# longer, and it puts a visible pause between Send and the agent's reply.
+# It is also WATCHDOG_INTERVAL_S, which is the same trade made once already
+# in this file.
+POLL_S = 0.25
+
+# How many consecutive looks may find no live server before `wait` gives up
+# on the session.
+#
+# Consecutive, not cumulative, because the miss this has to survive is a
+# `serve` restart: from the moment the old process dies until the new one
+# writes server-info, every look misses, and a single miss read as a death
+# would end a wait the user is still typing into. Eight looks is two seconds;
+# a serve spawn from launch to server-info measured 0.112-0.144 s over five
+# runs, so the window is more than an order of magnitude clear of it.
+#
+# The consequence at the other end, and it is deliberate: a `wait` started
+# before any server exists does not sit there hoping one appears. It reports
+# NOSERVER after ~2 s, because "no server has ever been started here" and
+# "the server has gone" are the same fact to the agent, and both are answered
+# by starting one.
+DEAD_SERVER_STRIKES = 8
+
+# How many consecutive looks may find an answers file that exists and cannot
+# be read before that is reported rather than retried.
+#
+# The retry is the point: the file is written by another process, so a read
+# can land in the middle of one. That is a moment -- write_json_atomic
+# renames a complete file into place, so under this name a torn read is
+# barely reachable at all -- and two seconds of it is three orders of
+# magnitude more than a rename needs.
+#
+# What the bound is for is the other case. A file that is a directory, or is
+# unreadable, or holds something that is not a round of answers, will never
+# become readable, and retrying it until the deadline would report TIMEOUT --
+# which the skill answers by arming another wait that can only fail the same
+# way, for ever. Saying so once is the only exit from that loop.
+UNREADABLE_STRIKES = 8
+
+ABSENT, UNREADABLE, READY = "absent", "unreadable", "ready"
+
+
+def read_answers(path):
+    """(state, payload) for a round's answers file. Never raises.
+
+    Read first and ask whether it exists afterwards, rather than the other
+    way round: os.replace is what puts this file there, so a check followed
+    by a read has a window between them, and the read's own errno answers the
+    question anyway. FileNotFoundError is the file not being there yet; every
+    other OSError is a file that is there and cannot be read -- a directory,
+    a permission, a .craft that stopped being a directory, and on Windows a
+    share violation against the rename itself.
+
+    A payload that is not an object is UNREADABLE rather than READY. `null`,
+    `[]` and `"nonsense"` are all valid JSON, and .get on any of them is an
+    AttributeError out of a command whose whole job is to return a code.
+    """
+    try:
+        payload = read_json(path)
+    except FileNotFoundError:
+        return ABSENT, None
+    except (OSError, ValueError):
+        return UNREADABLE, None
+    if not isinstance(payload, dict):
+        return UNREADABLE, None
+    return READY, payload
+
+
+def cmd_wait(args):
+    """Block until the user sends this round, and say what happened.
+
+    This is the seam between an agent's turn and a human's attention: the
+    agent writes a round, starts this, and stops. Whatever this prints is the
+    whole of what the agent knows when it wakes up, so there is exactly one
+    line of it and the exit code says the same thing the line does.
+
+    It reads. It writes nothing -- not the answers, not .craft, not a lock --
+    because a wait against a project no server ever ran in must leave no
+    trace of one.
+    """
+    session = Session(args.project_dir)
+    answers = session.answers_path(args.round)
+    deadline = time.monotonic() + args.timeout
+    dead_server_strikes = 0
+    unreadable_strikes = 0
+
+    while True:
+        state, payload = read_answers(answers)
+        if state == READY:
+            # `is True`, not truthiness: bool("false") is True, which is the
+            # reason the server refuses a `finished` that is not a boolean.
+            # Anything else here is a hand-edited file, and the two mistakes
+            # are not the same size -- FINISHED ends the conversation, while
+            # SUBMITTED costs one more round of questions.
+            token = "FINISHED" if payload.get("finished") is True else "SUBMITTED"
+            print("{} round={} answers={}".format(token, args.round, answers))
+            return 0
+
+        if state == UNREADABLE:
+            # No liveness check on this path, deliberately: the round is
+            # already on disk, so whether the server is still up is not the
+            # question any more.
+            unreadable_strikes += 1
+            if unreadable_strikes >= UNREADABLE_STRIKES:
+                print(
+                    "ERROR   {} exists and cannot be read as a round of "
+                    "answers".format(answers)
+                )
+                return 1
+        else:
+            unreadable_strikes = 0
+            dead_server_strikes = (
+                0 if server_alive(session) else dead_server_strikes + 1
+            )
+            if dead_server_strikes >= DEAD_SERVER_STRIKES:
+                print("NOSERVER")
+                return 3
+
+        # Every path through the loop reaches this. A retry that skipped it
+        # would be a --timeout that does not exist, and the agent would never
+        # get its turn back.
+        if time.monotonic() >= deadline:
+            print("TIMEOUT round={}".format(args.round))
+            # Said where it cannot be mistaken for the outcome, because the
+            # outcome is one line on stdout and a shell reads it. TIMEOUT is
+            # a heartbeat: the agent arms another wait and the user goes on
+            # typing. Left as the bare word in a transcript otherwise full of
+            # failures, it reads as one.
+            sys.stderr.write(
+                "craftui: round {} is still open after {:g}s and nothing has "
+                "been sent yet. This is a heartbeat, not a failure -- run "
+                "wait again to go on waiting.\n".format(args.round, args.timeout)
+            )
+            return 2
+        time.sleep(POLL_S)
+
+
 # ----------------------------------------------------------------------- cli
 
 
-def _idle_minutes(text):
-    """A float number of minutes that is actually a duration.
+def _positive_duration(text, unit):
+    """A float duration in `unit` that is actually a duration.
 
-    Zero and negative shut the server down on the watchdog's first tick,
-    which looks exactly like a server that failed to start; NaN compares
-    false against everything, so the idle check would never fire again.
-    Refused here, before a lock is taken and before anything is written.
+    The two durations on this command line fail the same four ways, so they
+    are refused in the same place. Zero and negative shut the server down on
+    the watchdog's first tick -- which looks exactly like a server that
+    failed to start -- and make a `wait` that is over before it begins. NaN
+    is the one worth naming: it compares false against everything, so an idle
+    check built from it never fires again and a deadline built from it is
+    never reached. Refused here, before a lock is taken, before a browser is
+    opened, and before anything is written.
     """
     try:
         value = float(text)
     except (TypeError, ValueError):
-        raise argparse.ArgumentTypeError("{!r} is not a number of minutes".format(text))
+        raise argparse.ArgumentTypeError(
+            "{!r} is not a number of {}".format(text, unit))
     if not math.isfinite(value) or value <= 0:
         raise argparse.ArgumentTypeError(
-            "the idle timeout must be a positive number of minutes, not {!r}".format(
-                text
-            )
-        )
+            "a positive number of {} is required, not {!r}".format(unit, text))
     return value
+
+
+def _idle_minutes(text):
+    return _positive_duration(text, "minutes")
+
+
+def _timeout_seconds(text):
+    return _positive_duration(text, "seconds")
+
+
+ROUND_RANGE = "a round number is {} to {}".format(MIN_ROUND, MAX_ROUND)
+
+
+def _round_number(text):
+    """The same round number the server would parse out of a request.
+
+    One round, one spelling, on both sides of the wire: parse_round is what
+    decides which file a POST writes, so it has to be what decides which file
+    `wait` watches. Its own comment has the reasoning -- no sign, no leading
+    zero, no float, and not str.isdigit(), which is true of "\u0663".
+
+    Refused at the flag rather than waited out. A round that cannot name a
+    file is a wait against a file that can never appear, and the agent would
+    spend the whole timeout finding that out.
+    """
+    number = parse_round(text)
+    if number is None:
+        raise argparse.ArgumentTypeError("{}, not {!r}".format(ROUND_RANGE, text))
+    return number
 
 
 # A port as it may be written on the command line: ASCII decimal digits, and
@@ -691,8 +880,38 @@ def _port_number(text):
     return value
 
 
+# What "you called me wrong" exits with. EX_USAGE from sysexits.h, and
+# outside every code this CLI documents. See CraftParser.
+USAGE_EXIT = 64
+
+
+class CraftParser(argparse.ArgumentParser):
+    """A parser whose usage errors cannot be mistaken for an outcome.
+
+    argparse exits 2 for "you called me wrong", and this CLI documents 2 as
+    TIMEOUT -- which the craft skill reads as "the user is still thinking"
+    and answers by running `wait` again. So a renamed or mistyped flag would
+    put the skill in a loop, waiting for ever on a command that never ran and
+    on a user who was never asked anything. The caller building argv here is
+    an agent reading a skill file, which is precisely where a flag name goes
+    wrong.
+
+    Subcommands inherit this: add_subparsers defaults parser_class to
+    type(self), so every subparser is a CraftParser too, and it is a
+    subparser that refuses a bad --port or --round.
+
+    error() only. --help and --version go through exit() and still leave 0,
+    because asking how to call it is not calling it wrong.
+    """
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        sys.stderr.write("{}: error: {}\n".format(self.prog, message))
+        raise SystemExit(USAGE_EXIT)
+
+
 def build_parser():
-    parser = argparse.ArgumentParser(prog="craftui")
+    parser = CraftParser(prog="craftui")
     subs = parser.add_subparsers(dest="command", required=True)
 
     serve = subs.add_parser("serve", help="start the craft UI server")
@@ -707,6 +926,15 @@ def build_parser():
         "--_child", dest="_child", action="store_true", help=argparse.SUPPRESS
     )
     serve.set_defaults(func=lambda a: _serve_child(a) if a._child else cmd_serve(a))
+
+    wait = subs.add_parser("wait", help="block until the user sends a round")
+    wait.add_argument("--project-dir", default=".")
+    wait.add_argument("--round", type=_round_number, required=True)
+    # Fifteen minutes. Long enough that an agent is not woken for nothing
+    # while somebody reads the questions properly, short enough that a
+    # session which ended in the browser is noticed the same afternoon.
+    wait.add_argument("--timeout", type=_timeout_seconds, default=900.0)
+    wait.set_defaults(func=cmd_wait)
 
     return parser
 

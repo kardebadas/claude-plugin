@@ -35,7 +35,7 @@ import craftui
 import server as server_module
 import session as session_module
 from server import CraftServer, make_key
-from session import LockHeld, Session, read_json
+from session import LockHeld, Session, read_json, write_json_atomic
 
 UI_DIR = Path(__file__).resolve().parent.parent
 CRAFTUI = str(UI_DIR / "craftui.py")
@@ -476,14 +476,22 @@ class ServeTest(CommandTestCase):
                         "a failed start kept the project locked")
 
     def test_a_bad_port_is_refused_by_the_parser_not_by_a_failed_bind(self):
-        """Exit 2 and a usage error, not exit 1 from a child that spawned,
-        took the lock and then failed to bind. Both are non-zero, which is
-        why the codes are what this asserts: the second spends a process and
-        a lock to say something the flag itself could have said."""
+        """A usage error, not exit 1 from a child that spawned, took the lock
+        and then failed to bind. Both are non-zero, which is why the codes
+        are what this asserts: the second spends a process and a lock to say
+        something the flag itself could have said.
+
+        The code moved from 2 to USAGE_EXIT when `wait` arrived, because 2 is
+        TIMEOUT and a usage error is not an outcome. UsageExitTest is where
+        that is argued; this is one of the two places it is observed through
+        a real process.
+        """
         for value in ("-1", "65536", "99999", "2147483648"):
             with self.subTest(value=value):
                 result = self.serve("--port", value)
-                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertEqual(
+                    result.returncode, craftui.USAGE_EXIT,
+                    result.stdout + result.stderr)
                 self.assertIn("65535", result.stderr)
                 self.assertEqual(result.stdout, "")
                 self.assertFalse(self.info_path.exists())
@@ -493,7 +501,9 @@ class ServeTest(CommandTestCase):
         for value in ("1e3", "banana", "", " 1", "0x10", "+1"):
             with self.subTest(value=value):
                 result = self.serve("--port", value)
-                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertEqual(
+                    result.returncode, craftui.USAGE_EXIT,
+                    result.stdout + result.stderr)
                 self.assertIn("port", result.stderr)
                 self.assertFalse(self.info_path.exists())
 
@@ -1272,6 +1282,570 @@ class VersionFloorTest(unittest.TestCase):
         self.assertIsNotNone(guard, "nothing at module level calls the version guard")
         self.assertIsNotNone(first_local_import, "craftui imports neither server nor session")
         self.assertLess(guard, first_local_import)
+
+
+# --------------------------------------------------------------------- wait
+
+# Captured before any test patches it, so a test that wants the real liveness
+# question back can have it.
+REAL_SERVER_ALIVE = craftui.server_alive
+
+
+def snapshot(root):
+    """Every path under root and what is in it. `wait` must not change this."""
+    seen = {}
+    for path in sorted(Path(root).rglob("*")):
+        key = str(path.relative_to(root))
+        try:
+            seen[key] = path.read_bytes() if path.is_file() else "<dir>"
+        except OSError as exc:
+            seen[key] = "<unreadable {}>".format(exc.errno)
+    return seen
+
+
+class WaitTest(CommandTestCase):
+    """`wait` through argv, which is the only way the craft skill calls it.
+
+    Almost nothing here starts a real server, deliberately. `wait` never
+    speaks to the server: it reads .craft/server-info and asks whether that
+    pid is alive, so a server-info naming any process that is up is a live
+    server as far as `wait` can tell, and this test process is one. What is
+    asserted here is what a shell sees -- the exit code, and one line on
+    stdout -- plus one end-to-end run against a real server, because the file
+    `wait` watches is written by a real POST and nothing else in this file
+    would notice if that contract changed. The properties of the polling loop
+    itself are in CmdWaitTest, where a poll costs nothing.
+    """
+
+    def wait(self, *extra):
+        return run("wait", "--project-dir", self.root, "--round", "1", *extra)
+
+    def answers(self, number=1, finished=False):
+        path = self.session.answers_path(number)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"round": number, "finished": finished, "answers": {}}),
+            encoding="utf-8",
+        )
+        return path
+
+    def pretend_server(self, pid=None):
+        """A server-info naming a live process. `wait` asks nothing else."""
+        pid = os.getpid() if pid is None else pid
+        write_json_atomic(
+            self.info_path,
+            {"type": "server-started", "port": 1, "pid": pid, "key": "k",
+             "url": "http://127.0.0.1:1/?key=k"},
+        )
+
+    def test_no_server_exits_3(self):
+        result = self.wait("--timeout", "5")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "NOSERVER\n")
+
+    def test_answers_already_present_return_submitted(self):
+        self.pretend_server()
+        path = self.answers(1, finished=False)
+        result = self.wait("--timeout", "10")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            result.stdout, "SUBMITTED round=1 answers={}\n".format(path))
+
+    def test_finished_answers_return_finished(self):
+        self.pretend_server()
+        path = self.answers(1, finished=True)
+        result = self.wait("--timeout", "10")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            result.stdout, "FINISHED round=1 answers={}\n".format(path))
+
+    def test_a_real_submit_through_a_real_server_is_what_wait_reports(self):
+        """The whole seam, once, with nothing faked: a browser POSTs, the
+        server writes the file, `wait` finds it and says where it is."""
+        self.serve()
+        info = self.info()
+        request = urllib.request.Request(
+            "http://127.0.0.1:{}/api/submit?key={}".format(info["port"], info["key"]),
+            data=json.dumps(
+                {"round": 1, "answers": {"Q-1": {"text": "yes"}}, "finished": False}
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            self.assertIs(json.loads(response.read())["ok"], True)
+        result = self.wait("--timeout", "20")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        path = self.session.answers_path(1)
+        self.assertEqual(
+            result.stdout, "SUBMITTED round=1 answers={}\n".format(path))
+        self.assertEqual(
+            read_json(path)["answers"], {"Q-1": {"text": "yes"}},
+            "wait named a file that is not the one the browser sent")
+
+    def test_a_mistyped_flag_is_not_a_timeout(self):
+        """The defect this task exists to close. argparse exits 2 and this
+        CLI documents 2 as TIMEOUT, which the skill answers by arming another
+        wait -- so one wrong flag name would loop for ever on a command that
+        never ran, waiting on a user who was never asked anything."""
+        result = run(
+            "wait", "--project-dir", self.root, "--round", "1", "--timout", "5")
+        self.assertEqual(result.returncode, craftui.USAGE_EXIT, result.stderr)
+        self.assertEqual(result.stdout, "", "a usage error printed an outcome")
+        self.assertIn("--timout", result.stderr)
+
+
+class CmdWaitTest(unittest.TestCase):
+    """The polling loop, in this process, with the poll interval collapsed.
+
+    Through argv every one of these would cost a spawn and real seconds --
+    DEAD_SERVER_STRIKES alone is two of them -- and none of what is asserted
+    here is a property of the process boundary. The three things that are
+    really do run as processes, in WaitTest.
+
+    server_alive is stubbed rather than driven by real pids: it is total and
+    HelperTest covers every way it can be handed rubbish. What these tests
+    are about is what the loop does with the answers it gives.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = self._tmp.name
+        self.session = Session(self.root)
+        self.answers_path = self.session.answers_path(1)
+        self.alive_calls = 0
+        self.elapsed = None
+        self.patch("POLL_S", 0.001)
+        self.alive(True)
+
+    def patch(self, name, value):
+        previous = getattr(craftui, name)
+        self.addCleanup(setattr, craftui, name, previous)
+        setattr(craftui, name, value)
+
+    def alive(self, answer):
+        """Stub server_alive. `answer` is a bool or an f(call number) -> bool."""
+        def stub(_session):
+            self.alive_calls += 1
+            return answer(self.alive_calls) if callable(answer) else answer
+
+        self.patch("server_alive", stub)
+
+    def real_alive(self):
+        """Put the real liveness question back for one test."""
+        self.patch("server_alive", REAL_SERVER_ALIVE)
+
+    def write(self, text, path=None):
+        path = self.answers_path if path is None else path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def payload(self, **extra):
+        body = {"round": 1, "answers": {}}
+        body.update(extra)
+        return json.dumps(body)
+
+    def wait(self, timeout=5.0, number=1):
+        args = craftui.build_parser().parse_args(
+            ["wait", "--project-dir", self.root,
+             "--round", str(number), "--timeout", repr(timeout)])
+        out, err = io.StringIO(), io.StringIO()
+        started = time.monotonic()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = craftui.cmd_wait(args)
+        self.elapsed = time.monotonic() - started
+        self.assertEqual(
+            out.getvalue().count("\n"), 1,
+            "wait must print exactly one line, and printed {!r}".format(
+                out.getvalue()))
+        return code, out.getvalue().strip(), err.getvalue()
+
+    # -- what it says -----------------------------------------------------
+
+    def test_submitted_names_the_round_and_the_file(self):
+        self.write(self.payload(finished=False))
+        code, line, _ = self.wait()
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            line, "SUBMITTED round=1 answers={}".format(self.answers_path))
+
+    def test_finished_names_the_round_and_the_file(self):
+        self.write(self.payload(finished=True))
+        code, line, _ = self.wait()
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            line, "FINISHED round=1 answers={}".format(self.answers_path))
+
+    def test_only_a_real_true_finishes_the_session(self):
+        """bool("false") is True, which is why the server refuses a finished
+        that is not a boolean. Anything that reaches here as something else
+        is a hand-edited file, and the two mistakes are not the same size:
+        FINISHED ends the conversation, SUBMITTED costs one more round."""
+        for value in ('"false"', '"no"', '"true"', "1", "[]", "{}", '"yes"'):
+            with self.subTest(finished=value):
+                self.write(
+                    '{{"round": 1, "finished": {}, "answers": {{}}}}'.format(value))
+                code, line, _ = self.wait()
+                self.assertEqual(code, 0)
+                self.assertTrue(line.startswith("SUBMITTED"), line)
+
+    def test_a_missing_finished_key_is_not_finished(self):
+        self.write('{"round": 1, "answers": {}}')
+        self.assertTrue(self.wait()[1].startswith("SUBMITTED"))
+
+    def test_the_round_it_was_asked_about_is_the_round_it_watches(self):
+        self.write(self.payload(finished=False), self.session.answers_path(2))
+        code, line, _ = self.wait(timeout=0.05, number=1)
+        self.assertEqual(code, 2, line)
+
+    # -- when nothing arrives ---------------------------------------------
+
+    def test_nothing_arriving_times_out_with_exit_2(self):
+        code, line, err = self.wait(timeout=0.2)
+        self.assertEqual(code, 2)
+        self.assertEqual(line, "TIMEOUT round=1")
+        self.assertGreaterEqual(self.elapsed, 0.2, "the timeout was not waited out")
+        self.assertIn("heartbeat", err.lower())
+
+    def test_the_timeout_says_out_loud_that_it_is_not_a_failure(self):
+        """Whoever reads this sees a bare TIMEOUT in a transcript otherwise
+        full of failures. The agent arms another one and the user goes on
+        typing; the line has to say so, and not on stdout, which is one line
+        and is read by a shell."""
+        err = self.wait(timeout=0.05)[2].lower()
+        self.assertIn("not a failure", err)
+        self.assertIn("again", err)
+        self.assertNotIn("error", err)
+
+    def test_answers_arriving_mid_wait_are_picked_up(self):
+        timer = threading.Timer(0.05, self.write, args=(self.payload(),))
+        timer.start()
+        self.addCleanup(timer.cancel)
+        code, line, _ = self.wait(timeout=10)
+        self.assertEqual(code, 0)
+        self.assertTrue(line.startswith("SUBMITTED round=1"), line)
+        self.assertLess(self.elapsed, 5, "it waited out the timeout instead")
+
+    # -- when the server goes ----------------------------------------------
+
+    def test_a_dead_server_mid_wait_exits_3(self):
+        self.alive(lambda call: call < 3)
+        code, line, _ = self.wait(timeout=30)
+        self.assertEqual(code, 3)
+        self.assertEqual(line, "NOSERVER")
+
+    def test_noserver_needs_a_full_run_of_misses(self):
+        """Exactly the run, and not one miss fewer: the count is the whole of
+        what keeps a restart from reading as a death."""
+        self.alive(False)
+        code, _, _ = self.wait(timeout=30)
+        self.assertEqual(code, 3)
+        self.assertEqual(self.alive_calls, craftui.DEAD_SERVER_STRIKES)
+
+    def test_a_gap_shorter_than_the_run_does_not_end_the_wait(self):
+        """A `serve` restart leaves server-info naming a dead pid for as long
+        as the restart takes. One miss short of the run, over and over, must
+        never be reported as a death."""
+        self.alive(lambda call: call % craftui.DEAD_SERVER_STRIKES == 0)
+        code, line, _ = self.wait(timeout=0.2)
+        self.assertEqual(code, 2, line)
+        self.assertGreater(
+            self.alive_calls, craftui.DEAD_SERVER_STRIKES * 2,
+            "the loop did not run long enough for this to have proved anything")
+
+    def test_answers_are_read_before_the_server_is_doubted(self):
+        """A server that exits the moment the user presses Send has still
+        delivered the round. Asking the liveness question first would throw
+        away answers that are already on disk."""
+        self.write(self.payload())
+        self.alive(False)
+        code, line, _ = self.wait(timeout=30)
+        self.assertEqual(code, 0, line)
+        self.assertTrue(line.startswith("SUBMITTED"), line)
+        self.assertEqual(self.alive_calls, 0, "it doubted the server first")
+
+    # -- when the file is there and cannot be read -------------------------
+
+    def test_a_torn_read_is_retried_not_reported(self):
+        """The file is written by another process, so a read can land in the
+        middle of one. That is a moment, not a malformed round.
+
+        Counted rather than timed: the torn reads are made to happen, one
+        fewer than the bound, so this asserts the retry right up to the edge
+        of it instead of racing a timer against a collapsed poll interval.
+        """
+        self.write(self.payload())
+        real, torn = craftui.read_json, []
+
+        def tearing(path):
+            if len(torn) < craftui.UNREADABLE_STRIKES - 1:
+                torn.append(path)
+                raise ValueError("Expecting value: line 1 column 1 (char 0)")
+            return real(path)
+
+        self.patch("read_json", tearing)
+        code, line, _ = self.wait(timeout=30)
+        self.assertEqual(len(torn), craftui.UNREADABLE_STRIKES - 1)
+        self.assertEqual(code, 0, line)
+        self.assertTrue(line.startswith("SUBMITTED"), line)
+
+    def test_the_run_of_unreadable_looks_has_to_be_consecutive(self):
+        """Counted cumulatively rather than in a run, a file that goes
+        unreadable, away, and unreadable again -- which is what deleting a
+        bad file and letting the server write it afresh looks like -- would
+        be reported as broken on the strength of two separate blips.
+
+        Written as a script of reads rather than as files on disk, because
+        what is being asserted is the counter and not the filesystem.
+        """
+        self.write(self.payload())
+        real, script = craftui.read_json, (
+            [ValueError] * (craftui.UNREADABLE_STRIKES - 1)
+            + [FileNotFoundError]
+            + [ValueError] * (craftui.UNREADABLE_STRIKES - 1)
+        )
+        self.assertGreater(len(script), craftui.UNREADABLE_STRIKES,
+                           "the script is too short to have proved anything")
+        reads = []
+
+        def scripted(path):
+            reads.append(path)
+            if len(reads) <= len(script):
+                raise script[len(reads) - 1]("scripted")
+            return real(path)
+
+        self.patch("read_json", scripted)
+        code, line, _ = self.wait(timeout=30)
+        self.assertEqual(len(reads), len(script) + 1)
+        self.assertEqual(code, 0, line)
+        self.assertTrue(line.startswith("SUBMITTED"), line)
+
+    def test_a_file_that_never_becomes_readable_is_reported_not_waited_out(self):
+        """Reporting this as TIMEOUT would be a lie the skill acts on: it
+        arms another wait, which can only fail the same way, for ever."""
+        for text in ('{"round": 1, "finish', "[]", '"nonsense"', "null", ""):
+            with self.subTest(text=text):
+                self.write(text)
+                code, line, _ = self.wait(timeout=30)
+                self.assertEqual(code, 1, line)
+                self.assertIn(str(self.answers_path), line)
+
+    def test_a_directory_where_the_answers_go_is_reported(self):
+        self.answers_path.parent.mkdir(parents=True, exist_ok=True)
+        self.answers_path.mkdir()
+        code, line, _ = self.wait(timeout=30)
+        self.assertEqual(code, 1, line)
+        self.assertIn(str(self.answers_path), line)
+
+    def test_the_timeout_is_honoured_while_the_file_is_unreadable(self):
+        """The deadline is checked on every path through the loop. A retry
+        that skips it is a --timeout that does not exist, and an agent that
+        never gets its turn back."""
+        self.patch("UNREADABLE_STRIKES", 10 ** 9)
+        self.write("{ not json")
+        code, line, _ = self.wait(timeout=0.2)
+        self.assertEqual(code, 2, line)
+        self.assertLess(self.elapsed, 10, "the wait ignored its own deadline")
+
+    # -- what it must not do -----------------------------------------------
+
+    def test_a_server_info_left_behind_by_a_dead_session_is_not_a_server(self):
+        """server-info survives a clean exit so that the next `serve` can
+        reuse the port. Presence says a server was started here; it does not
+        say one is running. Read as liveness, it would hand the agent a wait
+        that cannot end, on a session that finished hours ago.
+
+        The real server_alive, and a pid that really has gone."""
+        self.real_alive()
+        dead = subprocess.Popen([sys.executable, "-c", ""])
+        dead.wait()
+        write_json_atomic(
+            Path(self.root) / ".craft" / "server-info",
+            {"type": "server-started", "port": 1, "pid": dead.pid, "key": "k"},
+        )
+        code, line, _ = self.wait(timeout=30)
+        self.assertEqual(code, 3, line)
+        self.assertEqual(line, "NOSERVER")
+
+    def test_wait_writes_nothing_into_the_project(self):
+        """It is a reader. Creating .craft, or touching a lock, would make a
+        wait against a project no server ever ran in leave a trace of one."""
+        self.real_alive()
+        self.assertEqual(snapshot(self.root), {}, "the fixture was not empty")
+        code, _, _ = self.wait(timeout=30)
+        self.assertEqual(code, 3, "the real liveness question was not asked")
+        self.assertEqual(snapshot(self.root), {})
+
+    def test_wait_changes_nothing_it_reads(self):
+        self.write(self.payload())
+        write_json_atomic(
+            Path(self.root) / ".craft" / "server-info",
+            {"type": "server-started", "port": 1, "pid": os.getpid(), "key": "k"},
+        )
+        before = snapshot(self.root)
+        self.wait()
+        self.assertEqual(snapshot(self.root), before)
+
+
+class ReadAnswersTest(unittest.TestCase):
+    """read_answers is total: three states and no exception, whatever is on
+    disk. cmd_wait branches on it rather than guarding it."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "round-001.answers.json"
+
+    def written(self, text):
+        self.path.write_text(text, encoding="utf-8")
+        return craftui.read_answers(self.path)
+
+    def test_a_file_that_is_not_there_is_absent(self):
+        self.assertEqual(craftui.read_answers(self.path), (craftui.ABSENT, None))
+
+    def test_a_round_of_answers_is_ready(self):
+        state, payload = self.written('{"round": 1, "answers": {}}')
+        self.assertEqual(state, craftui.READY)
+        self.assertEqual(payload, {"round": 1, "answers": {}})
+
+    def test_everything_json_can_be_that_is_not_an_object_is_unreadable(self):
+        """null, [] and "nonsense" all parse. .get on any of them is an
+        AttributeError out of a command whose whole job is to return a code."""
+        for text in ("null", "[]", '"nonsense"', "3", "true"):
+            with self.subTest(text=text):
+                self.assertEqual(self.written(text), (craftui.UNREADABLE, None))
+
+    def test_a_half_written_file_is_unreadable(self):
+        for text in ("", "{", '{"round": 1, "finish', "not json at all"):
+            with self.subTest(text=text):
+                self.assertEqual(self.written(text), (craftui.UNREADABLE, None))
+
+    def test_a_directory_is_unreadable_and_not_an_exception(self):
+        self.path.mkdir()
+        self.assertEqual(craftui.read_answers(self.path), (craftui.UNREADABLE, None))
+
+    def test_a_missing_parent_is_absent_not_unreadable(self):
+        """A project with no .craft at all is a round that has not arrived,
+        which is exactly what a wait armed before the first submit sees."""
+        deep = Path(self._tmp.name) / "nope" / "round-001.answers.json"
+        self.assertEqual(craftui.read_answers(deep), (craftui.ABSENT, None))
+
+
+class PollIntervalTest(unittest.TestCase):
+    """The two numbers the loop is made of, asserted as the properties they
+    exist for rather than as the literals they happen to be. Nothing here
+    patches either of them."""
+
+    def test_the_dead_server_window_outlasts_a_serve_restart(self):
+        """A `serve` spawn is a few hundred milliseconds, and for all of it
+        server-info still names the pid that has gone. The window has to be
+        the margin over that, or a restart reads as a death and a wait the
+        user is still typing into is abandoned."""
+        self.assertGreaterEqual(
+            craftui.DEAD_SERVER_STRIKES * craftui.POLL_S, 1.5)
+
+    def test_a_poll_a_person_could_notice_is_no_poll(self):
+        """It runs for hours, so it has to be cheap; it ends a person's
+        silence, so it has to be quick. A look is four syscalls."""
+        self.assertLessEqual(craftui.POLL_S, 0.5)
+        self.assertGreaterEqual(craftui.POLL_S, 0.05)
+
+    def test_the_unreadable_window_is_orders_of_magnitude_past_a_rename(self):
+        """What it retries is a read landing inside another process's write,
+        which is one os.replace wide."""
+        self.assertGreaterEqual(
+            craftui.UNREADABLE_STRIKES * craftui.POLL_S, 1.0)
+
+
+class UsageExitTest(unittest.TestCase):
+    """"You called me wrong" must not be spelled like an outcome.
+
+    argparse exits 2 for a usage error and this CLI documents 2 as TIMEOUT.
+    Every case here goes through argparse's own error path, and the
+    subcommand cases go through a subparser, which inherits the override only
+    because add_subparsers defaults parser_class to type(self).
+    """
+
+    def refused(self, argv):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                craftui.build_parser().parse_args(argv)
+        return caught.exception.code, err.getvalue()
+
+    def test_the_usage_code_is_outside_every_outcome_this_cli_documents(self):
+        """0 ok, 1 failed, 2 TIMEOUT, 3 NOSERVER, 4 LOCKED. A usage error is
+        none of them, and the one it must not be is 2."""
+        self.assertNotIn(craftui.USAGE_EXIT, (0, 1, 2, 3, 4))
+
+    def test_every_way_of_calling_it_wrong_exits_the_same(self):
+        for argv in (
+            [],
+            ["nosuchcommand"],
+            ["wait"],
+            ["wait", "--round"],
+            ["wait", "--round", "1", "--timout", "5"],
+            ["wait", "--round", "1", "extra"],
+            ["serve", "--port", "banana"],
+            ["serve", "--idle-timeout-minutes", "0"],
+            ["serve", "--nonsense"],
+        ):
+            with self.subTest(argv=argv):
+                code, err = self.refused(argv)
+                self.assertEqual(code, craftui.USAGE_EXIT, err)
+
+    def test_a_round_that_cannot_name_a_file_is_refused_at_the_flag(self):
+        """One round, one spelling -- the rule the server parses a round by,
+        reused rather than restated. Waited out instead of refused, each of
+        these is a full timeout spent on a file that can never appear."""
+        for value in ("0", "-1", "1.0", "1e3", "01", "1000", "", " 1", "banana",
+                      "\u0663", "+1", "0x1"):
+            with self.subTest(round=value):
+                argv = ["wait", "--round", value]
+                code, err = self.refused(argv)
+                self.assertEqual(code, craftui.USAGE_EXIT, err)
+
+    def test_a_timeout_that_is_not_a_duration_is_refused_at_the_flag(self):
+        """nan is the one that matters: it compares false against everything,
+        so a deadline built from it is never reached and the wait never ends,
+        which is the one failure a heartbeat cannot recover from."""
+        for value in ("nan", "inf", "-inf", "0", "-1", "banana", ""):
+            with self.subTest(timeout=value):
+                argv = ["wait", "--round", "1", "--timeout", value]
+                code, err = self.refused(argv)
+                self.assertEqual(code, craftui.USAGE_EXIT, err)
+
+    def test_the_rounds_and_timeouts_that_are_accepted(self):
+        """The other half: a gate that refuses everything is not a gate."""
+        args = craftui.build_parser().parse_args(
+            ["wait", "--round", "999", "--timeout", "1e3"])
+        self.assertEqual((args.round, args.timeout), (999, 1000.0))
+        for value in ("1", "7", "42", "999"):
+            with self.subTest(round=value):
+                self.assertEqual(
+                    craftui.build_parser().parse_args(
+                        ["wait", "--round", value]).round, int(value))
+
+    def test_the_subparsers_inherit_it_rather_than_being_given_it(self):
+        """add_subparsers defaults parser_class to type(self). If that ever
+        stops being true, every flag on every subcommand goes back to exiting
+        2, which is TIMEOUT."""
+        parser = craftui.build_parser()
+        subs = [action for action in parser._actions
+                if isinstance(action, craftui.argparse._SubParsersAction)]
+        self.assertEqual(len(subs), 1)
+        self.assertTrue(subs[0].choices)
+        for name, sub in subs[0].choices.items():
+            with self.subTest(command=name):
+                self.assertIsInstance(sub, craftui.CraftParser)
+
+    def test_help_still_exits_zero(self):
+        """Asking how to call it is not calling it wrong."""
+        for argv in (["--help"], ["wait", "--help"], ["serve", "--help"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(self.refused(argv)[0], 0)
 
 
 if __name__ == "__main__":

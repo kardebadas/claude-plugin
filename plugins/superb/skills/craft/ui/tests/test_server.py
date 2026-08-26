@@ -2694,5 +2694,101 @@ class DraftSequenceTest(WriteTestCase):
         self.assertEqual(self.server.draft_seq(1), 20)
 
 
+class WriteGateTest(WriteTestCase):
+    """The gate the shutdown drain is built on.
+
+    daemon_threads = True, so server_close() joins nothing and a handler
+    inside write_json_atomic outlives the server that accepted it. The
+    shutdown path has to be able to say "no more writes" and then wait for
+    the ones already started, and _store is the only place this server writes
+    anything, so that is where the gate is.
+    """
+
+    def test_a_fresh_server_is_open_for_writes(self):
+        self.assertFalse(self.server.writes_closed)
+        self.assertEqual(self.server.writes_in_flight, 0)
+        self.assertEqual(self.server.refused_writes, 0)
+
+    def test_a_finished_write_leaves_nothing_in_flight(self):
+        self.post({"round": 1, "answers": {}})
+        self.assertEqual(self.server.writes_in_flight, 0)
+
+    def test_a_failed_write_leaves_nothing_in_flight(self):
+        """The mutant that matters: end_write outside the finally. Every
+        failed write would then leak a slot, and every later drain would
+        time out on a write that finished minutes ago."""
+        blocked = _UnwritableSession(self._tmp.name)
+        (blocked.craft_dir / "wall").write_text("not a directory", encoding="utf-8")
+        self.server.session = blocked
+        self.rejected("POST", "/api/submit", {"round": 1, "answers": {}})
+        self.assertEqual(self.server.writes_in_flight, 0)
+        self.assertTrue(self.server.drain_writes(1.0))
+
+    def test_a_closed_gate_refuses_a_write_and_writes_nothing(self):
+        before = self.written()
+        self.server.close_writes()
+        error = self.rejected("POST", "/api/submit", {"round": 1, "answers": {}})
+        self.assertEqual(error.code, 503)
+        body = error.read().decode("utf-8", "replace")
+        self.assertNotIn('"ok": true', body.lower())
+        self.assertNamesNoPath(body)
+        self.assertEqual(self.written(), before)
+        self.assertEqual(self.server.refused_writes, 1)
+
+    def test_a_closed_gate_refuses_an_autosave_too(self):
+        self.server.close_writes()
+        self.assertEqual(
+            self.rejected("PATCH", "/api/draft", {"round": 1, "answers": {}}).code, 503)
+        self.assertFalse(self.session.draft_path(1).exists())
+
+    def test_a_closed_gate_still_serves_reads(self):
+        """Shutting the gate must not turn the page into a 503 while the
+        drain finishes -- a browser mid-poll should see the session end, not
+        an error it will report as a bug."""
+        self.server.close_writes()
+        self.assertEqual(self.get("/").status, 200)
+        self.assertEqual(self.get("/api/round").status, 200)
+
+    def test_draining_an_idle_server_returns_at_once(self):
+        started = time.monotonic()
+        self.assertTrue(self.server.drain_writes(30.0))
+        self.assertLess(time.monotonic() - started, 5)
+
+    def test_draining_shuts_the_gate(self):
+        self.server.drain_writes(1.0)
+        self.assertTrue(self.server.writes_closed)
+        self.assertEqual(
+            self.rejected("POST", "/api/submit", {"round": 1, "answers": {}}).code, 503)
+
+    def test_a_drain_waits_for_a_slot_that_is_still_out(self):
+        self.assertTrue(self.server.begin_write())
+        started = time.monotonic()
+        self.assertFalse(self.server.drain_writes(0.3))
+        self.assertGreaterEqual(time.monotonic() - started, 0.3)
+        self.server.end_write()
+
+    def test_a_drain_returns_the_moment_the_last_slot_comes_back(self):
+        self.assertTrue(self.server.begin_write())
+        threading.Timer(0.2, self.server.end_write).start()
+        started = time.monotonic()
+        self.assertTrue(self.server.drain_writes(30.0))
+        self.assertLess(time.monotonic() - started, 10, "the drain slept out its timeout")
+
+    def test_a_negative_timeout_does_not_hang(self):
+        self.assertTrue(self.server.begin_write())
+        self.assertFalse(self.server.drain_writes(-1))
+        self.server.end_write()
+
+    def test_the_gate_counts_every_writer(self):
+        self.assertTrue(self.server.begin_write())
+        self.assertTrue(self.server.begin_write())
+        self.assertEqual(self.server.writes_in_flight, 2)
+        self.server.end_write()
+        self.assertEqual(self.server.writes_in_flight, 1)
+        self.assertFalse(self.server.drain_writes(0.05))
+        self.server.end_write()
+        self.assertTrue(self.server.drain_writes(5.0))
+
+
 if __name__ == "__main__":
     unittest.main()

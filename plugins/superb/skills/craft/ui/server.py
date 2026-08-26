@@ -53,6 +53,11 @@ so the parts that are not stupid are all in one place and all here:
 * The server writes inside .craft/ and nowhere else. It never writes
   CRAFT.md: the brief is the agent's to author, and this process only ever
   reads it.
+* A write cannot outlive the session's claim on the project. Handler threads
+  are daemons and are not joined at close, so the shutdown shuts the write
+  gate and drains it, bounded, before the project lock is let go -- see
+  CraftServer.begin_write. Without that, one session's write landed in a
+  project another session already owned.
 * Starting a session sweeps the .tmp- files a killed one left in .craft/.
   The atomic write cleans up in an except clause, and process death does
   not run one.
@@ -176,6 +181,12 @@ _LENGTH_TEXT = re.compile(r"\A[0-9]{1,19}\Z")
 # Said the same way wherever a round number is missing or impossible, on the
 # query string and in a body alike, so the two cannot drift apart.
 _NO_ROUND = {"ok": False, "error": "a round number from 1 to 999 is required"}
+
+# What a write is told once the session is on its way out. A 503 rather than
+# a 500: nothing is wrong with the request, and the client should feel free
+# to say so to the user rather than report it as a bug. It names no file and
+# no path -- there is no file, because nothing was opened.
+SHUTTING_DOWN = "the craft session is shutting down; nothing was written"
 
 
 def parse_round(value):
@@ -768,26 +779,40 @@ class _Handler(BaseHTTPRequestHandler):
         body_refusal now refuses both shapes at the door, which should mean
         nothing ever reaches these arms -- but "should mean" is the reason
         they are here. A limit in front of a call is not a guard around it.
+
+        The gate around it is the shutdown drain. This is the only place
+        this server writes anything, so it is the only place that has to
+        claim a slot before it starts and give it back when it ends --
+        whether it ended by writing or by failing, which is why end_write is
+        in a finally rather than after the call.
+
+        The slot goes back BEFORE the failure is reported, so that no
+        response this server sends is ever observed while the handler that
+        sent it still holds a write slot. The write has already failed by
+        then; there is nothing left on the disk path for a drain to wait
+        for, and a caller that can see the 500 can rely on the count.
         """
+        if not self.server.begin_write():
+            self._json({"ok": False, "error": SHUTTING_DOWN}, 503)
+            return False
+        failure = None
         try:
             write_json_atomic(path, payload)
         except (UnicodeEncodeError, RecursionError) as exc:
-            self._json(
-                {
-                    "ok": False,
-                    "error": "{} could not be written: {}".format(
-                        path.name, _reason(exc)
-                    ),
-                },
-                500,
-            )
-            return False
+            # The writer's own two failures, and neither is an OSError.
+            failure = exc
         except OSError as exc:
+            # A full disk, a .craft/ that stopped being a directory, a
+            # project that went read-only.
+            failure = exc
+        finally:
+            self.server.end_write()
+        if failure is not None:
             self._json(
                 {
                     "ok": False,
                     "error": "{} could not be written: {}".format(
-                        path.name, _reason(exc)
+                        path.name, _reason(failure)
                     ),
                 },
                 500,
@@ -928,9 +953,97 @@ class CraftServer(ThreadingHTTPServer):
         # _Handler.do_PATCH.
         self.draft_lock = threading.Lock()
         self._draft_seq = {}
+        # The write gate. See begin_write.
+        self._write_cond = threading.Condition()
+        self._writes_in_flight = 0
+        self._writes_closed = False
+        self.refused_writes = 0
         # Before the first request, and before this process has written a
         # byte of its own, so nothing in flight here can be swept.
         self.swept = self.sweep_stale_temp_files()
+
+    # ----------------------------------------------------------- write gate
+    #
+    # daemon_threads is True, so server_close() joins nothing. A handler that
+    # is inside write_json_atomic when the server stops keeps running, and can
+    # reach os.replace after the process has released the project lock and
+    # after another session has legitimately acquired it. Reproduced: session
+    # one's answers landing in the project while session two owned it. Two
+    # live writers on one project is the single thing the lock exists to
+    # prevent, and CRAFT.md is rewritten whole every round, so the loser's
+    # whole round goes.
+    #
+    # daemon_threads stays True: a wedged reader must not be able to hold the
+    # process open forever, and joining every handler thread is exactly that.
+    # What is bounded instead is the narrow thing that matters -- the window
+    # in which a write is on the disk path -- so the shutdown can shut the
+    # gate, wait for the writes already inside it, and only then let go.
+    #
+    # _store is the only place this server writes anything, which is what
+    # makes a gate of two calls sufficient rather than hopeful.
+
+    def begin_write(self):
+        """Claim a write slot. False means the session is shutting down.
+
+        Checking the flag and taking the slot are one step under one lock:
+        split them and a write can pass the check an instant before the gate
+        shuts and start after the drain has already counted the slots.
+        """
+        with self._write_cond:
+            if self._writes_closed:
+                self.refused_writes += 1
+                return False
+            self._writes_in_flight += 1
+            return True
+
+    def end_write(self):
+        """Give a slot back. Must run whether the write worked or not."""
+        with self._write_cond:
+            self._writes_in_flight -= 1
+            if self._writes_in_flight <= 0:
+                self._write_cond.notify_all()
+
+    def close_writes(self):
+        """Refuse every write from now on. Reads carry on being served.
+
+        Idempotent, and safe from a signal handler's thread: it takes a lock
+        no request-serving path holds for longer than one dict update.
+        """
+        with self._write_cond:
+            self._writes_closed = True
+            self._write_cond.notify_all()
+
+    def drain_writes(self, timeout):
+        """Shut the gate, then wait for the writes already through it.
+
+        True when nothing is left in flight; False when `timeout` seconds
+        passed with a write still going. Bounded on purpose: a write wedged
+        on an unresponsive filesystem must not be able to hold a session's
+        exit open for ever, and the caller decides what to say about it.
+        """
+        self.close_writes()
+        try:
+            timeout = max(0.0, float(timeout))
+        except (TypeError, ValueError):
+            timeout = 0.0
+        deadline = time.monotonic() + timeout
+        with self._write_cond:
+            while self._writes_in_flight > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._write_cond.wait(remaining)
+            return True
+
+    @property
+    def writes_in_flight(self):
+        with self._write_cond:
+            return self._writes_in_flight
+
+    @property
+    def writes_closed(self):
+        with self._write_cond:
+            return self._writes_closed
 
     def sweep_stale_temp_files(self):
         """Remove the .tmp- files a killed session left in .craft/.

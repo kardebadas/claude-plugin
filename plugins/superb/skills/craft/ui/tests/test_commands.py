@@ -1115,9 +1115,9 @@ class _Recorder:
 
 
 class ArgumentTest(unittest.TestCase):
-    """The two typed flags, at the function rather than through argv.
+    """The typed flags, at the function rather than through argv.
 
-    One of these cases cannot travel through argv at all: under LC_ALL=C the
+    Two of these cases cannot travel through argv at all: under LC_ALL=C the
     filesystem encoding is ASCII and a non-ASCII argument cannot be spawned,
     which is how this test came to be here rather than in ServeTest.
     """
@@ -1148,6 +1148,36 @@ class ArgumentTest(unittest.TestCase):
         for value in ("0", "-1", "nan", "inf", "-inf", "banana", ""):
             with self.subTest(value=value):
                 self.refused(craftui._idle_minutes, value)
+
+    def test_a_project_directory_with_a_newline_in_it_is_refused(self):
+        """`wait` prints exactly one line and the answers path is part of it,
+        so a project directory with a \\n in it made a SUBMITTED answer
+        arrive as two -- measured, before this guard existed: exit 0, two
+        lines on stdout, and the second one is what the skill's `case` would
+        parse as an outcome of its own."""
+        self.assertIn(
+            "control characters",
+            self.refused(craftui._project_dir, "/tmp/a\nb"))
+
+    def test_the_other_control_characters_go_with_the_newline(self):
+        """\\r rewrites the line that was just printed and \\x1b can move the
+        cursor or colour what follows, so a path holding either breaks the
+        same one-line contract without being as easy to see. None of them can
+        occur in a directory anybody meant to name."""
+        for value in ("/tmp/a\rb", "/tmp/a\x1bb", "/tmp/a\x00b", "/tmp/a\tb",
+                      "/tmp/a\x7fb", "\n", "/tmp/a\x0bb"):
+            with self.subTest(value=value):
+                self.refused(craftui._project_dir, value)
+
+    def test_the_project_directories_that_are_directories(self):
+        """A gate that refuses everything is not a gate. This refuses one
+        character class and has no other opinion about paths -- spaces, dots,
+        non-ASCII and the default all pass through unchanged, and unchanged
+        matters: the value is used as a path, not merely validated."""
+        for value in (".", "/tmp", "/tmp/a b", "relative/path", "..",
+                      "/tmp/ünïcode", "/tmp/a-b_c.d"):
+            with self.subTest(value=value):
+                self.assertEqual(craftui._project_dir(value), value)
 
 
 class ShutdownOrderTest(unittest.TestCase):
@@ -1383,6 +1413,41 @@ class WaitTest(CommandTestCase):
             read_json(path)["answers"], {"Q-1": {"text": "yes"}},
             "wait named a file that is not the one the browser sent")
 
+    def test_nothing_sent_exits_2_as_a_real_process(self):
+        """TIMEOUT is the outcome the skill answers by arming another wait,
+        and what it branches on is the status a shell reports -- not a value
+        returned inside this interpreter. The in-process cases in CmdWaitTest
+        would all pass against a main() that dropped the code on the floor.
+
+        Cheap by construction: --timeout is the whole cost.
+        """
+        self.pretend_server()
+        result = self.wait("--timeout", "0.2")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "TIMEOUT round=1\n")
+        self.assertIn("heartbeat", result.stderr.lower())
+
+    def test_an_unreadable_round_exits_1_as_a_real_process(self):
+        """The other end of the same contract, and the outcome that differs
+        from every other one in what the skill must do about it: 1 is the
+        code re-arming cannot fix, so a skill that read it as 2 would arm a
+        wait that can only fail the same way, for ever.
+
+        The file is already malformed when the wait starts, so this costs the
+        run of unreadable looks and nothing else.
+        """
+        self.pretend_server()
+        path = self.session.answers_path(1)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"round": 1, "finish', encoding="utf-8")
+        result = self.wait("--timeout", "30")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(
+            result.stdout,
+            "ERROR   {} exists and cannot be read as a round of answers\n".format(
+                path),
+        )
+
     def test_a_mistyped_flag_is_not_a_timeout(self):
         """The defect this task exists to close. argparse exits 2 and this
         CLI documents 2 as TIMEOUT, which the skill answers by arming another
@@ -1500,6 +1565,24 @@ class CmdWaitTest(unittest.TestCase):
         code, line, _ = self.wait(timeout=0.05, number=1)
         self.assertEqual(code, 2, line)
 
+    def test_a_round_that_is_not_round_one_is_watched_and_named(self):
+        """The negative above only says round 2's file does not end a wait on
+        round 1, and `session.answers_path(1)` in place of
+        `session.answers_path(args.round)` passes it -- every wait in this
+        file is a wait on round 1, so the hardcode is invisible from the
+        direction they all point in. Round 7 is waited on here with round 1's
+        answers lying beside it, so the hardcode both ends the wrong wait and
+        names the wrong file, and the line says which.
+        """
+        decoy = self.write(self.payload(finished=False))
+        seven = self.write(
+            self.payload(round=7, finished=False), self.session.answers_path(7))
+        self.assertNotEqual(decoy, seven)  # the premise
+        code, line, _ = self.wait(number=7)
+        self.assertEqual(code, 0, line)
+        self.assertEqual(line, "SUBMITTED round=7 answers={}".format(seven))
+        self.assertEqual(read_json(seven)["round"], 7, "it named round 1's file")
+
     # -- when nothing arrives ---------------------------------------------
 
     def test_nothing_arriving_times_out_with_exit_2(self):
@@ -1508,6 +1591,28 @@ class CmdWaitTest(unittest.TestCase):
         self.assertEqual(line, "TIMEOUT round=1")
         self.assertGreaterEqual(self.elapsed, 0.2, "the timeout was not waited out")
         self.assertIn("heartbeat", err.lower())
+
+    def test_the_timeout_lasts_the_number_of_seconds_it_was_given(self):
+        """`--timeout` is a duration and not a unit-free number.
+        `deadline = time.monotonic() + args.timeout * 10` survived every
+        other case here, because the only bound anywhere was an upper one of
+        ten seconds on a wait that asked for a fraction of a second -- so a
+        flag that silently meant ten times what it said was green, and the
+        agent would get its turn back long after the harness expected it.
+
+        Bounded from both sides. Generously above: POLL_S is collapsed here,
+        so a loaded machine adds scheduling latency to a sleep but cannot
+        make one shorter, and five times the deadline is well clear of that
+        while still an order of magnitude short of the mutant's ten.
+        """
+        code, line, _ = self.wait(timeout=0.5)
+        self.assertEqual(code, 2, line)
+        self.assertGreaterEqual(
+            self.elapsed, 0.5, "it gave up before the deadline it was given")
+        self.assertLess(
+            self.elapsed, 2.5,
+            "the wait lasted several times the --timeout it was given",
+        )
 
     def test_the_timeout_says_out_loud_that_it_is_not_a_failure(self):
         """Whoever reads this sees a bare TIMEOUT in a transcript otherwise
@@ -1632,6 +1737,26 @@ class CmdWaitTest(unittest.TestCase):
                 self.assertEqual(code, 1, line)
                 self.assertIn(str(self.answers_path), line)
 
+    def test_the_report_lands_on_the_strike_the_bound_names(self):
+        """The mirror of test_noserver_needs_a_full_run_of_misses, and for
+        the same reason: the retry case above stops one look short of the
+        bound, so `>` in place of `>=` on the strike check is invisible from
+        that side. Counted rather than timed -- on the UNREADABLE path
+        nothing else reads a file, so every read here is a look at the
+        answers.
+        """
+        self.write("{ not json")
+        real, reads = craftui.read_json, []
+
+        def counting(path):
+            reads.append(path)
+            return real(path)
+
+        self.patch("read_json", counting)
+        code, line, _ = self.wait(timeout=30)
+        self.assertEqual(code, 1, line)
+        self.assertEqual(len(reads), craftui.UNREADABLE_STRIKES)
+
     def test_a_directory_where_the_answers_go_is_reported(self):
         self.answers_path.parent.mkdir(parents=True, exist_ok=True)
         self.answers_path.mkdir()
@@ -1736,7 +1861,15 @@ class ReadAnswersTest(unittest.TestCase):
 class PollIntervalTest(unittest.TestCase):
     """The two numbers the loop is made of, asserted as the properties they
     exist for rather than as the literals they happen to be. Nothing here
-    patches either of them."""
+    patches either of them.
+
+    The window a run of N strikes covers is (N - 1) * POLL_S and not
+    N * POLL_S: the loop looks, then sleeps, so the first look is free and N
+    looks are N - 1 sleeps. Written out as N * POLL_S, both assertions below
+    overstated the window by one poll -- DEAD_SERVER_STRIKES = 6 satisfied
+    the first at exactly 1.5 while the window it was guarding had dropped to
+    1.25, under the floor this class's own docstrings name.
+    """
 
     def test_the_dead_server_window_outlasts_a_serve_restart(self):
         """A `serve` spawn is a few hundred milliseconds, and for all of it
@@ -1744,7 +1877,45 @@ class PollIntervalTest(unittest.TestCase):
         the margin over that, or a restart reads as a death and a wait the
         user is still typing into is abandoned."""
         self.assertGreaterEqual(
-            craftui.DEAD_SERVER_STRIKES * craftui.POLL_S, 1.5)
+            (craftui.DEAD_SERVER_STRIKES - 1) * craftui.POLL_S, 1.5)
+
+    def test_the_dead_server_window_is_that_wide_when_it_is_measured(self):
+        """The assertion above multiplies two constants together, which is a
+        restatement of the code and not a test of it: get the arithmetic
+        wrong -- as it was wrong -- and the restatement is wrong with it.
+
+        So this one measures the window `wait` actually leaves, through the
+        command, against a project that has no server in it. Nothing is
+        stubbed: an empty directory has no server-info, so the real liveness
+        question answers False on every look, which is exactly what a session
+        that has gone looks like. The cost is the window itself, once.
+        """
+        with tempfile.TemporaryDirectory() as root:
+            args = craftui.build_parser().parse_args(
+                ["wait", "--project-dir", root, "--round", "1",
+                 "--timeout", "30"])
+            out = io.StringIO()
+            started = time.monotonic()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                code = craftui.cmd_wait(args)
+            elapsed = time.monotonic() - started
+        self.assertEqual(code, 3, out.getvalue())
+        self.assertEqual(out.getvalue(), "NOSERVER\n")
+        self.assertGreaterEqual(
+            elapsed, 1.5,
+            "a `serve` restart is a few hundred milliseconds of misses and "
+            "this window no longer clears one by an order of magnitude",
+        )
+        # The other end, and generous: the sleeps total 1.75 s and nothing
+        # else in the loop takes measurable time, so five seconds is loaded-
+        # machine headroom rather than a second property. What it catches is
+        # a window widened until an agent armed before the first `serve` sits
+        # there instead of being told to start one.
+        self.assertLess(
+            elapsed, 5.0,
+            "a wait against a project with no server took far longer than "
+            "~1.75 s to say so",
+        )
 
     def test_a_poll_a_person_could_notice_is_no_poll(self):
         """It runs for hours, so it has to be cheap; it ends a person's
@@ -1756,7 +1927,7 @@ class PollIntervalTest(unittest.TestCase):
         """What it retries is a read landing inside another process's write,
         which is one os.replace wide."""
         self.assertGreaterEqual(
-            craftui.UNREADABLE_STRIKES * craftui.POLL_S, 1.0)
+            (craftui.UNREADABLE_STRIKES - 1) * craftui.POLL_S, 1.0)
 
 
 class UsageExitTest(unittest.TestCase):
@@ -1816,6 +1987,21 @@ class UsageExitTest(unittest.TestCase):
                 argv = ["wait", "--round", "1", "--timeout", value]
                 code, err = self.refused(argv)
                 self.assertEqual(code, craftui.USAGE_EXIT, err)
+
+    def test_a_project_directory_that_could_forge_a_second_line_is_refused(self):
+        """Refused at the flag, with the usage code, on both subcommands: a
+        directory `serve` accepted and `wait` refused would report this at
+        the seam between the agent's turn and the user's, hours later,
+        instead of at the first command that named it."""
+        for argv in (
+            ["wait", "--project-dir", "/tmp/a\nb", "--round", "1"],
+            ["serve", "--project-dir", "/tmp/a\nb"],
+            ["serve", "--project-dir", "/tmp/a\x1bb"],
+        ):
+            with self.subTest(argv=argv):
+                code, err = self.refused(argv)
+                self.assertEqual(code, craftui.USAGE_EXIT, err)
+                self.assertIn("control characters", err)
 
     def test_the_rounds_and_timeouts_that_are_accepted(self):
         """The other half: a gate that refuses everything is not a gate."""

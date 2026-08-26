@@ -680,13 +680,18 @@ POLL_S = 0.25
 # Consecutive, not cumulative, because the miss this has to survive is a
 # `serve` restart: from the moment the old process dies until the new one
 # writes server-info, every look misses, and a single miss read as a death
-# would end a wait the user is still typing into. Eight looks is two seconds;
-# a serve spawn from launch to server-info measured 0.112-0.144 s over five
-# runs, so the window is more than an order of magnitude clear of it.
+# would end a wait the user is still typing into.
+#
+# The window is (N - 1) * POLL_S and not N * POLL_S, because the loop sleeps
+# BETWEEN looks: the first look is free and eight looks are seven sleeps. So
+# eight is 1.75 s, not the two seconds this comment used to claim -- and the
+# claim was the whole justification for the number, since a serve spawn from
+# launch to server-info measured 0.112-0.144 s over five runs and the window
+# has to stay an order of magnitude clear of that.
 #
 # The consequence at the other end, and it is deliberate: a `wait` started
 # before any server exists does not sit there hoping one appears. It reports
-# NOSERVER after ~2 s, because "no server has ever been started here" and
+# NOSERVER after ~1.75 s, because "no server has ever been started here" and
 # "the server has gone" are the same fact to the agent, and both are answered
 # by starting one.
 DEAD_SERVER_STRIKES = 8
@@ -697,8 +702,9 @@ DEAD_SERVER_STRIKES = 8
 # The retry is the point: the file is written by another process, so a read
 # can land in the middle of one. That is a moment -- write_json_atomic
 # renames a complete file into place, so under this name a torn read is
-# barely reachable at all -- and two seconds of it is three orders of
-# magnitude more than a rename needs.
+# barely reachable at all -- and 1.75 s of it (eight looks with seven sleeps
+# between them, the same off-by-one as above) is three orders of magnitude
+# more than a rename needs.
 #
 # What the bound is for is the other case. A file that is a directory, or is
 # unreadable, or holds something that is not a round of answers, will never
@@ -860,6 +866,40 @@ def _round_number(text):
     return number
 
 
+# A control character anywhere in a project directory. \n is the one that
+# breaks a contract; the rest are refused with it because they break the same
+# one less visibly.
+_CONTROL_TEXT = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _project_dir(text):
+    """A project directory that cannot forge a second line of output.
+
+    `wait` answers in exactly one line on stdout, the answers path is part of
+    that line, and the skill reading it splits on newlines and branches on
+    what it finds -- so a project directory with a \\n in it makes a
+    SUBMITTED answer arrive as two lines, the second of which the skill
+    parses as an outcome of its own. Verified: exit 0 and two lines.
+
+    Refused rather than quoted or escaped. Quoting would change the line for
+    every caller to defend against a path nobody meant to type, and an
+    escaped path is no longer the path -- the line exists to be pasted into
+    an editor and read back with read_json. \\r and \\x1b are refused with
+    \\n because a terminal treats them as instructions too: \\r rewrites the
+    line that was just printed, and \\x1b moves the cursor.
+
+    At the flag, before a lock is taken, so `serve` and `wait` refuse the
+    same directory. A project that could be served but never waited on would
+    report this at the seam, hours later, instead of at the first command.
+    """
+    match = _CONTROL_TEXT.search(text or "")
+    if match is None:
+        return text
+    raise argparse.ArgumentTypeError(
+        "a project directory may not contain control characters, and {!r} "
+        "contains {!r}".format(text, match.group()))
+
+
 # A port as it may be written on the command line: ASCII decimal digits, and
 # no more of them than a port can have. Not int() on its own, which is happy
 # with " 1", with "\n80", and with "٣" -- the same trap session.py's
@@ -915,7 +955,7 @@ def build_parser():
     subs = parser.add_subparsers(dest="command", required=True)
 
     serve = subs.add_parser("serve", help="start the craft UI server")
-    serve.add_argument("--project-dir", default=".")
+    serve.add_argument("--project-dir", type=_project_dir, default=".")
     serve.add_argument("--port", type=_port_number, default=0)
     serve.add_argument("--open", action="store_true")
     serve.add_argument("--idle-timeout-minutes", type=_idle_minutes, default=240.0)
@@ -928,7 +968,7 @@ def build_parser():
     serve.set_defaults(func=lambda a: _serve_child(a) if a._child else cmd_serve(a))
 
     wait = subs.add_parser("wait", help="block until the user sends a round")
-    wait.add_argument("--project-dir", default=".")
+    wait.add_argument("--project-dir", type=_project_dir, default=".")
     wait.add_argument("--round", type=_round_number, required=True)
     # Fifteen minutes. Long enough that an agent is not woken for nothing
     # while somebody reads the questions properly, short enough that a

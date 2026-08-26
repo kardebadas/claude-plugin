@@ -2869,18 +2869,26 @@ def find_browser():
     return None
 
 
-def run_headless(browser, url):
+def run_headless(browser, url, budget=8000):
     """One headless chromium run over `url`, returning what it printed.
 
     --user-data-dir is a throwaway on purpose: the URL carries the session
     key, and the default profile would keep it in a history file.
+
+    `budget` is VIRTUAL milliseconds, not wall clock. The clock runs as fast
+    as the page will let it and pauses while a fetch is outstanding, so a
+    page that waits four seconds for its own autosave costs a few
+    milliseconds of real time -- and a test may not coordinate with the
+    browser by sleeping in Python, because the two clocks are unrelated. The
+    tests that need the server to change under a running page do it from
+    inside a request handler instead.
     """
     with tempfile.TemporaryDirectory() as profile:
         return subprocess.run(
             [browser, "--headless", "--no-sandbox", "--disable-gpu",
              "--no-first-run", "--no-default-browser-check",
              "--disable-extensions", "--user-data-dir=" + profile,
-             "--virtual-time-budget=8000", "--dump-dom", url],
+             "--virtual-time-budget={}".format(budget), "--dump-dom", url],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180,
         )
 
@@ -3361,6 +3369,20 @@ DRIVER = """
 <script>
 (function () {
   const probe = document.getElementById("probe");
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  // Waits on the page's OWN clock. Under --virtual-time-budget that clock
+  // runs far faster than wall time and pauses while a fetch is outstanding,
+  // so this both settles quickly and never observes a half-finished round
+  // trip. It returns what the predicate returned, or null on the deadline.
+  const waitFor = async (predicate, ms) => {
+    const deadline = Date.now() + (ms || 4000);
+    for (;;) {
+      const value = predicate();
+      if (value) return value;
+      if (Date.now() >= deadline) return null;
+      await sleep(20);
+    }
+  };
   const run = () => {
 // DRIVER BODY
   };
@@ -3370,11 +3392,19 @@ DRIVER = """
       setTimeout(step, 25);
       return;
     }
+    let value;
     try {
-      probe.textContent = JSON.stringify({ ok: run() });
+      value = run();
     } catch (e) {
       probe.textContent = JSON.stringify({ driverError: String(e) });
+      return;
     }
+    // Promise.resolve so a body may be `return (async () => {...})()`. A
+    // synchronous body is unaffected, and a rejection is RECORDED: an error
+    // nobody sees is the failure this whole class was added for.
+    Promise.resolve(value).then(
+      (settled) => { probe.textContent = JSON.stringify({ ok: settled }); },
+      (e) => { probe.textContent = JSON.stringify({ driverError: String(e) }); });
   };
   step();
 })();
@@ -3382,7 +3412,54 @@ DRIVER = """
 """
 
 
-class DrivenPageTest(ServerTestCase):
+class DrivenTestCase(ServerTestCase):
+    """The machinery for driving the real page: a copy of app.html, byte for
+    byte, with a driver appended that presses things and records what the
+    page then produced. Subclasses supply a ROUND and the bodies.
+    """
+
+    ROUND = None
+    BUDGET = 8000
+
+    @classmethod
+    def setUpClass(cls):
+        cls.browser = find_browser()
+        if not cls.browser:
+            raise unittest.SkipTest("no chromium or chrome on this machine")
+
+    def drive(self, body, round_obj=None, budget=None):
+        """Serve the page with `body` appended as a driver, and return what
+        it recorded."""
+        write_json_atomic(self.session.questions_path(1),
+                          self.ROUND if round_obj is None else round_obj)
+        source = APP_HTML.read_text(encoding="utf-8")
+        self.assertEqual(source.count("</body>"), 1, "cannot place the driver")
+        pages = tempfile.TemporaryDirectory()
+        self.addCleanup(pages.cleanup)
+        page = Path(pages.name) / "driven.html"
+        page.write_text(
+            source.replace("</body>",
+                           DRIVER.replace("// DRIVER BODY", body) + "</body>"),
+            encoding="utf-8")
+        server_module.APP_HTML = page
+        self.addCleanup(setattr, server_module, "APP_HTML", APP_HTML)
+
+        proc = run_headless(self.browser, self.url("/"),
+                            self.BUDGET if budget is None else budget)
+        self.assertEqual(
+            proc.returncode, 0,
+            "the browser failed: {}".format(proc.stderr.decode("utf-8", "replace")))
+        dom = proc.stdout.decode("utf-8", "replace")
+        found = re.search(r'(?s)<pre id="probe">(.*?)</pre>', dom)
+        self.assertIsNotNone(found, "the driven page built no probe at all")
+        recorded = unescape(found.group(1))
+        self.assertTrue(recorded, "the driver never ran: the page's own script threw")
+        result = json.loads(recorded)
+        self.assertNotIn("driverError", result, result)
+        return result["ok"]
+
+
+class DrivenPageTest(DrivenTestCase):
     """The page after something has been clicked, which --dump-dom cannot see.
 
     chromium's headless dump renders a page and prints the DOM; it does not
@@ -3412,41 +3489,6 @@ class DrivenPageTest(ServerTestCase):
              "type": "text"},
         ],
     }
-
-    @classmethod
-    def setUpClass(cls):
-        cls.browser = find_browser()
-        if not cls.browser:
-            raise unittest.SkipTest("no chromium or chrome on this machine")
-
-    def drive(self, body):
-        """Serve the page with `body` appended as a driver, and return what
-        it recorded."""
-        write_json_atomic(self.session.questions_path(1), self.ROUND)
-        source = APP_HTML.read_text(encoding="utf-8")
-        self.assertEqual(source.count("</body>"), 1, "cannot place the driver")
-        pages = tempfile.TemporaryDirectory()
-        self.addCleanup(pages.cleanup)
-        page = Path(pages.name) / "driven.html"
-        page.write_text(
-            source.replace("</body>",
-                           DRIVER.replace("// DRIVER BODY", body) + "</body>"),
-            encoding="utf-8")
-        server_module.APP_HTML = page
-        self.addCleanup(setattr, server_module, "APP_HTML", APP_HTML)
-
-        proc = run_headless(self.browser, self.url("/"))
-        self.assertEqual(
-            proc.returncode, 0,
-            "the browser failed: {}".format(proc.stderr.decode("utf-8", "replace")))
-        dom = proc.stdout.decode("utf-8", "replace")
-        found = re.search(r'(?s)<pre id="probe">(.*?)</pre>', dom)
-        self.assertIsNotNone(found, "the driven page built no probe at all")
-        recorded = unescape(found.group(1))
-        self.assertTrue(recorded, "the driver never ran: the page's own script threw")
-        result = json.loads(recorded)
-        self.assertNotIn("driverError", result, result)
-        return result["ok"]
 
     LATCH = """
     const card = document.querySelector('.question[data-id="Q-1"]');
@@ -3570,6 +3612,571 @@ class DrivenPageTest(ServerTestCase):
         # catches it and the panel apologises -- while the counter and the
         # filter, which are the page itself, carry on above.
         self.assertEqual(got[4]["ledger"], "The ledger could not be shown.")
+
+
+# ---------------------------------------------------------------------------
+# Task 11: the page made live. Autosave, Send, Finish, draft restore, the
+# between-rounds state and the connection overlay.
+#
+# The source lint below always runs and proves only that the text says what it
+# should. Everything that decides whether a user's hour of thinking survives is
+# in LivePageTest, which drives the real page against this real server and then
+# reads the files off the disk -- because "the draft was saved" is a claim
+# about a file, and no assertion about the DOM is one.
+# ---------------------------------------------------------------------------
+
+
+class PageWiringContractTest(ServerTestCase):
+    """Same contract-not-behaviour caveat as PageContractTest above."""
+
+    def page(self):
+        return self.get("/").read().decode("utf-8")
+
+    def test_the_page_wires_autosave_to_the_draft_endpoint(self):
+        html = self.page()
+        self.assertIn("/api/draft", html)
+        self.assertIn('method: "PATCH"', html)
+
+    def test_the_page_wires_both_submit_paths(self):
+        html = self.page()
+        self.assertIn("/api/submit", html)
+        self.assertIn("submit(false)", html)
+        self.assertIn("submit(true)", html)
+
+    def test_the_page_wires_the_next_round_poll(self):
+        self.assertIn("pollForNextRound", self.page())
+
+    def test_finish_is_wired_through_a_confirmation(self):
+        self.assertIn("confirm(", self.page())
+
+    def test_autosave_carries_a_sequence_number(self):
+        """Overlapping autosaves are the normal case, not an edge one: every
+        keystroke is its own connection and ThreadingHTTPServer runs them in
+        parallel. `hello world` typed once was measured leaving `hel` on disk.
+        do_PATCH orders them by `seq`, and only if the client sends one."""
+        html = self.page()
+        self.assertIn("saveSeq += 1", html)
+        self.assertIn("seq: seq", html)
+
+    def test_a_refused_save_is_not_reported_as_a_saved_one(self):
+        """A 413 or a 400 resolves the fetch promise like any other response.
+        A page that only catches rejections tells the user their work is safe
+        while the server is refusing to store it."""
+        html = self.page()
+        self.assertIn("response.ok", html)
+        self.assertIn("not saved", html)
+
+    def test_finish_is_carried_as_a_boolean(self):
+        """`finished` must be exactly true or false -- "false" is a 400 --
+        and bool("false") is True, so the coercion has to happen here."""
+        self.assertIn("finished: finished === true", self.page())
+
+
+class LivePageTest(DrivenTestCase):
+    """The page driven against the real server, with the disk as the witness.
+
+    Every test here ends by reading a file the server wrote, because that file
+    is the product: `.draft.json` is what a closed tab costs nothing against,
+    and `.answers.json` is what the agent folds into CRAFT.md. A DOM that says
+    "saved" over an empty directory is the failure this class exists to catch.
+    """
+
+    BUDGET = 20000
+
+    ROUND = {
+        "round": 1,
+        "questions": [
+            {"id": "Q-1", "importance": "REQUIRED",
+             "title": "How should users authenticate?", "type": "single",
+             "allow_other": True,
+             "options": [{"value": "email"}, {"value": "magic"}]},
+            {"id": "Q-2", "importance": "OPTIONAL", "title": "Anything else?",
+             "type": "longtext"},
+            {"id": "Q-3", "importance": "IMPORTANT", "title": "Who is it for?",
+             "type": "text"},
+        ],
+    }
+
+    # Typing, twice, waiting for the page to claim each one is saved.
+    TYPE = """
+    return (async () => {
+      const status = document.getElementById("status");
+      const field = document.querySelector('.question[data-id="Q-2"] [data-text]');
+      const type = async (text) => {
+        field.value = text;
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+        const saved = await waitFor(() => status.textContent === "saved", 6000);
+        return !!saved;
+      };
+      const first = await type("hel");
+      const second = await type("hello world");
+      return { first: first, second: second, status: status.textContent };
+    })();
+    """
+
+    def test_typing_is_autosaved_to_the_draft_under_a_rising_seq(self):
+        got = self.drive(self.TYPE)
+        self.assertTrue(got["first"], got)
+        self.assertTrue(got["second"], got)
+        stored = read_json(self.session.draft_path(1))
+        self.assertEqual(stored["round"], 1)
+        self.assertEqual(stored["answers"]["Q-2"], {"text": "hello world"})
+        # A constant seq is not a sequence: do_PATCH compares with >=, so a
+        # client that sends 1 every time still writes every time and keeps
+        # exactly the last-writer-wins bug seq was added to fix.
+        self.assertGreaterEqual(stored["seq"], 2)
+        # Nothing was submitted. One character in app.html separates the two.
+        self.assertFalse(self.session.answers_path(1).exists())
+
+    RESTORE = """
+    return (async () => {
+      const status = document.getElementById("status");
+      await waitFor(() => status.textContent === "draft restored", 6000);
+      const one = document.querySelector('.question[data-id="Q-1"]');
+      const two = document.querySelector('.question[data-id="Q-2"]');
+      const three = document.querySelector('.question[data-id="Q-3"]');
+      return {
+        status: status.textContent,
+        checked: [...one.querySelectorAll("input[type=radio]")]
+          .filter((i) => i.checked).map((i) => i.value),
+        other: one.querySelector("[data-other]").value,
+        note: one.querySelector("[data-note]").value,
+        text: two.querySelector("[data-text]").value,
+        pressed: two.querySelector(".delegate").getAttribute("aria-pressed"),
+        delegated: two.dataset.delegated,
+        hint: getComputedStyle(two.querySelector(".hint")).display,
+        counts: document.getElementById("counts").textContent,
+        threePressed: three.querySelector(".delegate").getAttribute("aria-pressed"),
+        threeNote: three.querySelector("[data-note]").value,
+      };
+    })();
+    """
+
+    def test_a_saved_draft_is_restored_into_the_form(self):
+        """The entire point of autosave. A draft that is written and never
+        read back is a file nobody will ever see."""
+        write_json_atomic(self.session.draft_path(1), {
+            "round": 1,
+            "answers": {
+                "Q-1": {"choice": ["magic"], "other": "passkeys",
+                        "note": "email, but I want passkeys later"},
+                "Q-2": {"delegated": True},
+                # Truthy, and not True. `if (answer.delegated)` would latch
+                # this and manufacture a Delegated Decision the user never
+                # made -- which is never asked again.
+                "Q-3": {"delegated": "no", "note": "not a decision"},
+            },
+        })
+        got = self.drive(self.RESTORE)
+        self.assertEqual(got["checked"], ["magic"])
+        self.assertEqual(got["other"], "passkeys")
+        self.assertEqual(got["note"], "email, but I want passkeys later")
+        self.assertEqual(got["text"], "")
+        # A restored delegation must restore the WHOLE state, not just the
+        # button: without data-delegated the card does not grey and the line
+        # saying Claude decides this one is invisible, so a user who reloads
+        # sees a pressed button and no explanation of it.
+        self.assertEqual(got["pressed"], "true")
+        self.assertEqual(got["delegated"], "true")
+        self.assertEqual(got["hint"], "inline")
+        # ...and a `delegated` that is merely truthy latches nothing, while
+        # the note written beside it still comes back.
+        self.assertEqual(got["threePressed"], "false")
+        self.assertEqual(got["threeNote"], "not a decision")
+        # The counter counts what was restored, not an empty form.
+        self.assertIn("2 answered", got["counts"])
+        # ...and the user is told their work came back, which is the only
+        # visible difference between a restored form and a page that quietly
+        # dropped the file.
+        self.assertEqual(got["status"], "draft restored")
+
+    SEND = """
+    return (async () => {
+      const card = document.querySelector('.question[data-id="Q-1"]');
+      card.querySelector('input[value="email"]').checked = true;
+      card.dispatchEvent(new Event("change", { bubbles: true }));
+      document.getElementById("send").click();
+      const waiting = document.getElementById("waiting");
+      const shown = await waitFor(() => waiting.hasAttribute("data-on"), 6000);
+      return {
+        shown: !!shown,
+        heading: waiting.querySelector("h2").textContent,
+        sendDisabled: document.getElementById("send").disabled,
+        problem: document.getElementById("problem").textContent,
+      };
+    })();
+    """
+
+    def test_send_writes_the_answers_and_moves_to_the_waiting_state(self):
+        got = self.drive(self.SEND)
+        self.assertTrue(got["shown"], got)
+        self.assertIn("folding your answers in", got["heading"])
+        self.assertTrue(got["sendDisabled"], got)
+        self.assertEqual(got["problem"], "")
+        submitted = read_json(self.session.answers_path(1))
+        self.assertEqual(submitted["round"], 1)
+        self.assertIs(submitted["finished"], False)
+        self.assertEqual(submitted["answers"]["Q-1"], {"choice": ["email"]})
+        self.assertEqual(submitted["answers"]["Q-2"], {"skipped": True})
+        # POST never promotes the draft, so Send has to carry the answers in
+        # its own body -- and it flushes the draft first, so a Send that
+        # failed still leaves the work on the disk.
+        self.assertEqual(read_json(self.session.draft_path(1))["answers"],
+                         submitted["answers"])
+
+    FINISH_DISMISSED = """
+    return (async () => {
+      let asked = null;
+      window.confirm = (message) => { asked = message; return false; };
+      document.getElementById("finish").click();
+      await sleep(1500);
+      return {
+        asked: asked,
+        waiting: document.getElementById("waiting").hasAttribute("data-on"),
+        sendDisabled: document.getElementById("send").disabled,
+      };
+    })();
+    """
+
+    def test_finish_asks_first_and_a_dismissal_sends_nothing(self):
+        """Finish ends the session. A confirm that is decorative -- or one
+        whose answer is ignored -- ends it by accident."""
+        got = self.drive(self.FINISH_DISMISSED)
+        self.assertIsNotNone(got["asked"], got)
+        # It shows what is still open, which is the whole reason to ask.
+        self.assertIn("REQUIRED", got["asked"])
+        self.assertFalse(got["waiting"], got)
+        self.assertFalse(got["sendDisabled"], got)
+        self.assertFalse(self.session.answers_path(1).exists())
+
+    FINISH_ACCEPTED = """
+    return (async () => {
+      window.confirm = () => true;
+      document.getElementById("finish").click();
+      const waiting = document.getElementById("waiting");
+      const shown = await waitFor(() => waiting.hasAttribute("data-on"), 6000);
+      return { shown: !!shown, heading: waiting.querySelector("h2").textContent };
+    })();
+    """
+
+    def test_finish_accepted_submits_a_finished_round(self):
+        got = self.drive(self.FINISH_ACCEPTED)
+        self.assertTrue(got["shown"], got)
+        self.assertIn("final brief", got["heading"])
+        submitted = read_json(self.session.answers_path(1))
+        # Exactly true, not "true": the server answers "false" with a 400,
+        # and this is the flag that ends somebody's session.
+        self.assertIs(submitted["finished"], True)
+
+    REFUSED = """
+    return (async () => {
+      const status = document.getElementById("status");
+      const field = document.querySelector('.question[data-id="Q-2"] [data-text]');
+      field.value = "small";
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      await waitFor(() => status.textContent === "saved", 6000);
+      field.value = "x".repeat(1100000);
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      const refused = await waitFor(
+        () => status.textContent.indexOf("not saved") === 0, 8000);
+      // Both captured at the moment of the refusal: the recovery below moves
+      // them on, and asserting the end state would assert the wrong one.
+      const problem = document.getElementById("problem").textContent;
+      const refusedStatus = status.textContent;
+      // ...and then shrink it back, so a save can land again.
+      field.value = "small again";
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      const recovered = await waitFor(() => status.textContent === "saved", 8000);
+      return {
+        refused: !!refused,
+        status: refusedStatus,
+        problem: problem,
+        recovered: !!recovered,
+        problemAfter: document.getElementById("problem").textContent,
+      };
+    })();
+    """
+
+    def test_a_refused_autosave_says_so_instead_of_saying_saved(self):
+        """A real 413 from the real server: the body limit is 1 MiB and this
+        types 1.1 MB. The user must not be told their work is safe while the
+        server is refusing to store it -- that is the whole failure this task
+        exists to prevent, arriving quietly."""
+        got = self.drive(self.REFUSED)
+        self.assertTrue(got["refused"], got)
+        self.assertIn("too large", got["status"])
+        self.assertIn("not been saved", got["problem"])
+        # The server's messages are written to be embedded and carry no full
+        # stop of their own, so the page supplies one. Without it the user
+        # reads "...too large They are still on this page".
+        self.assertIn("too large. They are still on this page", got["problem"])
+        # A save that lands takes the alarm down again. An alarm that never
+        # clears is one the user learns to read past, which costs it the one
+        # time it is telling the truth.
+        self.assertTrue(got["recovered"], got)
+        self.assertEqual(got["problemAfter"], "")
+        stored = read_json(self.session.draft_path(1))
+        self.assertEqual(stored["answers"]["Q-2"], {"text": "small again"})
+        # The 1.1 MB never reached the disk: the server refused it on the
+        # Content-Length alone, before a temp file existed.
+        self.assertLess(self.session.draft_path(1).stat().st_size, 4096)
+
+    SEND_REFUSED = """
+    return (async () => {
+      const status = document.getElementById("status");
+      const problem = document.getElementById("problem");
+      const field = document.querySelector('.question[data-id="Q-2"] [data-text]');
+      field.value = "x".repeat(1100000);
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      await waitFor(() => status.textContent.indexOf("not saved") === 0, 10000);
+      document.getElementById("send").click();
+      const refused = await waitFor(
+        () => problem.textContent.indexOf("Your answers were NOT sent") === 0,
+        12000);
+      return {
+        refused: !!refused,
+        problem: problem.textContent,
+        status: status.textContent,
+        waiting: document.getElementById("waiting").hasAttribute("data-on"),
+        sendDisabled: document.getElementById("send").disabled,
+      };
+    })();
+    """
+
+    def test_a_send_the_server_refuses_does_not_look_like_a_send(self):
+        """The worst thing this page could do, and the plan asked for it.
+
+        A 413 RESOLVES the fetch promise like any other response, so a page
+        that awaits the POST and then unconditionally shows "Claude is folding
+        your answers in…" has taken an hour of somebody's thinking, written
+        nothing anywhere, and put a reassuring face over the fact. The user
+        closes the tab.
+
+        A real refusal from the real server: 1.1 MB against a 1 MiB body
+        limit.
+        """
+        got = self.drive(self.SEND_REFUSED, budget=30000)
+        self.assertTrue(got["refused"], got)
+        self.assertIn("too large", got["problem"])
+        self.assertIn("Nothing has been lost", got["problem"])
+        self.assertIn("not sent", got["status"])
+        # No waiting state, and the button works again, because Send is still
+        # the thing the user has to do.
+        self.assertFalse(got["waiting"], got)
+        self.assertFalse(got["sendDisabled"], got)
+        # And nothing was written that a fold-in step could pick up.
+        self.assertFalse(self.session.answers_path(1).exists())
+
+    # A ledger the page cannot even read, driven straight into renderRound --
+    # the shape the review found blanking the counter and the filter.
+    LEDGER_THEN_TYPE = """
+    return (async () => {
+      const unreadable = {};
+      Object.defineProperty(unreadable, "contradictions", {
+        enumerable: true,
+        get() { throw new Error("a ledger this page cannot even read"); },
+      });
+      renderRound({ round: 1, questions: currentRound.questions,
+                    ledger: unreadable });
+      const status = document.getElementById("status");
+      const field = document.querySelector('.question[data-id="Q-2"] [data-text]');
+      field.value = "the ledger is broken and this still has to save";
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      const saved = await waitFor(() => status.textContent === "saved", 6000);
+      return {
+        saved: !!saved,
+        counts: document.getElementById("counts").textContent,
+        ledger: document.getElementById("ledger").textContent,
+      };
+    })();
+    """
+
+    def test_a_ledger_the_page_cannot_render_does_not_disable_autosave(self):
+        """The finding the last round closed, one layer further on. A throw
+        inside the ledger used to escape before applyFilter and updateCounts;
+        autosave hooks in at exactly that point, and a mistyped sidebar panel
+        must not be able to stop a user's answers reaching the disk."""
+        got = self.drive(self.LEDGER_THEN_TYPE)
+        self.assertTrue(got["saved"], got)
+        self.assertEqual(got["ledger"], "The ledger could not be shown.")
+        self.assertIn("1 answered", got["counts"])
+        self.assertEqual(
+            read_json(self.session.draft_path(1))["answers"]["Q-2"],
+            {"text": "the ledger is broken and this still has to save"})
+
+    SWAP = """
+    return (async () => {
+      const card = document.querySelector('.question[data-id="Q-1"]');
+      card.querySelector('input[value="email"]').checked = true;
+      card.dispatchEvent(new Event("change", { bubbles: true }));
+      document.getElementById("send").click();
+      const waiting = document.getElementById("waiting");
+      const shown = await waitFor(() => waiting.hasAttribute("data-on"), 6000);
+      const label = document.getElementById("roundlabel");
+      const swapped = await waitFor(
+        () => label.textContent.indexOf("round 2") === 0, 12000);
+      // The brief is re-read AFTER the questions are swapped, so waiting on
+      // the round label alone reads the sidebar one step too early. That is
+      // a race in this driver and not in the page; the null waitFor returns
+      // on its deadline is what tells the two apart.
+      const grew = await waitFor(
+        () => document.getElementById("brief").textContent
+                .indexOf("Magic links") >= 0, 8000);
+      return {
+        shown: !!shown,
+        swapped: !!swapped,
+        grew: !!grew,
+        label: label.textContent,
+        heading: document.querySelector("#questions h3").textContent,
+        waiting: waiting.hasAttribute("data-on"),
+        sendDisabled: document.getElementById("send").disabled,
+        brief: document.getElementById("brief").textContent,
+        counts: document.getElementById("counts").textContent,
+      };
+    })();
+    """
+
+    def test_the_next_round_swaps_itself_in_and_the_brief_grows(self):
+        """Round 2 is posted from inside a request handler, the first time the
+        page polls after round 1's answers have landed.
+
+        Coordinating on the FILE rather than on a clock is what makes this
+        deterministic. The browser runs on a virtual clock that advances far
+        faster than wall time, so a Python thread sleeping two seconds before
+        writing round 2 would post it long after the page had given up.
+        """
+        self.session.brief_path.write_text(
+            "# Vision\n\nA small music player.\n", encoding="utf-8")
+        original = self.server.round_payload
+
+        def post_round_two():
+            if self.session.answers_path(1).exists():
+                second = json.loads(json.dumps(self.ROUND))
+                second["round"] = 2
+                second["questions"][0]["title"] = "Which store fronts matter?"
+                write_json_atomic(self.session.questions_path(2), second)
+                self.session.brief_path.write_text(
+                    "# Vision\n\nA small music player.\n\n"
+                    "## Accounts\n\nMagic links, decided in round 1.\n",
+                    encoding="utf-8")
+            return original()
+
+        self.server.round_payload = post_round_two
+        got = self.drive(self.SWAP)
+        self.assertTrue(got["shown"], got)
+        self.assertTrue(got["swapped"], got)
+        self.assertEqual(got["heading"], "Which store fronts matter?")
+        # The waiting state took itself down, and the page is usable again.
+        self.assertFalse(got["waiting"], got)
+        self.assertFalse(got["sendDisabled"], got)
+        self.assertIn("0 answered", got["counts"])
+        # The brief was re-read, so the user watches it grow. A page that
+        # swapped the questions and left the brief at round 1's text would
+        # look identical until the session ended.
+        self.assertTrue(got["grew"], got)
+        self.assertIn("Magic links, decided in round 1.", got["brief"])
+        # ...and round 1's answers are still the ones that were sent. The
+        # swap must not have re-submitted or rewritten anything.
+        self.assertEqual(read_json(self.session.answers_path(1))["answers"]["Q-1"],
+                         {"choice": ["email"]})
+
+    PAUSED = """
+    return (async () => {
+      const overlay = document.getElementById("overlay");
+      const real = window.fetch;
+      window.fetch = () => Promise.reject(new TypeError("Failed to fetch"));
+      const paused = await waitFor(() => overlay.hasAttribute("data-on"), 20000);
+      const text = overlay.textContent;
+      window.fetch = real;
+      const cleared = await waitFor(() => !overlay.hasAttribute("data-on"), 20000);
+      return { paused: !!paused, text: text, cleared: !!cleared };
+    })();
+    """
+
+    def test_a_server_that_stops_answering_pauses_the_page_and_it_recovers(self):
+        """The page's own dependency is replaced rather than the world: the
+        real server cannot be stopped part-way through a browser run without
+        coordinating two unrelated clocks. What this constrains is the page's
+        reaction to a fetch that rejects, which is what a stopped server
+        produces; it does not constrain what the browser does to the socket.
+        """
+        got = self.drive(self.PAUSED, budget=60000)
+        self.assertTrue(got["paused"], got)
+        self.assertIn("Connection paused", got["text"])
+        self.assertTrue(got["cleared"], got)
+
+    EXPIRED = """
+    return (async () => {
+      const overlay = document.getElementById("overlay");
+      window.fetch = () => Promise.resolve(new Response("forbidden", { status: 403 }));
+      const ended = await waitFor(
+        () => overlay.textContent.indexOf("session has ended") >= 0, 20000);
+      return { ended: !!ended, text: overlay.textContent };
+    })();
+    """
+
+    PAGEHIDE = """
+    return (async () => {
+      const status = document.getElementById("status");
+      const field = document.querySelector('.question[data-id="Q-2"] [data-text]');
+      field.value = "typed, and then the tab was closed";
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      window.dispatchEvent(new Event("pagehide"));
+      // 200 ms is INSIDE the 400 ms debounce, so only the pagehide flush can
+      // have put anything on the disk by the time this settles. The page's
+      // clock is virtual and pauses while the request is outstanding, so the
+      // network round trip does not eat the window.
+      const saved = await waitFor(() => status.textContent === "saved", 200);
+      return { saved: !!saved, status: status.textContent };
+    })();
+    """
+
+    def test_a_tab_closed_inside_the_debounce_window_still_saves(self):
+        """The debounce is 400 ms in which a closed tab would cost the user
+        their last sentence. The flush uses keepalive so the request outlives
+        the page that started it."""
+        got = self.drive(self.PAGEHIDE)
+        self.assertTrue(got["saved"], got)
+        self.assertEqual(
+            read_json(self.session.draft_path(1))["answers"]["Q-2"],
+            {"text": "typed, and then the tab was closed"})
+
+    CORRUPT = """
+    return (async () => {
+      const box = document.getElementById("problem");
+      const shown = await waitFor(() => box.hasAttribute("data-on"), 6000);
+      return {
+        shown: !!shown,
+        problem: box.textContent,
+        text: document.querySelector('.question[data-id="Q-2"] [data-text]').value,
+      };
+    })();
+    """
+
+    def test_a_draft_that_cannot_be_read_is_named_rather_than_dropped(self):
+        """The form can only open empty, and an empty form over a draft that
+        is sitting on the disk invites the user to retype an hour of their own
+        work -- after which the first keystroke overwrites the only copy. The
+        server names the file for exactly this; the page has to say it."""
+        self.session.draft_path(1).write_text("{not json", encoding="utf-8")
+        got = self.drive(self.CORRUPT)
+        self.assertTrue(got["shown"], got)
+        self.assertIn("round-001.draft.json", got["problem"])
+        self.assertIn("could not be read", got["problem"])
+        # Named, and the consequence spelled out, because the page is about
+        # to overwrite it.
+        self.assertIn("overwrite", got["problem"])
+        self.assertEqual(got["text"], "")
+
+    def test_a_restarted_server_is_not_described_as_a_pause(self):
+        """`serve` mints a new key on every start, so a page whose server was
+        restarted gets 403 for ever -- it cannot reconnect, whatever the port
+        does. Telling that user the page will recover on its own is the one
+        message that guarantees they sit and wait instead of opening the new
+        link, and their typing is not being saved the whole time."""
+        got = self.drive(self.EXPIRED, budget=60000)
+        self.assertTrue(got["ended"], got)
+        self.assertNotIn("reconnect on its own", got["text"])
 
 
 if __name__ == "__main__":

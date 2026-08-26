@@ -76,7 +76,19 @@
                     background:none; color:#cfd6e0; font-size:11px; font-weight:600; }
   #filters button[aria-pressed=false] { opacity:.4; }
   footer { position:sticky; bottom:0; display:flex; gap:12px; align-items:center;
+           flex-wrap:wrap;
            padding:12px 16px; background:var(--panel); border-top:1px solid var(--line); }
+  /* The loud half of "your work is not where you think it is". The status
+     line in the header is a word; this is a sentence, in front of the two
+     buttons, and it does not go away until the thing it is about does.
+     order:-1 puts it above them without nesting another flex container. */
+  #problem { flex:1 0 100%; order:-1; display:none; margin:0 0 10px;
+             background:var(--warn-bg); border:1px solid var(--warn-line);
+             border-radius:6px; padding:8px 10px; color:var(--req); }
+  #problem[data-on] { display:block; }
+  button[disabled] { opacity:.5; cursor:default; }
+  #status[data-state=saving] { opacity:.65; }
+  #status[data-state=error] { color:#ff9c8f; font-weight:700; }
   #send { padding:9px 18px; background:var(--accent); color:#fff; border:none;
           font-weight:650; }
   #finish { padding:9px 14px; background:none; border:1px solid var(--line);
@@ -133,6 +145,7 @@
 </main>
 
 <footer>
+  <div id="problem" role="alert"></div>
   <button id="send">Send to Claude</button>
   <button id="finish">Finish</button>
   <span id="counts" aria-live="polite"></span>
@@ -484,8 +497,441 @@ async function loadRound() {
   renderRound(payload.round);
 }
 
-loadRound();
-loadBrief();
+// ------------------------------------------------------------ autosave
+//
+// Crash insurance, and the reason this page can be closed without a thought.
+// It is NOT what the agent reads as an answer: PATCH writes the round's
+// .draft.json, POST writes .answers.json from its own body, and the server
+// never promotes one into the other -- so a draft that is stale when Send
+// arrives can never become the submitted round.
+
+const SAVE_DELAY_MS = 400;    // one debounce, not one request per keystroke
+const RETRY_MS = 2000;        // after a save that failed for want of a server
+const POLL_MS = 1000;         // while waiting for Claude to post the next round
+const HEARTBEAT_MS = 5000;    // ...and while it is still the user's turn
+
+let saveTimer = null;
+// Monotonic, and the client half of do_PATCH's ordering. Every keystroke is
+// its own connection and the server threads them, so two autosaves overlap
+// as a matter of course rather than as an edge case: `hello world` typed
+// once was measured leaving `hel` on the disk with both writes acknowledged
+// 200. A PATCH carrying a seq lower than one already written is now ignored,
+// and that only works if this rises.
+let saveSeq = 0;
+let dirty = false;            // typing this page has not seen reach the disk
+let waiting = false;          // Send is done; the next round is Claude's move
+let lastSeenRound = null;
+let expired = false;          // 403: a restarted server, a key this page lacks
+// What the message in the footer is ABOUT, so that a later success clears
+// only its own kind. A save that lands must not silently erase a warning
+// that the user's answers were never sent.
+let problemKind = null;
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+function setStatus(text, state) {
+  const node = document.getElementById("status");
+  node.textContent = text;
+  if (state) node.setAttribute("data-state", state);
+  else node.removeAttribute("data-state");
+}
+
+function setProblem(text, kind) {
+  const node = document.getElementById("problem");
+  node.textContent = text || "";
+  problemKind = text ? (kind || null) : null;
+  if (text) node.setAttribute("data-on", "1");
+  else node.removeAttribute("data-on");
+}
+
+function clearProblem(kind) {
+  if (problemKind === kind) setProblem("");
+}
+
+// What the server said, in the words it used: a 413 from answers that grew
+// past a megabyte, a 400 from a body nested too deep and a 500 from a full
+// disk are different problems and the user can act on the difference.
+//
+// It also notices the one status that is not a hiccup. `serve` mints a NEW
+// session key every time it starts, so a 403 means this page holds a key
+// nothing will ever accept again -- whatever the port does.
+async function refusal(response) {
+  if (response.status === 403) {
+    expired = true;
+    showOverlay("expired");
+    return "this page's session key is no longer accepted";
+  }
+  try {
+    const payload = await response.json();
+    if (payload && typeof payload.error === "string") return payload.error;
+  } catch (err) {
+    // Not JSON -- a 403 body is plain text -- so the status line is all
+    // there is to report, and it is better than nothing at all.
+  }
+  return "the server answered " + response.status;
+}
+
+function scheduleSave() {
+  if (!currentRound || waiting) return;
+  dirty = true;
+  setStatus("saving…", "saving");
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveDraft, SAVE_DELAY_MS);
+}
+
+// Never throws and never lies. A fetch that RESOLVES is not a save: a 413
+// from a body over the limit, a 400 from one nested too deep and a 500 from
+// a disk that filled up all arrive as ordinary responses, and a page that
+// only catches rejections tells the user their work is safe while the server
+// is refusing to store it.
+async function saveDraft(keepalive) {
+  if (!currentRound) return;
+  clearTimeout(saveTimer);
+  saveSeq += 1;
+  const seq = saveSeq;
+  let response;
+  try {
+    response = await fetch(api("/api/draft"), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ round: currentRound.round, seq: seq,
+                             answers: collectAnswers() }),
+      // Set only by the pagehide flush below: it lets that one request
+      // outlive the page that started it.
+      keepalive: keepalive === true,
+    });
+  } catch (err) {
+    return saveBroke("the craft server did not answer.", true);
+  }
+  if (!response.ok) {
+    const reason = await refusal(response);
+    // A 5xx is a machine having a bad moment and is worth trying again; a
+    // refusal would fail identically for ever, and any keystroke reschedules
+    // it anyway.
+    return saveBroke(reason, response.status >= 500);
+  }
+  // `{"ok": true, "stale": true}` is a success and not a failure: a newer
+  // keystroke than this one is already on the disk, which is what the user
+  // wanted, and this client did nothing wrong.
+  if (seq === saveSeq) dirty = false;
+  setStatus("saved", "saved");
+  clearProblem("save");
+}
+
+// The server's messages are written to be embedded and do not end in a full
+// stop, so one is supplied here rather than leaving the user reading
+// "...the request body is too large They are still on this page".
+function sentence(reason) {
+  return /[.!?]$/.test(reason) ? reason : reason + ".";
+}
+
+function saveBroke(reason, retry) {
+  setStatus("not saved — " + reason, "error");
+  setProblem("Your answers have not been saved: " + sentence(reason) +
+             " They are still on this page — do not close it.", "save");
+  if (retry && !expired) {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveDraft, RETRY_MS);
+  }
+}
+
+// Three listeners of its own, beside the counter's, and deliberately not
+// folded into them. The DOM catches what a listener throws and still runs
+// the others on the same element, so a fault in updateCounts cannot take
+// autosave down with it -- which matters here, because the ledger finding
+// was exactly a throw deleting the steps that came after it.
+document.getElementById("questions").addEventListener("input", scheduleSave);
+document.getElementById("questions").addEventListener("change", scheduleSave);
+document.getElementById("questions").addEventListener("click", event => {
+  if (event.target.closest(".delegate")) scheduleSave();
+});
+
+// A closed tab must cost nothing, and the debounce is 400 ms in which it
+// would. keepalive lets the request outlive the page; bodies over 64 KiB are
+// refused by that flag rather than sent, which is the same size class the
+// server refuses anyway, and the ordinary debounced save has already carried
+// everything before it.
+window.addEventListener("pagehide", () => {
+  if (dirty && currentRound && !waiting) saveDraft(true);
+});
+
+// ------------------------------------------------------- restore a draft
+//
+// The other half of autosave, and the half the user sees. A draft that is
+// written and never read back is a file nobody will ever look at.
+//
+// Total by construction and guarded on top of that, for the same reason
+// renderLedger is: the file it reads may have been hand-edited, and a throw
+// here runs BEFORE loadBrief and would leave the brief panel empty on a page
+// that otherwise looked finished.
+async function restoreDraft() {
+  if (!currentRound) return;
+  let stored;
+  try {
+    const response = await fetch(api("/api/draft?round=" + currentRound.round));
+    if (!response.ok) {
+      return setProblem("Your saved answers could not be read back: " +
+                        sentence(await refusal(response)) + " Anything typed " +
+                        "for this round before now may not reappear.", "draft");
+    }
+    stored = await response.json();
+  } catch (err) {
+    return setProblem("The craft server did not answer when this page asked " +
+                      "for your saved answers. Reload the page.", "draft");
+  }
+  if (stored && typeof stored.error === "string") {
+    // The server names the file rather than locating it. Said out loud
+    // because the alternative -- an empty form over a draft that is sitting
+    // on the disk -- invites the user to retype an hour of their own work,
+    // and the first keystroke after that overwrites the only copy.
+    setProblem("Your saved answers for this round could not be read: " +
+               sentence(stored.error) + " The form has opened empty, and the " +
+               "first thing you type will overwrite that file — copy it " +
+               "aside first if you want to keep it.", "draft");
+  }
+  const answers = (stored && stored.answers !== null &&
+                   typeof stored.answers === "object" &&
+                   !Array.isArray(stored.answers)) ? stored.answers : {};
+  let restored = 0;
+  document.querySelectorAll("#questions .question").forEach(card => {
+    if (restoreCard(card, answers[card.dataset.id])) restored += 1;
+  });
+  updateCounts();
+  // The only visible difference between a form that came back and a page
+  // that quietly dropped the file.
+  if (restored) setStatus("draft restored", "saved");
+}
+
+// One card, from whatever the draft holds for it, checking every shape --
+// this reads a file a person may have edited by hand. `delegated` is
+// compared against true rather than tested for truthiness for the same
+// reason answerState does it: a malformed flag must not manufacture a
+// decision the user never made, and a Delegated Decision is never asked
+// again.
+function restoreCard(card, answer) {
+  if (answer === null || typeof answer !== "object" || Array.isArray(answer)) {
+    return false;
+  }
+  let restored = false;
+  if (answer.delegated === true) {
+    const button = card.querySelector(".delegate");
+    if (button) {
+      button.setAttribute("aria-pressed", "true");
+      // The whole state, not just the button. Without this the card does not
+      // grey and the line saying Claude decides this one never appears, so a
+      // reload shows a pressed button with nothing explaining it.
+      card.dataset.delegated = "true";
+      restored = true;
+    }
+  }
+  const choice = Array.isArray(answer.choice) ? answer.choice
+               : (typeof answer.choice === "string" ? [answer.choice] : []);
+  choice.forEach(value => {
+    if (typeof value !== "string") return;
+    let input = null;
+    try {
+      input = card.querySelector('input[value="' + CSS.escape(value) + '"]');
+    } catch (err) {
+      input = null;   // a value no selector can name
+    }
+    if (input) { input.checked = true; restored = true; }
+  });
+  [["[data-other]", answer.other], ["[data-text]", answer.text],
+   ["[data-note]", answer.note]].forEach(pair => {
+    const field = card.querySelector(pair[0]);
+    if (field && typeof pair[1] === "string" && pair[1]) {
+      field.value = pair[1];
+      restored = true;
+    }
+  });
+  return restored;
+}
+
+// ----------------------------------------------------------- send/finish
+
+function setBusy(busy) {
+  document.getElementById("send").disabled = busy;
+  document.getElementById("finish").disabled = busy;
+}
+
+// This is the product. What lands in .answers.json is what the agent folds
+// into CRAFT.md, so nothing here may report a success it did not get: a page
+// that shows "Claude is folding your answers in…" over a request the server
+// refused has taken an hour of somebody's thinking and left no trace of it.
+async function submit(finished) {
+  if (!currentRound || waiting) return;
+  clearTimeout(saveTimer);
+  const round = currentRound.round;
+  const answers = collectAnswers();
+  setBusy(true);
+  // Said before the two round trips rather than after them: a Send that is
+  // slow, or one against a server that has wedged, otherwise leaves two
+  // greyed buttons and no word about why.
+  setStatus("sending…", "saving");
+  // The draft first, and awaited. This is NOT how the answers travel -- POST
+  // carries its own body and the server never promotes a draft -- it is what
+  // is left on the disk if the POST below fails.
+  await saveDraft();
+  let response;
+  try {
+    response = await fetch(api("/api/submit"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      // Exactly true or exactly false: the server answers "false" with a
+      // 400, and bool("false") is True in the language it is written in.
+      body: JSON.stringify({ round: round, answers: answers,
+                             finished: finished === true }),
+    });
+  } catch (err) {
+    return sendBroke("the craft server did not answer.");
+  }
+  if (!response.ok) return sendBroke(await refusal(response));
+
+  lastSeenRound = round;
+  waiting = true;
+  dirty = false;
+  setStatus("sent", "saved");
+  clearProblem("send");
+  const box = document.getElementById("waiting");
+  box.querySelector("h2").textContent = finished === true
+    ? "Sent. Claude is writing the final brief."
+    : "Claude is folding your answers in…";
+  box.querySelector("p").textContent = finished === true
+    ? "Nothing more is needed from you here."
+    : "The next round will appear here when it is ready.";
+  box.setAttribute("data-on", "1");
+}
+
+function sendBroke(reason) {
+  setBusy(false);
+  setStatus("not sent — " + reason, "error");
+  setProblem("Your answers were NOT sent to Claude: " + sentence(reason) +
+             " Nothing has been lost — they are still on this page and in " +
+             "this round's draft file. Try Send again.", "send");
+}
+
+document.getElementById("send").addEventListener("click", () => submit(false));
+
+// Separate from Send, and confirmed first, because it ends the session:
+// after this the agent writes the final brief and there are no more rounds.
+// What is still open goes in the prompt, since that is the fact the decision
+// turns on and it is otherwise a line at the other end of the page.
+document.getElementById("finish").addEventListener("click", () => {
+  if (!currentRound || waiting) return;
+  const open = document.getElementById("counts").textContent;
+  const message = "Finish the crafting session?\n\n" +
+    (open || "Nothing has been answered yet.") +
+    "\n\nClaude will write the final brief from what you have answered. " +
+    "There will be no more rounds.";
+  if (confirm(message)) submit(true);
+});
+
+// ------------------------------------------------------ between rounds
+//
+// One loop with two jobs, because they are the same request. While the user
+// is typing it is the heartbeat that notices the server has gone; after Send
+// it is the poll that swaps the next round in. Two loops would be two timers
+// fighting over one overlay -- and a second Send would start a second copy
+// of the first, both polling for ever.
+async function pollForNextRound() {
+  for (;;) {
+    await sleep(waiting ? POLL_MS : HEARTBEAT_MS);
+    if (expired) return;   // nothing this page can send will be accepted again
+    // A backgrounded tab is not a session in use, and every authenticated
+    // request pushes the server's idle timeout out -- so a forgotten tab
+    // would hold the project lock open for as long as the browser lived.
+    // Waiting is the exception: the user is waiting for exactly this.
+    if (document.hidden && !waiting) continue;
+    let payload;
+    try {
+      const response = await fetch(api("/api/round"));
+      if (!response.ok) {
+        await refusal(response);          // a 403 raises the expired overlay
+        if (!expired) showOverlay("paused");
+        continue;
+      }
+      payload = await response.json();
+    } catch (err) {
+      showOverlay("paused");
+      continue;
+    }
+    showOverlay(null);
+    if (!waiting || typeof lastSeenRound !== "number") continue;
+    // Higher, not merely different. A round file that went away must not
+    // drag the page back to a round it has already answered.
+    if (!payload.ok || !payload.round || !(payload.round.round > lastSeenRound)) {
+      continue;
+    }
+    await swapIn(payload.round);
+  }
+}
+
+async function swapIn(round) {
+  waiting = false;
+  document.getElementById("waiting").removeAttribute("data-on");
+  setBusy(false);
+  setStatus("");
+  try {
+    renderRound(round);
+  } catch (err) {
+    // renderRound guards its own sidebar and the server validates what it
+    // serves, so this should be unreachable -- which is why it is here. The
+    // loop above must not be able to die.
+    panel("questions", "The next round could not be shown. Reload this page.");
+    return;
+  }
+  // The brief is re-read every round, so the user watches the thing they are
+  // building grow. It is also the only visible proof that Send did anything.
+  await settle(restoreDraft);
+  await settle(loadBrief);
+}
+
+// ------------------------------------------------------------- overlays
+
+const OVERLAY = {
+  paused: ["Connection paused",
+           "The craft server stopped responding. This page will reconnect " +
+           "on its own."],
+  // Not a pause, and it must not be described as one. `serve` mints a new
+  // session key every time it starts, so a page whose server was restarted
+  // holds a key nothing will accept again, however the port turns out.
+  // Telling this user to wait is telling them to wait for ever, while
+  // everything they type goes nowhere.
+  expired: ["This page's session has ended",
+            "The craft server was restarted and issued a new key, so nothing " +
+            "typed here can be saved. Open the new link printed in your " +
+            "terminal."],
+};
+
+function showOverlay(kind) {
+  const box = document.getElementById("overlay");
+  if (expired) kind = "expired";   // an ended session does not un-end
+  if (!kind) { box.removeAttribute("data-on"); return; }
+  box.querySelector("h2").textContent = OVERLAY[kind][0];
+  box.querySelector("p").textContent = OVERLAY[kind][1];
+  box.setAttribute("data-on", "1");
+}
+
+// Runs one step and absorbs whatever it throws, so a fault in one step of a
+// sequence cannot delete the steps after it. That is the exact shape of the
+// ledger finding: a throw in a sidebar panel took the counter and the filter
+// with it, because they ran afterwards.
+async function settle(step) {
+  try {
+    await step();
+  } catch (err) {
+    setProblem("Part of this page did not finish loading: " +
+               sentence(String(err)) + " Reload it if anything looks wrong.",
+               "page");
+  }
+}
+
+(async function start() {
+  await settle(loadRound);
+  await settle(restoreDraft);
+  await settle(loadBrief);
+  pollForNextRound();
+})();
 </script>
 </body>
 </html>

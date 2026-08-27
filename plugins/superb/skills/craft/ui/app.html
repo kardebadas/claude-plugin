@@ -110,6 +110,12 @@
   #overlay, #waiting { position:fixed; inset:0; display:none; place-items:center;
                        background:rgba(20,24,31,.72); color:#fff; z-index:20;
                        text-align:center; padding:24px; }
+  /* The connection overlay sits ABOVE the between-rounds box, and the order
+     is load-bearing: both are up at once after Send, and what the user needs
+     then is the news that the server stopped answering -- not the line
+     saying the next round is on its way. At equal z-index the win went to
+     whichever came later in the document, which was the wrong one. */
+  #overlay { z-index:21; }
   #overlay[data-on], #waiting[data-on] { display:grid; }
   .hidden { display:none !important; }
   #brief h1,#brief h2,#brief h3 { margin:14px 0 6px; }
@@ -245,14 +251,46 @@ function renderRound(round) {
     return;
   }
 
+  const questions = Array.isArray(round.questions) ? round.questions : [];
+  // The round's own words, and the only string on this page the agent
+  // addresses to the reader rather than about a question. textContent like
+  // every other one of them.
+  const note = typeof round.note === "string" && round.note.trim()
+    ? round.note.trim() : "";
+
+  if (!questions.length) {
+    // The closing round, and the same argument as the guard above one step
+    // later: a round object carrying `questions: []` is TRUTHY, so it walked
+    // straight into a forEach over nothing and left an empty column -- which
+    // is the blank page that guard exists to prevent, arriving by the route
+    // the skill actually tells the agent to take.
+    sessionEnded = true;
+    host.append(el("div", { class: "card" },
+      el("h3", { text: "Nothing left to ask" }),
+      el("p", { class: "why",
+                text: note || "Claude posted this round with no questions in " +
+                              "it. Nothing here is waiting on you — the brief " +
+                              "beside this is where the session's work is." })));
+  } else if (note) {
+    // A note beside questions is a lead-in rather than a farewell. Dropping
+    // it would be the same silence: accepted, stored, shown to nobody.
+    host.append(el("div", { class: "card" }, el("p", { class: "why", text: note })));
+  }
+
   let area = null;
-  (round.questions || []).forEach(q => {
+  questions.forEach(q => {
     if (q.area && q.area !== area) {
       area = q.area;
       host.append(el("div", { class: "area", text: area }));
     }
     host.append(questionCard(q));
   });
+  // Nothing to send on a closing round, so the buttons stop offering to.
+  // Send would write an answers file for a `wait` that is no longer running
+  // and leave this page waiting for ever for a round nobody will write; and
+  // swapIn re-enables them, so a later round that does carry questions gets
+  // its buttons back.
+  if (!questions.length) setBusy(true);
   // Before applyFilter and updateCounts, and it must not be able to stop
   // them: see showLedger.
   showLedger(round.ledger);
@@ -531,6 +569,13 @@ let dirty = false;            // typing this page has not seen reach the disk
 let waiting = false;          // Send is done; the next round is Claude's move
 let lastSeenRound = null;
 let expired = false;          // 403: a restarted server, a key this page lacks
+// The other ending, and the one every session reaches: there are no more
+// rounds. Set when Finish is accepted, and when a round arrives with nothing
+// left to ask -- the two ways *Ending* says a craft session finishes. Both
+// are followed by the agent running `stop`, which reaches this page as a
+// fetch that fails and nothing else, so without this flag the last thing a
+// session says is that the page will reconnect on its own.
+let sessionEnded = false;
 // What the message in the footer is ABOUT, so that a later success clears
 // only its own kind. A save that lands must not silently erase a warning
 // that the user's answers were never sent.
@@ -814,6 +859,11 @@ async function submit(finished) {
 
   lastSeenRound = round;
   waiting = true;
+  // The server took it, so this session is over whatever happens next: the
+  // agent's remaining moves are the final brief and `stop`. Recorded here
+  // rather than at the click, because a Send the server refused ends
+  // nothing.
+  if (finished === true) sessionEnded = true;
   dirty = false;
   setStatus("sent", "saved");
   clearProblem("send");
@@ -937,11 +987,28 @@ const OVERLAY = {
             "The craft server was restarted and issued a new key, so nothing " +
             "typed here can be saved. Open the new link printed in your " +
             "terminal."],
+  // The third ending, and the one every session actually reaches. `stop` is
+  // the last line of the skill's *Ending*, and a stopped server produces a
+  // connection error rather than a 403 -- so with only two states, the last
+  // sentence of every finished session was "this page will reconnect on its
+  // own", about a server that was shut down on purpose at the one moment
+  // there was nothing left to reconnect to.
+  finished: ["This session is finished",
+             "The craft server has been shut down, which is how a craft " +
+             "session ends — this is not a hiccup and there is nothing to " +
+             "wait for. Claude has everything you sent, and the final brief " +
+             "is in the terminal you started this from. You can close this " +
+             "page."],
 };
 
 function showOverlay(kind) {
   const box = document.getElementById("overlay");
-  if (expired) kind = "expired";   // an ended session does not un-end
+  // Which of the three a lost connection turns out to be. `finished` wins
+  // over `expired` because a session that is over has no new link to open,
+  // and both outrank a pause: a pause is the only one of the three worth
+  // waiting through, and saying it when it is false is the whole finding.
+  if (kind && sessionEnded) kind = "finished";
+  else if (expired) kind = "expired";   // an ended session does not un-end
   if (!kind) { box.removeAttribute("data-on"); return; }
   box.querySelector("h2").textContent = OVERLAY[kind][0];
   box.querySelector("p").textContent = OVERLAY[kind][1];

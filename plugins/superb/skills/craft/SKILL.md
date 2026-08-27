@@ -192,7 +192,14 @@ a round by filename and would otherwise write its answers over another one.
 | `type` | required — `single` / `multi` / `text` / `longtext` |
 | `options` | required for `single` and `multi`: a non-empty list of objects, each with a non-blank string `value` |
 | `area`, `why` | optional; `why` is the *why this matters* §4 asks for |
-| `allow_other`, `delegable` | optional booleans |
+| `allow_other` | optional boolean, **default false** — `single` and `multi` only. Set it to `true` to give me a free-text box beside your options, for when none of them is what I mean |
+| `delegable` | optional boolean, **default true** — every question gets a *you decide* button unless you set this to `false`. Set it `false` on the questions only I can answer: my budget, my users, what the product is for. A delegated answer becomes a Delegated Decision and is never asked again, so offering that on a question you cannot actually decide is worse than not offering it |
+
+`note` — optional; one or two sentences in your own words, shown at the top
+of the questions column. On the closing round *Ending* describes — the one
+with an empty `questions` list — it is the whole page, so write it: it is
+the last thing I read here, and a round with no questions and no note is a
+blank screen.
 
 `ledger` — optional, and it is where the confirmed decisions, assumptions,
 contradictions and delegated decisions the sections below tell you to keep
@@ -262,10 +269,15 @@ questions are still unanswered, name them and report
 gets `VISION CLEAR`.
 
 If you conclude the vision is clear before I press Finish, write a final
-round with an empty `questions` list and a closing note, then stop.
+round with an empty `questions` list and a `note` saying so, then stop. The
+page turns that round into the closing screen — my last screen of the
+session, with the ledger beside it — and the `note` is all of it, so a round
+with nothing in either is a blank page I am left staring at.
 
 Either way, run `python3 "$SKILL/ui/craftui.py" stop --project-dir .` when
-the session is over, so the project is free for the next one.
+the session is over, so the project is free for the next one. Stopping is
+not rude: once I have pressed Finish, or once a closing round has landed,
+the page says the session is finished rather than waiting for you.
 
 ---
 

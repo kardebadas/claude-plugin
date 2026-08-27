@@ -111,6 +111,21 @@ def validate_round(obj, expected_round=None):
         errors.append("questions: missing or not a list")
     else:
         _validate_questions(questions, errors)
+
+    # The round's own voice, and the whole content of a closing round: an
+    # empty `questions` list plus the note saying there is nothing left to
+    # ask. Optional on every round, and null reads as absent -- the rule the
+    # ledger already keeps -- because most rounds say everything they have to
+    # say in their questions.
+    #
+    # What it may not be is a non-string. The page renders it as textContent,
+    # where a dict or a list arrives as "[object Object]": the same failure
+    # LEDGER_TEXT_FIELDS is checked for, in the one field a user reads as a
+    # sentence addressed to them.
+    note = obj.get("note")
+    if note is not None and not isinstance(note, str):
+        errors.append("note: not a string")
+
     # After the questions and outside their branch: a round whose questions
     # are unusable still has a ledger, and reporting one problem per fix is
     # how a round takes four attempts to land.

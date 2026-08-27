@@ -175,6 +175,60 @@ class ValidateRoundShapeTest(unittest.TestCase):
         self.assertEqual(obj, before)
 
 
+class ValidateRoundNoteTest(unittest.TestCase):
+    """`note`: what a closing round is made of.
+
+    *Ending* tells the agent to close a session with a round whose
+    `questions` list is empty and whose note says why. Validation did not
+    look at the field at all, so the note was accepted, written to disk and
+    shown to nobody -- and the round carrying it rendered as a blank column.
+
+    Optional, because most rounds have nothing to say outside their
+    questions, and null reads as absent: the rule the ledger already keeps.
+    What it may not be is a non-string. The page renders it as textContent,
+    where an object arrives as "[object Object]" -- the same failure
+    LEDGER_TEXT_FIELDS exists to report, in the one place a round speaks to
+    the user in its own voice.
+    """
+
+    def closing(self, **kw):
+        obj = {"round": 1, "questions": []}
+        obj.update(kw)
+        return validate_round(obj)
+
+    def test_a_closing_round_with_a_note_is_valid(self):
+        self.assertEqual(self.closing(note="Your vision is clear."), [])
+
+    def test_a_note_on_a_round_that_still_has_questions_is_valid(self):
+        obj = a_round(question())
+        obj["note"] = "Three of these left, and then we are done."
+        self.assertEqual(validate_round(obj), [])
+
+    def test_an_absent_note_is_valid(self):
+        self.assertEqual(self.closing(), [])
+
+    def test_a_null_note_reads_as_an_absent_one(self):
+        self.assertEqual(self.closing(note=None), [])
+
+    def test_a_note_that_is_not_a_string_is_reported(self):
+        for value in ({"text": "done"}, ["done"], 7, True):
+            with self.subTest(note=value):
+                self.assertEqual(self.closing(note=value), ["note: not a string"])
+
+    def test_a_bad_note_is_reported_beside_the_rounds_other_problems(self):
+        """Reporting one problem per fix is how a round takes four attempts
+        to land -- the argument the ledger check is placed on, applied here."""
+        self.assertEqual(
+            validate_round({"questions": [], "note": 7}),
+            ["round: missing or not an integer", "note: not a string"])
+
+    def test_validation_does_not_mutate_a_round_carrying_a_note(self):
+        obj = {"round": 1, "questions": [], "note": "done"}
+        before = copy.deepcopy(obj)
+        validate_round(obj)
+        self.assertEqual(obj, before)
+
+
 class ValidateRoundAgainstItsFilenameTest(unittest.TestCase):
     """`expected_round`: the one thing nothing else here ties together.
 

@@ -3388,6 +3388,97 @@ class RenderedPageTest(ServerTestCase):
         self.assertIn("No questions yet", dom)
         self.assertIn("Nothing recorded yet.", dom)
 
+    # The closing round: an empty `questions` list and a note, which is what
+    # SKILL.md's *Ending* tells the agent to write when the vision is clear
+    # before Finish is pressed. The note carries the injection string too,
+    # because it is the one part of a round the agent writes in its own voice
+    # and it reaches the page by the same route a title does.
+    CLOSING = {
+        "round": 4,
+        "project": "music-app",
+        "questions": [],
+        "note": "Your vision is clear — nothing left to ask. " + HOSTILE,
+        "ledger": {
+            "decisions": [{"id": "DEC-014", "title": "Playlists are private"}],
+        },
+    }
+
+    def test_a_closing_round_is_a_page_that_says_so_and_not_an_empty_column(self):
+        """A round object with `questions: []` is TRUTHY, so it walked past
+        the `!round` guard and forEach'd over nothing: an empty column, which
+        is the exact failure that guard's own comment describes, one step
+        later -- and the note written for this moment was accepted by the
+        server, stored on the disk and absent from the document."""
+        write_json_atomic(self.session.questions_path(4), self.CLOSING)
+        dom = self.rendered()
+        self.assertIn("Nothing left to ask", dom)
+        self.assertIn("Your vision is clear", dom)
+        # The ledger is the session's record, and the last round is where it
+        # is most worth reading. It renders beside the note, not instead of it.
+        self.assertIn("DEC-014", dom)
+        # ...and the note is agent-written text like every other string in a
+        # round file. A closing note assigned as HTML would be the second
+        # innerHTML on this page, on the one string nothing else escapes.
+        self.assertIn("&lt;img", dom)
+        self.assertNotIn("<img", dom)
+        self.assertIn("<title>craft</title>", dom)
+
+    def test_a_closing_round_with_no_note_still_says_something(self):
+        """The note is optional at the schema, so the page cannot depend on
+        it to avoid a blank column."""
+        write_json_atomic(self.session.questions_path(4),
+                          {"round": 4, "questions": []})
+        dom = self.rendered()
+        self.assertIn("Nothing left to ask", dom)
+        # A different state with a different cause: a round HAS been posted.
+        self.assertNotIn("No questions yet", dom)
+
+    def test_a_note_on_a_round_that_still_has_questions_is_shown_too(self):
+        """Accepted, stored and never shown is the defect itself. A field the
+        schema allows on any round has to reach the page on any round."""
+        round_obj = json.loads(json.dumps(self.ROUND))
+        round_obj["note"] = "Three of these left, and then we are done."
+        write_json_atomic(self.session.questions_path(1), round_obj)
+        dom = self.rendered()
+        self.assertIn("Three of these left", dom)
+        self.assertIn("How should users authenticate?", dom)
+
+    # The two option flags, whose defaults are opposite and were documented as
+    # one thing. Q-default sets neither; Q-opted-out sets both, each away from
+    # its default.
+    FLAGS = {
+        "round": 1,
+        "questions": [
+            {"id": "Q-default", "importance": "REQUIRED", "type": "single",
+             "title": "Neither flag is set", "options": [{"value": "a"}]},
+            {"id": "Q-opted-out", "importance": "REQUIRED", "type": "single",
+             "title": "Only you can answer this", "delegable": False,
+             "allow_other": True, "options": [{"value": "b"}]},
+        ],
+    }
+
+    def test_the_two_option_flags_default_in_opposite_directions(self):
+        """`allow_other` is opt-in and `delegable` is opt-out, and nothing
+        pinned either direction. An agent that omits `delegable` gets "you
+        decide" on every question, including the ones where handing the
+        decision over makes no sense -- and a flipped default would have been
+        a silent change to what the round file means."""
+        write_json_atomic(self.session.questions_path(1), self.FLAGS)
+        dom = self.rendered()
+        found = re.search(r'(?s)<div id="questions">(.*?)</div>\s*</section>', dom)
+        self.assertIsNotNone(found, dom[:400])
+        column = found.group(1)
+        parts = column.split('id="q-Q-opted-out"')
+        self.assertEqual(len(parts), 2, column)
+        default, opted_out = parts
+        # delegable defaults to true: the button is there without the key.
+        self.assertIn("you decide", default)
+        # allow_other defaults to false: no free-text field without the key.
+        self.assertNotIn("data-other", default)
+        # ...and each flag, set, does the opposite of its default.
+        self.assertNotIn("you decide", opted_out)
+        self.assertIn("data-other", opted_out)
+
 
 # The driver appended to a copy of the page. It runs after the page's own
 # script, waits for renderRound to have built the cards -- loadRound is a
@@ -4490,6 +4581,106 @@ class LivePageTest(DrivenTestCase):
         self.assertEqual(
             read_json(self.session.answers_path(1))["answers"]["Q-1"],
             {"choice": ["email"]})
+
+    # ------------------------------------------------------------------
+    # Fix round 2. The last screen of a session, which is the one screen
+    # every session reaches.
+    # ------------------------------------------------------------------
+
+    # Finish is accepted, and then the agent runs `stop` -- the last line of
+    # *Ending*, and the last thing that happens in every browser session. A
+    # stopped server produces a connection error and never a 403, so the page
+    # took the only path it had and promised to reconnect to a server that was
+    # shut down on purpose. The page's own fetch is replaced rather than the
+    # real server stopped, for the reason the paused test gives: the browser's
+    # clock and Python's cannot be coordinated mid-run.
+    FINISHED_THEN_THE_SERVER_STOPS = """
+    return (async () => {
+      const waiting = document.getElementById("waiting");
+      const overlay = document.getElementById("overlay");
+      window.confirm = () => true;
+      document.getElementById("finish").click();
+      await waitFor(() => waiting.hasAttribute("data-on"), 8000);
+      window.fetch = () => Promise.reject(new TypeError("Failed to fetch"));
+      const shown = await waitFor(() => overlay.hasAttribute("data-on"), 20000);
+      return {
+        shown: !!shown,
+        text: overlay.textContent,
+        overlayZ: getComputedStyle(overlay).zIndex,
+        waitingZ: getComputedStyle(waiting).zIndex,
+      };
+    })();
+    """
+
+    def test_the_end_of_a_finished_session_is_not_described_as_a_pause(self):
+        """The last thing a craft session said, every single time.
+
+        There were two overlay states and only one of them could be reached
+        by a stopped server, so the sentence a user read after pressing
+        Finish was "this page will reconnect on its own" -- about a server
+        the agent had just shut down, at the one moment there was nothing
+        left to reconnect to. `expired` is set exclusively by a 403, which a
+        stopped server cannot produce.
+        """
+        got = self.drive(self.FINISHED_THEN_THE_SERVER_STOPS, budget=60000)
+        self.assertTrue(got["shown"], got)
+        self.assertIn("session is finished", got["text"])
+        self.assertNotIn("reconnect on its own", got["text"])
+        # It is drawn ABOVE the between-rounds box, which is up at the
+        # same moment. Equal z-index gave the win to whichever came later in
+        # the document, and that was the box saying the next round is coming.
+        self.assertGreater(int(got["overlayZ"]), int(got["waitingZ"]))
+        self.assertIs(read_json(self.session.answers_path(1))["finished"], True)
+
+    # The other ending, and the one the agent chooses: a round with an empty
+    # `questions` list and a closing note, followed by the same `stop`.
+    CLOSING = {
+        "round": 1,
+        "questions": [],
+        "note": "Your vision is clear — nothing left to ask.",
+    }
+
+    CLOSING_THEN_THE_SERVER_STOPS = """
+    return (async () => {
+      const overlay = document.getElementById("overlay");
+      const heading = document.querySelector("#questions h3").textContent;
+      const column = document.getElementById("questions").textContent;
+      const sendDisabled = document.getElementById("send").disabled;
+      const finishDisabled = document.getElementById("finish").disabled;
+      window.fetch = () => Promise.reject(new TypeError("Failed to fetch"));
+      const shown = await waitFor(() => overlay.hasAttribute("data-on"), 20000);
+      return {
+        heading: heading,
+        column: column,
+        sendDisabled: sendDisabled,
+        finishDisabled: finishDisabled,
+        shown: !!shown,
+        text: overlay.textContent,
+      };
+    })();
+    """
+
+    def test_a_closing_round_ends_the_session_on_the_page_as_well(self):
+        """The agent's own ending, which the page did not know about.
+
+        `stop` follows a closing round exactly as it follows Finish, so this
+        user read the same false promise -- while looking at a page that had
+        nothing on it to read at all. And the two buttons must stop offering:
+        Send on a closing round writes an answers file for a `wait` that is
+        no longer running, and leaves the page waiting for ever for a round
+        nobody is going to write.
+        """
+        got = self.drive(self.CLOSING_THEN_THE_SERVER_STOPS,
+                         round_obj=self.CLOSING, budget=60000)
+        self.assertEqual(got["heading"], "Nothing left to ask")
+        self.assertIn("Your vision is clear", got["column"])
+        self.assertTrue(got["sendDisabled"], got)
+        self.assertTrue(got["finishDisabled"], got)
+        self.assertTrue(got["shown"], got)
+        self.assertIn("session is finished", got["text"])
+        self.assertNotIn("reconnect on its own", got["text"])
+        # Nothing was sent, because nothing could be.
+        self.assertFalse(self.session.answers_path(1).exists())
 
 
 if __name__ == "__main__":

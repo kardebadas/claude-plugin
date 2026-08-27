@@ -16,7 +16,7 @@ Personal [Claude Code](https://claude.com/claude-code) and Codex plugins.
 Add the repository's local marketplace, then install `superb` from it:
 
 ```
-codex plugin marketplace add /path/to/claude-plugin/.agents/plugins
+codex plugin marketplace add /path/to/claude-plugin
 codex plugin add superb@personal
 ```
 

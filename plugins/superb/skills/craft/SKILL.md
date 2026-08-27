@@ -1,6 +1,7 @@
 ---
 name: craft
 description: Use when a product idea is still vague and needs to become a clear definition of what to build — "let's craft an app like X", "help me define what I actually want", "clarify this idea before we plan it". Also use before planning or implementation when requirements, UX, domain behaviour, or technical preferences have not been decided. Not for planning, task breakdown, or writing code.
+argument-hint: "[ui|file]"
 ---
 
 # Crafting Skill
@@ -101,6 +102,167 @@ It should contain a structured questionnaire tailored specifically to the produc
 I should be able to open the file, answer many questions at once, save it, and then ask you to review it.
 
 Do not generate a generic universal questionnaire without adapting it to the application.
+
+That questionnaire is what **file mode** puts in `CRAFT.md`. In browser
+mode it does not go there at all — §2b decides which, and it decides first.
+
+---
+
+# 2b. Delivery — the browser, or the file
+
+There is a browser front-end for this skill. Decide **once, at the start of
+the session**, how questions reach me. Say which mode you are in, in one
+line, and then stay in it.
+
+* `/superb:craft ui` — the browser. `/superb:craft file` — `CRAFT.md`.
+* With no argument: try the browser, fall back to the file.
+
+**Everything else in this file applies identically in both modes** — question
+design, the four importance levels, the areas to explore, challenging my
+thinking, the strict boundaries, the three end statuses. Only the surface I
+answer on changes.
+
+Below, `$SKILL` is the directory this file lives in. You will be running from
+my project directory, so use its absolute path.
+
+## Starting the browser
+
+```sh
+python3 "$SKILL/ui/craftui.py" serve --project-dir . --open
+```
+
+It prints one line of JSON. Give me the **complete** `url` from it, query
+string included — the session key lives in that query string and the server
+refuses every request that arrives without it.
+
+Then add `.craft/` to my project's `.gitignore` if nothing there covers it
+already, and say so in one line.
+
+**Falling back is never a failure.** No `python3`, a `serve` that fails, or
+`LOCKED` → say so in one line and carry on in file mode. A crafting session
+is never blocked by a web server.
+
+`LOCKED` means another craft session holds this project **right now**. The
+lock is held by the kernel, so it cannot be stale, and there is no override
+flag — do not invent one. Tell me the pid it names, let me decide whether to
+stop that session, and go on in file mode meanwhile. One exception: a
+`LOCKED` immediately after a `stop` that said `NOSERVER` is that server still
+draining its last write. Try `serve` once more before you report contention.
+
+## What this changes about what you write
+
+**In browser mode, `CRAFT.md` holds the accumulated brief and nothing else.
+Never the questionnaire.** The questions live in
+`.craft/round-NNN.questions.json`. The page shows me the brief beside the
+questions and re-reads it every round, so I watch it grow as I answer — which
+is exactly what a questionnaire pasted into it would bury.
+
+In file mode, `CRAFT.md` holds both, exactly as §2 describes.
+
+Writing the questionnaire into `CRAFT.md` while a browser session is live
+means I answer the same questions in two places and you fold in two
+conflicting sets. Do not do it, however helpful it looks.
+
+## The loop
+
+1. Write `.craft/round-NNN.questions.json`.
+2. Run `python3 "$SKILL/ui/craftui.py" wait --project-dir . --round NNN`
+   **as a background command**, and end your turn. Do not poll in a loop, and
+   do not ask me in chat what I am answering in the browser.
+3. Act on the one line it prints. Fold the answers into `CRAFT.md`, then
+   write the next round. The questionnaire gets **smaller** every pass,
+   exactly as *Second pass* says.
+
+### The round file
+
+`round` — an integer, and it must equal the NNN in the filename. The server
+compares them and refuses the round if they disagree, because the page picks
+a round by filename and would otherwise write its answers over another one.
+
+`questions` — a list. Each entry is an object:
+
+| Field | |
+|---|---|
+| `id` | required; unique within the round |
+| `importance` | required — `REQUIRED` / `IMPORTANT` / `PREFERENCE` / `OPTIONAL` |
+| `title` | required, non-empty — the question itself |
+| `type` | required — `single` / `multi` / `text` / `longtext` |
+| `options` | required for `single` and `multi`: a non-empty list of objects, each with a non-blank string `value` |
+| `area`, `why` | optional; `why` is the *why this matters* §4 asks for |
+| `allow_other`, `delegable` | optional booleans |
+
+`ledger` — optional, and it is where the confirmed decisions, assumptions,
+contradictions and delegated decisions the sections below tell you to keep
+become a sidebar I can read while I answer. Four keys — `decisions`,
+`assumptions`, `contradictions`, `delegated` — and **each one must be a
+list** of objects, each with an `id`. A contradiction may also carry
+`between`, a list of question ids.
+
+A round that breaks any of this is not served: I get an error in the browser
+instead of questions. `status` prints the same complaint, field by field, so
+run it if you are unsure what the page is refusing.
+
+### What `wait` says
+
+One line on stdout, and the exit code says the same thing as the line.
+
+| Exit | Printed | What you do |
+|---|---|---|
+| 0 | `SUBMITTED round=N answers=…` | Read that file, fold it in, write round N+1. |
+| 0 | `FINISHED round=N answers=…` | Read it, fold it in, then see *Ending*. |
+| 2 | `TIMEOUT round=N` | **A heartbeat, not a failure** — I am still thinking. Run `wait` again. |
+| 3 | `NOSERVER` | The server is gone. See *Restarting*. |
+| 1 | `ERROR …` | A state waiting again cannot fix. Read the line; fix it, or fall back to file mode. |
+| 64 | usage | You called the command wrong. Fix the command line. |
+
+**Re-arm `wait` on 2, and never on 1 or 64.** A `TIMEOUT` is me still typing.
+A `1` is a condition another wait cannot change, and `64` means the command
+itself was malformed — that code exists precisely so you can tell it apart
+from a heartbeat.
+
+The other three commands share the codes. `serve`: `0` and a line of JSON,
+`4` `LOCKED`, `1` `ERROR`. `stop`: `0` `STOPPED`, `3` `NOSERVER`, `1` if it
+could not stop the server. `status` always exits `0` and prints one JSON
+object describing the session — it writes nothing, so it is safe to run at
+any point just to look.
+
+### Restarting
+
+Run `serve` again. It reuses the port, so a tab I left open lands back on
+the right server — but **it mints a new key every time**, and the key is in
+the URL. The URL I already have is dead for good and will keep answering
+403. Give me the new one; do not tell me to reload.
+
+## Reading the answers
+
+`.craft/round-NNN.answers.json` carries `round`, `submitted_at`, `finished`,
+and `answers` keyed by question id. Four states, and they are not the same
+thing:
+
+| In the file | Means |
+|---|---|
+| `choice` / `text` / `other` | Answered. Fold it in and close the question. |
+| `"delegated": true` | **I do not care.** Record it under *Delegated Decisions* and never ask it again. |
+| `"skipped": true` | Still open. Ask it again next round. |
+| the id is absent | The same as skipped. |
+
+A `note` is mine in my own words and can sit beside any of those. Fold it in
+as a qualifier; never discard it because the `choice` next to it looked
+sufficient.
+
+## Ending
+
+`FINISHED` means **I have stopped answering.** It does not mean the vision is
+clear. Do the final fold, then judge the brief on its merits: if REQUIRED
+questions are still unanswered, name them and report
+`CRAFT STATUS: MORE CLARIFICATION NEEDED`. Only a genuinely complete brief
+gets `VISION CLEAR`.
+
+If you conclude the vision is clear before I press Finish, write a final
+round with an empty `questions` list and a closing note, then stop.
+
+Either way, run `python3 "$SKILL/ui/craftui.py" stop --project-dir .` when
+the session is over, so the project is free for the next one.
 
 ---
 

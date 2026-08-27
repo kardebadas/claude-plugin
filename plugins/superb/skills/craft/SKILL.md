@@ -122,8 +122,11 @@ design, the four importance levels, the areas to explore, challenging my
 thinking, the strict boundaries, the three end statuses. Only the surface I
 answer on changes.
 
-Below, `$SKILL` is the directory this file lives in. You will be running from
-my project directory, so use its absolute path.
+Below, `$SKILL` is the directory this file lives in. Your harness tells you
+when it loads this skill — the line reading *"Base directory for this skill:"*.
+Use that absolute path. Do not guess it, and do not search for it: you will be
+running from my project directory, not from the skill's, and a wrong guess
+looks exactly like the UI being unavailable.
 
 ## Starting the browser
 

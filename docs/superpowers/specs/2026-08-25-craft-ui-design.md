@@ -88,8 +88,14 @@ Created in the user's project, beside `CRAFT.md`:
     round-001.draft.json         # server writes on every change
     round-001.answers.json       # server writes on Send / Finish
     round-002.questions.json
+    server.log                   # child stderr, appended
+    serve-error                  # written instead of server-info when start fails
     ...
 ```
+
+`server.log` is load-bearing, not debris: it is where the watchdog's *"your lock
+file was removed, shutting down"* notice lands, and that notice is the entire
+mitigation for the post-acquire removal case in *Deliberate limitations*.
 
 The skill adds `.craft/` to the project's `.gitignore` if it is not already
 covered, and says so in one line.
@@ -277,6 +283,8 @@ Blocks until one of three things happens, prints one line, exits:
 | user pressed Send | `SUBMITTED round=2 answers=.craft/round-002.answers.json` | 0 |
 | user pressed Finish | `FINISHED round=2 answers=.craft/round-002.answers.json` | 0 |
 | nothing for `--timeout` | `TIMEOUT round=2` | 2 |
+| the answers file is there and unreadable | `ERROR <name> …` | 1 |
+| the flags were wrong | argparse usage text | 64 |
 | server not running | `NOSERVER` | 3 |
 
 (Exit `4` is `serve`'s "another session holds the lock" — see the Session lock
@@ -373,7 +381,8 @@ Layout: questions carry the page, brief and ledger pinned right.
 **Left — the question stream.** Grouped by `area`, importance chip on each, and
 *"why this matters"* rendered always-visible rather than folded — that sentence
 is most of craft's value and hiding it would reduce the page to a form. Controls
-render per `type`; `allow_other` adds a free-text "Other"; `delegable` adds the
+render per `type`; `allow_other` (default **off**) adds a free-text "Other";
+`delegable` (default **on** — omit it and every question gets one) adds the
 **you decide** button. Every question carries an optional note field, which is
 where *"email, but I want passkeys later"* goes — the nuance a radio button
 destroys.
@@ -401,8 +410,11 @@ poll is also how a fold that takes several minutes stays legible rather than
 looking hung.
 
 **Connection state.** If the server dies the page shows a paused overlay and
-reconnects on its own when it returns — a restart on the same project directory
-reuses the port, so the open tab recovers without a new URL.
+retries. **A restart does not recover the tab** — see *Port selection* above:
+`serve` reuses the port but mints a new key, so the old tab gets a 403 for ever
+and the page says the session expired rather than pretending to reconnect. Give
+the human the new URL. This paragraph previously claimed the opposite; the claim
+was refuted by measurement and is recorded here so it is not restored.
 
 **Accepted limitation.** Rendering `CRAFT.md` needs a markdown renderer, and
 "stdlib only, no npm" means a small hand-written one in Python: headings, bold,
@@ -517,6 +529,11 @@ it stays a consumer, and is refreshed by `marketplace update` after a push.
   `(process, inode)` — the semantics this design specifically rejects, under
   which a refused acquirer's own `close()` drops the holder's lock. Sound on
   local filesystems, including WSL's 9p/drvfs, which was tested.
+- **A submitted round is bounded by nesting depth, not only by bytes.** The
+  byte ceiling alone cannot bound the write: `indent=2` amplified a 1 MiB body
+  into ~928 MB on disk, measured. The real bound is `MAX_BODY_DEPTH`, and an
+  answer shape deeper than that is refused with a 400. A round of answers is
+  structurally flat, so this only bites something malformed.
 - **The Windows lock path is built but unproven.** `msvcrt.locking` is written to
   the same contract as `fcntl.flock` and sits behind a one-function dispatch, but
   no Windows machine has run it. Treat Windows as built-but-unverified until

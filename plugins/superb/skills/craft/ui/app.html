@@ -152,14 +152,14 @@
 
 <footer>
   <div id="problem" role="alert"></div>
-  <button id="send">Send to Claude</button>
+  <button id="send">Send to agent</button>
   <button id="finish">Finish</button>
   <span id="counts" aria-live="polite"></span>
 </footer>
 
 <div id="overlay"><div><h2>Connection paused</h2>
   <p>The craft server stopped responding. This page will reconnect on its own.</p></div></div>
-<div id="waiting"><div><h2>Claude is folding your answers in…</h2>
+<div id="waiting"><div><h2>The agent is folding your answers in…</h2>
   <p>The next round will appear here when it is ready.</p></div></div>
 
 <script>
@@ -228,7 +228,7 @@ function questionCard(q) {
     card.append(el("button", { class: "delegate", type: "button",
                                "aria-pressed": "false", text: "you decide" }));
     card.append(el("span", { class: "hint",
-                             text: "Claude decides this one — your note still travels with it." }));
+                             text: "The agent decides this one — your note still travels with it." }));
   }
   return card;
 }
@@ -245,7 +245,7 @@ function renderRound(round) {
     host.append(el("div", { class: "card" },
       el("h3", { text: "No questions yet" }),
       el("p", { class: "why",
-                text: "Claude has not posted a round. This page will show it when it lands." })));
+                text: "The agent has not posted a round. This page will show it when it lands." })));
     showLedger(null);
     updateCounts();
     return;
@@ -268,7 +268,7 @@ function renderRound(round) {
     host.append(el("div", { class: "card" },
       el("h3", { text: "Nothing left to ask" }),
       el("p", { class: "why",
-                text: note || "Claude posted this round with no questions in " +
+                text: note || "The agent posted this round with no questions in " +
                               "it. Nothing here is waiting on you — the brief " +
                               "beside this is where the session's work is." })));
   } else if (note) {
@@ -369,7 +369,7 @@ function collectAnswers() {
     const delegate = card.querySelector(".delegate");
     if (delegate && delegate.getAttribute("aria-pressed") === "true") {
       // Delegation beats every other field -- schema.answer_state says so --
-      // but the note rides along. It is the sentence that tells Claude WHY it
+      // but the note rides along. It is the sentence that tells the agent WHY it
       // was handed the decision, and dropping it would be the one deletion
       // this page makes on the user's behalf.
       answers[id] = written ? { delegated: true, note: written } : { delegated: true };
@@ -554,7 +554,7 @@ async function loadRound() {
 
 const SAVE_DELAY_MS = 400;    // one debounce, not one request per keystroke
 const RETRY_MS = 2000;        // after a save that failed for want of a server
-const POLL_MS = 1000;         // while waiting for Claude to post the next round
+const POLL_MS = 1000;         // while waiting for the agent to post the next round
 const HEARTBEAT_MS = 5000;    // ...and while it is still the user's turn
 
 let saveTimer = null;
@@ -575,7 +575,7 @@ let saveSeq = 0;
 // edits are counted here and that is the question the guard asks.
 let editSeq = 0;
 let dirty = false;            // typing this page has not seen reach the disk
-let waiting = false;          // Send is done; the next round is Claude's move
+let waiting = false;          // Send is done; the next round is the agent's move
 let lastSeenRound = null;
 let expired = false;          // 403: a restarted server, a key this page lacks
 // The other ending, and the one every session reaches: there are no more
@@ -795,7 +795,7 @@ function restoreCard(card, answer) {
     if (button) {
       button.setAttribute("aria-pressed", "true");
       // The whole state, not just the button. Without this the card does not
-      // grey and the line saying Claude decides this one never appears, so a
+      // grey and the line saying the agent decides this one never appears, so a
       // reload shows a pressed button with nothing explaining it.
       card.dataset.delegated = "true";
       restored = true;
@@ -833,7 +833,7 @@ function setBusy(busy) {
 
 // This is the product. What lands in .answers.json is what the agent folds
 // into CRAFT.md, so nothing here may report a success it did not get: a page
-// that shows "Claude is folding your answers in…" over a request the server
+// that shows "The agent is folding your answers in…" over a request the server
 // refused has taken an hour of somebody's thinking and left no trace of it.
 async function submit(finished) {
   if (!currentRound || waiting) return;
@@ -878,8 +878,8 @@ async function submit(finished) {
   clearProblem("send");
   const box = document.getElementById("waiting");
   box.querySelector("h2").textContent = finished === true
-    ? "Sent. Claude is writing the final brief."
-    : "Claude is folding your answers in…";
+    ? "Sent. The agent is writing the final brief."
+    : "The agent is folding your answers in…";
   box.querySelector("p").textContent = finished === true
     ? "Nothing more is needed from you here."
     : "The next round will appear here when it is ready.";
@@ -895,7 +895,7 @@ async function submit(finished) {
 function sendBroke(reason, drafted) {
   setBusy(false);
   setStatus("not sent — " + reason, "error");
-  setProblem("Your answers were NOT sent to Claude: " + sentence(reason) +
+  setProblem("Your answers were NOT sent to the agent: " + sentence(reason) +
              (drafted
                ? " Nothing has been lost — they are still on this page and in " +
                  "this round's draft file."
@@ -916,7 +916,7 @@ document.getElementById("finish").addEventListener("click", () => {
   const open = document.getElementById("counts").textContent;
   const message = "Finish the crafting session?\n\n" +
     (open || "Nothing has been answered yet.") +
-    "\n\nClaude will write the final brief from what you have answered. " +
+    "\n\nThe agent will write the final brief from what you have answered. " +
     "There will be no more rounds.";
   if (confirm(message)) submit(true);
 });
@@ -1005,7 +1005,7 @@ const OVERLAY = {
   finished: ["This session is finished",
              "The craft server has been shut down, which is how a craft " +
              "session ends — this is not a hiccup and there is nothing to " +
-             "wait for. Claude has everything you sent, and the final brief " +
+             "wait for. The agent has everything you sent, and the final brief " +
              "is in the terminal you started this from. You can close this " +
              "page."],
 };

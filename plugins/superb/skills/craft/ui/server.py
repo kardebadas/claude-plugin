@@ -884,7 +884,7 @@ class _Handler(BaseHTTPRequestHandler):
         return self._json({"ok": True})
 
     def do_POST(self):
-        """Send to Claude. This is the product.
+        """Send to the agent. This is the product.
 
         What lands here is what the agent folds into CRAFT.md, and four
         answer states have to survive apart: answered, delegated ("you

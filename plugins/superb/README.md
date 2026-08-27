@@ -1,7 +1,7 @@
 # superb
 
-A personal skill collection for Claude Code. Every skill inside is invoked as
-`superb:<skill>`.
+A personal skill collection for Claude Code and Codex. Every skill inside is
+invoked as `superb:<skill>`.
 
 | Skill | Invoke as | What it is |
 | ----- | --------- | ---------- |
@@ -24,4 +24,4 @@ skills/<new-skill>/SKILL.md
 
 The `name:` in that file's frontmatter is what follows the colon, so a skill
 whose frontmatter says `name: foo` is invoked as `superb:foo`. Bump `version`
-in `.claude-plugin/plugin.json` and add a row to the table above.
+in both plugin manifests and add a row to the table above.

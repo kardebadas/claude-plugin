@@ -77,7 +77,7 @@ Let the phase branch be `P` (checked out in the phase worktree) and the wave be
    not at this wave yet.
 2. Record `BASE` = the current head of `P`.
 3. For each member `T_i`, add a worktree at
-   `<repo>/.claude/worktrees/wt-<phase>-t<i>` on a new branch
+   `<repo>/.agent-worktrees/wt-<phase>-t<i>` on a new branch
    `wt/<phase>-t<i>` cut from `BASE`. Mark `T_i` as `[~] … — started <date> in
    wt/<phase>-t<i>` and save — one write per member, before that member's
    dispatch.
@@ -144,7 +144,7 @@ recollection, a summary, or a memory note is not the switch.
   settled inside the orchestrator's own head.
 - For each open entry, dispatch **one Brain Agent per question**, given: the
   question, the spec, the relevant plan section, the repo rules that bear on it
-  (this project: `docs/qa/RULES.md` and `CLAUDE.md`), the code it concerns, and
+  (for example, `docs/qa/RULES.md`, `AGENTS.md`, or `CLAUDE.md`), the code it concerns, and
   the instruction to return a **ruling** — one chosen option, its reasoning,
   and its cost if wrong — in <=15 lines plus a `DETAIL:` file. Ask for a
   decision, not a survey.
@@ -153,7 +153,7 @@ recollection, a summary, or a memory note is not the switch.
   and records why.
 - The entry closes with `Closed by: Brain Agent <label> — <ruling verbatim>`.
   Every ruling is also a candidate `docs/qa/` entry for this project — record it
-  there per `CLAUDE.md`'s loop before the next gate.
+  there per the repository-instructions loop before the next gate.
 
 **Gates and guard rails in the mode:**
 

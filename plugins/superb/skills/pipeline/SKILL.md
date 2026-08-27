@@ -119,7 +119,7 @@ edit them.
 - **Run state NEVER goes in the skill directory.** A skill directory is shared
   across every project and every run; state written there corrupts the next run
   and leaks one project's work into another. If the path you are about to write
-  to contains `.claude/skills/`, or is not under
+  to is inside a skill directory, or is not under
   `docs/superpowers/runs/<this run>/`, **stop — you have the wrong path.**
 - **One run directory, created at Stage 1**, its full path stated to the user
   in your first message and reused verbatim for the rest of the run. Fix-mode
@@ -696,7 +696,7 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
   a subagent's report instead of from the tracker.
 - You are treating the file as a summary you keep in sync, rather than the
   record you take orders from.
-- The path you are about to write to contains `.claude/skills/`, or is not
+- The path you are about to write to is inside a skill directory, or is not
   under `<PROJECT_DIR>/docs/superpowers/runs/<this run>/`.
 - You are about to offer, or agree to, a compact without having walked the
   conversation for decisions no file records.

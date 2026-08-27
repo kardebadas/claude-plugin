@@ -1,0 +1,24 @@
+{
+  "name": "superb",
+  "version": "0.5.0",
+  "description": "Personal product-discovery and implementation-pipeline skills for Codex.",
+  "author": {
+    "name": "kardebadas"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Superb",
+    "shortDescription": "Clarify product ideas and run an implementation pipeline.",
+    "longDescription": "Craft turns a vague product idea into a decision-rich brief. Pipeline takes an approved brief through planning, implementation, review, and fixes.",
+    "developerName": "kardebadas",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Help me turn this product idea into a clear brief.",
+      "Run the implementation pipeline for this approved design."
+    ]
+  }
+}

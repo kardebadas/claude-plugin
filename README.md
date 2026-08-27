@@ -1,12 +1,23 @@
 # claude-plugin
 
-Personal [Claude Code](https://claude.com/claude-code) plugins.
+Personal [Claude Code](https://claude.com/claude-code) and Codex plugins.
 
 ## Install
+
+### Claude Code
 
 ```
 /plugin marketplace add kardebadas/claude-plugin
 /plugin install superb@kardebadas-claude-plugin
+```
+
+### Codex
+
+Add the repository's local marketplace, then install `superb` from it:
+
+```
+codex plugin marketplace add /path/to/claude-plugin/.agents/plugins
+codex plugin add superb@personal
 ```
 
 ## The `superb` namespace
@@ -37,16 +48,18 @@ plugins/superb/skills/<new-skill>/SKILL.md
 ```
 
 The `name:` in that file's frontmatter is what follows the colon, so a skill
-whose frontmatter says `name: foo` is invoked as `superb:foo`. Bump `version` in
-`plugins/superb/.claude-plugin/plugin.json` and mention the skill in its
-`description` and in the table above.
+whose frontmatter says `name: foo` is invoked as `superb:foo`. Bump the
+version in both plugin manifests and mention the skill in their descriptions
+and in the table above.
 
 ## Layout
 
 ```
 .claude-plugin/marketplace.json     the marketplace manifest
+.agents/plugins/marketplace.json    the Codex local-marketplace manifest
 plugins/superb/
   .claude-plugin/plugin.json        the plugin manifest — "name": "superb" sets the prefix
+  .codex-plugin/plugin.json         the Codex plugin manifest
   skills/<skill>/SKILL.md           one directory per skill
   skills/<skill>/references/        read at the stage that needs them
   skills/<skill>/templates/         copied into a run directory, never edited

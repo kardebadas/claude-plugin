@@ -163,12 +163,17 @@ held by the kernel, so it cannot be stale, and there is no override flag — do
 not invent one. But whose session it is decides what you do, so **run
 `status`** before you fall back:
 
-* `"server": true` — it is **mine, left running from earlier**. A craft server
-  holds the lock for its whole life, so a live server on this project *is* the
+* `"server": true` — a craft session is **live on this project**. A craft
+  server holds the lock for its whole life, so a live server here *is* the
   holder `LOCKED` named (`ps -p <that pid> -o args=` names this project, if
-  you want it confirmed). Run `stop`, then `serve`, and give me the new URL.
-  **Do not fall back to file mode here**: that tab is still open in front of
-  me rendering `CRAFT.md`, and writing the questionnaire into it is exactly
+  you want it confirmed). Almost always it is mine, left running from earlier —
+  the server outlives the terminal by up to four hours. **Ask me before you
+  stop it**, in one line: *"a craft session is already live on this project
+  (pid N) — shall I take it over?"* You cannot tell my leftover from a session
+  I am running in another window, and stopping the second one loses whatever I
+  have typed there. On yes: `stop`, then `serve`, then give me the new URL.
+  **Do not fall back to file mode here either way**: that tab is open in front
+  of me rendering `CRAFT.md`, and writing the questionnaire into it is exactly
   the two-places problem *What this changes about what you write* forbids.
 * `"server": false` — a session that is not answering: someone else's, or one
   still starting up. Tell me the pid, let me decide whether to stop it, and go

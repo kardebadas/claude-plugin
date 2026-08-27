@@ -1,0 +1,1049 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- Defence in depth, and cheap: this page loads nothing and talks to nobody
+     but the server that served it. default-src 'none' with connect-src 'self'
+     means that a string this page mishandled could not carry the session key
+     off the machine even if it did execute. 'unsafe-inline' twice is the
+     price of a single-file page with no build step; it is the part this does
+     NOT protect, and the reason every agent-written string below goes in as
+     textContent. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>craft</title>
+<!-- An empty data: icon, so the browser does not fire an unauthenticated
+     /favicon.ico at the server on every load. Self-contained: it fetches
+     nothing. -->
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg:#f4f6f8; --panel:#fff; --line:#dfe4ea; --ink:#14181f; --dim:#6b7482;
+    --accent:#2f6bd8; --req:#b3261e; --imp:#a8560a; --pref:#3f4b5b; --opt:#5b6673;
+    --warn-bg:#fdecea; --warn-line:#e5a49d;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { position:sticky; top:0; z-index:5; display:flex; gap:14px; align-items:center;
+           flex-wrap:wrap; padding:10px 16px; background:#2b2f36; color:#cfd6e0; }
+  header b { color:#fff; letter-spacing:.08em; }
+  #status { margin-left:auto; }
+  main { display:flex; align-items:flex-start; gap:16px; padding:16px;
+         max-width:1400px; margin:0 auto; }
+  #stream { flex:1 1 62%; min-width:0; }
+  aside { flex:0 0 34%; position:sticky; top:56px; max-height:calc(100vh - 76px);
+          overflow:auto; }
+  /* Narrow windows stack rather than squeeze: a 34% sidebar on a laptop half
+     screen leaves the questions -- which carry the page -- unreadable. */
+  @media (max-width:900px) {
+    main { display:block; }
+    aside { position:static; max-height:none; margin-top:16px; }
+  }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+          padding:14px 16px; margin-bottom:12px; }
+  .chip { display:inline-block; padding:2px 8px; border-radius:999px; color:#fff;
+          font-size:10px; font-weight:700; letter-spacing:.05em; }
+  .chip.REQUIRED{background:var(--req)} .chip.IMPORTANT{background:var(--imp)}
+  .chip.PREFERENCE{background:var(--pref)} .chip.OPTIONAL{background:var(--opt)}
+  .area { font-size:10px; letter-spacing:.12em; text-transform:uppercase;
+          color:var(--dim); font-weight:700; margin:18px 0 6px; }
+  h3 { margin:8px 0 4px; font-size:16px; }
+  /* Never folded behind a disclosure triangle. "Why this matters" is most of
+     what separates a craft question from a form field. */
+  .why { color:var(--dim); margin:0 0 10px; }
+  label.opt { display:block; padding:5px 0; cursor:pointer; }
+  label.opt .detail { display:block; color:var(--dim); font-size:12.5px;
+                      margin-left:22px; }
+  input[type=text], textarea { width:100%; padding:7px 9px; border:1px solid var(--line);
+                               border-radius:5px; font:inherit; }
+  textarea { min-height:80px; resize:vertical; }
+  .note { margin-top:8px; }
+  .note input { font-size:13px; }
+  button { font:inherit; cursor:pointer; border-radius:5px; }
+  .delegate { margin-top:10px; padding:4px 10px; background:none; color:var(--dim);
+              border:1px dashed #a9b3c0; }
+  .delegate[aria-pressed=true] { background:#eef3fd; color:var(--accent);
+                                 border-style:solid; border-color:var(--accent); }
+  .hint { display:none; margin-left:8px; font-size:12.5px; color:var(--accent); }
+  .question[data-delegated=true] .hint { display:inline; }
+  /* Set aside, not thrown away: the fields stay editable and their contents
+     stay on the wire, so un-latching "you decide" gives the answer back. */
+  .question[data-delegated=true] label.opt,
+  .question[data-delegated=true] [data-text],
+  .question[data-delegated=true] [data-other] { opacity:.45; }
+  #filters button { margin-right:6px; padding:3px 9px; border:1px solid #4a525e;
+                    background:none; color:#cfd6e0; font-size:11px; font-weight:600; }
+  #filters button[aria-pressed=false] { opacity:.4; }
+  footer { position:sticky; bottom:0; display:flex; gap:12px; align-items:center;
+           flex-wrap:wrap;
+           padding:12px 16px; background:var(--panel); border-top:1px solid var(--line); }
+  /* The loud half of "your work is not where you think it is". The status
+     line in the header is a word; this is a sentence, in front of the two
+     buttons, and it does not go away until the thing it is about does.
+     order:-1 puts it above them without nesting another flex container. */
+  #problem { flex:1 0 100%; order:-1; display:none; margin:0 0 10px;
+             background:var(--warn-bg); border:1px solid var(--warn-line);
+             border-radius:6px; padding:8px 10px; color:var(--req); }
+  #problem[data-on] { display:block; }
+  button[disabled] { opacity:.5; cursor:default; }
+  #status[data-state=saving] { opacity:.65; }
+  #status[data-state=error] { color:#ff9c8f; font-weight:700; }
+  #send { padding:9px 18px; background:var(--accent); color:#fff; border:none;
+          font-weight:650; }
+  #finish { padding:9px 14px; background:none; border:1px solid var(--line);
+            color:var(--dim); }
+  #counts { color:var(--dim); }
+  .ledger-item { border-top:1px solid var(--line); padding:6px 0; font-size:13px; }
+  .contradiction { background:var(--warn-bg); border:1px solid var(--warn-line);
+                   border-radius:6px; padding:8px 10px; margin-bottom:8px; }
+  .contradiction .jump { display:inline-block; margin-top:4px; margin-right:6px;
+                         padding:1px 7px; border:1px solid var(--warn-line);
+                         border-radius:999px; font-size:11px; font-weight:600;
+                         color:var(--req); text-decoration:none; }
+  /* The jumped-to card outlines itself. A jump link that scrolls into a wall
+     of identical cards has told the reader nothing. */
+  .question:target { outline:2px solid var(--accent); outline-offset:3px; }
+  /* ...and stops clear of the sticky header, which otherwise eats the chip
+     and the first line of the title of the very card the jump was for. */
+  .question { scroll-margin-top:64px; }
+  #overlay, #waiting { position:fixed; inset:0; display:none; place-items:center;
+                       background:rgba(20,24,31,.72); color:#fff; z-index:20;
+                       text-align:center; padding:24px; }
+  /* The connection overlay sits ABOVE the between-rounds box, and the order
+     is load-bearing: both are up at once after Send, and what the user needs
+     then is the news that the server stopped answering -- not the line
+     saying the next round is on its way. At equal z-index the win went to
+     whichever came later in the document, which was the wrong one. */
+  #overlay { z-index:21; }
+  #overlay[data-on], #waiting[data-on] { display:grid; }
+  .hidden { display:none !important; }
+  #brief h1,#brief h2,#brief h3 { margin:14px 0 6px; }
+  #brief h1 { font-size:19px; } #brief h2 { font-size:16px; } #brief h3 { font-size:14px; }
+  #brief pre { background:#f0f2f5; padding:8px; border-radius:5px; overflow-x:auto; }
+  #brief ul, #brief ol { margin:6px 0; padding-left:20px; }
+  #brief blockquote { margin:6px 0; padding-left:10px; border-left:3px solid var(--line);
+                      color:var(--dim); }
+</style>
+</head>
+<body>
+
+<header>
+  <b>CRAFT</b>
+  <span id="roundlabel">—</span>
+  <span id="filters">
+    <button data-level="REQUIRED"   aria-pressed="true">REQUIRED</button>
+    <button data-level="IMPORTANT"  aria-pressed="true">IMPORTANT</button>
+    <button data-level="PREFERENCE" aria-pressed="true">PREFERENCE</button>
+    <button data-level="OPTIONAL"   aria-pressed="true">OPTIONAL</button>
+  </span>
+  <span id="status"></span>
+</header>
+
+<main>
+  <section id="stream">
+    <div id="questions"></div>
+  </section>
+  <aside>
+    <div class="card"><div class="area">Current brief</div><div id="brief"></div></div>
+    <div class="card"><div class="area">Ledger</div><div id="ledger"></div></div>
+  </aside>
+</main>
+
+<footer>
+  <div id="problem" role="alert"></div>
+  <button id="send">Send to Claude</button>
+  <button id="finish">Finish</button>
+  <span id="counts" aria-live="polite"></span>
+</footer>
+
+<div id="overlay"><div><h2>Connection paused</h2>
+  <p>The craft server stopped responding. This page will reconnect on its own.</p></div></div>
+<div id="waiting"><div><h2>Claude is folding your answers in…</h2>
+  <p>The next round will appear here when it is ready.</p></div></div>
+
+<script>
+// The key travels in the URL and nowhere else. There is no cookie: one was
+// tried and removed, because cookies are scoped to a host and not to a port,
+// so any other page on 127.0.0.1 could have read this session's key back out
+// of a subresource it caused. Two consequences live here: every fetch appends
+// the key itself, and nothing tidies it out of location.search -- a reload
+// with the key gone is a page that can no longer talk to its own server.
+const KEY = new URLSearchParams(location.search).get("key") || "";
+const api = (path) => path + (path.includes("?") ? "&" : "?") + "key=" + encodeURIComponent(KEY);
+const LEVELS = ["REQUIRED", "IMPORTANT", "PREFERENCE", "OPTIONAL"];
+
+let currentRound = null;
+const hidden = new Set();
+
+// Everything the agent wrote -- a title, an option label, a line of the
+// ledger -- reaches the DOM through here, and `text` is assigned as
+// textContent. There is exactly one innerHTML on this page and it is the
+// brief, which markdown.py escaped before it transformed.
+function el(tag, attrs, ...kids) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === false || v === null || v === undefined) continue;
+    if (k === "text") node.textContent = v; else node.setAttribute(k, v);
+  }
+  kids.filter(Boolean).forEach(kid => node.append(kid));
+  return node;
+}
+
+function questionCard(q) {
+  const card = el("div", { class: "card question", id: "q-" + q.id, "data-id": q.id,
+                           "data-importance": q.importance });
+  card.append(el("span", { class: "chip " + q.importance, text: q.importance }));
+  card.append(el("h3", { text: q.title }));
+  if (q.why) card.append(el("p", { class: "why", text: q.why }));
+
+  if (q.type === "single" || q.type === "multi") {
+    const kind = q.type === "single" ? "radio" : "checkbox";
+    (q.options || []).forEach(opt => {
+      const label = el("label", { class: "opt" });
+      label.append(el("input", { type: kind, name: q.id, value: opt.value }));
+      label.append(" " + (opt.label || opt.value));
+      if (opt.detail) label.append(el("span", { class: "detail", text: opt.detail }));
+      card.append(label);
+    });
+    if (q.allow_other) {
+      card.append(el("input", { type: "text", "data-other": "1",
+                                placeholder: "Other — in your own words" }));
+    }
+  } else if (q.type === "longtext") {
+    card.append(el("textarea", { "data-text": "1", placeholder: "Your answer" }));
+  } else {
+    card.append(el("input", { type: "text", "data-text": "1", placeholder: "Your answer" }));
+  }
+
+  // Every question gets one, whatever its type. "Email, but I want passkeys
+  // later" is the most valuable sentence a user can write and a radio button
+  // destroys it.
+  const note = el("div", { class: "note" });
+  note.append(el("input", { type: "text", "data-note": "1",
+                            placeholder: "Note — anything the options above miss" }));
+  card.append(note);
+
+  if (q.delegable !== false) {
+    card.append(el("button", { class: "delegate", type: "button",
+                               "aria-pressed": "false", text: "you decide" }));
+    card.append(el("span", { class: "hint",
+                             text: "Claude decides this one — your note still travels with it." }));
+  }
+  return card;
+}
+
+function renderRound(round) {
+  currentRound = round;
+  const host = document.getElementById("questions");
+  host.textContent = "";
+  document.getElementById("roundlabel").textContent =
+    round ? ("round " + round.round + (round.project ? " · " + round.project : "")) : "—";
+  if (!round) {
+    // Not a blank page. A blank page and a broken page look the same, and a
+    // user who cannot tell them apart waits for a round that is not coming.
+    host.append(el("div", { class: "card" },
+      el("h3", { text: "No questions yet" }),
+      el("p", { class: "why",
+                text: "Claude has not posted a round. This page will show it when it lands." })));
+    showLedger(null);
+    updateCounts();
+    return;
+  }
+
+  const questions = Array.isArray(round.questions) ? round.questions : [];
+  // The round's own words, and the only string on this page the agent
+  // addresses to the reader rather than about a question. textContent like
+  // every other one of them.
+  const note = typeof round.note === "string" && round.note.trim()
+    ? round.note.trim() : "";
+
+  if (!questions.length) {
+    // The closing round, and the same argument as the guard above one step
+    // later: a round object carrying `questions: []` is TRUTHY, so it walked
+    // straight into a forEach over nothing and left an empty column -- which
+    // is the blank page that guard exists to prevent, arriving by the route
+    // the skill actually tells the agent to take.
+    sessionEnded = true;
+    host.append(el("div", { class: "card" },
+      el("h3", { text: "Nothing left to ask" }),
+      el("p", { class: "why",
+                text: note || "Claude posted this round with no questions in " +
+                              "it. Nothing here is waiting on you — the brief " +
+                              "beside this is where the session's work is." })));
+  } else if (note) {
+    // A note beside questions is a lead-in rather than a farewell. Dropping
+    // it would be the same silence: accepted, stored, shown to nobody.
+    host.append(el("div", { class: "card" }, el("p", { class: "why", text: note })));
+  }
+
+  let area = null;
+  questions.forEach(q => {
+    if (q.area && q.area !== area) {
+      area = q.area;
+      host.append(el("div", { class: "area", text: area }));
+    }
+    host.append(questionCard(q));
+  });
+  // Nothing to send on a closing round, so the buttons stop offering to.
+  // Send would write an answers file for a `wait` that is no longer running
+  // and leave this page waiting for ever for a round nobody will write; and
+  // swapIn re-enables them, so a later round that does carry questions gets
+  // its buttons back.
+  if (!questions.length) setBusy(true);
+  // Before applyFilter and updateCounts, and it must not be able to stop
+  // them: see showLedger.
+  showLedger(round.ledger);
+  applyFilter();
+  updateCounts();
+}
+
+// The ledger panel, and the second lock on it. renderLedger below is written
+// to be total, so this catch should be unreachable -- which is exactly why it
+// is here. Everything renderRound does AFTER the ledger is what the page is
+// for: applyFilter puts the user's chosen levels back, updateCounts is the
+// only feedback that an answer registered. A throw in one sidebar panel used
+// to take both with it and leave a page whose cards looked perfectly fine.
+function showLedger(ledger) {
+  try {
+    renderLedger(ledger);
+  } catch (e) {
+    panel("ledger", "The ledger could not be shown.");
+  }
+}
+
+// Total by construction: every list is Array.isArray'd, every entry is
+// checked for being an object, and every field that reaches the screen goes
+// through str(). The server validates a round's ledger before serving it
+// (schema._validate_ledger), and that is not enough on its own -- validation
+// tells the AGENT what it got wrong, while this decides whether the person
+// at the browser keeps their filter and their counter. A panel must never be
+// able to cost the page its controls.
+function renderLedger(ledger) {
+  const host = document.getElementById("ledger");
+  host.textContent = "";
+  const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  const entries = (v) => (Array.isArray(v) ? v.filter(isObject) : []);
+  const str = (v) => (typeof v === "string" ? v : "");
+  const safe = isObject(ledger) ? ledger : {};
+
+  const contradictions = entries(safe.contradictions);
+  contradictions.forEach(c => {
+    const box = el("div", { class: "contradiction" });
+    box.append(el("strong", { text: str(c.id) + " " }));
+    box.append(document.createTextNode(str(c.text)));
+    (Array.isArray(c.between) ? c.between : []).forEach(ref => {
+      // Jump link, but only to a question actually on this round's page.
+      if (typeof ref !== "string" || !document.getElementById("q-" + ref)) return;
+      box.append(" ");
+      box.append(el("a", { href: "#q-" + ref, class: "jump", text: ref }));
+    });
+    host.append(box);
+  });
+  const rows = [
+    ...entries(safe.decisions).map(d => str(d.id) + " ✓ " + (str(d.title) || str(d.summary))),
+    ...entries(safe.delegated).map(d => str(d.id) + " → " + str(d.title)),
+    ...entries(safe.assumptions).map(a => str(a.id) + " ? " + str(a.text)),
+  ];
+  rows.forEach(text => host.append(el("div", { class: "ledger-item", text })));
+  if (!rows.length && !contradictions.length) {
+    host.append(el("div", { class: "why", text: "Nothing recorded yet." }));
+  }
+}
+
+// Class toggling, no round trip: filtering is a reading aid used dozens of
+// times an hour, and a fetch for it would put the server between a user and
+// their own page.
+function applyFilter() {
+  document.querySelectorAll("#questions .question").forEach(card => {
+    card.classList.toggle("hidden", hidden.has(card.dataset.importance));
+  });
+}
+
+function collectAnswers() {
+  const answers = {};
+  document.querySelectorAll("#questions .question").forEach(card => {
+    const id = card.dataset.id;
+    const note = card.querySelector("[data-note]");
+    const written = note && note.value.trim() ? note.value.trim() : null;
+    const delegate = card.querySelector(".delegate");
+    if (delegate && delegate.getAttribute("aria-pressed") === "true") {
+      // Delegation beats every other field -- schema.answer_state says so --
+      // but the note rides along. It is the sentence that tells Claude WHY it
+      // was handed the decision, and dropping it would be the one deletion
+      // this page makes on the user's behalf.
+      answers[id] = written ? { delegated: true, note: written } : { delegated: true };
+      return;
+    }
+    const answer = {};
+    const checked = [...card.querySelectorAll("input[type=radio],input[type=checkbox]")]
+      .filter(i => i.checked).map(i => i.value);
+    if (checked.length) answer.choice = checked;
+    const other = card.querySelector("[data-other]");
+    if (other && other.value.trim()) answer.other = other.value.trim();
+    const text = card.querySelector("[data-text]");
+    if (text && text.value.trim()) answer.text = text.value.trim();
+    if (written) answer.note = written;
+    // An untouched question is an explicit skip rather than an absence: both
+    // read as "skipped", and saying it out loud makes a draft file legible.
+    answers[id] = Object.keys(answer).length ? answer : { skipped: true };
+  });
+  return answers;
+}
+
+// ---- mirror of schema.answer_state: begin ----
+//
+// This function and schema.answer_state must agree on every shape, because
+// between them they decide what the agent is told the user meant -- and a
+// Delegated Decision is never asked again. Do not "simplify" either half
+// without the other; tests/test_server.py runs THIS text against the Python
+// one on a thousand generated answers.
+//
+// Every check below is here because the obvious JavaScript is wrong:
+//   * `if (a.delegated)` is truthiness; Python requires `is True`. A
+//     malformed flag must not manufacture a decision the user never made.
+//   * typeof "object" is true of null and of arrays; Python's isinstance
+//     dict is true of neither.
+//   * `(a.text || "").trim()` throws on a number and answers "0" wrongly;
+//     Python asks whether it is a string first, and "0" is a real answer.
+//   * a blank or whitespace choice entry is not an answer, and neither null
+//     nor undefined is one.
+//   * `(a.choice || []).some(...)` throws on the string form, which a
+//     single-choice draft may legitimately hold.
+//   * String.prototype.trim() is NOT str.strip(). The two disagree on six
+//     codepoints -- see PY_BLANK below -- and each disagreement is a question
+//     one side calls answered and the other calls open.
+// The values reaching this are read from a draft file on disk that a person
+// may have hand-edited, so none of these shapes is hypothetical.
+//
+// Exactly the 29 codepoints Python's str.strip() removes, and no others.
+// JavaScript's \s is a different set: it includes U+FEFF, which Python does
+// not strip, and it omits U+001C-001F and U+0085, which Python does. Writing
+// the set out is the only way the two sides can agree, and Python is the side
+// that decides: schema.count_open is what the agent is told, and a question
+// this page called answered while count_open called it open is a question
+// asked again after the user answered it.
+const PY_BLANK = /^[\t\n\v\f\r\x1c-\x1f\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]*$/;
+function isBlank(value) {
+  return PY_BLANK.test(value);
+}
+
+function choiceHasContent(entry) {
+  if (typeof entry === "string") return !isBlank(entry);
+  return entry !== null && entry !== undefined;
+}
+
+function answerState(a) {
+  if (a === null || typeof a !== "object" || Array.isArray(a)) return "skipped";
+  if (a.delegated === true) return "delegated";
+  if (a.skipped === true) return "skipped";
+  const choice = a.choice;
+  if (Array.isArray(choice) && choice.some(choiceHasContent)) return "answered";
+  if (typeof choice === "string" && !isBlank(choice)) return "answered";
+  for (const key of ["text", "other"]) {
+    const value = a[key];
+    if (typeof value === "string" && !isBlank(value)) return "answered";
+  }
+  return "skipped";
+}
+// ---- mirror of schema.answer_state: end ----
+
+function updateCounts() {
+  if (!currentRound) { document.getElementById("counts").textContent = ""; return; }
+  const answers = collectAnswers();
+  let settled = 0;
+  const open = Object.fromEntries(LEVELS.map(l => [l, 0]));
+  (currentRound.questions || []).forEach(q => {
+    const state = answerState(answers[q.id]);
+    // Drop an unrecognised importance rather than inventing a key for it --
+    // schema.count_open does the same, and the two must not disagree.
+    if (state !== "skipped") settled += 1;
+    else if (Object.prototype.hasOwnProperty.call(open, q.importance)) open[q.importance] += 1;
+  });
+  const trailing = LEVELS.filter(l => open[l]).map(l => open[l] + " " + l).join(" · ");
+  document.getElementById("counts").textContent =
+    settled + " answered" + (trailing ? " · " + trailing + " still open" : "");
+}
+
+document.getElementById("filters").addEventListener("click", event => {
+  const button = event.target.closest("button[data-level]");
+  if (!button) return;
+  const level = button.dataset.level;
+  const on = button.getAttribute("aria-pressed") === "true";
+  button.setAttribute("aria-pressed", String(!on));
+  if (on) hidden.add(level); else hidden.delete(level);
+  applyFilter();
+});
+
+document.getElementById("questions").addEventListener("click", event => {
+  const button = event.target.closest(".delegate");
+  if (!button) return;
+  const on = button.getAttribute("aria-pressed") === "true";
+  button.setAttribute("aria-pressed", String(!on));
+  const card = button.closest(".question");
+  if (card) card.dataset.delegated = String(!on);
+  updateCounts();
+});
+
+// The counter is the only feedback that an answer registered, so it follows
+// typing and clicking rather than waiting for a save.
+document.getElementById("questions").addEventListener("input", updateCounts);
+document.getElementById("questions").addEventListener("change", updateCounts);
+
+function panel(id, message) {
+  const host = document.getElementById(id);
+  host.textContent = "";
+  host.append(el("div", { class: "why", text: message }));
+}
+
+async function loadBrief() {
+  try {
+    const payload = await (await fetch(api("/api/brief"))).json();
+    if (payload.error) return panel("brief", payload.error);
+    // The one innerHTML on this page. markdown.py escapes the brief before it
+    // transforms it, allowlists link schemes, and refuses control characters.
+    document.getElementById("brief").innerHTML = payload.html || "";
+  } catch (e) {
+    panel("brief", "The craft server did not answer. Reload this page.");
+  }
+}
+
+async function loadRound() {
+  let payload;
+  try {
+    payload = await (await fetch(api("/api/round"))).json();
+  } catch (e) {
+    return panel("questions", "The craft server did not answer. Reload this page.");
+  }
+  if (!payload.ok) {
+    // The agent writes these files while this page is reading them, so a
+    // half-written or hand-edited round is an ordinary event and has to be
+    // legible rather than blank.
+    //
+    // ...and it is the one error on this page where reloading is genuinely
+    // the fix, so it is the one that has to say so. pollForNextRound only
+    // swaps a round in while `waiting` is true, and on a first load it is
+    // false: a round-001 the agent then repairs is never picked up, and a
+    // reader who was not told to reload sits in front of a page that has
+    // stopped being about anything.
+    const host = document.getElementById("questions");
+    host.textContent = "";
+    host.append(
+      el("div", { class: "card contradiction" },
+         el("strong", { text: payload.error }),
+         el("pre", { text: (payload.details || []).join("\n") }),
+         el("div", { class: "why",
+                     text: "Once that is fixed, reload this page." })));
+    // The same argument as the empty state, one panel over: an empty box and
+    // a broken box look identical, and the ledger is beside a message saying
+    // the round could not be read, which is where a reader is most likely to
+    // wonder whether anything on this page still works.
+    showLedger(null);
+    return;
+  }
+  renderRound(payload.round);
+}
+
+// ------------------------------------------------------------ autosave
+//
+// Crash insurance, and the reason this page can be closed without a thought.
+// It is NOT what the agent reads as an answer: PATCH writes the round's
+// .draft.json, POST writes .answers.json from its own body, and the server
+// never promotes one into the other -- so a draft that is stale when Send
+// arrives can never become the submitted round.
+
+const SAVE_DELAY_MS = 400;    // one debounce, not one request per keystroke
+const RETRY_MS = 2000;        // after a save that failed for want of a server
+const POLL_MS = 1000;         // while waiting for Claude to post the next round
+const HEARTBEAT_MS = 5000;    // ...and while it is still the user's turn
+
+let saveTimer = null;
+// Monotonic, and the client half of do_PATCH's ordering. Every keystroke is
+// its own connection and the server threads them, so two autosaves overlap
+// as a matter of course rather than as an edge case: `hello world` typed
+// once was measured leaving `hel` on the disk with both writes acknowledged
+// 200. A PATCH carrying a seq lower than one already written is now ignored,
+// and that only works if this rises.
+let saveSeq = 0;
+// Saves STARTED and EDITS MADE are two different counts, and the difference
+// is a data-loss path. A keystroke landing while a PATCH is in flight starts
+// no save -- it only restarts the debounce -- so saveSeq does not move, and a
+// guard that compares against saveSeq clears `dirty` for an edit that has
+// been nowhere. The pagehide flush below is gated on `dirty`, so that edit is
+// then never sent anywhere: measured as ONE PATCH carrying the older text.
+// The question a landed save must answer is "does a newer edit exist?", so
+// edits are counted here and that is the question the guard asks.
+let editSeq = 0;
+let dirty = false;            // typing this page has not seen reach the disk
+let waiting = false;          // Send is done; the next round is Claude's move
+let lastSeenRound = null;
+let expired = false;          // 403: a restarted server, a key this page lacks
+// The other ending, and the one every session reaches: there are no more
+// rounds. Set when Finish is accepted, and when a round arrives with nothing
+// left to ask -- the two ways *Ending* says a craft session finishes. Both
+// are followed by the agent running `stop`, which reaches this page as a
+// fetch that fails and nothing else, so without this flag the last thing a
+// session says is that the page will reconnect on its own.
+let sessionEnded = false;
+// What the message in the footer is ABOUT, so that a later success clears
+// only its own kind. A save that lands must not silently erase a warning
+// that the user's answers were never sent.
+let problemKind = null;
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+function setStatus(text, state) {
+  const node = document.getElementById("status");
+  node.textContent = text;
+  if (state) node.setAttribute("data-state", state);
+  else node.removeAttribute("data-state");
+}
+
+function setProblem(text, kind) {
+  const node = document.getElementById("problem");
+  node.textContent = text || "";
+  problemKind = text ? (kind || null) : null;
+  if (text) node.setAttribute("data-on", "1");
+  else node.removeAttribute("data-on");
+}
+
+function clearProblem(kind) {
+  if (problemKind === kind) setProblem("");
+}
+
+// What the server said, in the words it used: a 413 from answers that grew
+// past a megabyte, a 400 from a body nested too deep and a 500 from a full
+// disk are different problems and the user can act on the difference.
+//
+// It also notices the one status that is not a hiccup. `serve` mints a NEW
+// session key every time it starts, so a 403 means this page holds a key
+// nothing will ever accept again -- whatever the port does.
+async function refusal(response) {
+  if (response.status === 403) {
+    expired = true;
+    showOverlay("expired");
+    return "this page's session key is no longer accepted";
+  }
+  try {
+    const payload = await response.json();
+    if (payload && typeof payload.error === "string") return payload.error;
+  } catch (err) {
+    // Not JSON -- a 403 body is plain text -- so the status line is all
+    // there is to report, and it is better than nothing at all.
+  }
+  return "the server answered " + response.status;
+}
+
+function scheduleSave() {
+  if (!currentRound || waiting) return;
+  editSeq += 1;
+  dirty = true;
+  setStatus("saving…", "saving");
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveDraft, SAVE_DELAY_MS);
+}
+
+// Never throws and never lies. A fetch that RESOLVES is not a save: a 413
+// from a body over the limit, a 400 from one nested too deep and a 500 from
+// a disk that filled up all arrive as ordinary responses, and a page that
+// only catches rejections tells the user their work is safe while the server
+// is refusing to store it.
+async function saveDraft(keepalive) {
+  if (!currentRound) return false;
+  clearTimeout(saveTimer);
+  saveSeq += 1;
+  const seq = saveSeq;
+  // The edit this save is carrying. Anything typed after this line is NOT in
+  // the body below, whatever the server answers.
+  const edits = editSeq;
+  let response;
+  try {
+    response = await fetch(api("/api/draft"), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ round: currentRound.round, seq: seq,
+                             answers: collectAnswers() }),
+      // Set only by the pagehide flush below: it lets that one request
+      // outlive the page that started it.
+      keepalive: keepalive === true,
+    });
+  } catch (err) {
+    return saveBroke("the craft server did not answer.", true);
+  }
+  if (!response.ok) {
+    const reason = await refusal(response);
+    // A 5xx is a machine having a bad moment and is worth trying again; a
+    // refusal would fail identically for ever, and any keystroke reschedules
+    // it anyway.
+    return saveBroke(reason, response.status >= 500);
+  }
+  // `{"ok": true, "stale": true}` is a success and not a failure: a newer
+  // keystroke than this one is already on the disk, which is what the user
+  // wanted, and this client did nothing wrong.
+  //
+  // The guard is on EDITS, not on saves. A keystroke during this request
+  // started no save, so `seq === saveSeq` would still hold and would clear
+  // `dirty` for text that has been nowhere -- and "saved" would be on screen
+  // over it, which is the failure reported as a success. If a newer edit
+  // exists, everything below is that edit's news to deliver: its own debounce
+  // is already running and the header still reads "saving…".
+  if (editSeq === edits) {
+    dirty = false;
+    setStatus("saved", "saved");
+    clearProblem("save");
+  }
+  return true;
+}
+
+// The server's messages are written to be embedded and do not end in a full
+// stop, so one is supplied here rather than leaving the user reading
+// "...the request body is too large They are still on this page".
+function sentence(reason) {
+  return /[.!?]$/.test(reason) ? reason : reason + ".";
+}
+
+function saveBroke(reason, retry) {
+  setStatus("not saved — " + reason, "error");
+  setProblem("Your answers have not been saved: " + sentence(reason) +
+             " They are still on this page — do not close it.", "save");
+  if (retry && !expired) {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveDraft, RETRY_MS);
+  }
+}
+
+// Three listeners of its own, beside the counter's, and deliberately not
+// folded into them. The DOM catches what a listener throws and still runs
+// the others on the same element, so a fault in updateCounts cannot take
+// autosave down with it -- which matters here, because the ledger finding
+// was exactly a throw deleting the steps that came after it.
+document.getElementById("questions").addEventListener("input", scheduleSave);
+document.getElementById("questions").addEventListener("change", scheduleSave);
+document.getElementById("questions").addEventListener("click", event => {
+  if (event.target.closest(".delegate")) scheduleSave();
+});
+
+// A closed tab must cost nothing, and the debounce is 400 ms in which it
+// would. keepalive lets the request outlive the page; bodies over 64 KiB are
+// refused by that flag rather than sent, which is the same size class the
+// server refuses anyway, and the ordinary debounced save has already carried
+// everything before it.
+window.addEventListener("pagehide", () => {
+  if (dirty && currentRound && !waiting) saveDraft(true);
+});
+
+// ------------------------------------------------------- restore a draft
+//
+// The other half of autosave, and the half the user sees. A draft that is
+// written and never read back is a file nobody will ever look at.
+//
+// Total by construction and guarded on top of that, for the same reason
+// renderLedger is: the file it reads may have been hand-edited, and a throw
+// here runs BEFORE loadBrief and would leave the brief panel empty on a page
+// that otherwise looked finished.
+async function restoreDraft() {
+  if (!currentRound) return;
+  let stored;
+  try {
+    const response = await fetch(api("/api/draft?round=" + currentRound.round));
+    if (!response.ok) {
+      return setProblem("Your saved answers could not be read back: " +
+                        sentence(await refusal(response)) + " Anything typed " +
+                        "for this round before now may not reappear.", "draft");
+    }
+    stored = await response.json();
+  } catch (err) {
+    return setProblem("The craft server did not answer when this page asked " +
+                      "for your saved answers. Reload the page.", "draft");
+  }
+  if (stored && typeof stored.error === "string") {
+    // The server names the file rather than locating it. Said out loud
+    // because the alternative -- an empty form over a draft that is sitting
+    // on the disk -- invites the user to retype an hour of their own work,
+    // and the first keystroke after that overwrites the only copy.
+    setProblem("Your saved answers for this round could not be read: " +
+               sentence(stored.error) + " The form has opened empty, and the " +
+               "first thing you type will overwrite that file — copy it " +
+               "aside first if you want to keep it.", "draft");
+  }
+  const answers = (stored && stored.answers !== null &&
+                   typeof stored.answers === "object" &&
+                   !Array.isArray(stored.answers)) ? stored.answers : {};
+  let restored = 0;
+  document.querySelectorAll("#questions .question").forEach(card => {
+    if (restoreCard(card, answers[card.dataset.id])) restored += 1;
+  });
+  updateCounts();
+  // The only visible difference between a form that came back and a page
+  // that quietly dropped the file.
+  if (restored) setStatus("draft restored", "saved");
+}
+
+// One card, from whatever the draft holds for it, checking every shape --
+// this reads a file a person may have edited by hand. `delegated` is
+// compared against true rather than tested for truthiness for the same
+// reason answerState does it: a malformed flag must not manufacture a
+// decision the user never made, and a Delegated Decision is never asked
+// again.
+function restoreCard(card, answer) {
+  if (answer === null || typeof answer !== "object" || Array.isArray(answer)) {
+    return false;
+  }
+  let restored = false;
+  if (answer.delegated === true) {
+    const button = card.querySelector(".delegate");
+    if (button) {
+      button.setAttribute("aria-pressed", "true");
+      // The whole state, not just the button. Without this the card does not
+      // grey and the line saying Claude decides this one never appears, so a
+      // reload shows a pressed button with nothing explaining it.
+      card.dataset.delegated = "true";
+      restored = true;
+    }
+  }
+  const choice = Array.isArray(answer.choice) ? answer.choice
+               : (typeof answer.choice === "string" ? [answer.choice] : []);
+  choice.forEach(value => {
+    if (typeof value !== "string") return;
+    let input = null;
+    try {
+      input = card.querySelector('input[value="' + CSS.escape(value) + '"]');
+    } catch (err) {
+      input = null;   // a value no selector can name
+    }
+    if (input) { input.checked = true; restored = true; }
+  });
+  [["[data-other]", answer.other], ["[data-text]", answer.text],
+   ["[data-note]", answer.note]].forEach(pair => {
+    const field = card.querySelector(pair[0]);
+    if (field && typeof pair[1] === "string" && pair[1]) {
+      field.value = pair[1];
+      restored = true;
+    }
+  });
+  return restored;
+}
+
+// ----------------------------------------------------------- send/finish
+
+function setBusy(busy) {
+  document.getElementById("send").disabled = busy;
+  document.getElementById("finish").disabled = busy;
+}
+
+// This is the product. What lands in .answers.json is what the agent folds
+// into CRAFT.md, so nothing here may report a success it did not get: a page
+// that shows "Claude is folding your answers in…" over a request the server
+// refused has taken an hour of somebody's thinking and left no trace of it.
+async function submit(finished) {
+  if (!currentRound || waiting) return;
+  clearTimeout(saveTimer);
+  const round = currentRound.round;
+  const answers = collectAnswers();
+  setBusy(true);
+  // Said before the two round trips rather than after them: a Send that is
+  // slow, or one against a server that has wedged, otherwise leaves two
+  // greyed buttons and no word about why.
+  setStatus("sending…", "saving");
+  // The draft first, and awaited. This is NOT how the answers travel -- POST
+  // carries its own body and the server never promotes a draft -- it is what
+  // is left on the disk if the POST below fails. Whether it LANDED is the
+  // fact sendBroke needs: a Send refused for size was preceded by a draft
+  // refused for the same size, and the disk holds nothing.
+  const drafted = await saveDraft();
+  let response;
+  try {
+    response = await fetch(api("/api/submit"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      // Exactly true or exactly false: the server answers "false" with a
+      // 400, and bool("false") is True in the language it is written in.
+      body: JSON.stringify({ round: round, answers: answers,
+                             finished: finished === true }),
+    });
+  } catch (err) {
+    return sendBroke("the craft server did not answer.", drafted);
+  }
+  if (!response.ok) return sendBroke(await refusal(response), drafted);
+
+  lastSeenRound = round;
+  waiting = true;
+  // The server took it, so this session is over whatever happens next: the
+  // agent's remaining moves are the final brief and `stop`. Recorded here
+  // rather than at the click, because a Send the server refused ends
+  // nothing.
+  if (finished === true) sessionEnded = true;
+  dirty = false;
+  setStatus("sent", "saved");
+  clearProblem("send");
+  const box = document.getElementById("waiting");
+  box.querySelector("h2").textContent = finished === true
+    ? "Sent. Claude is writing the final brief."
+    : "Claude is folding your answers in…";
+  box.querySelector("p").textContent = finished === true
+    ? "Nothing more is needed from you here."
+    : "The next round will appear here when it is ready.";
+  box.setAttribute("data-on", "1");
+}
+
+// `drafted` is whether the flush inside submit() actually reached the disk,
+// and the reassurance is only true when it did. A Send refused for size was
+// preceded by a draft refused for the same size, so telling that user their
+// work is in the draft file is false in exactly the case it is shown -- and
+// the half of the sentence they act on is the half that says it is safe to
+// close the tab.
+function sendBroke(reason, drafted) {
+  setBusy(false);
+  setStatus("not sent — " + reason, "error");
+  setProblem("Your answers were NOT sent to Claude: " + sentence(reason) +
+             (drafted
+               ? " Nothing has been lost — they are still on this page and in " +
+                 "this round's draft file."
+               : " They are still on this page and NOWHERE ELSE — this " +
+                 "round's draft file could not be written either, so do not " +
+                 "close this page.") +
+             " Try Send again.", "send");
+}
+
+document.getElementById("send").addEventListener("click", () => submit(false));
+
+// Separate from Send, and confirmed first, because it ends the session:
+// after this the agent writes the final brief and there are no more rounds.
+// What is still open goes in the prompt, since that is the fact the decision
+// turns on and it is otherwise a line at the other end of the page.
+document.getElementById("finish").addEventListener("click", () => {
+  if (!currentRound || waiting) return;
+  const open = document.getElementById("counts").textContent;
+  const message = "Finish the crafting session?\n\n" +
+    (open || "Nothing has been answered yet.") +
+    "\n\nClaude will write the final brief from what you have answered. " +
+    "There will be no more rounds.";
+  if (confirm(message)) submit(true);
+});
+
+// ------------------------------------------------------ between rounds
+//
+// One loop with two jobs, because they are the same request. While the user
+// is typing it is the heartbeat that notices the server has gone; after Send
+// it is the poll that swaps the next round in. Two loops would be two timers
+// fighting over one overlay -- and a second Send would start a second copy
+// of the first, both polling for ever.
+async function pollForNextRound() {
+  for (;;) {
+    await sleep(waiting ? POLL_MS : HEARTBEAT_MS);
+    if (expired) return;   // nothing this page can send will be accepted again
+    // A backgrounded tab is not a session in use, and every authenticated
+    // request pushes the server's idle timeout out -- so a forgotten tab
+    // would hold the project lock open for as long as the browser lived.
+    // Waiting is the exception: the user is waiting for exactly this.
+    if (document.hidden && !waiting) continue;
+    let payload;
+    try {
+      const response = await fetch(api("/api/round"));
+      if (!response.ok) {
+        await refusal(response);          // a 403 raises the expired overlay
+        if (!expired) showOverlay("paused");
+        continue;
+      }
+      payload = await response.json();
+    } catch (err) {
+      showOverlay("paused");
+      continue;
+    }
+    showOverlay(null);
+    if (!waiting || typeof lastSeenRound !== "number") continue;
+    // Higher, not merely different. A round file that went away must not
+    // drag the page back to a round it has already answered.
+    if (!payload.ok || !payload.round || !(payload.round.round > lastSeenRound)) {
+      continue;
+    }
+    await swapIn(payload.round);
+  }
+}
+
+async function swapIn(round) {
+  waiting = false;
+  document.getElementById("waiting").removeAttribute("data-on");
+  setBusy(false);
+  setStatus("");
+  try {
+    renderRound(round);
+  } catch (err) {
+    // renderRound guards its own sidebar and the server validates what it
+    // serves, so this should be unreachable -- which is why it is here. The
+    // loop above must not be able to die.
+    panel("questions", "The next round could not be shown. Reload this page.");
+    return;
+  }
+  // The brief is re-read every round, so the user watches the thing they are
+  // building grow. It is also the only visible proof that Send did anything.
+  await settle(restoreDraft);
+  await settle(loadBrief);
+}
+
+// ------------------------------------------------------------- overlays
+
+const OVERLAY = {
+  paused: ["Connection paused",
+           "The craft server stopped responding. This page will reconnect " +
+           "on its own."],
+  // Not a pause, and it must not be described as one. `serve` mints a new
+  // session key every time it starts, so a page whose server was restarted
+  // holds a key nothing will accept again, however the port turns out.
+  // Telling this user to wait is telling them to wait for ever, while
+  // everything they type goes nowhere.
+  expired: ["This page's session has ended",
+            "The craft server was restarted and issued a new key, so nothing " +
+            "typed here can be saved. Open the new link printed in your " +
+            "terminal."],
+  // The third ending, and the one every session actually reaches. `stop` is
+  // the last line of the skill's *Ending*, and a stopped server produces a
+  // connection error rather than a 403 -- so with only two states, the last
+  // sentence of every finished session was "this page will reconnect on its
+  // own", about a server that was shut down on purpose at the one moment
+  // there was nothing left to reconnect to.
+  finished: ["This session is finished",
+             "The craft server has been shut down, which is how a craft " +
+             "session ends — this is not a hiccup and there is nothing to " +
+             "wait for. Claude has everything you sent, and the final brief " +
+             "is in the terminal you started this from. You can close this " +
+             "page."],
+};
+
+function showOverlay(kind) {
+  const box = document.getElementById("overlay");
+  // Which of the three a lost connection turns out to be. `finished` wins
+  // over `expired` because a session that is over has no new link to open,
+  // and both outrank a pause: a pause is the only one of the three worth
+  // waiting through, and saying it when it is false is the whole finding.
+  if (kind && sessionEnded) kind = "finished";
+  else if (expired) kind = "expired";   // an ended session does not un-end
+  if (!kind) { box.removeAttribute("data-on"); return; }
+  box.querySelector("h2").textContent = OVERLAY[kind][0];
+  box.querySelector("p").textContent = OVERLAY[kind][1];
+  box.setAttribute("data-on", "1");
+}
+
+// Runs one step and absorbs whatever it throws, so a fault in one step of a
+// sequence cannot delete the steps after it. That is the exact shape of the
+// ledger finding: a throw in a sidebar panel took the counter and the filter
+// with it, because they ran afterwards.
+async function settle(step) {
+  try {
+    await step();
+  } catch (err) {
+    setProblem("Part of this page did not finish loading: " +
+               sentence(String(err)) + " Reload it if anything looks wrong.",
+               "page");
+  }
+}
+
+(async function start() {
+  await settle(loadRound);
+  await settle(restoreDraft);
+  await settle(loadBrief);
+  pollForNextRound();
+})();
+</script>
+</body>
+</html>

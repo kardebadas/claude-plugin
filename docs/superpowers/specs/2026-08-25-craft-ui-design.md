@@ -88,8 +88,14 @@ Created in the user's project, beside `CRAFT.md`:
     round-001.draft.json         # server writes on every change
     round-001.answers.json       # server writes on Send / Finish
     round-002.questions.json
+    server.log                   # child stderr, appended
+    serve-error                  # written instead of server-info when start fails
     ...
 ```
+
+`server.log` is load-bearing, not debris: it is where the watchdog's *"your lock
+file was removed, shutting down"* notice lands, and that notice is the entire
+mitigation for the post-acquire removal case in *Deliberate limitations*.
 
 The skill adds `.craft/` to the project's `.gitignore` if it is not already
 covered, and says so in one line.
@@ -208,21 +214,54 @@ Defaults: `--project-dir .`, idle timeout 240 minutes. `--open` launches the
 user's browser.
 
 **Port selection:** if `.craft/server-info` records a port and that port is
-free, reuse it; otherwise take an ephemeral one. Reuse is what lets a restarted
-server be picked up by the tab the user already has open, so a crash or an idle
-exit costs a reconnect rather than a new URL.
+free, reuse it; otherwise take an ephemeral one.
 
-**Session lock.** Before binding, `serve` takes `.craft/session.lock` —
-`{"pid": …, "started_at": …}`, written with `O_EXCL`. If the lock exists and
-its pid is alive, `serve` refuses:
+**The original rationale for this was wrong and is recorded here so it is not
+repeated.** It said reuse lets a restarted server be picked up by the tab the
+user already has open. It cannot: `make_key()` is called fresh on every start,
+the key travels only in the query string, and there is no cookie — so a tab
+sitting at `…?key=OLD` gets a 403 on every request regardless of the port. The
+port is the wrong half of the URL to preserve. Reuse is kept because it costs one
+probe syscall and keeps the URL stable across a restart *within* one session,
+where the agent re-reads `server-info` anyway; it buys nothing for the browser.
+
+**Session lock — held by the kernel, not by a pid file.** Before binding,
+`serve` opens `.craft/session.lock` and takes an exclusive non-blocking lock on
+the open file descriptor: `fcntl.flock(fd, LOCK_EX | LOCK_NB)` on Unix,
+`msvcrt.locking(fd, LK_NBLCK, 1)` on Windows, behind one small
+platform-dispatch function. It then writes `{"pid": …, "started_at": …}` into
+the file so a refusal can name the holder. The fd is held open for the life of
+the process.
+
+**Two earlier designs failed here, and the reasons are worth keeping.** An
+`O_EXCL` create left the lock visible and zero-byte between create and write, so
+a second session read an unreadable lock, judged it crash-orphaned, and took it.
+Publishing a fully-written file with `os.link()` fixed *creation* but not
+*destruction*: both places that removed a lock unlinked **by path**, without
+re-checking that what was at the path was still what they had judged removable —
+so two sessions could both judge one stale lock stale, and the loser's unlink
+would delete the winner's brand-new live lock. Both bugs were confirmed with
+reproductions, the second with two real OS processes, and **the whole test suite
+passed against both.**
+
+A kernel lock removes that entire class. The lock lives against the open file
+description, so the kernel releases it when the process exits **by any means,
+including `SIGKILL`**. There is no staleness to detect, no liveness heuristic,
+no reclaim path, and nothing ever unlinks the lock file — so there is no blind
+unlink left to get wrong. `release_lock` unlocks and closes the fd.
+
+If another live process holds it, `serve` refuses and exits `4`:
 
 ```
 LOCKED  another craft session (pid 44913, started 14:02) owns .craft/
-        use --force to take it over
+        that process is still running; stop it, or kill 44913
 ```
 
-and exits `4`. A lock whose pid is dead is stale: it is reclaimed silently. The
-lock is released on clean `stop` and on idle exit.
+**There is no `--force`.** It existed to take over a stale lock, and stale locks
+no longer occur. A held lock means a live holder, and the remedy is to end that
+process — which releases the lock — rather than to have two sessions writing
+`CRAFT.md`. Unlinking the file while the old holder still holds a lock on the
+old inode would reintroduce exactly the bug this design removes.
 
 This exists because `CRAFT.md` is rewritten whole on every round. Two sessions
 on one project means last-writer-wins, silently — one session's answers
@@ -244,6 +283,8 @@ Blocks until one of three things happens, prints one line, exits:
 | user pressed Send | `SUBMITTED round=2 answers=.craft/round-002.answers.json` | 0 |
 | user pressed Finish | `FINISHED round=2 answers=.craft/round-002.answers.json` | 0 |
 | nothing for `--timeout` | `TIMEOUT round=2` | 2 |
+| the answers file is there and unreadable | `ERROR <name> …` | 1 |
+| the flags were wrong | argparse usage text | 64 |
 | server not running | `NOSERVER` | 3 |
 
 (Exit `4` is `serve`'s "another session holds the lock" — see the Session lock
@@ -300,9 +341,23 @@ then posts a final round containing no questions and a closing note, and stops.
 ## Server behaviour
 
 - **Binds `127.0.0.1` only.** The URL carries a session key the server requires
-  on every request; anything without it gets `403`. After first load the browser
-  holds the key in a cookie, so reloads and asset fetches carry it. This is the
-  same
+  on every request; anything without it gets `403`.
+
+  **There is no cookie, deliberately.** An earlier draft set one so reloads would
+  carry the key. An adversarial review drove headless Chromium and demonstrated
+  that a page on *any other* `http://127.0.0.1:<port>` can load a single
+  subresource from this server and read the cookie back — and that the stolen
+  cookie is a complete credential, since `/api/brief` with no `key=` in the URL
+  returned `200`. Cookies are scoped by host, not by port (RFC 6265 §8.5);
+  Chrome records `sourcePort` and does not enforce it. `SameSite=Strict` bounds
+  the leak to same-site, which on a developer machine means every other local
+  port — exactly the adversary the key exists to stop.
+
+  The page is a single self-contained file with no subresources, and its fetch
+  helper already appends `?key=` to every request, so the cookie was solving a
+  problem that does not exist. The key therefore lives only in the URL. Browser
+  history is not readable across origins, which is a far smaller exposure than a
+  credential handed to every process listening on loopback. This is the same
   posture as the superpowers brainstorming companion, and it exists so a stray
   tab or another machine on the LAN cannot read the user's product plans.
 - **Serves three things:** `app.html`, the current round JSON, and the brief
@@ -326,7 +381,8 @@ Layout: questions carry the page, brief and ledger pinned right.
 **Left — the question stream.** Grouped by `area`, importance chip on each, and
 *"why this matters"* rendered always-visible rather than folded — that sentence
 is most of craft's value and hiding it would reduce the page to a form. Controls
-render per `type`; `allow_other` adds a free-text "Other"; `delegable` adds the
+render per `type`; `allow_other` (default **off**) adds a free-text "Other";
+`delegable` (default **on** — omit it and every question gets one) adds the
 **you decide** button. Every question carries an optional note field, which is
 where *"email, but I want passkeys later"* goes — the nuance a radio button
 destroys.
@@ -354,8 +410,11 @@ poll is also how a fold that takes several minutes stays legible rather than
 looking hung.
 
 **Connection state.** If the server dies the page shows a paused overlay and
-reconnects on its own when it returns — a restart on the same project directory
-reuses the port, so the open tab recovers without a new URL.
+retries. **A restart does not recover the tab** — see *Port selection* above:
+`serve` reuses the port but mints a new key, so the old tab gets a 403 for ever
+and the page says the session expired rather than pretending to reconnect. Give
+the human the new URL. This paragraph previously claimed the opposite; the claim
+was refuted by measurement and is recorded here so it is not restored.
 
 **Accepted limitation.** Rendering `CRAFT.md` needs a markdown renderer, and
 "stdlib only, no npm" means a small hand-written one in Python: headings, bold,
@@ -416,9 +475,11 @@ guidance governs both front-ends.
 | `wait` — no server | exits `3` printing `NOSERVER` |
 | auth | a request with no key, and one with a wrong key, both get `403` |
 | lock — held | a second `serve` against the same project exits `4` printing `LOCKED`, and does not bind |
-| lock — stale | a lock naming a dead pid is reclaimed and `serve` starts normally |
-| lock — force | `--force` takes over a live lock; the displaced server's port is freed and rebound |
-| lock — release | clean `stop` removes the lock, so the next `serve` starts without `--force` |
+| lock — death releases | a holder killed with `SIGKILL` leaves the project immediately lockable, with no reclaim step |
+| lock — cross-process | two real OS processes: exactly one acquires, the other is refused |
+| lock — release | clean `stop` releases the lock, so the next `serve` starts normally |
+| lock — stolen mid-session | removing the lock file under a running server makes it log and shut down rather than keep writing |
+| lock — truthful refusal | under contention, a refusal names the process that actually holds the lock |
 | malformed round | a `questions.json` with a syntax error yields an error screen, and the process is still alive afterwards |
 | answer states | delegated, skipped, answered and absent round-trip distinctly through the JSON |
 
@@ -451,11 +512,32 @@ it stays a consumer, and is refreshed by `marketplace update` after a push.
 
 ## Deliberate limitations
 
-- One session per project directory at a time, enforced by `.craft/session.lock`
-  (see *Session lock*). The lock guards the common case — a second session
-  started while the first is live. It does not make `.craft/` safe for genuine
-  concurrent use, and nothing else does either; `--force` is an override, not a
-  merge.
+- One session per project directory at a time, enforced by a kernel lock on
+  `.craft/session.lock` (see *Session lock*). It guards a second session started
+  while the first is live. It does not make `.craft/` safe for genuine concurrent
+  use, and nothing else does either.
+- **A lock file removed *after* a session acquired it cannot be defended
+  against.** Each removal lets one more session acquire; four simultaneous
+  holders were reproduced. No acquirer-side check can prevent it — once the name
+  is gone there is nothing to compare against. The mitigation is that the holder
+  notices: `Session.verify_lock_still_ours()` is checked on the server's watchdog
+  tick, and a server whose lock was taken shuts down loudly rather than keep
+  writing `CRAFT.md`. `.craft/` is gitignored, so `git clean -xdf` is a realistic
+  trigger, not a theoretical one.
+- **On NFS the guarantee degrades.** Linux implements `flock()` over NFS as a
+  POSIX record lock unless mounted `local_lock=flock|all`, and those are keyed on
+  `(process, inode)` — the semantics this design specifically rejects, under
+  which a refused acquirer's own `close()` drops the holder's lock. Sound on
+  local filesystems, including WSL's 9p/drvfs, which was tested.
+- **A submitted round is bounded by nesting depth, not only by bytes.** The
+  byte ceiling alone cannot bound the write: `indent=2` amplified a 1 MiB body
+  into ~928 MB on disk, measured. The real bound is `MAX_BODY_DEPTH`, and an
+  answer shape deeper than that is refused with a 400. A round of answers is
+  structurally flat, so this only bites something malformed.
+- **The Windows lock path is built but unproven.** `msvcrt.locking` is written to
+  the same contract as `fcntl.flock` and sits behind a one-function dispatch, but
+  no Windows machine has run it. Treat Windows as built-but-unverified until
+  someone does, the same way any untested platform claim should be treated.
 - No round history UI. Earlier rounds remain on disk as JSON and are readable,
   but the page shows the current round only (D5).
 - No authentication beyond the session key, and no TLS. Loopback only.

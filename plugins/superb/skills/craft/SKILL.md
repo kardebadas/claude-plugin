@@ -128,6 +128,13 @@ Use that absolute path. Do not guess it, and do not search for it: you will be
 running from my project directory, not from the skill's, and a wrong guess
 looks exactly like the UI being unavailable.
 
+**Before either mode writes anything, know where it is writing.** Crafting is
+the skill that runs before a project exists, and `CRAFT.md`, `.craft/` and
+`--project-dir .` all mean the working directory. If that directory is not a
+git repo, ask me where the brief should live before you start — otherwise
+"let's craft an app like Spotify", typed at home, puts the session and a
+`.gitignore` in `$HOME`.
+
 ## Starting the browser
 
 ```sh
@@ -141,16 +148,35 @@ refuses every request that arrives without it.
 Then add `.craft/` to my project's `.gitignore` if nothing there covers it
 already, and say so in one line.
 
-**Falling back is never a failure.** No `python3`, a `serve` that fails, or
-`LOCKED` → say so in one line and carry on in file mode. A crafting session
-is never blocked by a web server.
+Say one more thing in that first message: **the terminal stays mine while I
+answer.** The page carries the round in front of me and nothing else, so if I
+want to change my mind about something I settled two rounds ago, telling you
+here is how — there is no history screen in the page, deliberately, and you
+fold what I say in the terminal into the next round like any other answer.
 
-`LOCKED` means another craft session holds this project **right now**. The
-lock is held by the kernel, so it cannot be stale, and there is no override
-flag — do not invent one. Tell me the pid it names, let me decide whether to
-stop that session, and go on in file mode meanwhile. One exception: a
-`LOCKED` immediately after a `stop` that said `NOSERVER` is that server still
-draining its last write. Try `serve` once more before you report contention.
+**Falling back is never a failure.** No `python3`, a `serve` that fails, or a
+`LOCKED` you cannot clear → say so in one line and carry on in file mode. A
+crafting session is never blocked by a web server.
+
+`LOCKED` means a craft session holds this project **right now**. The lock is
+held by the kernel, so it cannot be stale, and there is no override flag — do
+not invent one. But whose session it is decides what you do, so **run
+`status`** before you fall back:
+
+* `"server": true` — it is **mine, left running from earlier**. A craft server
+  holds the lock for its whole life, so a live server on this project *is* the
+  holder `LOCKED` named (`ps -p <that pid> -o args=` names this project, if
+  you want it confirmed). Run `stop`, then `serve`, and give me the new URL.
+  **Do not fall back to file mode here**: that tab is still open in front of
+  me rendering `CRAFT.md`, and writing the questionnaire into it is exactly
+  the two-places problem *What this changes about what you write* forbids.
+* `"server": false` — a session that is not answering: someone else's, or one
+  still starting up. Tell me the pid, let me decide whether to stop it, and go
+  on in file mode meanwhile.
+
+One exception to both: a `LOCKED` immediately after a `stop` that said
+`NOSERVER` is that server still draining its last write. Try `serve` once
+more before you report anything.
 
 ## What this changes about what you write
 
@@ -165,6 +191,29 @@ In file mode, `CRAFT.md` holds both, exactly as §2 describes.
 Writing the questionnaire into `CRAFT.md` while a browser session is live
 means I answer the same questions in two places and you fold in two
 conflicting sets. Do not do it, however helpful it looks.
+
+## Resuming
+
+`.craft/` outlives this conversation, and the second morning is where that
+bites. **Run `status` before you write a round.** If `round` is null, nothing
+has been crafted here and the loop below starts at 1. If it is not null, a
+craft is already in progress, and starting at 1 anyway is the worst move
+available: yesterday's `round-001.answers.json` is still on disk, so `wait
+--round 1` comes back `SUBMITTED` in a twentieth of a second. You then fold in
+yesterday's answers as if I had just given them, overwrite them, and race
+forward a round at a time — while I sit looking at a page showing round 3,
+having touched nothing.
+
+So say what `status` found — the round it is on, and how many REQUIRED
+questions its `open` still counts — and then do one of two things, never both:
+
+* **Resume** at `round + 1`. `CRAFT.md` is the brief I left; the existing
+  answers files are there to re-read if the last session ended before folding
+  them in.
+* **Start fresh**, which means deleting `.craft/round-*` first, and saying so.
+  A round file left behind is a round `wait` can answer without me.
+
+If which of the two I want is not obvious from what I have just said, ask.
 
 ## The loop
 
@@ -238,10 +287,26 @@ any point just to look.
 
 ### Restarting
 
-Run `serve` again. It reuses the port, so a tab I left open lands back on
-the right server — but **it mints a new key every time**, and the key is in
-the URL. The URL I already have is dead for good and will keep answering
-403. Give me the new one; do not tell me to reload.
+`NOSERVER` has two causes, and only one of them wants a `serve`.
+
+**If this round has already timed out on you at least once and nothing has
+been sent** — no answers file, `status` showing its questions still `open` —
+the server did not crash. It shut itself down after four hours of complete
+silence, which is me having walked away. Tell me the session timed out after
+four hours of quiet, offer to bring it back, and **stop there.** Do not
+`serve` unprompted: another one is another four hours of `wait` re-arming
+into an empty room.
+
+**Otherwise** — no server was ever started here, or the one that was has just
+gone while I was plainly still here — run `serve` again. It **mints a new key
+every time**, and the key is in the URL, so the URL I already have is dead for
+good and will keep answering 403. Give me the new one; do not tell me to
+reload. Reusing the port changes nothing about that: a tab I left open 403s on
+the right port just as thoroughly as on the wrong one.
+
+And if I simply lose the URL while the session is still up, `stop` then
+`serve` is the whole recovery. Nothing reprints a live key — `status` strips
+it from the URL it reports, by design — and that is not a gap to work around.
 
 ## Reading the answers
 

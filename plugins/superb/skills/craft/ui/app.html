@@ -519,12 +519,21 @@ async function loadRound() {
     // The agent writes these files while this page is reading them, so a
     // half-written or hand-edited round is an ordinary event and has to be
     // legible rather than blank.
+    //
+    // ...and it is the one error on this page where reloading is genuinely
+    // the fix, so it is the one that has to say so. pollForNextRound only
+    // swaps a round in while `waiting` is true, and on a first load it is
+    // false: a round-001 the agent then repairs is never picked up, and a
+    // reader who was not told to reload sits in front of a page that has
+    // stopped being about anything.
     const host = document.getElementById("questions");
     host.textContent = "";
     host.append(
       el("div", { class: "card contradiction" },
          el("strong", { text: payload.error }),
-         el("pre", { text: (payload.details || []).join("\n") })));
+         el("pre", { text: (payload.details || []).join("\n") }),
+         el("div", { class: "why",
+                     text: "Once that is fixed, reload this page." })));
     // The same argument as the empty state, one panel over: an empty box and
     // a broken box look identical, and the ledger is beside a message saying
     // the round could not be read, which is where a reader is most likely to

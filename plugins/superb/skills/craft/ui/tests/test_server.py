@@ -3380,6 +3380,12 @@ class RenderedPageTest(ServerTestCase):
         # box -- next to a message saying the round could not be read, which
         # is exactly where a reader starts wondering what else is broken.
         self.assertIn("Nothing recorded yet.", dom)
+        # And it tells them to reload, which every other error panel on this
+        # page does and this one is the only one where it is actually the
+        # cure: pollForNextRound swaps a round in only while `waiting`, and a
+        # first load is not waiting, so the repaired round-001 arrives on a
+        # reload or not at all.
+        self.assertIn("reload this page", dom.lower())
 
     def test_no_round_yet_says_so(self):
         """An empty .craft/ is the state the page opens in, and a blank panel

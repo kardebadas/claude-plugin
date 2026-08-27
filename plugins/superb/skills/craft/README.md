@@ -34,9 +34,12 @@ assumptions, contradictions and delegated decisions, a **you decide** button on
 questions you would rather hand over, a free-text note beside any answer, and
 autosave so a closed tab loses nothing. Send when you have had enough for one
 round; Finish when you are done. The agent waits in the background and wakes
-when you send. In this mode **`CRAFT.md` holds only the accumulated brief** —
-the questions live in `.craft/round-NNN.questions.json` and never appear in the
-brief, so you are never asked the same thing twice in two places.
+when you send. The terminal stays yours throughout: the page carries the
+current round only, so changing your mind about something you settled two
+rounds ago is something you say in the chat, and the next round reflects it.
+In this mode **`CRAFT.md` holds only the accumulated brief** — the questions
+live in `.craft/round-NNN.questions.json` and never appear in the brief, so
+you are never asked the same thing twice in two places.
 
 **File.** The original mode, and the fallback: the questionnaire is written
 into `CRAFT.md` itself, with `[REQUIRED]`-style headings and a **My decision**
@@ -44,8 +47,10 @@ block under each question. You open the file, answer as many as you like, save,
 and ask for a review. No Python, no server, no browser.
 
 Falling back is never treated as a failure. No `python3`, a server that will
-not start, or another craft session already holding the project — the skill
-says so in one line and carries on in file mode.
+not start, or a craft session that is genuinely someone else's already holding
+the project — the skill says so in one line and carries on in file mode. Its
+own server, left running from an earlier session, it stops and restarts
+instead.
 
 ## What it records
 

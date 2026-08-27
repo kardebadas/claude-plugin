@@ -1155,8 +1155,10 @@ def cmd_stop(args):
     somewhere else in this file.
 
     It does not unlink server-info. The recorded port is how the next `serve`
-    lands on the same port, and how a tab the user still has open reconnects
-    itself instead of showing them a dead page.
+    lands on the same port -- and that is the whole of it. NOT so a tab the
+    user still has open reconnects itself: a restart mints a new key, so that
+    tab 403s on the reused port exactly as it would on a fresh one. _pick_port
+    says the same thing from the other end.
 
     It does not escalate to SIGKILL. SIGTERM is what runs the shutdown drain,
     and the drain is what stops a write that was already in flight from

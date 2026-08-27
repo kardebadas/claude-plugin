@@ -270,7 +270,10 @@ def _port_free(port):
 
 
 def _pick_port(session, requested):
-    """Reuse the last port when it is free, so an open tab reconnects itself.
+    """Reuse the last port when it is free. NOT so an open tab reconnects --
+    it cannot: a restart mints a new key, so the old tab 403s for ever. Reuse
+    keeps the URL stable within one session, where the agent re-reads
+    server-info anyway, and costs one probe syscall.
 
     0 means "any", which is what socket binding already means by it.
     """
@@ -1080,7 +1083,8 @@ def cmd_status(args):
         "server": server_alive(session),
         # From server-info, which survives a clean exit: when `server` is
         # false these describe the session that was, and the port is the one
-        # the next `serve` will try to reuse so that an open tab reconnects.
+        # the next `serve` will try to reuse it. Not for the browser's sake --
+        # a restart mints a new key and the old tab 403s regardless.
         "port": info.get("port"),
         # Without its query string, which is where the session key lives.
         # See _url_without_key: this line is quoted into transcripts.

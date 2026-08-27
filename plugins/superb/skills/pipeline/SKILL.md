@@ -397,11 +397,12 @@ phase before Stage 4 starts.
 
 ### Compacting at GATE 2
 
-Stage 4 is the long stage — a real run spent ~50 orchestrator turns over 13
-tasks — and your whole context is re-sent on every one of them. Stage 1's
-question rounds are the worst of it: Rule 5 keeps agent *output* out of context
-behind a `DETAIL:` pointer, but a conversation with the user cannot be
-pointer-ised. It is simply there, paid for fifty times.
+Stage 4 is the long stage — one orchestrator turn per dispatch, and every task
+takes an implementer, a reviewer and usually a fix round or two, across every
+phase. Your whole context is re-sent on each of them. Stage 1's question rounds
+are the worst of it: Rule 5 keeps agent *output* out of context behind a
+`DETAIL:` pointer, but a conversation with the user cannot be pointer-ised. It
+is simply there, re-sent every turn until the run ends.
 
 GATE 2 is also the safest point in the run to lose it. The design is in the
 spec, the plan in its files, the register empty by law, and the user has just
@@ -411,7 +412,7 @@ stops being true the moment Stage 4 starts: implementation generates knowledge
 not on disk yet. Cheapest and safest are the same point, and this is it.
 **Never offer this at GATE 1** — a compact costs a summarisation pass and voids
 the prompt cache, so the next turn re-reads everything. That pays back across
-fifty turns, not across the handful GATE 1 has left.
+the whole of Stage 4, not across the handful of turns GATE 1 has left.
 
 **Flush first, in this order. Then offer.**
 
@@ -643,7 +644,7 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
 | "The user told me earlier to use brain agents instead of asking" | Only the verbatim record in `register.md` turns that mode on. Not there → ask the user. |
 | "The register is empty and the plan is approved — there is nothing to flush, just compact" | Empty tables are two checks of three. The third is the decision the user made out loud that no file records. Walk the conversation first. |
 | "The user asked for the compact now; the flush can follow" | Then it follows an empty context. Write first, compact second — that order is the only thing that makes the cheap move safe. |
-| "Compaction helps at GATE 1 too, same argument" | The argument is fifty turns of re-sent context. GATE 1 has a handful left, and a compact costs a summarisation pass plus the prompt cache. |
+| "Compaction helps at GATE 1 too, same argument" | The argument is a whole stage of re-sent context. GATE 1 has a handful of turns left, and a compact costs a summarisation pass plus the prompt cache. |
 | "13 tasks is basically 12, splitting is bureaucratic" | The cap is a number, not a vibe. 13 tasks → split before implementation. |
 | "I'll split the oversized phase once I see how it goes" | Splitting after implementation starts does not satisfy Rule 3. Split before GATE 2. |
 

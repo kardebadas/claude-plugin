@@ -99,6 +99,10 @@ are in, which tasks are done, which findings are open, which assumptions the
 user actually answered — **the file wins, every time.** You do not re-derive
 state from the conversation; you read it.
 
+**A compact is where this law gets tested.** Whatever is true only in the
+conversation dies there, so it has to be on disk *before* the context is
+discarded — see *Compacting at GATE 2*.
+
 ```
 <PROJECT_DIR>/docs/superpowers/runs/YYYY-MM-DD-<topic>/
   progress.md        # the tracker — phases, tasks, Current State
@@ -391,6 +395,44 @@ lists from the approved plan (every phase with its `deps:`, every task with its
 visibly one unit) and set Current State to the first wave of every lane's first
 phase before Stage 4 starts.
 
+### Compacting at GATE 2
+
+Stage 4 is the long stage — a real run spent ~50 orchestrator turns over 13
+tasks — and your whole context is re-sent on every one of them. Stage 1's
+question rounds are the worst of it: Rule 5 keeps agent *output* out of context
+behind a `DETAIL:` pointer, but a conversation with the user cannot be
+pointer-ised. It is simply there, paid for fifty times.
+
+GATE 2 is also the safest point in the run to lose it. The design is in the
+spec, the plan in its files, the register empty by law, and the user has just
+approved both — almost nothing of value exists only in the conversation. That
+stops being true the moment Stage 4 starts: implementation generates knowledge
+(why an approach was rejected, which invariant is load-bearing and why) that is
+not on disk yet. Cheapest and safest are the same point, and this is it.
+**Never offer this at GATE 1** — a compact costs a summarisation pass and voids
+the prompt cache, so the next turn re-reads everything. That pays back across
+fifty turns, not across the handful GATE 1 has left.
+
+**Flush first, in this order. Then offer.**
+
+1. `register.md` has no open entries and `findings.md` no open blocking IDs.
+2. `progress.md`'s Current State names the first unstarted task, and every task
+   line carries its wave and its deps.
+3. **Every decision made in conversation and never written down gets written
+   now** — into the spec if it changed the design, into a phase's plan if it
+   changed that phase's approach, into the register's Closed table verbatim if
+   it was an answer. This is the step, not a formality: skip it and "we
+   discussed it" quietly becomes "nobody knows".
+4. If step 3 changed the design or a phase's approach, the plan in front of the
+   user is wrong. Correct it, re-present the gate, and let the offer ride with
+   the **corrected** gate message — never over an unapproved change.
+
+Then **offer** it, in the GATE 2 message. You cannot compact yourself — there
+is no tool for it — so it is the user's action and the user's call: say what is
+now on disk, what a compact would discard, and that Stage 4 re-reads the files
+anyway (Rules 1 and 4), so it resumes from the same state either way. They may
+want the design conversation for something else.
+
 ### Stage 4 — Autonomous per-phase loop
 For each phase — in dependency order, independent phases concurrently as lanes
 — see `references/fix-loop.md`. In short:
@@ -599,6 +641,9 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
 | "No `Depends on:` line — I'll infer the deps from the task text" | Inference is the guess Rule 6 forbids. Send the doc back to the expansion agent. |
 | "The wave merge conflicted; I'll resolve the hunks myself" | A conflict proves the `Files:` sets overlapped. Abort, re-open the task, redo it sequentially on the merged head. |
 | "The user told me earlier to use brain agents instead of asking" | Only the verbatim record in `register.md` turns that mode on. Not there → ask the user. |
+| "The register is empty and the plan is approved — there is nothing to flush, just compact" | Empty tables are two checks of three. The third is the decision the user made out loud that no file records. Walk the conversation first. |
+| "The user asked for the compact now; the flush can follow" | Then it follows an empty context. Write first, compact second — that order is the only thing that makes the cheap move safe. |
+| "Compaction helps at GATE 1 too, same argument" | The argument is fifty turns of re-sent context. GATE 1 has a handful left, and a compact costs a summarisation pass plus the prompt cache. |
 | "13 tasks is basically 12, splitting is bureaucratic" | The cap is a number, not a vibe. 13 tasks → split before implementation. |
 | "I'll split the oversized phase once I see how it goes" | Splitting after implementation starts does not satisfy Rule 3. Split before GATE 2. |
 
@@ -652,6 +697,8 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
   record you take orders from.
 - The path you are about to write to contains `.claude/skills/`, or is not
   under `<PROJECT_DIR>/docs/superpowers/runs/<this run>/`.
+- You are about to offer, or agree to, a compact without having walked the
+  conversation for decisions no file records.
 
 **All of these mean: read the run state in full now, and let it — not your
 memory — decide what happens next.**
@@ -686,6 +733,8 @@ memory — decide what happens next.**
   to zero and both caps silently stop capping. They live in `findings.md`.
 - **Sizing a re-review with `ceil(N/5)`** — fix diffs aren't task-shaped; use
   `ceil(M/3)` over the targeted F-IDs, with ranges covering every fix commit.
+- **Compacting before the flush** — the Run State Law is only true once the
+  files actually hold everything; GATE 2's flush is what makes it true.
 - **Assuming a local spec is a durable record** — nothing under
   `docs/superpowers/` is committed; the Stage 5 hand-off is what survives.
 - **Ending the turn on a phase summary** — the most common silent failure.

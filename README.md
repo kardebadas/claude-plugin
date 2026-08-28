@@ -38,6 +38,57 @@ enough to work from — it is not an instruction to start building.
 `pipeline` composes the [superpowers](https://github.com/obra/superpowers)
 skills, so install that plugin too.
 
+## Dependencies
+
+**`craft` has none.** It is self-contained: the browser UI is Python 3.9+ using
+only the standard library — no pip, no npm, no build step. If `python3` is
+missing, or the server cannot start, it falls back to the `CRAFT.md`
+questionnaire and keeps working.
+
+**`pipeline` composes [superpowers](https://github.com/obra/superpowers) and
+will not run without it.** It deliberately reimplements none of these — it owns
+only the seams between them:
+
+| Stage | Skill it invokes |
+|-------|------------------|
+| 1 — brainstorm | `superpowers:brainstorming` |
+| 2, 3 — master plan, per-phase expansion | `superpowers:writing-plans` |
+| 4 — the autonomous implement/review/fix loop | `superpowers:subagent-driven-development` |
+| 5 — finish | `superpowers:finishing-a-development-branch` |
+
+Install it per harness — the two are separate installs from the same upstream,
+and **they drift**: this machine currently runs **6.3.0** under Claude Code and
+**6.2.0** under Codex. `pipeline` uses only the four skills above, whose
+interfaces have been stable, but a version gap is worth knowing about before
+blaming the pipeline for a difference in behaviour between harnesses.
+
+```sh
+# Claude Code
+claude plugin marketplace add anthropics/claude-plugins-official
+claude plugin install superpowers@claude-plugins-official
+
+# Codex — see the superpowers README for the current install path
+```
+
+**`pipeline` also expects a `/review` skill in the target repository.** Stage 4
+calls it after every phase. If your repo has no `/review`, that step has nothing
+to invoke — supply one, or expect the review half of the loop to be skipped.
+
+### For contributors
+
+The craft UI's test suite (`tools/test-craftui.sh`, 778 tests plus an
+end-to-end smoke test) needs `python3` and nothing else to run. Two layers
+**skip cleanly** when their runtime is absent, and are worth having:
+
+- `node` — runs the page's `answerState` against `schema.answer_state` over
+  1,049 cases, which is what keeps the two implementations of the four answer
+  states from drifting apart.
+- `chromium` — drives the real page in a real browser. It is the only layer
+  that catches a broken page; the source lints pass against a page with a
+  deliberate syntax error.
+
+A green suite on a machine without them is a weaker green than it looks.
+
 ## Adding a skill to the namespace
 
 Drop it in and it is namespaced automatically — no manifest edit is needed for

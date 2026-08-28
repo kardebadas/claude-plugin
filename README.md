@@ -38,6 +38,82 @@ enough to work from — it is not an instruction to start building.
 `pipeline` composes the [superpowers](https://github.com/obra/superpowers)
 skills, so install that plugin too.
 
+## What a session looks like
+
+### `superb:craft`
+
+```
+> /superb:craft I want something like Spotify but for audiobooks
+
+Mode: browser. Your questions are at
+http://127.0.0.1:45893/?key=d3603afb…  ← open this, the key is part of the link
+
+Round 1 is up — 15 questions. 5 REQUIRED, 7 IMPORTANT, 2 PREFERENCE, 1 OPTIONAL.
+I'll wait; answer them whenever, and press Send when you're done.
+```
+
+You answer in the page. Each question says *why it matters* — "this decides
+onboarding, account recovery and every piece of identity infrastructure you will
+own for the life of the product" — so you know what you are choosing between.
+Every question takes a free-text note beside the options, which is where
+*"magic links, but I want passkeys later"* goes. And **you decide** hands a
+question back: it gets recorded as a Delegated Decision and is never asked again.
+
+Your brief grows in the sidebar as you answer. Press **Send to agent** and the
+next round lands in the same page — smaller than the last one, because the
+settled questions are gone and only what your answers opened up remains.
+
+It ends one of two ways: you press **Finish**, or it runs out of things to ask.
+Either way you are left with `CRAFT.md` — vision, scope, confirmed decisions,
+delegated decisions, open questions, contradictions — and a status line:
+
+```
+CRAFT STATUS: VISION CLEAR
+```
+
+That is the signal there is enough to plan from. It is *not* an instruction to
+start building.
+
+If `python3` is missing or the server cannot start, it says so in one line and
+puts the same questionnaire in `CRAFT.md` instead. Nothing is blocked by the UI.
+
+### `superb:pipeline`
+
+```
+> /superb:pipeline build what CRAFT.md describes
+```
+
+It asks until nothing is ambiguous — there is no cap on question rounds, and
+"use your judgment" changes the *format* of the questions, never whether an
+unknown gets asked. Then two gates, and they are the only two:
+
+```
+GATE 1 — the design.   A spec, after two agents have tried to break it.
+GATE 2 — the plan.     Phases, tasks, and which of them can run at once.
+```
+
+At GATE 2 you see the shape of the build before it starts:
+
+```
+Phase A — schema, renderer, session   deps: none
+  W1  T1 session paths    T3 validation    T4 renderer     ← 3 at once
+  W2  T2 session lock                                      ← needs T1
+Phase B — the HTTP surface            deps: A
+```
+
+Tasks share a wave only when neither depends on the other **and** they touch no
+file in common; each one then runs in its own git worktree. Phases with no
+dependency between them run as concurrent lanes.
+
+After that it runs on its own: implement, review, fix, next phase — stopping
+only for a genuine unknown, a blocked subagent, or the finished branch. Every
+task is reviewed by an agent that did not write it, and anything touching a
+security or data-integrity boundary gets a second reviewer whose only job is to
+prove it wrong.
+
+The run's state lives on disk, so a compaction or a crash resumes from the
+tracker rather than from memory.
+
 ## Dependencies
 
 **`craft` has none.** It is self-contained: the browser UI is Python 3.9+ using

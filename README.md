@@ -1,4 +1,4 @@
-# claude-plugin
+# Codex & Claude Plugin
 
 Personal [Claude Code](https://claude.com/claude-code) and Codex plugins.
 

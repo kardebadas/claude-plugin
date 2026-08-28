@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "kardebadas-claude-plugin",
-  "description": "Personal Claude Code plugins.",
+  "description": "Personal plugins for Codex and Claude Code.",
   "owner": {
     "name": "kardebadas"
   },

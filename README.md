@@ -56,19 +56,24 @@ only the seams between them:
 | 4 — the autonomous implement/review/fix loop | `superpowers:subagent-driven-development` |
 | 5 — finish | `superpowers:finishing-a-development-branch` |
 
-Install it per harness — the two are separate installs from the same upstream,
-and **they drift**: this machine currently runs **6.3.0** under Claude Code and
-**6.2.0** under Codex. `pipeline` uses only the four skills above, whose
-interfaces have been stable, but a version gap is worth knowing about before
-blaming the pipeline for a difference in behaviour between harnesses.
+Both harnesses install it from the same upstream — `obra/superpowers` — through
+their own plugin marketplace:
+
+**Claude Code**
 
 ```sh
-# Claude Code
 claude plugin marketplace add anthropics/claude-plugins-official
 claude plugin install superpowers@claude-plugins-official
-
-# Codex — see the superpowers README for the current install path
 ```
+
+**Codex CLI** — open the plugin search interface with `/plugins`, search for
+`superpowers`, and select *Install Plugin*.
+
+**They are separate installs and they drift.** This machine currently runs
+**6.3.0** under Claude Code and **6.2.0** under Codex. `pipeline` uses only the
+four skills above, whose interfaces have been stable — but a version gap is
+worth ruling out before blaming the pipeline for behaving differently in one
+harness than the other.
 
 **`pipeline` also expects a `/review` skill in the target repository.** Stage 4
 calls it after every phase. If your repo has no `/review`, that step has nothing

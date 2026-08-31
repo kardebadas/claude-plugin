@@ -292,6 +292,45 @@ fired: stop, and tell me how to restart.
 **A hard cap of 12 rounds exists as a bug detector, not a budget.** Reaching it
 means the shrink rule is not working; say so rather than starting round 13.
 
+### Every question must be objective
+
+**The test:** blank the `title` and keep only the `options`. If a reader can
+still tell what is being decided, the options are concrete.
+
+| Fails | Passes |
+| ----- | ------ |
+| `["modern", "traditional"]` | `["React", "Vue", "Svelte", "no framework"]` |
+| `["scalable", "simple"]` | `["PostgreSQL", "SQLite", "DynamoDB"]` |
+| `["good UX", "fast"]` | `["one page per step", "one long form", "a wizard modal"]` |
+
+Adjectives are not options. They describe how someone feels about a choice
+rather than naming the choice, and an answer to them cannot be written down as
+a decision — which means the next round has to ask again in different words.
+
+**One decision per question.** "What's your stack?" is six questions wearing one
+coat, and it gets a shrug.
+
+**Every question earns its place.** If both answers produce the same software,
+do not ask it.
+
+### A delegated decision still has to be written down
+
+*You decide* closes the question, not the decision. A bare delegation loses the
+reasoning permanently: nobody downstream can tell what was considered, so the
+first person to disagree has to redo the thinking from nothing.
+
+Every Delegated Decision carries four things:
+
+* the options that were on the table;
+* craft's recommendation, as the default;
+* the constraints the choice has to respect;
+* what goes wrong if it is chosen badly.
+
+**`delegable` defaults to `false` on a REQUIRED question.** A delegated REQUIRED
+is not a delegation, it is a scope reduction — if it could be delegated it was
+never required. Either lower its importance honestly, or record the answer in
+Confirmed Decisions.
+
 ### The round file
 
 `round` — an integer, and it must equal the NNN in the filename. The server
@@ -309,7 +348,7 @@ a round by filename and would otherwise write its answers over another one.
 | `options` | required for `single` and `multi`: a non-empty list of objects, each with a non-blank string `value` |
 | `area`, `why` | optional; `why` is the *why this matters* §4 asks for |
 | `allow_other` | optional boolean, **default false** — `single` and `multi` only. Set it to `true` to give me a free-text box beside your options, for when none of them is what I mean |
-| `delegable` | optional boolean, **default true** — every question gets a *you decide* button unless you set this to `false`. Set it `false` on the questions only I can answer: my budget, my users, what the product is for. A delegated answer becomes a Delegated Decision and is never asked again, so offering that on a question you cannot actually decide is worse than not offering it |
+| `delegable` | optional boolean, **default true — except on a `required` question, where it defaults to `false`.** Every question gets a *you decide* button unless you set this to `false`. Set it `false` on the questions only I can answer: my budget, my users, what the product is for. A delegated answer becomes a Delegated Decision and is never asked again, so offering that on a question you cannot actually decide is worse than not offering it |
 
 `note` — optional; one or two sentences in your own words, shown at the top
 of the questions column. On the closing round *Ending* describes — the one

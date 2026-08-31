@@ -100,5 +100,94 @@ class StructureTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("DEC-001", out)
 
+class HarnessTests(unittest.TestCase):
+    """Tests about the tests. A mutation that changes nothing proves nothing."""
+
+    def test_no_replace_target_is_a_no_op(self):
+        """Every COMPLETE.replace() target must exist in COMPLETE.
+
+        Two regression tests silently passed because they replaced
+        "- Database: PostgreSQL." while the fixture said "Postgres." — the
+        replace was a no-op, so the test asserted against an unmodified brief.
+        """
+        import re
+        src = pathlib.Path(__file__).read_text(encoding="utf-8")
+        targets = re.findall(r'COMPLETE\.replace\(\s*\n?\s*"((?:[^"\\]|\\.)*)"', src)
+        self.assertTrue(targets, "found no replace targets to check")
+        missing = [t for t in targets
+                   if t.encode().decode("unicode_escape") not in COMPLETE]
+        self.assertEqual(missing, [], "replace targets absent from COMPLETE: %s" % missing)
+
+
+class ReviewRegressions(unittest.TestCase):
+    """One test per defect an adversarial review found in the first version."""
+
+    def test_not_applicable_does_not_whitelist_the_whole_section(self):
+        rc, out = run(COMPLETE.replace(
+            "- Database: Postgres.",
+            "- Not applicable — no database.\n    - Hosting: TODO"))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("vagueness", out)
+
+    def test_etc_is_caught(self):
+        rc, out = run(COMPLETE.replace("- No mobile app.", "- No mobile app, no tablet, etc."))
+        self.assertEqual(rc, 1, out)
+
+    def test_url_colon_is_not_an_acceptance_sentence(self):
+        rc, out = run(COMPLETE.replace(
+            "- Upload a file: a signed-in user uploads a PDF and sees it listed.",
+            "- See https://example.com/spec"))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("acceptance", out.lower())
+
+    def test_empty_technical_axis_fails(self):
+        rc, out = run(COMPLETE.replace("- Database: Postgres.", "- Database:"))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("neither chosen nor deferred", out)
+
+    def test_core_features_with_no_bullets_fails(self):
+        rc, out = run(COMPLETE.replace(
+            "- Upload a file: a signed-in user uploads a PDF and sees it listed.",
+            "Some prose about features."))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("no features", out)
+
+    def test_duplicate_heading_fails(self):
+        rc, out = run(COMPLETE + "\n    ## Core Features\n    - Another: this one is different entirely.\n")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("more than once", out)
+
+    def test_fenced_code_is_not_parsed_as_content(self):
+        rc, out = run(COMPLETE.replace(
+            "## Open Questions\n    _(none)_",
+            "## Open Questions\n    ```\n    ## Core Features\n    - TBD\n    ```\n    _(none)_"))
+        self.assertEqual(rc, 0, out)
+
+    def test_q1_does_not_collide_with_q10(self):
+        import json, tempfile, os, pathlib as pl
+        d = tempfile.mkdtemp()
+        pl.Path(d, "CRAFT.md").write_text(textwrap.dedent(COMPLETE) +
+            "\n- Q1 settled here.\n- Q10 settled there.\n")
+        os.makedirs(pl.Path(d, ".craft"))
+        pl.Path(d, ".craft", "round-001.questions.json").write_text(json.dumps({
+            "round": 1, "questions": [
+                {"id": "Q1", "importance": "REQUIRED", "title": "a", "type": "text"},
+                {"id": "Q10", "importance": "REQUIRED", "title": "b", "type": "text"}]}))
+        p = subprocess.run([sys.executable, str(CHECK), d], capture_output=True, text=True)
+        self.assertNotIn("appears 2 times", p.stdout)
+
+    def test_uppercase_importance_is_actually_checked(self):
+        import json, tempfile, os, pathlib as pl
+        d = tempfile.mkdtemp()
+        pl.Path(d, "CRAFT.md").write_text(textwrap.dedent(COMPLETE))
+        os.makedirs(pl.Path(d, ".craft"))
+        pl.Path(d, ".craft", "round-001.questions.json").write_text(json.dumps({
+            "round": 1, "questions": [
+                {"id": "QZ", "importance": "REQUIRED", "title": "never mentioned", "type": "text"}]}))
+        p = subprocess.run([sys.executable, str(CHECK), d], capture_output=True, text=True)
+        self.assertEqual(p.returncode, 1, p.stdout)
+        self.assertIn("QZ", p.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

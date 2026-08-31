@@ -254,7 +254,7 @@ drop the ones that fail; never pass them through untouched.
 ## The loop
 
 1. Write `.craft/round-NNN.questions.json`.
-2. Run `python3 "$SKILL/ui/craftui.py" wait --project-dir . --round NNN --timeout 600`
+2. Run `python3 "$SKILL/ui/craftui.py" wait --project-dir . --round NNN --timeout 90`
    **and wait for it inside this turn.** Do not end your turn on it, and do not
    background it with `&`. Do not poll in a tight loop, and do not ask me in chat
    what I am answering in the browser.
@@ -272,21 +272,28 @@ drop the ones that fail; never pass them through untouched.
    **Waiting is executing, not stopping.** A wait is a tool call; your turn has not
    ended and no question is owed.
 
-   The 600-second bound is a heartbeat, not a timeout you are avoiding. My terminal
-   input is mine and stays mine, so surface every ten minutes, read anything I
-   typed, fold it in like any other answer, and re-arm.
+   **Ninety seconds is not arbitrary, and raising it breaks this.** A harness
+   runs a command in the foreground only up to its own limit and backgrounds
+   anything longer — Claude Code's default is 120 seconds. A wait set near or
+   above that limit is backgrounded, which is precisely the parking failure
+   above, reintroduced by the fix meant to remove it. Stay comfortably underneath
+   whatever your harness's *default* foreground window is; do not raise the
+   timeout to reduce re-arms.
+
+   Each `TIMEOUT` costs one line of output and one tool call. Re-arming twenty
+   times is cheap; being backgrounded once is the bug.
 3. Act on the one line it prints. Fold the answers into `CRAFT.md`, then write
    the next round **in the same turn**. The questionnaire gets **smaller** every
    pass, exactly as *Second pass* says.
 
 ### When the loop ends
 
-Four conditions, and nothing else:
+Five conditions, and nothing else:
 
 | Condition | Signal | What you do |
 | --------- | ------ | ----------- |
-| I pressed Finish | exit `0` `FINISHED` | Final fold, run the merits test in *Ending*, `stop`. |
-| Converged | zero open REQUIRED and zero IMPORTANT | Write the closing round — empty `questions`, a real `note` — then `stop`. |
+| I pressed Finish | exit `0` `FINISHED` | Final fold, then *Ending*. **`FINISHED` outranks every row below** — I have stopped answering, so a still-open REQUIRED question does not buy another round. Report `MORE CLARIFICATION NEEDED` naming it, and `stop`. |
+| Converged | zero open REQUIRED and zero IMPORTANT **across the brief, not the round** | Write the closing round — empty `questions`, a real `note` — then `stop`. |
 | Unrecoverable | exit `1` `ERROR`, or `64` | **Never re-arm.** Fix it, or fall back to file mode. |
 | No progress | two consecutive rounds yielding no new confirmed or delegated decision | Stop and say so. A third ask is arguing with someone who has decided not to answer. |
 
@@ -296,8 +303,18 @@ Exit `3` `NOSERVER` splits. If I am plainly present — I just typed — re-`ser
 and re-arm. If this round already timed out once, the four-hour idle shutdown has
 fired: stop, and tell me how to restart.
 
-**A hard cap of 12 rounds exists as a bug detector, not a budget.** Reaching it
-means the shrink rule is not working; say so rather than starting round 13.
+| Round cap reached | 12 rounds | Stop and say the shrink rule is not working. |
+
+**Count the rounds from disk, not from memory:** `ls .craft/round-*.questions.json
+| wc -l`. Nothing in the server enforces this — `MAX_ROUND` is 999 — and a
+resumed session has no recollection of how many rounds already happened. The cap
+is a bug detector, not a budget: reaching it means rounds stopped shrinking, so
+say that rather than starting round 13.
+
+**"Converged" is a property of the brief, not of the last round.** `count_open`
+scores one round's unanswered questions, so a round where I answered everything
+reports zero open while the brief is still missing whole sections. Check the
+brief — that is what `check-brief.sh` is for.
 
 ### Every question must be objective
 
@@ -333,10 +350,14 @@ Every Delegated Decision carries four things:
 * the constraints the choice has to respect;
 * what goes wrong if it is chosen badly.
 
-**`delegable` defaults to `false` on a REQUIRED question.** A delegated REQUIRED
-is not a delegation, it is a scope reduction — if it could be delegated it was
-never required. Either lower its importance honestly, or record the answer in
-Confirmed Decisions.
+**Set `delegable: false` explicitly on every REQUIRED question.** The page's
+default is unconditional — omit the key and a *you decide* button appears on a
+question only I can answer — so this is yours to write, not something the UI
+infers from importance.
+
+A delegated REQUIRED is not a delegation, it is a scope reduction: if it could
+be delegated it was never required. Either lower its importance honestly, or
+record the answer in Confirmed Decisions.
 
 ### The round file
 
@@ -355,7 +376,7 @@ a round by filename and would otherwise write its answers over another one.
 | `options` | required for `single` and `multi`: a non-empty list of objects, each with a non-blank string `value` |
 | `area`, `why` | optional; `why` is the *why this matters* §4 asks for |
 | `allow_other` | optional boolean, **default false** — `single` and `multi` only. Set it to `true` to give me a free-text box beside your options, for when none of them is what I mean |
-| `delegable` | optional boolean, **default true — except on a `required` question, where it defaults to `false`.** Every question gets a *you decide* button unless you set this to `false`. Set it `false` on the questions only I can answer: my budget, my users, what the product is for. A delegated answer becomes a Delegated Decision and is never asked again, so offering that on a question you cannot actually decide is worse than not offering it |
+| `delegable` | optional boolean, **default true, unconditionally** — every question gets a *you decide* button unless you set this to `false`, and the page does not look at `importance`, so **write `false` yourself on every REQUIRED question**. Set it `false` on the questions only I can answer: my budget, my users, what the product is for. A delegated answer becomes a Delegated Decision and is never asked again, so offering that on a question you cannot actually decide is worse than not offering it |
 
 `note` — optional; one or two sentences in your own words, shown at the top
 of the questions column. On the closing round *Ending* describes — the one
@@ -446,8 +467,11 @@ clear.
 `CRAFT STATUS: VISION CLEAR` is **earned, not judged.** Two independent passes,
 and both are required:
 
-**1. The mechanical check.** Run `./check-brief.sh <project-dir>` from this
-skill's directory. Exit `0` is the only pass; `1` names the predicate that
+**1. The mechanical check.** Run
+`python3 "$SKILL/skills/craft/check-brief.py" "$PWD"` — an absolute path to the
+script and an explicit project directory. You run from the project, not from the
+skill, so a bare `./check-brief.sh .` is either "command not found" or a check of
+the wrong directory. Exit `0` is the only pass; `1` names the predicate that
 failed and `2` means there is no readable brief. **Report its output, not your
 impression of it** — the whole point of a script is that it gives the same
 answer twice, and a summary of a check you ran is not the check.

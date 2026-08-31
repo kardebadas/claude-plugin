@@ -1,7 +1,7 @@
 {
   "name": "superb",
   "version": "0.6.0",
-  "description": "Personal product-discovery, implementation-pipeline and bug-fix skills for Codex.",
+  "description": "Personal skills for Codex: craft, pipeline and bug-fix.",
   "author": {
     "name": "kardebadas"
   },
@@ -9,7 +9,7 @@
   "interface": {
     "displayName": "Superb",
     "shortDescription": "Clarify product ideas, run an implementation pipeline, fix bugs from evidence.",
-    "longDescription": "Craft turns a vague product idea into a decision-rich brief. Pipeline takes an approved brief through planning, implementation, review, and fixes. Bug-fix traces a reported bug to file:line evidence before any fix is planned, and is not done until a regression test that failed first passes.",
+    "longDescription": "craft turns a vague product idea into a decision-rich brief. pipeline takes an approved brief through planning, implementation, review and fixes. bug-fix traces a reported bug to file:line evidence before any fix is planned, and is not done until a regression test that failed first passes.",
     "developerName": "kardebadas",
     "category": "Productivity",
     "capabilities": [

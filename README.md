@@ -212,14 +212,19 @@ Two gates, both run by CI on every push and pull request, and both worth running
 before you push:
 
 ```
-./tools/check-plugin.sh    plugin structure — frontmatter, namespace, manifests, drift
-./tools/test-craftui.sh    the craft UI test suite
+./tools/check-plugin.sh            plugin structure — frontmatter, namespace, manifests, drift
+./tools/check-plugin-mutants.sh    proves the above can still fail
+./tools/test-craftui.sh            the craft UI test suite
 ```
 
 `check-plugin.sh` exists because `claude plugin validate --strict` does not
 catch any of what it checks — it passes on a plugin whose agent has malformed
-frontmatter, which loads with its description silently stripped. The check is
-mutation-tested: fifteen deliberate breakages, all caught.
+frontmatter, which then loads with its description silently stripped.
+
+`check-plugin-mutants.sh` is the reason to believe it. A gate that passes
+everything is indistinguishable from a gate that checks nothing, so the harness
+applies 33 deliberate breakages and fails if any of them slips through. It works
+on a throwaway copy of the repository and never touches your working tree.
 
 The craft UI's test suite (`tools/test-craftui.sh`, 778 tests plus an
 end-to-end smoke test) needs `python3` and nothing else to run. Two layers

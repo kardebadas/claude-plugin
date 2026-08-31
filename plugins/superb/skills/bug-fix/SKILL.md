@@ -75,12 +75,15 @@ that is the one failure this skill exists to prevent.
 
 ## Step 2 — Decide, and write the cause down
 
-**Persist the investigation report to a file** before planning. Put it where the
-repo already keeps working notes; if it has no such place, `docs/bug-fix/` is a
-reasonable default, and creating one directory is not a structural change worth
-asking about. Step 3 hands `writing-plans` that path, not a conversation,
-because the implementers read the file and your context will not survive to
-reach them.
+**Persist the investigation report to a file, and commit it** before planning.
+Put it where the repo already keeps working notes; if it has no such place,
+`docs/bug-fix/` is a reasonable default, and creating one directory is not a
+structural change worth asking about.
+
+**Committing it is not optional bookkeeping.** Both executors work in a fresh
+git worktree, and an untracked file does not follow them there — an uncommitted
+report leaves Step 3's `Spec:` path dangling at the moment the implementers need
+it. Commit it on its own, before the fix exists.
 
 Then decide whether anything is genuinely the user's call:
 
@@ -101,10 +104,19 @@ Otherwise go straight to planning. Do not manufacture questions.
 file as its `Spec:` path plus the agreed fix direction.
 
 The plan must include a **regression test that fails before the fix and passes
-after**. State the expected failure explicitly — for a bug in existing code it
-is a wrong value or a raised error, **not** "function not defined", which is
-what the plan template's own example assumes. If the bug genuinely cannot be
-covered by a test, the plan must say so and why.
+after**, and the test must be **its own task, ordered before the fix task** —
+that ordering is what makes the failure observable, because once the fix is
+committed there is nothing left to stash. State the expected failure explicitly:
+for a bug in existing code it is a wrong value or a raised error, **not**
+"function not defined", which is what the plan template's own example assumes.
+
+The plan's **last task is the verification below.** Put it in the plan rather
+than saving it for afterwards — both executors finish by invoking
+`finishing-a-development-branch`, which merges the branch and removes the
+worktree, so anything you intended to check "after the executor returns" would
+be checked on work that is already merged and gone.
+
+If the bug genuinely cannot be covered by a test, the plan must say so and why.
 
 **Commit conventions come from the repository, not from here.** Read its
 `CLAUDE.md`, `AGENTS.md`, or contributing guide and follow its subject-line
@@ -118,25 +130,30 @@ user's rather than the project's:
 ## Step 4 — Implement
 
 `writing-plans` stamps every plan with an executor header naming
-`subagent-driven-development` or `executing-plans`. **Follow the plan's header**
-— it is the instruction the plan was written against, and contradicting it means
-the implementers read one thing and you intended another. Where the header
-offers the choice, take `superpowers:subagent-driven-development` if a subagent
-mechanism is available, so the fix is reviewed by something that did not write
-it, and `superpowers:executing-plans` where none is.
+`subagent-driven-development` or `executing-plans`, and asks the user which they
+want. **Follow whatever the plan ends up carrying** — it is the instruction the
+plan was written against, and overriding it means the implementers read one
+thing and you intended another. If the choice is still open when you get there,
+prefer `superpowers:subagent-driven-development` where a subagent mechanism
+exists, so the fix is reviewed by something that did not write it.
 
-Then verify, in this order, recording each result:
+The verification is the plan's last task, so the executor runs it while the
+branch still exists:
 
-1. **The regression test fails without the fix.** Stash or revert the fix and
-   run it. If it passes, it is not testing the bug — go back to Step 3.
-2. It passes with the fix applied.
-3. The original reproduction from Step 0 no longer reproduces.
+1. **The test task went red before the fix task ran.** That is the evidence, and
+   it is captured when the test task executes — not reconstructed afterwards by
+   stashing, which cannot work once the fix is committed. If the test passed on
+   its own task, it is not testing the bug: go back to Step 3.
+2. It passes once the fix task lands.
+3. The original reproduction from Step 0 no longer reproduces. **Skip this only
+   if Step 0 recorded the reproduction as `unknown`**, and say so in the result
+   rather than silently omitting it.
 4. The repo's own gates — full suite, linters, build — are green.
-5. The commit carries no attribution trailer and no session link.
+5. The commits carry no attribution trailer and no session link.
 
-**The fix is not done until step 1 has actually been run.** A green suite that
-never covered the bug is the same false signal as a green gate over unchecked
-code.
+**The fix is not done until step 1 has actually been observed.** A green suite
+that never covered the bug is the same false signal as a green gate over
+unchecked code.
 
 ## Red flags — STOP
 
@@ -151,5 +168,9 @@ code.
   the file, not your context.
 - About to call it done having only re-run the repro → the failing-first test is
   the deliverable that outlives you, and you have not watched it fail.
+- Planning to verify "after the executor returns" → it returns from a merged
+  branch with the worktree deleted. Verification is the plan's last task.
+- About to hand over a `Spec:` path you have not committed → it will not exist
+  inside the implementer's worktree.
 - About to write a ticket prefix you did not read out of the repo's own rules →
   you are carrying another project's conventions into this one.

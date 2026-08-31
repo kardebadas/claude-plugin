@@ -12,6 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: ./tools/check-plugin.sh
+      - run: ./tools/check-plugin-mutants.sh
 
   craftui:
     name: craft UI

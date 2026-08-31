@@ -13,7 +13,11 @@ def run(brief, rounds=None):
     return p.returncode, p.stdout
 
 COMPLETE = """
-    # CRAFT.md
+    # Crafted Product Definition
+    ## Vision
+    A document store for small teams.
+    ## Scope
+    In scope: upload, list, delete.
     ## Confirmed Decisions
     | ID | Decision | Source |
     | -- | -------- | ------ |
@@ -22,19 +26,18 @@ COMPLETE = """
     - Upload a file: a signed-in user uploads a PDF and sees it listed.
     ## Domain Behaviour
     - Document: has an owner; a document may not be shared outside its team.
-    ## User Types
+    ## Target Users
     - Editor: appears in the upload journey; may create and delete own documents.
     ## Explicit Non-Goals
     - No mobile app.
-    ## Technical Direction
+    ## Technical Preferences
     - Database: Postgres.
     - Frontend: No preference — planning skill may decide.
     ## Open Questions
     _(none)_
-    ## Assumptions
+    ## Remaining Assumptions
     _(none)_
-    ## Contradictions
-    _(none)_
+
     """
 
 class StructureTests(unittest.TestCase):
@@ -59,14 +62,14 @@ class StructureTests(unittest.TestCase):
         self.assertIn("open", out.lower())
 
     def test_unresolved_contradiction_fails(self):
-        rc, out = run(COMPLETE.replace("## Contradictions\n    _(none)_",
-                                       "## Contradictions\n    - CON-001 unresolved: offline vs realtime"))
+        rc, out = run(COMPLETE.replace("## Open Questions\n    _(none)_",
+                                       "## Open Questions\n    - CON-001 unresolved: offline vs realtime"))
         self.assertEqual(rc, 1)
         self.assertIn("CON-001", out)
 
     def test_high_impact_unconfirmed_assumption_fails(self):
-        rc, out = run(COMPLETE.replace("## Assumptions\n    _(none)_",
-                                       "## Assumptions\n    - ASM-001 Impact: High Status: Unconfirmed"))
+        rc, out = run(COMPLETE.replace("## Remaining Assumptions\n    _(none)_",
+                                       "## Remaining Assumptions\n    - ASM-001 Impact: High Status: Unconfirmed"))
         self.assertEqual(rc, 1)
 
     def test_feature_without_acceptance_sentence_fails(self):
@@ -75,6 +78,21 @@ class StructureTests(unittest.TestCase):
             "- Upload a file"))
         self.assertEqual(rc, 1)
         self.assertIn("acceptance", out.lower())
+
+    def test_every_required_heading_exists_in_the_skills_own_template(self):
+        """The check must require headings craft actually writes.
+
+        The first version invented names — User Types, Technical Direction,
+        Contradictions — none of which the output template emits, so every real
+        brief failed for reasons unrelated to its quality. The unit tests missed
+        it because the fixture was written to match the script.
+        """
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("cb", CHECK)
+        cb = importlib.util.module_from_spec(spec); spec.loader.exec_module(cb)
+        skill = (CHECK.parent / "SKILL.md").read_text(encoding="utf-8")
+        missing = [h for h in cb.REQUIRED_HEADINGS if ("## " + h) not in skill]
+        self.assertEqual(missing, [], "check-brief requires headings the skill never writes: %s" % missing)
 
     def test_required_decision_sourced_from_recommendation_fails(self):
         rc, out = run(COMPLETE.replace("| DEC-001 | Postgres | User answer |",

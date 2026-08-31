@@ -11,10 +11,15 @@ import json, pathlib, re, sys
 
 VAGUE = re.compile(r"\b(TBD|TODO|etc\.|as appropriate)\b", re.I)
 NA    = re.compile(r"^Not applicable — .+", re.M)
-REQUIRED_HEADINGS = ["Confirmed Decisions", "Core Features", "Domain Behaviour",
-                     "User Types", "Explicit Non-Goals", "Technical Direction",
-                     "Open Questions", "Assumptions", "Contradictions"]
+# These MUST match headings craft's own output template writes. test_check_brief
+# asserts exactly that — an earlier version invented heading names, and every
+# real brief failed the structure predicate for reasons unrelated to its quality.
+REQUIRED_HEADINGS = ["Vision", "Target Users", "Scope", "Core Features",
+                     "Domain Behaviour", "Explicit Non-Goals",
+                     "Technical Preferences", "Confirmed Decisions",
+                     "Open Questions", "Remaining Assumptions"]
 FAILURES = []
+ALL_LINES = []
 
 def ok(p):        print("PASS %s" % p)
 def fail(p, why): print("FAIL %s — %s" % (p, why)); FAILURES.append(p)
@@ -46,10 +51,12 @@ def predicate_nothing_open(sec):
     for line in sec.get("Open Questions", "").split("\n"):
         if "[REQUIRED]" in line or "[IMPORTANT]" in line:
             return fail("nothing-open", "still open: %s" % line.strip()[:60])
-    for line in sec.get("Contradictions", "").split("\n"):
+    # Contradictions are recorded as CON-* wherever they arise; the template has
+    # no dedicated heading, so scan the whole brief rather than requiring one.
+    for line in ALL_LINES[0].split("\n"):
         if "CON-" in line and "unresolved" in line.lower():
             return fail("nothing-open", line.strip()[:60])
-    for line in sec.get("Assumptions", "").split("\n"):
+    for line in sec.get("Remaining Assumptions", "").split("\n"):
         if "Impact: High" in line and "Status: Unconfirmed" in line:
             return fail("nothing-open", "high-impact unconfirmed: %s" % line.strip()[:60])
     ok("nothing-open")
@@ -65,15 +72,23 @@ def predicate_traceability(sec, craft_dir, text):
             except Exception as e:
                 return fail("traceability", "%s: %s" % (rf.name, e))
             for q in obj.get("questions", []):
-                if q.get("importance") not in ("required", "important"):
+                # schema.py: IMPORTANCES are uppercase. Comparing lowercase made
+                # this predicate dead code that passed on anything.
+                if str(q.get("importance", "")).upper() not in ("REQUIRED", "IMPORTANT"):
                     continue
                 qid = str(q.get("id"))
                 hits = text.count(qid)
                 if hits == 0: return fail("traceability", "%s resolves to nothing" % qid)
                 if hits > 1:  return fail("traceability", "%s appears %d times" % (qid, hits))
-    for row in sec.get("Confirmed Decisions", "").split("\n"):
+    # The template records decisions as **Source:** fields, not table rows.
+    body = sec.get("Confirmed Decisions", "")
+    for m in re.finditer(r"\*\*Source:\*\*\s*(.+)", body):
+        src = m.group(1).strip().rstrip(".")
+        if src and "user" not in src.lower():
+            return fail("traceability", "a decision is sourced from %r, not the user" % src[:40])
+    for row in body.split("\n"):
         cells = [c.strip() for c in row.split("|") if c.strip()]
-        if len(cells) >= 3 and cells[0].startswith("DEC-") and cells[2] != "User answer":
+        if len(cells) >= 3 and cells[0].startswith("DEC-") and "user" not in cells[2].lower():
             return fail("traceability", "%s sourced from %r, not a user answer" % (cells[0], cells[2]))
     if not FAILURES or FAILURES[-1] != "traceability":
         if rounds: ok("traceability")
@@ -87,7 +102,7 @@ def predicate_concreteness(sec):
             return fail("concreteness", "no rule beyond fields: %s" % b[:50])
     if not bullets(sec.get("Explicit Non-Goals", "")):
         return fail("concreteness", "Explicit Non-Goals is empty")
-    for line in sec.get("Technical Direction", "").split("\n"):
+    for line in sec.get("Technical Preferences", "").split("\n"):
         if line.strip().startswith("- ") and ":" not in line:
             return fail("concreteness", "axis neither chosen nor deferred: %s" % line.strip()[:50])
     ok("concreteness")
@@ -102,6 +117,7 @@ def main(argv):
         print("check-brief: FAIL")
         return 2
     sec = sections(text)
+    ALL_LINES.append(text)
     predicate_structure(sec)
     predicate_nothing_open(sec)
     predicate_traceability(sec, root / ".craft", text)

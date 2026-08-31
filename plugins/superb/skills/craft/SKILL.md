@@ -244,6 +244,13 @@ in which case generate the technical questions inline against the layer table in
 **It proposes; it does not decide.** If it returns prose, a recommendation, or a
 chosen stack rather than questions, discard that part. The decisions are mine.
 
+**Validate what it returns before merging it.** Its questions go into a round
+file, and a round file that fails `validate_round` is refused wholesale — one
+malformed option from the agent loses the questions you wrote too. Check every
+returned question against *The round file* below: uppercase `importance`,
+options as objects with a `value` string, a `type` from the allowed four. Fix or
+drop the ones that fail; never pass them through untouched.
+
 ## The loop
 
 1. Write `.craft/round-NNN.questions.json`.
@@ -997,8 +1004,8 @@ your stack?", which is six questions wearing one coat and gets a shrug.
   library; state management, if the framework does not settle it.
 * **Backend** — language; framework; API style (REST / GraphQL / RPC);
   background jobs, if a feature implies them.
-* **Data** — database engine; relational or document; migrations; caching, if a
-  feature implies it.
+* **Data** — database engine; relational or document; migrations; file and blob
+  storage, if anything is uploaded; caching, if a feature implies it.
 * **Auth** — provider or self-hosted; session or token; social logins.
 * **Hosting** — platform; containerised or not; CI.
 * **Cross-cutting** — package manager; language version floor; test framework.

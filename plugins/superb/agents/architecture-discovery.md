@@ -29,17 +29,25 @@ no summary, no chosen stack.
 [
   {
     "id": "tech-db-engine",
-    "importance": "required",
+    "importance": "REQUIRED",
     "title": "Which database engine?",
     "type": "single",
-    "options": ["PostgreSQL", "MySQL", "SQLite", "MongoDB"],
+    "options": [
+      {"value": "PostgreSQL"},
+      {"value": "MySQL"},
+      {"value": "SQLite"},
+      {"value": "MongoDB"}
+    ],
     "why": "The data model has relational joins across three entities, so this shapes the schema work."
   }
 ]
 ```
 
-`importance` is `required`, `important` or `nice`. `type` is `single`, `multi`
-or `text`.
+`importance` is one of `REQUIRED`, `IMPORTANT`, `PREFERENCE`, `OPTIONAL` —
+**uppercase**, exactly as `ui/schema.py` defines them. `type` is `single`,
+`multi`, `text` or `longtext`. Each option is an **object with a `value`
+string**, never a bare string; a bare string is rejected by the validator and
+your whole round is refused.
 
 ## The rules that make a question a question
 
@@ -53,9 +61,9 @@ decided, the options are concrete. If they cannot, rewrite them.
 
 | Fails the test | Passes |
 | -------------- | ------ |
-| `["modern", "traditional"]` | `["React", "Vue", "Svelte", "no framework"]` |
-| `["scalable", "simple"]` | `["PostgreSQL", "SQLite", "DynamoDB"]` |
-| `["best practice", "pragmatic"]` | `["REST", "GraphQL", "tRPC"]` |
+| `modern`, `traditional` | `React`, `Vue`, `Svelte`, `no framework` |
+| `scalable`, `simple` | `PostgreSQL`, `SQLite`, `DynamoDB` |
+| `best practice`, `pragmatic` | `REST`, `GraphQL`, `tRPC` |
 
 Adjectives are not options. They describe how someone feels about a choice
 instead of naming it, and an answer to them cannot be written down as a decision.

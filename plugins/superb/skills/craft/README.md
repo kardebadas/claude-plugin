@@ -91,3 +91,35 @@ CRAFT STATUS: BLOCKED BY CONTRADICTION
 `CRAFT.md` alone, without the original conversation. It does **not** mean
 building should start automatically — that is still your call, and
 [`superb:pipeline`](../pipeline) is the skill that takes it from there.
+
+
+## Depth, autonomy and a measured finish
+
+**Technical questions branch on what you are building.** The `Platform` answer
+decides which layers exist, and each present layer gets drilled one decision at
+a time. If the shape — frontend, backend, full stack — is not yet known, that is
+the first REQUIRED question, because everything else depends on it. A CLI is
+never asked about a frontend framework.
+
+For a software project with an undecided stack, craft dispatches
+`superb:architecture-discovery` once per session. It returns candidate questions
+only: the wire format has no field a design decision could go in, so it proposes
+and you decide. Its absence never blocks a round.
+
+**The round loop drives itself.** Craft waits for your answers inside its own
+turn, bounded at ten minutes as a heartbeat, and folds in anything you typed in
+the terminal before re-arming. It ends on one of four named conditions — you
+press Finish, it converges, it hits an unrecoverable error, or two consecutive
+rounds yield nothing new — with a twelve-round cap as a bug detector.
+
+**`VISION CLEAR` is earned, not judged.** Two independent passes: `check-brief.sh`,
+whose output is reported rather than summarised, and a reviewer handed `CRAFT.md`
+and nothing else. Craft's criterion is that the brief be understandable without
+the original conversation, and only an agent lacking the transcript can test that.
+
+### Every question must be objective
+
+Blank the title, keep the options. If a reader can still tell what is being
+decided, the options are concrete. `["React", "Vue", "Svelte"]` passes;
+`["modern", "traditional"]` does not — an answer to an adjective cannot be
+written down as a decision.

@@ -434,10 +434,30 @@ sufficient.
 ## Ending
 
 `FINISHED` means **I have stopped answering.** It does not mean the vision is
-clear. Do the final fold, then judge the brief on its merits: if REQUIRED
-questions are still unanswered, name them and report
-`CRAFT STATUS: MORE CLARIFICATION NEEDED`. Only a genuinely complete brief
-gets `VISION CLEAR`.
+clear.
+
+`CRAFT STATUS: VISION CLEAR` is **earned, not judged.** Two independent passes,
+and both are required:
+
+**1. The mechanical check.** Run `./check-brief.sh <project-dir>` from this
+skill's directory. Exit `0` is the only pass; `1` names the predicate that
+failed and `2` means there is no readable brief. **Report its output, not your
+impression of it** — the whole point of a script is that it gives the same
+answer twice, and a summary of a check you ran is not the check.
+
+**2. A fresh-context reviewer.** Dispatch an agent, hand it `CRAFT.md` **and
+nothing else**, and ask what it still could not build from. This skill's own
+completion criterion is that the brief be understandable by another LLM
+*without access to the original conversation* — and only an agent that lacks the
+transcript can test that. You have the transcript. You fail that precondition by
+construction, so you cannot be the judge of it.
+
+Whatever it still cannot answer becomes round N+1. Those are questions, not
+footnotes on a finished brief.
+
+If either pass fails, the status is `CRAFT STATUS: MORE CLARIFICATION NEEDED`,
+and you say **which** pass failed and why. Naming unanswered REQUIRED questions
+is part of that, not a substitute for it.
 
 If you conclude the vision is clear before I press Finish, write a final
 round with an empty `questions` list and a `note` saying so, then stop. The
@@ -1477,6 +1497,14 @@ Crafting is complete when another capable LLM can read `CRAFT.md` and confidentl
 The downstream LLM should still need to decide **how to implement the product**.
 
 It should not need to guess **what product I wanted**.
+
+That list is what the brief must **contain**. `check-brief.sh` is how it gets
+**verified** — see *Ending*, which requires it plus a reader who was not here.
+
+**A converged round is not a complete brief.** `count_answered` folds
+`delegated` into settled, so fifteen *you decide* clicks report a fully answered
+round over a brief that has recorded almost nothing. The counter measures one
+round; the check measures the brief.
 
 ---
 

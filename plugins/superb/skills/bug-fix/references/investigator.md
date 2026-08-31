@@ -23,20 +23,29 @@ Orient yourself in the repository:
 - `git log -1 --format="%H %s"` — the last commit
 - `git diff HEAD~1..HEAD --stat` — what it touched
 
-Then read the repo's own instructions — `CLAUDE.md`, `AGENTS.md`, or whatever
-the project uses — for its conventions, known gotchas, and testing rules. If the
-project keeps per-task notes or session summaries, read the most recent one: it
-records *why* a change was made, which the diff cannot tell you.
+Then read the repo's own instructions, in this order, taking the first that
+exists: `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`, `README.md`. They carry the
+project's conventions, known gotchas and testing rules. **If none exists, say so
+in your report and continue** — an investigation with no project context is
+still valid; one that silently invented the context is not.
 
-## Step 2 — Understand the last change
+If the project keeps per-task notes or session summaries, read the most recent
+by modification time: it records *why* a change was made, which a diff cannot.
+
+## Step 2 — Understand the recent changes
 
 - `git diff HEAD~1..HEAD` for the full diff.
-- Read the **complete** content of every changed file, not just the diff, so you
-  see the surrounding context the change lives in.
-- Follow imports and calls out of the changed code far enough to trace the path.
+- Read the **complete** content of changed files, not just the diff, so you see
+  the context a change lives in — but **bound this by relevance, not by the
+  commit**. A merge or a squash can touch hundreds of files. Read in full only
+  those on the execution path you are tracing in Step 3; for the rest the
+  `--stat` and the diff hunks are enough.
+- If the symptom has a last-known-good point, `git log --oneline <good>..HEAD`
+  over the affected paths is a better starting set than the last commit alone.
 
 The last commit is a suspect, not a verdict. Many bugs are older than the change
-that exposed them.
+that exposed them, and the fastest way to waste an investigation is to read one
+commit exhaustively because it was convenient.
 
 ## Step 3 — Investigate
 

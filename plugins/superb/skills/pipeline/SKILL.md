@@ -505,6 +505,43 @@ milestones passed at speed, not stations to wait at.
 either you are executing, or your message ends in a guard-rail question and
 names which guard rail fired. There is no third state.
 
+**Waiting on a dispatched agent is executing, not stopping.** A wait is a tool
+call; the turn has not ended and no guard rail is required. "I have nothing to
+do until the implementer returns" is never the end of a turn — it is the reason
+to wait. Which wait, and whether skipping it parks the run, is the platform
+question below.
+
+### Who wakes you after a dispatch (read before your first dispatch)
+
+Harnesses differ on one point that decides whether ending a turn is free or
+fatal, and the skill cannot tell from inside which one it is running on. Find
+out before you dispatch anything.
+
+| Harness family | What happens when a dispatched agent finishes | Ending your turn with children outstanding |
+| --- | --- | --- |
+| **Re-invoking** (e.g. Claude Code) | The completion starts a new turn for you | Costs nothing — you will be woken |
+| **Mailbox** (e.g. Codex `spawn_agent` / `wait_agent`) | Its answer is placed in a mailbox that **only a new turn drains**, and completion **cannot itself start one** | **Parks the run** until the user types something |
+
+On a mailbox harness the rule is mechanical, not motivational:
+
+> Whenever you have dispatched agents outstanding and no local work left, your
+> next action is a **bounded wait**, not the end of your turn. Repeat the wait
+> until the mailbox delivers or you have a guard-rail question to ask.
+
+Bound each wait in long stretches — on Codex, `wait_agent` with `timeout_ms`
+between 300000 and 600000. The wait is an event subscription, so a long stretch
+wakes just as fast as a short one; stacking short polls buys nothing and costs
+a tool call and a context rebill each. A stretch that times out with no
+activity is a cue to reconcile against git, not to shorten the next stretch.
+
+Read your harness's own reference for the exact tool names — on Codex that is
+`superpowers:using-superpowers`'s `references/codex-tools.md` — and **trust
+your actual tool list over any table, including this one.** If you cannot
+establish which family you are on, treat it as a mailbox harness: waiting on a
+re-invoking harness is harmless, while ending your turn on a mailbox harness is
+the "stops after every task" failure, and it is the user who pays for it, once
+per task, by having to type *continue*.
+
 ### Stage 5 — Finish
 Read `progress.md` first and confirm every phase is `[x]` with a hash; any `[ ]`
 or `[~]` is unfinished work, not a bookkeeping lapse — go finish it (a `[~]`

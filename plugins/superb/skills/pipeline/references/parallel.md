@@ -86,6 +86,10 @@ Let the phase branch be `P` (checked out in the phase worktree) and the wave be
    brief (`scripts/task-brief` run against the sub-plan), the project quality
    gates, and the <=10-line return contract (`BRANCH:` line included). The
    implementer commits on its own branch only.
+   After dispatching, if you have no local work left, **wait — do not end the
+   turn.** On a mailbox harness (Codex) a finished member cannot wake you, so
+   ending the turn here parks the wave until the user types something. See
+   *Who wakes you after a dispatch* in `SKILL.md`.
 5. As each member returns DONE, run its per-task review (review package over
    `BASE..wt/<phase>-t<i>`, task reviewer, fix loop, adversarial pass on
    trigger) exactly as `subagent-driven-development` prescribes, in that

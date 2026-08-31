@@ -26,6 +26,10 @@ phase autonomously.
    each its own instance of this loop.
    Every dispatch prompt carries the ≤10-line return contract; long output goes
    to `agent-output/<label>.md` and comes back as a path. (Rule 5.)
+   **After any dispatch, if you have no local work left, wait rather than end
+   the turn** — on a mailbox harness a finished agent cannot wake you, and the
+   turn-end is what makes a run stop after every task. See *Who wakes you after
+   a dispatch* in `SKILL.md`.
 2. **Review**:
    - Let `N` = number of tasks in this phase (from the expanded sub-plan).
    - Spawn `ceil(N/5)` **slice reviewers** in parallel. Assign each a

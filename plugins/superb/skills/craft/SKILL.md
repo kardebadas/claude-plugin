@@ -889,25 +889,49 @@ Clarify desired targets:
 
 ## Preferred technologies
 
-Ask whether I have preferences for:
+**Classify before you ask.** The `## Platform` answer determines which layers
+exist, and a layer that does not exist must not be asked about:
 
-* programming language;
-* frontend framework;
-* backend framework;
-* database;
-* hosting;
-* authentication provider;
-* storage;
-* package manager;
-* component library.
+| Platform answer | Layers present |
+| --------------- | -------------- |
+| web | frontend, backend, data, hosting |
+| API only | backend, data, hosting |
+| CLI | runtime, packaging, distribution |
+| mobile | client, backend, data, hosting |
+| desktop | client, local storage, packaging |
+| browser extension | client, permissions, store distribution |
 
-If I do not care, explicitly record:
+**If the shape is not yet known, that is the first question**, and it is
+REQUIRED: is this a frontend, a backend, or a full-stack build? Everything below
+depends on the answer, so ask it before the rest of this section.
+
+**Then drill each present layer.** One decision per question — never "what's
+your stack?", which is six questions wearing one coat and gets a shrug.
+
+*Worked example, a full-stack web app:*
+
+* **Frontend** — framework; rendering (SPA / SSR / static); styling; component
+  library; state management, if the framework does not settle it.
+* **Backend** — language; framework; API style (REST / GraphQL / RPC);
+  background jobs, if a feature implies them.
+* **Data** — database engine; relational or document; migrations; caching, if a
+  feature implies it.
+* **Auth** — provider or self-hosted; session or token; social logins.
+* **Hosting** — platform; containerised or not; CI.
+* **Cross-cutting** — package manager; language version floor; test framework.
+
+Ask only about layers the platform answer put in play, and only where the answer
+would change what gets built. A CLI has no frontend framework, and asking about
+one tells me you did not read my answer.
+
+If I do not care about an axis, record it exactly:
 
 `No preference — planning skill may decide.`
 
-This distinction is important.
-
-Do not force me to make technical decisions I deliberately want another skill to make.
+That is a real answer, not a gap. Do not force me to make technical decisions I
+deliberately want another skill to make — but do not leave an axis unrecorded
+either, because silence and "no preference" are different states downstream: one
+says I chose not to choose, the other says nobody asked.
 
 ---
 

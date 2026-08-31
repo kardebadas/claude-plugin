@@ -15,6 +15,9 @@
     "code-review",
     "subagents",
     "parallel",
-    "autonomous"
+    "autonomous",
+    "bug-fix",
+    "debugging",
+    "root-cause"
   ]
 }

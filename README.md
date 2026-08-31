@@ -27,6 +27,7 @@ inside it is invoked as `superb:<skill>`:
 
 | Skill | Invoke as | What it is |
 | ----- | --------- | ---------- |
+| [`setup`](plugins/superb/skills/setup) | `superb:setup` | Installs and verifies the dependencies the other skills need. Detects the harness, reports one fact per line, and on Claude Code runs the installs itself — then re-runs the check, because an install that printed no error has not been verified. On Codex, where plugins install through an interactive picker, it says so rather than attempting a workaround. |
 | [`craft`](plugins/superb/skills/craft) | `superb:craft` | Turns a vague product idea into a clear definition of what to build. Puts a questionnaire tailored to the product in front of you — in a local browser UI, or in `CRAFT.md` — which you answer in your own time; each pass folds your answers in, records confirmed decisions, surfaces assumptions and contradictions, and gets shorter. Deliberately stops before planning — no tasks, no phases, no code. |
 | [`pipeline`](plugins/superb/skills/pipeline) | `superb:pipeline` | Takes a settled idea to a finished branch: brainstorm, pressure-test, design gate, master plan, phase expansion, plan gate, then an autonomous per-phase implement/review/fix loop. Keeps its state on disk so a compaction or a crash cannot lose the run, and runs independent tasks as parallel implementers in separate worktrees. |
 | [`bug-fix`](plugins/superb/skills/bug-fix) | `superb:bug-fix` | Carries a reported bug from symptom to a regression-tested fix. Dispatches an investigator into its own context, and refuses to plan a fix until the root cause is proven with `file:line` evidence — a plausible fix for an unproven cause closes the ticket and leaves the bug live. Not done until a test that failed before the fix passes after it. |
@@ -42,6 +43,31 @@ enough to work from — it is not an instruction to start building.
 plugin too.
 
 ## What a session looks like
+
+### `superb:setup`
+
+```
+> /superb:setup
+```
+
+```
+HARNESS   claude
+REQUIRED  superpowers  MISSING   not-installed
+MARKET    claude-plugins-official  OK
+ACTION    claude plugin install superpowers@claude-plugins-official
+OPTIONAL  python3      OK        3.11.2
+```
+
+It runs the `ACTION` lines in order, then **re-runs the check** — the second run
+is the verification, since an install that printed no error has not been proven.
+
+`DISABLED` is reported separately from `MISSING`, because an installed-but-
+disabled plugin looks present to anything checking only for the name while its
+skills silently fail to load.
+
+It will not write to your config, install a language runtime, or run `git init`
+to satisfy an optional dependency. Without `python3` craft falls back to its
+file questionnaire; outside a git repository pipeline runs tasks one at a time.
 
 ### `superb:craft`
 
@@ -154,6 +180,10 @@ Commit conventions are read from the repository being fixed, not carried in from
 somewhere else.
 
 ## Dependencies
+
+**`superb:setup` installs and checks all of this for you** on Claude Code, and
+tells you what it cannot do on Codex. The rest of this section is what it is
+checking, for when you would rather know than run it.
 
 **`craft` has none.** It is self-contained: the browser UI is Python 3.9+ using
 only the standard library — no pip, no npm, no build step. If `python3` is

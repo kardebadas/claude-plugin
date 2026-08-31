@@ -5,6 +5,7 @@ invoked as `superb:<skill>`.
 
 | Skill | Invoke as | What it is |
 | ----- | --------- | ---------- |
+| [`setup`](skills/setup) | `superb:setup` | Installs and verifies what the other skills depend on. Reports what it cannot do rather than working around it. |
 | [`craft`](skills/craft) | `superb:craft` | Turns a vague product idea into a decision-rich `CRAFT.md` brief. Questions, challenges and records; deliberately stops before planning. |
 | [`pipeline`](skills/pipeline) | `superb:pipeline` | Takes a settled idea to a finished branch: design gate, master plan, phase expansion, plan gate, then an autonomous per-phase implement/review/fix loop. |
 | [`bug-fix`](skills/bug-fix) | `superb:bug-fix` | Carries a reported bug to a regression-tested fix. Refuses to plan until the root cause is proven with `file:line` evidence. |

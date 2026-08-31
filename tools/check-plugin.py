@@ -152,6 +152,9 @@ else:
         t, e = read(rd)
         if e: bad(f"{n}/README.md: {e}")
         elif len(set(t.split())) < 20: bad(f"{n}/README.md has almost no distinct content")
+    for sh in sorted(d.rglob("*.sh")):
+        if not sh.stat().st_mode & 0o111:
+            bad(f"{n}: {sh.relative_to(ROOT)} is not executable — the skill cannot run it")
     for where, txt in (("root README", rr or ""), ("plugin README", pr or "")):
         if not mentions(txt, f"superb:{n}"): bad(f"{n} missing from the {where}")
     for label, txt in surfaces.items():

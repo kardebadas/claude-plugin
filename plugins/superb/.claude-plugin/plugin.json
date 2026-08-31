@@ -1,11 +1,13 @@
 {
   "name": "superb",
-  "version": "0.6.0",
-  "description": "Personal skill collection for Claude Code and Codex, invoked as superb:<skill>. craft turns a vague product idea into a decision-rich brief; pipeline drives a settled idea to a finished branch; bug-fix carries a reported bug from root-cause evidence to a regression-tested fix.",
+  "version": "0.7.0",
+  "description": "Personal skill collection for Claude Code and Codex, invoked as superb:<skill>. setup installs what the others need; craft turns a vague product idea into a decision-rich brief; pipeline drives a settled idea to a finished branch; bug-fix carries a reported bug from root-cause evidence to a regression-tested fix.",
   "author": {
     "name": "kardebadas"
   },
   "keywords": [
+    "setup",
+    "dependencies",
     "craft",
     "product-discovery",
     "requirements",

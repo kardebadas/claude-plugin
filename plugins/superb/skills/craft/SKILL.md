@@ -223,12 +223,50 @@ If which of the two I want is not obvious from what I have just said, ask.
 ## The loop
 
 1. Write `.craft/round-NNN.questions.json`.
-2. Run `python3 "$SKILL/ui/craftui.py" wait --project-dir . --round NNN`
-   **as a background command**, and end your turn. Do not poll in a loop, and
-   do not ask me in chat what I am answering in the browser.
-3. Act on the one line it prints. Fold the answers into `CRAFT.md`, then
-   write the next round. The questionnaire gets **smaller** every pass,
-   exactly as *Second pass* says.
+2. Run `python3 "$SKILL/ui/craftui.py" wait --project-dir . --round NNN --timeout 600`
+   **and wait for it inside this turn.** Do not end your turn on it, and do not
+   background it with `&`. Do not poll in a tight loop, and do not ask me in chat
+   what I am answering in the browser.
+
+   **Why this wording is exact.** `wait` is an ordinary blocking process. Whether
+   ending your turn works at all is a property of the harness you are running on,
+   which this skill cannot see: where a finished background task starts a new turn
+   you would be woken, and where completion only lands in a mailbox nothing drains,
+   the session parks until I type something. That is the reported failure — *"I had
+   to go to the CLI and say already replied, next wave."* Waiting in your own turn
+   behaves the same on both. It is also why this used to fail only sometimes:
+   "background command" reads as either the harness's background-task mechanism or
+   a shell `&`, and a `&` returns instantly with nothing left to wake you.
+
+   **Waiting is executing, not stopping.** A wait is a tool call; your turn has not
+   ended and no question is owed.
+
+   The 600-second bound is a heartbeat, not a timeout you are avoiding. My terminal
+   input is mine and stays mine, so surface every ten minutes, read anything I
+   typed, fold it in like any other answer, and re-arm.
+3. Act on the one line it prints. Fold the answers into `CRAFT.md`, then write
+   the next round **in the same turn**. The questionnaire gets **smaller** every
+   pass, exactly as *Second pass* says.
+
+### When the loop ends
+
+Four conditions, and nothing else:
+
+| Condition | Signal | What you do |
+| --------- | ------ | ----------- |
+| I pressed Finish | exit `0` `FINISHED` | Final fold, run the merits test in *Ending*, `stop`. |
+| Converged | zero open REQUIRED and zero IMPORTANT | Write the closing round — empty `questions`, a real `note` — then `stop`. |
+| Unrecoverable | exit `1` `ERROR`, or `64` | **Never re-arm.** Fix it, or fall back to file mode. |
+| No progress | two consecutive rounds yielding no new confirmed or delegated decision | Stop and say so. A third ask is arguing with someone who has decided not to answer. |
+
+`TIMEOUT` (exit `2`) is none of these. It is the heartbeat: re-arm in the same turn.
+
+Exit `3` `NOSERVER` splits. If I am plainly present — I just typed — re-`serve`
+and re-arm. If this round already timed out once, the four-hour idle shutdown has
+fired: stop, and tell me how to restart.
+
+**A hard cap of 12 rounds exists as a bug detector, not a budget.** Reaching it
+means the shrink rule is not working; say so rather than starting round 13.
 
 ### The round file
 

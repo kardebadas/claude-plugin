@@ -292,7 +292,7 @@ Rules of the mode are in `references/parallel.md`.
 - User says "run the whole pipeline", "take this end to end", "implement all
   phases", "don't stop between phases".
 
-**When NOT to use:** a single bug fix (use `bug-fix`), a one-off change, or when
+**When NOT to use:** a single bug fix (use `superb:bug-fix`), a one-off change, or when
 the user wants to stay hands-on at every step (run the individual skills
 directly).
 

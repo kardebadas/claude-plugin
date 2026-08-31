@@ -29,14 +29,17 @@ inside it is invoked as `superb:<skill>`:
 | ----- | --------- | ---------- |
 | [`craft`](plugins/superb/skills/craft) | `superb:craft` | Turns a vague product idea into a clear definition of what to build. Puts a questionnaire tailored to the product in front of you — in a local browser UI, or in `CRAFT.md` — which you answer in your own time; each pass folds your answers in, records confirmed decisions, surfaces assumptions and contradictions, and gets shorter. Deliberately stops before planning — no tasks, no phases, no code. |
 | [`pipeline`](plugins/superb/skills/pipeline) | `superb:pipeline` | Takes a settled idea to a finished branch: brainstorm, pressure-test, design gate, master plan, phase expansion, plan gate, then an autonomous per-phase implement/review/fix loop. Keeps its state on disk so a compaction or a crash cannot lose the run, and runs independent tasks as parallel implementers in separate worktrees. |
+| [`bug-fix`](plugins/superb/skills/bug-fix) | `superb:bug-fix` | Carries a reported bug from symptom to a regression-tested fix. Dispatches an investigator into its own context, and refuses to plan a fix until the root cause is proven with `file:line` evidence — a plausible fix for an unproven cause closes the ticket and leaves the bug live. Not done until a test that failed before the fix passes after it. |
 
-The two are meant to run in order: `superb:craft` decides *what* the product is,
-`superb:pipeline` decides *how* it gets built and then builds it. Crafting
+`craft` and `pipeline` are meant to run in order: `superb:craft` decides *what*
+the product is, `superb:pipeline` decides *how* it gets built and then builds it.
+`superb:bug-fix` is for afterwards, when something built has gone wrong. Crafting
 reaching `CRAFT STATUS: VISION CLEAR` is the signal that the pipeline has
 enough to work from — it is not an instruction to start building.
 
-`pipeline` composes the [superpowers](https://github.com/obra/superpowers)
-skills, so install that plugin too.
+`pipeline` and `bug-fix` both compose the
+[superpowers](https://github.com/obra/superpowers) skills, so install that
+plugin too.
 
 ## What a session looks like
 
@@ -114,6 +117,42 @@ prove it wrong.
 The run's state lives on disk, so a compaction or a crash resumes from the
 tracker rather than from memory.
 
+### `superb:bug-fix`
+
+```
+> /superb:bug-fix uploads over ~5MB fail silently since Tuesday
+```
+
+It does not start editing. It dispatches an investigator into its **own
+context** — the separate context is what stops the conductor reasoning about
+implementation detail it will later have to judge — and waits for evidence:
+
+```
+## BUG INVESTIGATION
+
+Reported symptom:  uploads over ~5MB fail silently
+Root cause:        api/upload.ts:71 — the multipart limit is read from
+                   MAX_UPLOAD_MB, unset in prod, so it falls back to 5
+Execution path:    POST /upload -> parseMultipart -> limit=5 -> BREAKS AT
+                   silent 413 swallowed by the catch on :88
+Introduced by:     pre-existing; exposed by 4f2a1c9 raising the client cap
+```
+
+If it cannot pin a cause, it says what it ruled out and asks you for better
+repro detail. **It will not plan a fix on a hypothesis** — that is the whole
+point of the skill. A plausible fix for the wrong cause consumes the report,
+closes the ticket, and leaves the bug live.
+
+Then it asks only what is genuinely yours — two viable fixes, ambiguous intended
+behaviour, a blast radius past this repo — and plans the rest. The plan carries
+a **regression test that fails before the fix**, and the bug is not done until
+that test passes, the original reproduction is gone, and the repo's own gates
+are green. Re-running the repro by hand proves the symptom is gone today; the
+test is what stops it coming back.
+
+Commit conventions are read from the repository being fixed, not carried in from
+somewhere else.
+
 ## Dependencies
 
 **`craft` has none.** It is self-contained: the browser UI is Python 3.9+ using
@@ -131,6 +170,18 @@ only the seams between them:
 | 2, 3 — master plan, per-phase expansion | `superpowers:writing-plans` |
 | 4 — the autonomous implement/review/fix loop | `superpowers:subagent-driven-development` |
 | 5 — finish | `superpowers:finishing-a-development-branch` |
+
+**`bug-fix` composes superpowers too, and ships its own agent.** It needs
+`superpowers:writing-plans` to plan the fix, `superpowers:systematic-debugging`
+for the no-subagent investigation path, and
+`superpowers:subagent-driven-development` for fixes larger than three files.
+The investigator itself is bundled — `plugins/superb/agents/bug-investigator.md`
+— so there is nothing extra to install for it.
+
+On Codex, `multi_agent = true` in `~/.codex/config.toml` enables the subagent
+path. Without it `bug-fix` still runs, investigating inline under the same
+evidence bar, because Codex has no `agents` manifest key and its agent roles are
+TOML rather than markdown — so the bundled agent is not assumed to load there.
 
 Both harnesses install it from the same upstream — `obra/superpowers` — through
 their own plugin marketplace:
@@ -156,6 +207,24 @@ calls it after every phase. If your repo has no `/review`, that step has nothing
 to invoke — supply one, or expect the review half of the loop to be skipped.
 
 ### For contributors
+
+Two gates, both run by CI on every push and pull request, and both worth running
+before you push:
+
+```
+./tools/check-plugin.sh            plugin structure — frontmatter, namespace, manifests, drift
+./tools/check-plugin-mutants.sh    proves the above can still fail
+./tools/test-craftui.sh            the craft UI test suite
+```
+
+`check-plugin.sh` exists because `claude plugin validate --strict` does not
+catch any of what it checks — it passes on a plugin whose agent has malformed
+frontmatter, which then loads with its description silently stripped.
+
+`check-plugin-mutants.sh` is the reason to believe it. A gate that passes
+everything is indistinguishable from a gate that checks nothing, so the harness
+applies 33 deliberate breakages and fails if any of them slips through. It works
+on a throwaway copy of the repository and never touches your working tree.
 
 The craft UI's test suite (`tools/test-craftui.sh`, 778 tests plus an
 end-to-end smoke test) needs `python3` and nothing else to run. Two layers
@@ -193,6 +262,7 @@ plugins/superb/
   .claude-plugin/plugin.json        the plugin manifest — "name": "superb" sets the prefix
   .codex-plugin/plugin.json         the Codex plugin manifest
   skills/<skill>/SKILL.md           one directory per skill
+  agents/<agent>.md                 subagents, auto-discovered by Claude Code
   skills/<skill>/references/        read at the stage that needs them
   skills/<skill>/templates/         copied into a run directory, never edited
 ```

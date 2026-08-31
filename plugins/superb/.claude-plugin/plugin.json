@@ -1,11 +1,12 @@
 {
   "name": "superb",
-  "version": "0.5.0",
-  "description": "Personal skill collection. Skills are invoked as superb:<skill>. craft turns a vague product idea into a decision-rich CRAFT.md brief \u2014 it questions, challenges and records, and deliberately stops short of planning. pipeline takes a settled idea to a finished branch, composing the superpowers skills with a zero-assumption question law, on-disk run state, two approval gates, reviewer fan-out, a recursive fix loop, and dependency waves for parallel implementers.",
+  "version": "0.6.0",
+  "description": "Personal skill collection for Claude Code and Codex, invoked as superb:<skill>. craft turns a vague product idea into a decision-rich brief; pipeline drives a settled idea to a finished branch; bug-fix carries a reported bug from root-cause evidence to a regression-tested fix.",
   "author": {
     "name": "kardebadas"
   },
   "keywords": [
+    "craft",
     "product-discovery",
     "requirements",
     "design",
@@ -15,6 +16,9 @@
     "code-review",
     "subagents",
     "parallel",
-    "autonomous"
+    "autonomous",
+    "bug-fix",
+    "debugging",
+    "root-cause"
   ]
 }

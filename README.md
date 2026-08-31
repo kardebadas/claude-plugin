@@ -61,6 +61,11 @@ OPTIONAL  python3      OK        3.11.2
 It runs the `ACTION` lines in order, then **re-runs the check** — the second run
 is the verification, since an install that printed no error has not been proven.
 
+The exit code is the instruction: `0` satisfied, `1` actionable, **`2` could not
+be determined — install nothing.** That last one matters more than it looks. A
+failed `claude plugin list` is not evidence that a plugin is absent, and treating
+it as such reinstalls a working dependency over the top of itself.
+
 `DISABLED` is reported separately from `MISSING`, because an installed-but-
 disabled plugin looks present to anything checking only for the name while its
 skills silently fail to load.

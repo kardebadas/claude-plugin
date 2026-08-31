@@ -220,6 +220,30 @@ questions its `open` still counts — and then do one of two things, never both:
 
 If which of the two I want is not obvious from what I have just said, ask.
 
+## Before the first round: technical discovery
+
+For a **software project whose stack is not yet decided**, dispatch
+**`superb:architecture-discovery`** once — after the idea is stated, before
+round 1. Hand it the idea, the product category, whatever inspecting the
+repository told you, and the technical category list from *Preferred
+technologies*. It returns candidate questions in the round-file shape, ready to
+merge with the ones you wrote.
+
+Name it with the `superb:` prefix. A bare `architecture-discovery` resolves to
+whatever personal agent happens to exist, which may have been written for
+something else entirely.
+
+**Once per session, not once per round.** Rounds are supposed to shrink; a fresh
+discovery pass every round works against that.
+
+**Skip it** when the project is not software, when the stack is already settled
+by the repository or by what I have already told you, or when it is unavailable —
+in which case generate the technical questions inline against the layer table in
+*Preferred technologies*. Its absence must never block a round.
+
+**It proposes; it does not decide.** If it returns prose, a recommendation, or a
+chosen stack rather than questions, discard that part. The decisions are mine.
+
 ## The loop
 
 1. Write `.craft/round-NNN.questions.json`.

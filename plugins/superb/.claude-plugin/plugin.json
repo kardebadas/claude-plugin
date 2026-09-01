@@ -1,6 +1,6 @@
 {
   "name": "superb",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Personal skill collection for Claude Code and Codex, invoked as superb:<skill>. setup installs what the others need; craft turns a vague product idea into a decision-rich brief; pipeline drives a settled idea to a finished branch; bug-investigate finds out why something is broken and stops there; bug-fix carries it on to a regression-tested fix.",
   "author": {
     "name": "kardebadas"

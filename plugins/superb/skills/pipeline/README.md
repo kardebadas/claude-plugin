@@ -40,11 +40,24 @@ phase is called complete, and it is updated around *every individual task* —
 `[~]` is the only thing that distinguishes "never started" from "died halfway"
 after a crash or a context compaction.
 
+**Review is a line in the tracker, not a memory.** Every phase ends with an
+`RV` line, ticked `[~]` before the reviewers go out and `[x]` only against their
+returned report files — one per reviewer, counted against the number the line
+declares. It exists because the ledger cannot tell you whether review happened:
+an empty findings file is exactly what a phase nobody reviewed looks like, so
+any gate phrased "no open blocking findings" passes when the fan-out never ran.
+An unreviewed phase is an unticked box instead. A Rule 3 split and a lane join
+each get an `RVJ` line for the joint review no single phase's `RV` covers.
+
 **Reviewer fan-out.** A phase of N tasks gets `ceil(N/5)` slice reviewers over
-exact commit ranges, plus an integration reviewer whenever there is more than
-one slice. Fix rounds get their own math — `ceil(M/3)` over the findings the fix
-targeted — and the assigned ranges must cover every fix commit, because a clean
-round from reviewers who never looked at a fix closes nothing.
+exact commit ranges — or one per wave if it ran waves, since a wave is never
+split across two reviewers — plus an integration reviewer whenever there is more
+than one slice. The slices must cover every commit on the phase branch — including
+any the orchestrator wrote inline, which have no task line and so are covered
+by nothing unless a slice is widened to reach them. Fix rounds get their own
+math — `ceil(M/3)` over the findings the fix targeted — and the assigned ranges
+must cover every fix commit, because a clean round from reviewers who never
+looked at a fix closes nothing.
 
 **A findings ledger with stable IDs.** Every blocking finding gets an `F-NNN`
 that is never reused or renumbered. A rediscovered finding keeps its ID, which

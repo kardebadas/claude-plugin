@@ -200,6 +200,57 @@ for p in (ROOT/"plugins").rglob("*"):
 if hits: bad("personal paths or foreign conventions: " + ", ".join(hits[:8]))
 else: ok("no absolute home paths, private project names, or foreign ticket prefixes")
 
+# ---- pipeline RV/RVJ examples must obey the grammar they teach ----
+# The skill's gate is "one agent-output file per reviewer, counted against the
+# <s> slice + <i> integration declared on that round". Every worked example must
+# obey it, or the gate teaches its own violation. Each record is bounded at the
+# next record so one example cannot borrow its neighbour's evidence.
+# Deliberately NOT checked: the declared slice count against ceil(N/5), since a
+# waved phase legitimately departs from it.
+print("\n== pipeline review-line examples ==")
+start = re.compile(r"(?:-\s*)?\[x\]\s*(RVJ|RV)\b|(?:->|→)\s*(round)\s+\d+\s*:")
+decl  = re.compile(r"(?:N|M)=\d+\s*(?:waved\s+)?(?:->|→)\s*(\d+)\s*slice\s*\+\s*(\d+)\s*integration")
+rpt   = re.compile(r"reports\s+(.+?)(?=\s*[·|]|\s+coverage\b|\s*$)")
+cov   = re.compile(r"coverage\s+\S+\.md")
+def nfiles(spec):
+    m = re.search(r"\{([^}]*)\}", spec)
+    src = m.group(1) if m else spec
+    return len([x for x in src.split(",") if x.strip()])
+seen = viol = 0
+pdir = ROOT / "plugins" / "superb" / "skills" / "pipeline"
+for f in sorted(pdir.rglob("*.md")):
+    t, e = read(f)
+    if e: continue
+    flat, starts, off = [], [], 0
+    for ln in t.split("\n"):
+        starts.append(off); flat.append(ln.strip()); off += len(ln.strip()) + 1
+    flat = " ".join(flat)
+    def lineno(pos):
+        n = 1
+        for k, st in enumerate(starts, 1):
+            if st <= pos: n = k
+            else: break
+        return n
+    marks = [(m.start(), (m.group(1) or m.group(2))) for m in start.finditer(flat)]
+    for idx, (pos, kind) in enumerate(marks):
+        end = marks[idx + 1][0] if idx + 1 < len(marks) else len(flat)
+        rec = flat[pos:min(end, pos + 400)]
+        d = decl.search(rec)
+        if not d: continue          # e.g. the WAIVED form, which carries no counts
+        seen += 1
+        want = int(d.group(1)) + int(d.group(2))
+        where = f"{f.relative_to(ROOT)}:{lineno(pos)}"
+        if kind == "RVJ" and (int(d.group(1)), int(d.group(2))) != (0, 1):
+            viol += 1; bad(f"{where}: RVJ must be 0 slice + 1 integration, declares {d.group(1)}+{d.group(2)}")
+        r = rpt.search(rec)
+        got = nfiles(r.group(1)) if r else 0
+        if got != want:
+            viol += 1; bad(f"{where}: declares {want} reviewers, lists {got} report files")
+        if not cov.search(rec):
+            viol += 1; bad(f"{where}: closed review round with no coverage file")
+if not seen: bad("no closed RV/RVJ examples found — the grammar lost its worked instances")
+elif not viol: ok(f"{seen} closed review rounds: reviewer counts, RVJ shape and coverage all conform")
+
 print()
 print("check-plugin: FAIL" if FAIL else "check-plugin: PASS")
 sys.exit(1 if FAIL else 0)

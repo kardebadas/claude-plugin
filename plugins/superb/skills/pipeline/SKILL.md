@@ -41,6 +41,9 @@ Protocol — if more than one qualifies, ask which); read `progress.md`,
 
 - the Current State block;
 - per-phase task counts (`[x]` / `[~]` / `[ ]`);
+- **every phase's `RV` state, and any `RVJ`** — an open `RV` under a phase whose
+  tasks are all `[x]` is the headline of the report, not a footnote: that phase
+  was implemented and never reviewed;
 - open register entries;
 - open blocking F-IDs;
 - fix-loop iteration counts from the Counters table.
@@ -146,7 +149,7 @@ both.
 
 ## Current State
 - **Phase:** <current phase number and name>
-- **Next action:** <the single next unchecked task>
+- **Next action:** <the single next unchecked line — task, RV, or RVJ>
 - **Last updated:** <timestamp>
 - **Run directory:** <path>
 
@@ -155,22 +158,96 @@ both.
 - [~] T2 — <task name> · W2 · deps T1 — started <timestamp> in `wt/p1-t2`
 - [~] T3 — <task name> · W2 · deps T1 — started <timestamp> in `wt/p1-t3`
 - [ ] T4 — <task name> · W3 · deps T2, T3
+- [ ] RV — review fan-out
 ...
 ```
 
 Every task line carries its **wave** (`W<n>`) and its **deps** (Rule 6); every
 phase heading carries the phases it depends on. Tasks in the same wave may be
-`[~]` at the same time — that is the one sanctioned case of more than one
-`[~]` line, and each still gets its own write before its own dispatch.
+`[~]` at the same time — one of two sanctioned cases of more than one `[~]`
+line (the other is concurrent lanes, each of which may hold its own `[~]` task
+or `RV`), and each still gets its own write before its own dispatch.
+
+### The RV line — review is a tracker line, not a memory
+
+**Every implementation phase ends with an `RV` line**, written in at GATE 2 with
+its task lines. (Only implementation phases — the Stages 1–5 seeded at Stage 1
+are scaffolding and carry none.) It obeys Rule 2's write-before-work and Rule 4's
+reconciliation, carries no `W<n>`/`deps`, and is **not a task**: it never counts
+toward Rule 3's 12-task cap nor toward `N` in `ceil(N/5)`.
+
+```markdown
+- [ ] RV — review fan-out
+- [~] RV — review fan-out · N=8 → 2 slice + 1 integration · started 2026-09-01 14:31
+- [x] RV — review fan-out · N=8 → 2 slice + 1 integration
+      · reports p3-review-{a,b,int}.md · coverage p3-coverage.md → F-012, F-013
+```
+
+The `[ ]` form carries nothing else: at GATE 2 no task has a hash, and a waved
+phase's slice count still has latitude in it (one slice per wave, or per
+adjacent pair of small waves). Both are filled in at dispatch.
+
+**Closing it takes artifacts, not adjectives** — four fields, each checkable by
+someone who was not there, all paths relative to `agent-output/`:
+
+| Field | What it must satisfy |
+| --- | --- |
+| `N=<tasks> → <s> slice + <i> integration` | `N` is the phase's task count, so the fan-out is re-derivable at closure instead of trusted from the step that gets skipped. Which number `s` must match depends on the regime, and the line says which: an **unwaved** phase takes `s = ceil(N/5)`; a **waved** phase takes one slice per wave or per adjacent pair of small waves (write `waved` after `N`), which may be more or fewer than `ceil(N/5)` and never splits a wave across two reviewers; an **`RVJ`** is always `0 slice + 1 integration`, its `N` informational. `i` is 1 whenever `s > 1`. |
+| `coverage <file>` | One file holding **the slice assignment table — each row keyed by its report filename, with that reviewer's exact range — above the `git log --oneline PB..PH`**, and ending with the verdict line `COVERED: <n>/<n> commits`. All three: a bare log is the input to a coverage judgement rather than the judgement, and a table with a gap in it sits above the log just as happily as one without. Anything short of `<n>/<n>` does not close the line. |
+| `→ <F-IDs>` or `→ no findings` | What the round produced. |
+
+**Every field is per round, and re-review rounds append their own.** The counts
+are read against the round they sit in, never against the whole line:
+
+```markdown
+      → round 2: M=9 → 3 slice + 1 integration · reports p3-rr2-{a,b,c,int}.md
+        · coverage p3-rr2-coverage.md → F-012 closed, F-014 raised
+```
+
+`M` is the count of targeted F-IDs and the fan-out is `ceil(M/3)` (not
+`ceil(N/5)` — fix diffs are not task-shaped), with coverage over the fix commits.
+Whoever ran the round writes it, at whatever recursion depth.
+
+The one other closure: `[x] RV — WAIVED by user: "<their words>"`, which needs
+those words verbatim in `register.md`, applies only to the phases the user named
+(if that is unclear it is an Ambiguity stop, not a guess), and is listed in the
+Stage 5 hand-off. To un-waive, set it back to `[ ]`.
+
+**A phase whose `RV` is not `[x]` is not complete, however many of its tasks
+are.**
+
+**`RVJ` — the joint review of a designed unit.** A Rule 3 split, and a phase whose
+deps span two or more lanes, each owe a review no single phase's `RV` can cover.
+Same grammar and closure rules. It is always `0 slice + 1 integration` — one
+reviewer, seeing the unit whole — with `N` = the tasks across that unit, and a
+discriminator **naming the phases whose combined diff was reviewed**, since one
+phase can owe two and "lanes A+B" is not something a third party can check:
+
+```markdown
+- [ ] RVJ — joint integration review · split 4a+4b
+- [x] RVJ — joint integration review · lanes A+B (phases 5, 6) · N=17 → 0 slice + 1 integration
+      · reports j-56-int.md · coverage j-56-coverage.md → no findings
+```
+
+It gets **its own Counters row**, and it sits where it must be satisfied: after a
+split's last sibling, above the first task of a joining phase. Full procedure in
+`references/fix-loop.md`.
 
 The **Current State** block stays at the very top so re-orienting costs one
 read and nothing else. Never move it below the phase lists, never split it,
-never let it point at a task that isn't the first unfinished one. Timestamps
+never let it point at a line that isn't the first unfinished one. Timestamps
 come from a real clock (`date`), never from your sense of elapsed time.
+
+**`Next action` names the next unchecked line of this phase, and an open `RV`
+is such a line.** When the last task of a phase lands, the next action is that
+phase's `RV` — never the next phase's first task. Writing the next phase there
+while `RV` is open makes the tracker itself instruct the run to skip review,
+and the tracker is the thing every rule here tells you to obey.
 
 `[ ]` not started · `[~]` **started, outcome unknown** · `[x]` done, followed by
 the commit hash carrying it (or `` `nocommit` `` plus a one-line reason — never
-a blank).
+a blank). **`RV`/`RVJ` are the exception**: they produced review, not code, and
+close on reviewer evidence instead of a hash — see below.
 
 ### Rule 1 — Read-write bookend at every phase boundary
 
@@ -180,8 +257,11 @@ a blank).
   "just checking one thing".
 - **Before marking ANY phase complete:** update and save the tracker first —
   every task in that phase checked off **with its hash**, Current State
-  pointing at the next phase's first unstarted task. **A phase is complete when
-  the file says so**, not when you believe the work is done. No phase may be
+  pointing at the **next unchecked line** — which for a joining phase is its
+  `RVJ`, sitting above that phase's first task — **and this phase's `RV` (and
+  any `RVJ`) `[x]`**.
+  **A phase is complete when the file says so**, not when you believe the work
+  is done. No phase may be
   declared complete, and no next phase may begin, until that write is on disk.
 
 ### Rule 2 — Per-task updates, not per-phase
@@ -193,7 +273,9 @@ Around **each individual task**, in this order:
 3. On completion: mark it `[x]` with the commit hash.
 4. Update the Current State block (phase, next action, timestamp).
 5. Save.
-6. **Re-read the file** and take the next unstarted task from it.
+6. **Re-read the file** and take the next unstarted line from it — which, after
+   a phase's last task, is that phase's `RV` (then any `RVJ`), not the next
+   phase.
 
 **You never run on memory across two tasks.** Re-orient from the file after
 every single one. In a parallel wave (Rule 6) the same six steps run **per
@@ -215,6 +297,8 @@ and neither does "12 tasks, some with sub-steps" — sub-steps that are
 separately checkable are tasks. The split is part of the plan the user
 approves at GATE 2, so it happens before the gate, not after it.
 
+The `RV` and `RVJ` lines are **not** tasks and never count toward the 12.
+
 A split phase is still **one designed unit**: after its last sibling passes, it
 gets a **joint integration review** over the siblings' combined diff before the
 run advances (see Reviewer fan-out).
@@ -232,6 +316,13 @@ an Ambiguity-guard stop. Nothing applied → back to `[ ]`.
 **A `[~]` task is never assumed done because it looks done, and never assumed
 untouched because you don't remember it.** Full procedure in
 `references/run-state.md`.
+
+A `[~]` **`RV`/`RVJ`** reconciles against `agent-output/`, not against the code:
+the expected number of reviewer reports present and consolidated into
+`findings.md` → `[x]` with its evidence; present but never consolidated →
+consolidate them now; missing or short of the declared count → back to `[ ]` and
+run the fan-out. Never resolve one by re-reading the diff yourself — that would
+make you the reviewer, which is what the line records someone else being.
 
 ### Rule 5 — Hold pointers, not payloads
 
@@ -379,6 +470,11 @@ prompt says so, and a returned doc missing either on any task goes straight
 back to its agent. Expansion agents report ambiguities back instead of
 resolving them; those become register questions.
 
+Each expansion also ends its phase with the phase's **`RV` line**, so review is
+in the plan the user approves rather than something the run is trusted to
+remember. Splits and lane joins additionally get an **`RVJ`** (Stage 3a, once
+the split and the lanes are known).
+
 **Enforce the 12-task cap here.** When the expansions return, count the tasks
 in each phase. Any phase over 12 is split into sub-phases of ≤ 12 tasks
 (`4a`, `4b`, …) **now** — before GATE 2, before any implementation. Then
@@ -389,11 +485,18 @@ precedes one of its deps. The split, waved, laned plan is what the user
 approves.
 
 **GATE 2: user approves the full expanded plan.** `register.md` must have no
-open entries. Last routine gate. On approval, rewrite `progress.md`'s phase
-lists from the approved plan (every phase with its `deps:`, every task with its
-`W<n>` and `deps`, all `[ ]`, sub-phases kept adjacent so a split's siblings are
+open entries. Last routine gate — **and the last gate is a stop, not the end of
+the work** (see *Gates are stops; stages are work*). On approval, rewrite
+`progress.md`'s phase lists from the approved plan (every phase with its
+`deps:`, every task with its `W<n>` and `deps`, **every phase closed by its own
+`RV` line**, all `[ ]`, sub-phases kept adjacent so a split's siblings are
 visibly one unit) and set Current State to the first wave of every lane's first
 phase before Stage 4 starts.
+
+Write the `RV` lines **now**, at the same time as the task lines — plus an
+`RVJ` under the last sibling of every Rule 3 split and at every point where two
+lanes join. A review line added later is a review line that can be forgotten;
+one written at GATE 2 is part of the plan the user approved.
 
 ### Compacting at GATE 2
 
@@ -417,8 +520,9 @@ the whole of Stage 4, not across the handful of turns GATE 1 has left.
 **Flush first, in this order. Then offer.**
 
 1. `register.md` has no open entries and `findings.md` no open blocking IDs.
-2. `progress.md`'s Current State names the first unstarted task, and every task
-   line carries its wave and its deps.
+2. `progress.md`'s Current State names the first unstarted line, every task line
+   carries its wave and its deps, every phase carries its `RV` line, and every
+   split and lane join carries its `RVJ`.
 3. **Every decision made in conversation and never written down gets written
    now** — into the spec if it changed the design, into a phase's plan if it
    changed that phase's approach, into the register's Closed table verbatim if
@@ -447,26 +551,40 @@ For each phase — in dependency order, independent phases concurrently as lanes
    member lands, merge the member branches in task order, run the build gates,
    and only then re-read the tracker for the next wave. Independent phases run
    as concurrent lanes. Procedure: `references/parallel.md`.
-2. **Review**: `N` = task count in the phase → spawn `ceil(N/5)` slice
-   reviewers in parallel (each owning an exact **commit range** taken from the
-   tracker's hashes, each running the repo `/review` skill) **plus one
-   integration reviewer over the whole phase diff whenever there is more than
-   one slice**. Run the test suite — failing tests are bug findings.
+2. **Review**: mark the phase's **`RV` line `[~]` and save first** — it is a
+   tracker line and Rule 2 governs it. Then `N` = task count in the phase →
+   spawn the slice reviewers in parallel — `ceil(N/5)` for an **unwaved** phase,
+   one per wave or adjacent wave-pair for a **waved** one (recorded as `waved`
+   on the line, since a wave is never split across two reviewers) — each owning
+   an exact **commit range** taken from the tracker's hashes, each running the
+   repo `/review` skill, each returning a report file even when it finds
+   nothing, **plus one integration reviewer over the whole phase diff whenever
+   there is more than one slice**. Confirm the slices cover every commit on the
+   phase branch, including any you wrote inline yourself. Run the test suite —
+   failing tests are bug findings.
    Consolidate + dedup into `findings.md`, **assigning each new finding a
    stable `F-NNN` ID** (Critical / Major (= `/review` "Warning") / Minor;
-   severity ties resolve upward; a rediscovered finding keeps its old ID).
+   severity ties resolve upward; a rediscovered finding keeps its old ID), then
+   close `RV` `[x]` with those F-IDs — or `no findings` — and the
+   `agent-output/` paths.
 3. **Fix loop**: if any Critical/Major/bug → recurse `pipeline` in
    fix-mode on the open F-IDs, then re-review. Repeat until clean, subject to
    the convergence rule (an ID still open after a fix-mode run that targeted
    it, or a repeated open-ID set, stops the loop with a user question — before
    the caps). Minor-only ≠ blocking.
-4. **Advance** to next phase — only with no open blocking IDs in `findings.md`,
-   green tests, **and the tracker written and saved** with the phase fully
-   checked off (hashes included) and Current State pointing at the next phase's
-   first task. If this phase was the **last sibling of a Rule 3 split**, the
-   joint integration review over the siblings' combined diff runs first, and
-   its blocking findings go through the fix loop before the run advances past
-   the split. Minor findings are deferred to the Stage 5 hand-off, not
+4. **Advance** to next phase — only with the phase's **`RV` line `[x]`**
+   carrying its F-IDs or `no findings` and its `agent-output/` paths, no open
+   blocking IDs in `findings.md`, green tests, **and the tracker written and
+   saved** with the phase fully checked off (hashes included) and Current State
+   pointing at the **next unchecked line**. The `RV` condition is listed first
+   because it is the only one an unreviewed phase fails — the other three all
+   pass vacuously when step 2 never ran.
+
+   For the **last sibling of a Rule 3 split**, that next unchecked line is the
+   split's **`RVJ`**, not the next phase: the joint review over the siblings'
+   combined diff runs and closes `RVJ` `[x]`, its blocking findings going
+   through the fix loop, before the run advances. The last sibling's own `RV`
+   never substitutes for it. Minor findings are deferred to the Stage 5 hand-off, not
    discarded.
 
 Stage 4 is autonomous about **execution**, not about **requirements**: the
@@ -489,12 +607,16 @@ authorizes (Ambiguity, convergence, a cap, an existing run dir, an
 unreconcilable `[~]`, unexplained commits)? If not, **do not end the turn** —
 the next action is already written in the tracker; take it.
 
-A phase boundary is executed **inside one turn**, as one motion:
+A phase boundary is executed **inside one turn**, as one motion — and the
+boundary begins at the phase's `RV`, not after it:
 
-1. Close out the finished phase (Rule 1 write: all `[x]` + hashes, Current
-   State advanced, saved).
-2. Re-read the tracker.
-3. Dispatch the next phase's first task.
+1. The phase's last task landed, so the next line is its **`RV`**: mark it
+   `[~]`, dispatch the fan-out, consolidate, close it `[x]` with its evidence.
+   (If this is the last sibling of a split, its **`RVJ`** follows the same way.)
+2. Only then close out the phase (Rule 1 write: all `[x]` + hashes, `RV` `[x]`,
+   Current State advanced, saved).
+3. Re-read the tracker.
+4. Dispatch the next phase's first task.
 
 Narrate progress **inline** — one or two lines between tool calls ("Phase 2
 closed, 12/12 tasks, starting Phase 3") is fine and useful. What is forbidden
@@ -543,16 +665,26 @@ the "stops after every task" failure, and it is the user who pays for it, once
 per task, by having to type *continue*.
 
 ### Stage 5 — Finish
-Read `progress.md` first and confirm every phase is `[x]` with a hash; any `[ ]`
-or `[~]` is unfinished work, not a bookkeeping lapse — go finish it (a `[~]`
-goes through Rule 4 reconciliation first). Confirm `findings.md` has no open
-blocking IDs and `register.md` no open entries.
+Read `progress.md` first and confirm every phase is `[x]` with a hash **and
+that every phase's `RV` — and every `RVJ` — is `[x]`**. Do not take the tick on
+trust: this is the run's one independent pass over lines whose author had the
+motive to skip them, so **stat the `reports` paths and count them against the
+`<s> + <i>` on each line, per round, and check each coverage file ends
+`COVERED: <n>/<n>`.** A line that fails that is an unreviewed phase wearing a
+green tick — treat it as `[ ]`. Any `[ ]` or `[~]` is unfinished work,
+not a bookkeeping lapse — go finish it (a `[~]` goes through Rule 4
+reconciliation first). An open `RV` means that phase was implemented and never
+reviewed: go run its fan-out before anything else, however many phases back it
+sits. Confirm `findings.md` has no open blocking IDs and `register.md` no open
+entries.
 Invoke `superpowers:finishing-a-development-branch`. Because everything under
 `docs/superpowers/` is local-only, **the hand-off is the run's only durable
 output besides the commits**, and MUST include:
 
 - the **deferred Minor-findings table** from `findings.md` (ID, finding, file,
   phase) so the user decides their disposition — fix now, ticket, or accept;
+- **every phase whose `RV` closed as `WAIVED by user`**, with the quoted
+  instruction — the run's only durable record that code shipped unreviewed;
 - a **summary of the approved design and the decisions the register closed**,
   written so it still makes sense to someone who never had the local spec.
 
@@ -582,6 +714,22 @@ merges** on the phase branch's first-parent history rather than by counting five
 tasks — one slice per wave, or per adjacent pair of small waves, so no slice
 splits a wave's members across two reviewers.
 
+**The slices must cover the phase's whole diff, and that is a check you run.**
+Task hashes are where boundaries come from; they are not the definition of the
+scope. Before dispatching, list the phase branch's commits —
+`git log --oneline <phase-base>..<phase-head>` — and confirm every one falls
+inside some slice's range. A commit no slice covers is code that reaches the
+hand-off unreviewed.
+
+**Commits you authored yourself are covered like every other commit.** Glue, a
+merge fixup, "a few lines" written inline instead of dispatched — these have no
+task line and therefore no hash in the tracker, so slicing by task hashes alone
+leaves them out **by construction**. That makes orchestrator-authored code the
+*least*-reviewed code on the branch: an implementer's work is at least read by a
+reviewer, while yours was read by nobody. Extend a slice to swallow it. Being
+the author is not a review, and knowing it is correct is what every author
+believes.
+
 ### Re-review fan-out (different math)
 
 `ceil(N/5)` is defined over **tasks**. Fix-mode returns produce fix commits, not
@@ -605,9 +753,49 @@ siblings, before the run advances past the split.
 - It hunts exactly what per-sibling reviewers structurally cannot see —
   contracts introduced in `4a` and consumed in `4b`, `4b` regressing `4a`,
   duplicated or conflicting work across the split.
-- Its findings get F-IDs and enter `findings.md` like any others; blocking ones
-  run the fix loop, attributed to the split group, before advancing.
+- It is the split's **`RVJ`** line, and closes with the same evidence an `RV`
+  carries. Its findings get F-IDs like any others; blocking ones run the fix
+  loop under the **`RVJ`'s own Counters row** — not the siblings' shared row,
+  which they may already have spent — before advancing.
+- The same review, and the same line, is owed wherever **two lanes join**
+  (`references/parallel.md`).
 - The split is an artifact of the 12-task cap, never a reason to review less.
+
+## Gates are stops; stages are work
+
+A **gate** is a place the run stops to ask the user. A **stage** is work the run
+performs. The user can wave the run past a stop. **Waiving a stop does not
+delete the work behind it.**
+
+This matters most in the turn after GATE 2, because that approval is worded as
+permission to keep going and Stage 4 is where the run stops asking. "Approve and
+continue", "don't stop between phases", "run it to the end", "take it all the
+way", "I'm busy" — each removes **check-ins**. None removes the review fan-out,
+the test run, the ledger, or the tracker writes. A user who waives being asked
+has not waived being protected.
+
+Only an instruction that **names the work** removes the work — "skip the code
+review", never "continue". And when the user does say it, it is a decision
+recorded like every other: verbatim in `register.md`, and on each affected
+phase's `RV` line, which closes `[x]` carrying the waiver **in place of**
+reviewer evidence:
+
+```markdown
+- [x] RV — review fan-out · WAIVED by user: "skip the code review on this one"
+```
+
+That is the only way an `RV` closes without reviewer output, and Stage 5's
+hand-off **MUST list every phase closed this way**, so what shipped unreviewed
+is visible in the run's one durable artifact rather than resting on your memory
+of a permission.
+
+**Nothing substitutes for the fan-out.** Implementer self-reports and their own
+mutation tests, a green suite, Stage 1b's design pressure-test, per-task review
+inside `subagent-driven-development`, your own read of the diff — each is blind
+to something a fresh reviewer sees, and the rationalization table says why for
+each. The defects this catches are the author-blind ones: **a change correct in
+its own lines that activates broken code elsewhere**, a contract produced in one
+task and misused in another, a regression into an earlier phase.
 
 ## Guard rails (autonomy escape hatches)
 
@@ -683,6 +871,15 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
 | "The user asked for the compact now; the flush can follow" | Then it follows an empty context. Write first, compact second — that order is the only thing that makes the cheap move safe. |
 | "Compaction helps at GATE 1 too, same argument" | The argument is a whole stage of re-sent context. GATE 1 has a handful of turns left, and a compact costs a summarisation pass plus the prompt cache. |
 | "13 tasks is basically 12, splitting is bureaucratic" | The cap is a number, not a vibe. 13 tasks → split before implementation. |
+| "The user said 'approve and continue' — review was ceremony they waived" | Gates are stops; stages are work. They waived being asked, not being protected. Only "skip the code review" waives review, recorded verbatim. |
+| "Each lane self-verified — several ran mutation tests and killed every mutant" | An implementer grading its own diff is the exact failure independent review prevents. Self-verification is not the fan-out. |
+| "Stage 1b already put three agents on this design" | That pressure-tested a document before the code existed. It cannot review lines nobody had written. |
+| "`findings.md` has no open blocking IDs, so the phase passes" | An empty ledger is what an unreviewed phase looks like too. The `RV` line says whether review happened; the ledger only says what it found. |
+| "Tests are green and every implementer returned SUCCESS — that is the check" | Green tests are an input to step 2, named inside it. Agent reports are memory. Neither is a reviewer. |
+| "I wrote those few lines inline, I know they're fine" | You are the author. Orchestrator commits have no task hash, so no slice covers them unless you extend one — they are the least-reviewed code on the branch. |
+| "The last phase closed out this way and nothing broke" | Precedent inside one run is the defect propagating, not evidence it is safe. Check the `RV` lines and backfill every open one. |
+| "I'll run the reviewers at the end, over the whole branch at once" | Per-phase is the rule: findings are cheapest while the phase is fresh and unmerged, and four merged lanes make attribution guesswork. |
+| "Next action says Phase 4 T1, and the file is the truth" | It is — and the same file has an open `RV` line above the one it names, which is the earlier unchecked line. The Law is unchanged: read the phase lists, take the *first* unfinished line, and correct a Current State that skipped it. This licenses nothing beyond an open `RV`/`RVJ`. |
 | "I'll split the oversized phase once I see how it goes" | Splitting after implementation starts does not satisfy Rule 3. Split before GATE 2. |
 
 ## Red flags — STOP and ask the user
@@ -729,6 +926,19 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
   rather than quoting the file.
 - You finished a task and moved straight to the next one without writing.
 - You are about to say a phase is done, and the file still shows open tasks.
+- You are about to tick a phase complete while its **`RV` (or a split's
+  `RVJ`) is `[ ]` or `[~]`** — that phase was implemented and never reviewed.
+- You are closing an `RV`/`RVJ` round with fewer `reports` files than the
+  reviewers that round declares, or a coverage file that does not end
+  `COVERED: <n>/<n>`.
+- You are writing a `Next action` that names the **next phase** while this
+  phase's `RV` is still open.
+- You are at Stage 5 and any phase's `RV` is not `[x]`, or `findings.md` is
+  thin against the run's size. Check the `RV` lines phase by phase rather than
+  the ledger as a whole: one Minor from one reviewed phase makes a ledger look
+  alive while six other phases went unreviewed.
+- You are dispatching slice reviewers without having listed the phase branch's
+  commits to confirm every one lands inside a slice.
 - You are reconstructing "where were we" from the conversation, a plan doc, or
   a subagent's report instead of from the tracker.
 - You are treating the file as a summary you keep in sync, rather than the
@@ -795,6 +1005,9 @@ memory — decide what happens next.**
   design is agreed so the 2-agent pressure-test and GATE 1 happen.
 - **Reordering Stage 1** — pressure-test runs before GATE 1, and its gaps
   become user questions, not self-filled defaults.
+- **Advancing or finishing with an open `RV`/`RVJ`** — the phase was
+  implemented and never reviewed. Every other completion check passes vacuously
+  in that state, because they all read a ledger an unrun review leaves empty.
 - **Skipping the per-phase `writing-plans` expansion** — Stage 3 agents must
   call the skill, not summarize the phase themselves.
 - **Re-interviewing the user in fix-mode** — fix-mode skips Stage 1; the

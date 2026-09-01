@@ -116,19 +116,34 @@ first-parent history: `<wave base>^..<wave merge>` covers a whole wave, and
 `scripts/review-package BASE HEAD` includes merged commits. Assign slices by
 wave boundaries, not by counting five tasks.
 
+**Then check the union covers the whole phase** — `PB..PH`, the phase branch's
+base and head, *not* the per-wave `BASE` recorded above. Wave boundaries are
+where slices start and stop; they are not proof that everything on the branch is
+inside one.
+Anything committed outside a wave — a merge fixup, glue the orchestrator wrote
+between waves — has no task hash and lands in no slice until you widen one.
+Write the slice assignment table (rows keyed by report filename) above that
+`git log` in `agent-output/p<phase>-coverage.md`, end it `COVERED: <n>/<n>
+commits`, and cite the file on the phase's `RV` line.
+
 ## Lanes (independent phases in parallel)
 
 Each lane is a full instance of the per-phase loop in `fix-loop.md`: its own
 phase worktree and branch cut from the run branch, its own Counters row per
 phase, its own reviewers and fix loop. Rules:
 
-- A lane's phase close-out (Rule 1 write) merges the lane branch into the run
-  branch no-fast-forward and runs the build gates there. Two lanes closing at
+- A lane's phase close-out (Rule 1 write) requires that phase's **`RV` line
+  `[x]`** like any other, then merges the lane branch into the run branch
+  no-fast-forward and runs the build gates there. Two lanes closing at
   once merge one after the other; the second re-runs the gates on the result.
 - A phase with deps in **two or more lanes** starts only after **all** of them
   have merged, and only after a **joint integration review** over their combined
-  diff (the same review a Rule 3 split gets) has no open blocking findings.
-- Current State carries one `Next action` line per active lane. A cold start
+  diff (the same review a Rule 3 split gets) has no open blocking findings. That
+  review gets its own **`RVJ`** line at the join, closed on the same evidence as
+  an `RV`. Each lane's own `RV` covers one lane; the defect this review exists
+  to find is the one that lives between them, so no `RV` can stand in for it.
+- Current State carries one `Next action` line per active lane, each naming
+  that lane's first unchecked line — an open `RV` included. A cold start
   reconciles every lane's `[~]` tasks, not just the first one it sees.
 - Lanes never share a worktree. If two lanes would touch the same file, the
   master plan was wrong about their independence — that is a GATE 2 question

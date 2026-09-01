@@ -25,6 +25,9 @@ no fix: it consumes the report, closes the ticket, and leaves the bug live.
   investigation exists to establish a cause, not to ceremonially confirm one.
 - **A whole feature's worth of bugs** — that is a phase of `superb:pipeline`,
   which has the fix loop, the findings ledger and the convergence rule.
+- **You only want to know what is wrong** — that is `superb:bug-investigate`,
+  which runs this skill's Step 1 and stops. Reach for it when the decision to
+  fix has not been made, or when naming the cause is the whole deliverable.
 
 ## Step 0 — Assemble the report
 

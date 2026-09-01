@@ -9,7 +9,7 @@
     {
       "name": "superb",
       "source": "./plugins/superb",
-      "description": "Personal skill collection, invoked as superb:<skill>. setup installs and verifies the dependencies the others need; craft turns a vague product idea into a decision-rich CRAFT.md brief without planning or coding; pipeline drives a settled idea to a finished branch by composing the superpowers skills, with a zero-assumption question law, on-disk run state, two approval gates, reviewer fan-out, a recursive fix loop, and dependency waves for parallel implementers; bug-fix carries a reported bug from proven file:line root cause to a regression-tested fix, refusing to plan on a hypothesis."
+      "description": "Personal skill collection, invoked as superb:<skill>. setup installs and verifies the dependencies the others need; craft turns a vague product idea into a decision-rich CRAFT.md brief without planning or coding; pipeline drives a settled idea to a finished branch by composing the superpowers skills, with a zero-assumption question law, on-disk run state, two approval gates, reviewer fan-out, a recursive fix loop, and dependency waves for parallel implementers; bug-investigate finds why something is broken and stops there; bug-fix carries that same investigation from proven file:line root cause to a regression-tested fix, refusing to plan on a hypothesis."
     }
   ]
 }

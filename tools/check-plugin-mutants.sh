@@ -54,7 +54,13 @@ run_mutant "skill README gutted"                   "printf '# x\n' > plugins/sup
 run_mutant "skill README padded with filler"       "$J \"open('plugins/superb/skills/bug-fix/README.md','w').write('x '*200)\""
 run_mutant "skill dropped from plugin README"      "sed -i '/superb:bug-fix/d' plugins/superb/README.md"
 run_mutant "skill dropped from root README"        "sed -i 's/superb:bug-fix/superb:removed/g' README.md"
-run_mutant "skill dropped from marketplace desc"   "sed -i 's/bug-fix carries a reported bug/nothing/' .claude-plugin/marketplace.json"
+# Wording-independent: strip a skill's NAME from the description rather than a
+# phrase. A sed on prose silently becomes a no-op the next time the prose is
+# edited, and a mutant that changes nothing proves nothing.
+run_mutant "skill dropped from marketplace desc"   "$J \"import json,pathlib
+p=pathlib.Path('.claude-plugin/marketplace.json'); s=p.read_text()
+assert 'bug-fix' in s, 'mutant is a no-op: bug-fix absent from the marketplace description'
+p.write_text(s.replace('bug-fix','')) \""
 run_mutant "keywords stripped"                     "$J \"import json;p='plugins/superb/.claude-plugin/plugin.json';d=json.load(open(p));d['keywords']=['x'];json.dump(d,open(p,'w'),indent=2)\""
 run_mutant "claude description blanked"            "$J \"import json;p='plugins/superb/.claude-plugin/plugin.json';d=json.load(open(p));d['description']='';json.dump(d,open(p,'w'),indent=2)\""
 run_mutant "codex longDescription blanked"         "$J \"import json;p='plugins/superb/.codex-plugin/plugin.json';d=json.load(open(p));d['interface']['longDescription']='';json.dump(d,open(p,'w'),indent=2)\""

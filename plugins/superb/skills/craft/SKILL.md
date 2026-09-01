@@ -220,15 +220,144 @@ questions its `open` still counts — and then do one of two things, never both:
 
 If which of the two I want is not obvious from what I have just said, ask.
 
+## Before the first round: technical discovery
+
+For a **software project whose stack is not yet decided**, dispatch
+**`superb:architecture-discovery`** once — after the idea is stated, before
+round 1. Hand it the idea, the product category, whatever inspecting the
+repository told you, and the technical category list from *Preferred
+technologies*. It returns candidate questions in the round-file shape, ready to
+merge with the ones you wrote.
+
+Name it with the `superb:` prefix. A bare `architecture-discovery` resolves to
+whatever personal agent happens to exist, which may have been written for
+something else entirely.
+
+**Once per session, not once per round.** Rounds are supposed to shrink; a fresh
+discovery pass every round works against that.
+
+**Skip it** when the project is not software, when the stack is already settled
+by the repository or by what I have already told you, or when it is unavailable —
+in which case generate the technical questions inline against the layer table in
+*Preferred technologies*. Its absence must never block a round.
+
+**It proposes; it does not decide.** If it returns prose, a recommendation, or a
+chosen stack rather than questions, discard that part. The decisions are mine.
+
+**Validate what it returns before merging it.** Its questions go into a round
+file, and a round file that fails `validate_round` is refused wholesale — one
+malformed option from the agent loses the questions you wrote too. Check every
+returned question against *The round file* below: uppercase `importance`,
+options as objects with a `value` string, a `type` from the allowed four. Fix or
+drop the ones that fail; never pass them through untouched.
+
 ## The loop
 
 1. Write `.craft/round-NNN.questions.json`.
-2. Run `python3 "$SKILL/ui/craftui.py" wait --project-dir . --round NNN`
-   **as a background command**, and end your turn. Do not poll in a loop, and
-   do not ask me in chat what I am answering in the browser.
-3. Act on the one line it prints. Fold the answers into `CRAFT.md`, then
-   write the next round. The questionnaire gets **smaller** every pass,
-   exactly as *Second pass* says.
+2. Run `python3 "$SKILL/ui/craftui.py" wait --project-dir . --round NNN --timeout 90`
+   **and wait for it inside this turn.** Do not end your turn on it, and do not
+   background it with `&`. Do not poll in a tight loop, and do not ask me in chat
+   what I am answering in the browser.
+
+   **Why this wording is exact.** `wait` is an ordinary blocking process. Whether
+   ending your turn works at all is a property of the harness you are running on,
+   which this skill cannot see: where a finished background task starts a new turn
+   you would be woken, and where completion only lands in a mailbox nothing drains,
+   the session parks until I type something. That is the reported failure — *"I had
+   to go to the CLI and say already replied, next wave."* Waiting in your own turn
+   behaves the same on both. It is also why this used to fail only sometimes:
+   "background command" reads as either the harness's background-task mechanism or
+   a shell `&`, and a `&` returns instantly with nothing left to wake you.
+
+   **Waiting is executing, not stopping.** A wait is a tool call; your turn has not
+   ended and no question is owed.
+
+   **Ninety seconds is not arbitrary, and raising it breaks this.** A harness
+   runs a command in the foreground only up to its own limit and backgrounds
+   anything longer — Claude Code's default is 120 seconds. A wait set near or
+   above that limit is backgrounded, which is precisely the parking failure
+   above, reintroduced by the fix meant to remove it. Stay comfortably underneath
+   whatever your harness's *default* foreground window is; do not raise the
+   timeout to reduce re-arms.
+
+   Each `TIMEOUT` costs one line of output and one tool call. Re-arming twenty
+   times is cheap; being backgrounded once is the bug.
+3. Act on the one line it prints. Fold the answers into `CRAFT.md`, then write
+   the next round **in the same turn**. The questionnaire gets **smaller** every
+   pass, exactly as *Second pass* says.
+
+### When the loop ends
+
+Five conditions, and nothing else:
+
+| Condition | Signal | What you do |
+| --------- | ------ | ----------- |
+| I pressed Finish | exit `0` `FINISHED` | Final fold, then *Ending*. **`FINISHED` outranks every row below** — I have stopped answering, so a still-open REQUIRED question does not buy another round. Report `MORE CLARIFICATION NEEDED` naming it, and `stop`. |
+| Converged | zero open REQUIRED and zero IMPORTANT **across the brief, not the round** | Write the closing round — empty `questions`, a real `note` — then `stop`. |
+| Unrecoverable | exit `1` `ERROR`, or `64` | **Never re-arm.** Fix it, or fall back to file mode. |
+| No progress | two consecutive rounds yielding no new confirmed or delegated decision | Stop and say so. A third ask is arguing with someone who has decided not to answer. |
+
+`TIMEOUT` (exit `2`) is none of these. It is the heartbeat: re-arm in the same turn.
+
+Exit `3` `NOSERVER` splits. If I am plainly present — I just typed — re-`serve`
+and re-arm. If this round already timed out once, the four-hour idle shutdown has
+fired: stop, and tell me how to restart.
+
+| Round cap reached | 12 rounds | Stop and say the shrink rule is not working. |
+
+**Count the rounds from disk, not from memory:** `ls .craft/round-*.questions.json
+| wc -l`. Nothing in the server enforces this — `MAX_ROUND` is 999 — and a
+resumed session has no recollection of how many rounds already happened. The cap
+is a bug detector, not a budget: reaching it means rounds stopped shrinking, so
+say that rather than starting round 13.
+
+**"Converged" is a property of the brief, not of the last round.** `count_open`
+scores one round's unanswered questions, so a round where I answered everything
+reports zero open while the brief is still missing whole sections. Check the
+brief — that is what `check-brief.sh` is for.
+
+### Every question must be objective
+
+**The test:** blank the `title` and keep only the `options`. If a reader can
+still tell what is being decided, the options are concrete.
+
+| Fails | Passes |
+| ----- | ------ |
+| `["modern", "traditional"]` | `["React", "Vue", "Svelte", "no framework"]` |
+| `["scalable", "simple"]` | `["PostgreSQL", "SQLite", "DynamoDB"]` |
+| `["good UX", "fast"]` | `["one page per step", "one long form", "a wizard modal"]` |
+
+Adjectives are not options. They describe how someone feels about a choice
+rather than naming the choice, and an answer to them cannot be written down as
+a decision — which means the next round has to ask again in different words.
+
+**One decision per question.** "What's your stack?" is six questions wearing one
+coat, and it gets a shrug.
+
+**Every question earns its place.** If both answers produce the same software,
+do not ask it.
+
+### A delegated decision still has to be written down
+
+*You decide* closes the question, not the decision. A bare delegation loses the
+reasoning permanently: nobody downstream can tell what was considered, so the
+first person to disagree has to redo the thinking from nothing.
+
+Every Delegated Decision carries four things:
+
+* the options that were on the table;
+* craft's recommendation, as the default;
+* the constraints the choice has to respect;
+* what goes wrong if it is chosen badly.
+
+**Set `delegable: false` explicitly on every REQUIRED question.** The page's
+default is unconditional — omit the key and a *you decide* button appears on a
+question only I can answer — so this is yours to write, not something the UI
+infers from importance.
+
+A delegated REQUIRED is not a delegation, it is a scope reduction: if it could
+be delegated it was never required. Either lower its importance honestly, or
+record the answer in Confirmed Decisions.
 
 ### The round file
 
@@ -247,7 +376,7 @@ a round by filename and would otherwise write its answers over another one.
 | `options` | required for `single` and `multi`: a non-empty list of objects, each with a non-blank string `value` |
 | `area`, `why` | optional; `why` is the *why this matters* §4 asks for |
 | `allow_other` | optional boolean, **default false** — `single` and `multi` only. Set it to `true` to give me a free-text box beside your options, for when none of them is what I mean |
-| `delegable` | optional boolean, **default true** — every question gets a *you decide* button unless you set this to `false`. Set it `false` on the questions only I can answer: my budget, my users, what the product is for. A delegated answer becomes a Delegated Decision and is never asked again, so offering that on a question you cannot actually decide is worse than not offering it |
+| `delegable` | optional boolean, **default true, unconditionally** — every question gets a *you decide* button unless you set this to `false`, and the page does not look at `importance`, so **write `false` yourself on every REQUIRED question**. Set it `false` on the questions only I can answer: my budget, my users, what the product is for. A delegated answer becomes a Delegated Decision and is never asked again, so offering that on a question you cannot actually decide is worse than not offering it |
 
 `note` — optional; one or two sentences in your own words, shown at the top
 of the questions column. On the closing round *Ending* describes — the one
@@ -333,10 +462,33 @@ sufficient.
 ## Ending
 
 `FINISHED` means **I have stopped answering.** It does not mean the vision is
-clear. Do the final fold, then judge the brief on its merits: if REQUIRED
-questions are still unanswered, name them and report
-`CRAFT STATUS: MORE CLARIFICATION NEEDED`. Only a genuinely complete brief
-gets `VISION CLEAR`.
+clear.
+
+`CRAFT STATUS: VISION CLEAR` is **earned, not judged.** Two independent passes,
+and both are required:
+
+**1. The mechanical check.** Run
+`python3 "$SKILL/skills/craft/check-brief.py" "$PWD"` — an absolute path to the
+script and an explicit project directory. You run from the project, not from the
+skill, so a bare `./check-brief.sh .` is either "command not found" or a check of
+the wrong directory. Exit `0` is the only pass; `1` names the predicate that
+failed and `2` means there is no readable brief. **Report its output, not your
+impression of it** — the whole point of a script is that it gives the same
+answer twice, and a summary of a check you ran is not the check.
+
+**2. A fresh-context reviewer.** Dispatch an agent, hand it `CRAFT.md` **and
+nothing else**, and ask what it still could not build from. This skill's own
+completion criterion is that the brief be understandable by another LLM
+*without access to the original conversation* — and only an agent that lacks the
+transcript can test that. You have the transcript. You fail that precondition by
+construction, so you cannot be the judge of it.
+
+Whatever it still cannot answer becomes round N+1. Those are questions, not
+footnotes on a finished brief.
+
+If either pass fails, the status is `CRAFT STATUS: MORE CLARIFICATION NEEDED`,
+and you say **which** pass failed and why. Naming unanswered REQUIRED questions
+is part of that, not a substitute for it.
 
 If you conclude the vision is clear before I press Finish, write a final
 round with an empty `questions` list and a `note` saying so, then stop. The
@@ -851,25 +1003,49 @@ Clarify desired targets:
 
 ## Preferred technologies
 
-Ask whether I have preferences for:
+**Classify before you ask.** The `## Platform` answer determines which layers
+exist, and a layer that does not exist must not be asked about:
 
-* programming language;
-* frontend framework;
-* backend framework;
-* database;
-* hosting;
-* authentication provider;
-* storage;
-* package manager;
-* component library.
+| Platform answer | Layers present |
+| --------------- | -------------- |
+| web | frontend, backend, data, hosting |
+| API only | backend, data, hosting |
+| CLI | runtime, packaging, distribution |
+| mobile | client, backend, data, hosting |
+| desktop | client, local storage, packaging |
+| browser extension | client, permissions, store distribution |
 
-If I do not care, explicitly record:
+**If the shape is not yet known, that is the first question**, and it is
+REQUIRED: is this a frontend, a backend, or a full-stack build? Everything below
+depends on the answer, so ask it before the rest of this section.
+
+**Then drill each present layer.** One decision per question — never "what's
+your stack?", which is six questions wearing one coat and gets a shrug.
+
+*Worked example, a full-stack web app:*
+
+* **Frontend** — framework; rendering (SPA / SSR / static); styling; component
+  library; state management, if the framework does not settle it.
+* **Backend** — language; framework; API style (REST / GraphQL / RPC);
+  background jobs, if a feature implies them.
+* **Data** — database engine; relational or document; migrations; file and blob
+  storage, if anything is uploaded; caching, if a feature implies it.
+* **Auth** — provider or self-hosted; session or token; social logins.
+* **Hosting** — platform; containerised or not; CI.
+* **Cross-cutting** — package manager; language version floor; test framework.
+
+Ask only about layers the platform answer put in play, and only where the answer
+would change what gets built. A CLI has no frontend framework, and asking about
+one tells me you did not read my answer.
+
+If I do not care about an axis, record it exactly:
 
 `No preference — planning skill may decide.`
 
-This distinction is important.
-
-Do not force me to make technical decisions I deliberately want another skill to make.
+That is a real answer, not a gap. Do not force me to make technical decisions I
+deliberately want another skill to make — but do not leave an axis unrecorded
+either, because silence and "no preference" are different states downstream: one
+says I chose not to choose, the other says nobody asked.
 
 ---
 
@@ -1352,6 +1528,14 @@ Crafting is complete when another capable LLM can read `CRAFT.md` and confidentl
 The downstream LLM should still need to decide **how to implement the product**.
 
 It should not need to guess **what product I wanted**.
+
+That list is what the brief must **contain**. `check-brief.sh` is how it gets
+**verified** — see *Ending*, which requires it plus a reader who was not here.
+
+**A converged round is not a complete brief.** `count_answered` folds
+`delegated` into settled, so fifteen *you decide* clicks report a fully answered
+round over a brief that has recorded almost nothing. The counter measures one
+round; the check measures the brief.
 
 ---
 

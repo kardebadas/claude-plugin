@@ -83,6 +83,13 @@ run_mutant "skills directory deleted"              "rm -rf plugins/superb/skills
 run_mutant "CI workflow deleted"                   "rm -f .github/workflows/checks.yml"
 run_mutant "CI stops running the gate"             "sed -i 's|./tools/check-plugin.sh|./tools/nothing.sh|' .github/workflows/checks.yml"
 
+# --- the pipeline review-line linter must itself stay honest ---
+run_mutant "RV example loses a report file"        "sed -i 's|p3-review-{a,b,int}.md|p3-review-{a,b}.md|' plugins/superb/skills/pipeline/references/run-state.md"
+run_mutant "RVJ example declares slice reviewers"  "sed -i 's|N=17 → 0 slice + 1 integration · reports j-56-int.md|N=17 → 4 slice + 1 integration · reports j-56-{a,b,c,d,int}.md|' plugins/superb/skills/pipeline/references/run-state.md"
+run_mutant "RV example loses its coverage file"    "sed -i 's| · coverage p3-coverage.md||' plugins/superb/skills/pipeline/references/run-state.md"
+run_mutant "re-review round loses report files"    "sed -i 's|p3-rr2-{a,b,c,int}.md|p3-rr2-{a,int}.md|' plugins/superb/skills/pipeline/SKILL.md"
+run_mutant "every worked RV example deleted"       "sed -i '/· reports/d' plugins/superb/skills/pipeline/*.md plugins/superb/skills/pipeline/*/*.md"
+
 echo
 echo "killed=$PASS survived=$SURV"
 if [ "$SURV" -ne 0 ]; then

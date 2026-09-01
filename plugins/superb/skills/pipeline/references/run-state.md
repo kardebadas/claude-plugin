@@ -42,6 +42,14 @@ one.
 - [~] T3 — <task name> · W2 · deps T1 — started 2026-08-05 14:02 in `wt/p2-t3`
 - [x] T3 — <task name> · W2 · deps T1 — `a1b2c3d`
 - [x] T4 — <task name> · W3 · deps T3 — `nocommit` (docs only, folded into T5's commit)
+- [ ] RV — review fan-out
+- [~] RV — review fan-out · N=8 → 2 slice + 1 integration · started 2026-09-01 14:31
+- [x] RV — review fan-out · N=8 → 2 slice + 1 integration · reports p3-review-{a,b,int}.md · coverage p3-coverage.md → F-012, F-013
+- [x] RV — review fan-out · N=3 → 1 slice + 0 integration · reports p2-review-a.md · coverage p2-coverage.md → no findings
+- [x] RV — review fan-out · N=12 waved → 2 slice + 1 integration · reports p4-review-{a,b,int}.md · coverage p4-coverage.md → F-021
+- [x] RV — review fan-out · WAIVED by user: "skip the code review on this one"
+- [ ] RVJ — joint integration review · split 4a+4b
+- [x] RVJ — joint integration review · lanes A+B (phases 5, 6) · N=17 → 0 slice + 1 integration · reports j-56-int.md · coverage j-56-coverage.md → no findings
 ```
 
 `W<n>` is the task's wave and `deps` its in-phase dependencies, both copied
@@ -53,16 +61,44 @@ where to look for its commits. Phase headings carry `· deps: <phases>`.
 |--------|---------|
 | `[ ]` | Not started. Nothing was dispatched for it. |
 | `[~]` | **Started, outcome unknown.** Written *before* the work begins. |
-| `[x]` | Done, followed by the commit hash that carries it. |
+| `[x]` | Done, followed by the commit hash that carries it — except `RV`/`RVJ`, which close on reviewer evidence (see below). |
 
 **Write `[~]` before dispatching the task, not after.** That single write is
 what makes a dead session recoverable: without it, a half-applied task is
 indistinguishable from an untouched one.
 
-**Every `[x]` carries a hash.** Record the short hash of the commit containing
-that task's work. If a task genuinely produced no commit, write `` `nocommit` ``
-with a one-line reason — never leave the field blank, because a blank field is
-unverifiable and that is the whole point of recording it.
+**Every `[x]` task carries a hash.** Record the short hash of the commit
+containing that task's work. If a task genuinely produced no commit, write
+`` `nocommit` `` with a one-line reason — never leave the field blank, because a
+blank field is unverifiable and that is the whole point of recording it.
+
+**`RV`/`RVJ` are the exception in what they carry, not in whether they are
+checkable.** They produced review, not code, so instead of a hash they close on
+four fields, all paths relative to `agent-output/`:
+
+- `N=<tasks> → <s> slice + <i> integration` — `N` is on the line so the fan-out
+  is re-derivable at closure rather than trusted from the step most likely to
+  have been skipped. An **unwaved** phase takes `s = ceil(N/5)`; a **waved** one
+  takes a slice per wave or adjacent wave-pair (write `waved` after `N`), which
+  may be more or fewer; an **`RVJ`** is always `0 slice + 1 integration` with `N`
+  informational. `i` is 1 whenever `s > 1`.
+- `reports <files>` — **exactly `s + i` files, one per reviewer**, each the
+  `DETAIL:` path that reviewer returned. A review dispatch always requires its
+  report file, clean or not — the "omit `DETAIL:` if nothing is longer" licence
+  below does not reach reviewers, or a clean phase could never close. The
+  coverage file is never counted here.
+- `coverage <file>` — the slice assignment table, **each row keyed by its report
+  filename**, above the `git log --oneline PB..PH`, ending `COVERED: <n>/<n>
+  commits`. Record slices individually: one union range reads as complete even
+  when two slices leave a gap between them, and that gap is the defect being
+  hunted. Derive `PB` with `git merge-base`, never `<first-task-hash>^`.
+- `→ <F-IDs>` or `→ no findings`.
+
+Every field is **per round**; re-review rounds append their own `M=… → …`,
+`reports` and `coverage`, and the counts are read against their own round.
+
+The `[ ]` form carries none of it — at GATE 2 no task has a hash and the slice
+count is not yet knowable. Both are filled in at dispatch.
 
 Hashes buy three things: resume verification becomes `git cat-file -e <hash>`
 rather than a judgment call; a reviewer slice becomes an exact commit range
@@ -76,7 +112,13 @@ your own uncertainty about what just happened. Run this **before any other
 action** — before dispatching, before reading a plan doc, before writing code.
 
 1. Read `progress.md` in full, then `findings.md`, then `register.md`.
-2. **Scan for `[~]` tasks. Every one is a reconciliation obligation.** For each:
+2. **Scan for `[~]` lines. Every one is a reconciliation obligation.** An
+   `[~]` **`RV`/`RVJ`** reconciles against `agent-output/`, never against the
+   code: reviewer reports present and consolidated into `findings.md` → `[x]`
+   with its evidence; present but never consolidated → consolidate them now;
+   nothing there → back to `[ ]` and run the fan-out. Never resolve one by
+   reading the diff yourself — you would be reviewing it, which is the thing
+   the line records someone else doing. For each `[~]` **task**:
    - `git log`/`git status`/`git diff` for the work the task names, and run the
      tests that cover it. If the line names a `wt/…` branch, look there
      (`git log P..wt/…`, `git worktree list`) — a wave member's work is not on
@@ -87,8 +129,10 @@ action** — before dispatching, before reading a plan doc, before writing code.
      is correct is not obvious from the plan, that is an Ambiguity-guard stop —
      ask the user.
    - **Nothing applied** → reset to `[ ]`.
-3. Only when zero `[~]` tasks remain may the run continue. Take the next action
-   from the Current State block, not from what you remember doing.
+3. Only when zero `[~]` lines remain may the run continue. Take the next action
+   from the phase lists — **the first unchecked line, which may be an `RV` or
+   `RVJ`** — and correct the Current State block if it names anything later.
+   Not from what you remember doing.
 
 **A `[~]` task is never assumed done because it looks done, and never assumed
 untouched because you don't remember it.** Verify against the code.
@@ -100,14 +144,21 @@ protocol above with candidate selection and a reporting step. **This mode never
 starts a new run** — if step 1 finds nothing, report that and stop.
 
 1. **Find candidate run directories** under `<PROJECT_DIR>/docs/superpowers/runs/`.
-   - **Exactly one with unfinished work** (any `[ ]` or `[~]` task, open
-     register entry, or open blocking F-ID) → use it.
+   - **Exactly one with unfinished work** (any `[ ]` or `[~]` line — task,
+     `RV`, or `RVJ` — open register entry, or open blocking F-ID) → use it.
+     **`RV` counts.** A run whose every task is `[x]` but whose `RV` lines are
+     open is the most important run there is to resume: it is fully implemented
+     and entirely unreviewed, and a predicate that looked only at tasks would
+     report "no run to resume" over exactly that state.
    - **Multiple candidates, or none obviously active** → show each one's
      Current State block and **ask the user which to resume**. Recency is not
      consent: the newest directory is a guess about someone's unfinished work,
      not an answer.
    - **Zero** → report "no run to resume" and stop. Starting a fresh run from
-     `resume` is forbidden — that's what the bare invocation is for.
+     `resume` is forbidden — that's what the bare invocation is for. (`status`
+     shares this candidate logic but not this outcome: a run with nothing
+     unfinished is still a run to *report on*, so `status` names the most recent
+     directory and reports it as complete rather than claiming none exists.)
 2. **Read, in order and in full:** this file (if not already in context), then
    the run's `progress.md`, `register.md`, `findings.md`.
 3. **Read the plan documents the current position needs** — the spec, the
@@ -124,13 +175,18 @@ starts a new run** — if step 1 finds nothing, report that and stop.
      something worked outside the tracker; whether to absorb, revert, or
      investigate those commits is their call, not yours.
 5. **Report a short resume summary** to the user: run directory, current phase,
-   next task, open F-IDs, open register entries, and anything reconciliation
+   next line, **any phase whose tasks are all `[x]` with `RV` still open**,
+   open F-IDs, open register entries, and anything reconciliation
    surfaced. If reconciliation raised questions — partial `[~]` work whose
    disposition the plan doesn't settle, unexplained commits — these are **user
    questions; wait for the answers**.
 6. **If the register has open entries, ask them before resuming
    implementation.** Otherwise continue the Stage 4 loop from the tracker's
-   next task, under all normal rules — this protocol changes how a run is
+   next unchecked line — an open `RV` before any task of a later phase — under
+   all normal rules. **An open blocking F-ID outranks that line**: a fix loop
+   interrupted mid-round leaves `RV` `[x]` and every task `[x]`, so the tracker's
+   next unchecked line points past it. Read the ledger's open IDs and the
+   Iteration log's last incomplete row first, and resume the fix loop — this protocol changes how a run is
    re-entered, never what the run is allowed to do.
 
 ## Orchestrator context hygiene

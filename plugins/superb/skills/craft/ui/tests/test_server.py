@@ -2892,12 +2892,62 @@ BROWSERS = ("chromium", "chromium-browser", "google-chrome",
             "google-chrome-stable", "chrome")
 
 
+# A hang costs this per test; 32 hangs is an hour and a half of CI for no signal.
+BROWSER_TIMEOUT_S = 60
+# The probe is deliberately much shorter: a working chromium renders about:blank
+# in well under a second, so anything slower than this is broken, not busy.
+BROWSER_PROBE_S = 20
+_USABLE = None
+
+
 def find_browser():
     for name in BROWSERS:
         found = shutil.which(name)
         if found:
             return found
     return None
+
+
+def usable_browser():
+    """The browser, but only if it can actually render. Cached.
+
+    `find_browser` answers "is one installed", which is not the same question.
+    A chromium that is present and cannot produce a DOM — a sandbox it may not
+    enter, a /dev/shm too small, a snap wrapper with no display — used to hang
+    for the full timeout once per test. That is an environment fact, so it is a
+    skip with a reason, not thirty-two identical errors.
+    """
+    global _USABLE
+    if _USABLE is not None:
+        return _USABLE
+    found = [shutil.which(n) for n in BROWSERS]
+    found = [f for f in found if f]
+    if not found:
+        _USABLE = (None, "no chromium or chrome on this machine")
+        return _USABLE
+    # Try EVERY installed candidate, not just the first. A CI image can ship a
+    # broken chromium alongside a working google-chrome, and picking by name
+    # rather than by whether it renders is what turned one bad binary into
+    # thirty-two timeouts.
+    why = []
+    for browser in found:
+        try:
+            proc = subprocess.run(
+                [browser, "--headless", "--no-sandbox", "--disable-gpu",
+                 "--disable-dev-shm-usage", "--no-first-run",
+                 "--no-default-browser-check", "--dump-dom", "about:blank"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=BROWSER_PROBE_S)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            why.append("{}: {}".format(browser, type(exc).__name__))
+            continue
+        if proc.returncode == 0 and b"<html" in proc.stdout.lower():
+            _USABLE = (browser, None)
+            return _USABLE
+        why.append("{}: exit {} without a DOM".format(browser, proc.returncode))
+    _USABLE = (None, "no browser here can render — " + "; ".join(why)
+                     + " — browser tests skipped")
+    return _USABLE
 
 
 def run_headless(browser, url, budget=8000):
@@ -2917,10 +2967,14 @@ def run_headless(browser, url, budget=8000):
     with tempfile.TemporaryDirectory() as profile:
         return subprocess.run(
             [browser, "--headless", "--no-sandbox", "--disable-gpu",
+             # /dev/shm is 64 MB in most containers and CI images. Without this
+             # chromium deadlocks instead of failing, which is a 180 s hang per
+             # test rather than an error.
+             "--disable-dev-shm-usage",
              "--no-first-run", "--no-default-browser-check",
              "--disable-extensions", "--user-data-dir=" + profile,
              "--virtual-time-budget={}".format(budget), "--dump-dom", url],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=BROWSER_TIMEOUT_S,
         )
 
 
@@ -3267,9 +3321,9 @@ class RenderedPageTest(ServerTestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.browser = find_browser()
+        cls.browser, why = usable_browser()
         if not cls.browser:
-            raise unittest.SkipTest("no chromium or chrome on this machine")
+            raise unittest.SkipTest(why)
 
     def dump_dom(self):
         """The DOM after the page's script has run and its fetches returned."""
@@ -3551,9 +3605,9 @@ class DrivenTestCase(ServerTestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.browser = find_browser()
+        cls.browser, why = usable_browser()
         if not cls.browser:
-            raise unittest.SkipTest("no chromium or chrome on this machine")
+            raise unittest.SkipTest(why)
 
     def drive(self, body, round_obj=None, budget=None):
         """Serve the page with `body` appended as a driver, and return what

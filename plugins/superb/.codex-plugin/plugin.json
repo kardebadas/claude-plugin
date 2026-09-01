@@ -1,7 +1,7 @@
 {
   "name": "superb",
-  "version": "0.8.0",
-  "description": "Personal skills for Codex: setup, craft, pipeline and bug-fix.",
+  "version": "0.9.0",
+  "description": "Personal skills for Codex: setup, craft, pipeline, bug-investigate and bug-fix.",
   "author": {
     "name": "kardebadas"
   },
@@ -9,7 +9,7 @@
   "interface": {
     "displayName": "Superb",
     "shortDescription": "Clarify product ideas, run an implementation pipeline, fix bugs from evidence.",
-    "longDescription": "setup installs and verifies the dependencies the others need. craft turns a vague product idea into a decision-rich brief. pipeline takes an approved brief through planning, implementation, review and fixes. bug-fix traces a reported bug to file:line evidence before any fix is planned, and is not done until a regression test that failed first passes.",
+    "longDescription": "setup installs and verifies the dependencies the others need. craft turns a vague product idea into a decision-rich brief. pipeline takes an approved brief through planning, implementation, review and fixes. bug-investigate traces a reported bug to file:line evidence and stops there, for when knowing is the deliverable. bug-fix carries that same investigation on to a fix that is not done until a regression test which failed first passes.",
     "developerName": "kardebadas",
     "category": "Productivity",
     "capabilities": [
@@ -20,6 +20,7 @@
       "Set up superb and install what it needs.",
       "Help me turn this product idea into a clear brief.",
       "Run the implementation pipeline for this approved design.",
+      "Find out why this is broken.",
       "Find out why this is broken and fix it."
     ]
   }

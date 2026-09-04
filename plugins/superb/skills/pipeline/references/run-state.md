@@ -137,7 +137,7 @@ action** — before dispatching, before reading a plan doc, before writing code.
 **A `[~]` task is never assumed done because it looks done, and never assumed
 untouched because you don't remember it.** Verify against the code.
 
-## Resume Protocol (`/pipeline resume`)
+## Resume Protocol (`/superb:pipeline resume`)
 
 The user-invoked path back into an interrupted run. It wraps the cold-start
 protocol above with candidate selection and a reporting step. **This mode never

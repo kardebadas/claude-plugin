@@ -160,6 +160,40 @@ else:
     for label, txt in surfaces.items():
         if not mentions(txt, n): bad(f"{n} missing from the {label}")
 
+print("== skill invocation ==")
+# An indexed placeholder ($0, $1, ...) IS substituted — $0 is the first positional
+# argument — but one with no argument at its position is left in the prompt
+# verbatim. So a dispatch table keyed on $0 renders a stray literal "$0" on a bare
+# invocation, in exactly the arm it calls "no argument". $ARGUMENTS collapses to
+# the empty string instead, which is what a dispatch table wants. Caught only by
+# reading the table, never by running it.
+#
+# The check targets the DISPATCH INSTRUCTION, not any mention of $0: the corrected
+# text has to stay free to explain why an indexed placeholder is wrong, and a
+# blanket ban on the characters would fail on the sentence documenting the fix.
+#
+# The namespace regex must not fire on a relative path that happens to contain a
+# skill name — `../bug-fix/references/investigator.md` is a file reference, not an
+# invocation. Hence the leading "." in the lookbehind and the trailing "/" in the
+# lookahead: an invocation is never preceded by "." nor followed by "/".
+_inv_before = len(FAIL)
+skill_names = sorted(d.name for d in sdir.iterdir() if d.is_dir()) if sdir.is_dir() else []
+_ns = re.compile(r"(?<![\w:/.])/(" + "|".join(map(re.escape, skill_names)) + r")(?![\w/-])") \
+      if skill_names else None
+for n in skill_names:
+    t, e = read(sdir / n / "SKILL.md")
+    if e: continue
+    flat = " ".join(t.split())
+    m0 = re.search(r"[Dd]ispatch on [^.]{0,40}(\$\d)", flat)
+    if m0:
+        bad(f"{n}/SKILL.md dispatches on {m0.group(1)}; an indexed placeholder with "
+            "no argument at its position stays literal, so a bare invocation leaks "
+            "it into the prompt — dispatch on $ARGUMENTS")
+    for m in (_ns.finditer(t) if _ns else []):
+        bad(f"{n}/SKILL.md writes {m.group(0)!r} un-namespaced; use /superb:{m.group(1)}")
+if len(FAIL) == _inv_before:
+    ok("no indexed-placeholder dispatch, invocations namespaced")
+
 print("== agents ==")
 adir = ROOT/"plugins/superb/agents"
 files = sorted(adir.glob("*.md")) if adir.is_dir() else []

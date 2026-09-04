@@ -92,6 +92,10 @@ run_mutant "RV example loses its coverage file"    "sed -i 's| · coverage p3-co
 run_mutant "re-review round loses report files"    "sed -i 's|p3-rr2-{a,b,c,int}.md|p3-rr2-{a,int}.md|' plugins/superb/skills/pipeline/SKILL.md"
 run_mutant "every worked RV example deleted"       "sed -i '/· reports/d' plugins/superb/skills/pipeline/*.md plugins/superb/skills/pipeline/*/*.md"
 
+# --- the skill-invocation arm must itself stay honest ---
+run_mutant "skill dispatches on \$0 again"         "sed -i 's|Dispatch on the argument below|Dispatch on the argument (\`\$0\`)|' plugins/superb/skills/pipeline/SKILL.md"
+run_mutant "invocation loses its namespace"        "sed -i 's|/superb:pipeline|/pipeline|g' plugins/superb/skills/pipeline/SKILL.md"
+
 echo
 echo "killed=$PASS survived=$SURV"
 if [ "$SURV" -ne 0 ]; then

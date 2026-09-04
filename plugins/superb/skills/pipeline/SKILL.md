@@ -26,14 +26,24 @@ worktrees and merges, and the Brain-Agent mode). `templates/` holds the three ru
 
 ## Invocation
 
-Dispatch on the argument (`$0`) before doing anything else:
+Dispatch on the argument below, before doing anything else. An empty argument
+means Full mode.
+
+`$ARGUMENTS`
+
+That is the whole argument string, trimmed, and it collapses to the empty string
+when the skill was invoked with no argument. **Never key this table on an indexed
+placeholder.** `$0` is the first positional argument and it does get substituted —
+but an indexed placeholder with no argument at its position is left in the prompt
+verbatim, so a bare invocation renders a stray literal `$0` into exactly the arm
+this table calls "no argument". `$ARGUMENTS` is simply empty there.
 
 | Invocation | Behavior |
 |------------|----------|
-| `/pipeline` (no argument) | **Full mode** — current behavior: start at Stage 1, step 0. |
-| `/pipeline resume` | Run the **Resume Protocol** in `references/run-state.md`. **Never start a new run in this mode** — if no run directory exists, say so and stop. |
-| `/pipeline status` | **Strictly read-only report** (below). No writes, no dispatches, no fixes. |
-| `/pipeline <anything else>` | **Ask the user what they meant.** Never guess a verb. `fix-mode` in particular is internal-only — set exclusively by this skill's own fix loop, never a user argument; if the user passes it, refuse and explain that. |
+| `/superb:pipeline` (empty `$ARGUMENTS`) | **Full mode** — start at Stage 1, step 0. |
+| `/superb:pipeline resume` | Run the **Resume Protocol** in `references/run-state.md`. **Never start a new run in this mode** — if no run directory exists, say so and stop. |
+| `/superb:pipeline status` | **Strictly read-only report** (below). No writes, no dispatches, no fixes. |
+| `/superb:pipeline <anything else>` | **Ask the user what they meant.** Never guess a verb. `fix-mode` in particular is internal-only — set exclusively by this skill's own fix loop, never a user argument; if the user passes it, refuse and explain that. |
 
 **`status`:** locate the run directory (same candidate logic as the Resume
 Protocol — if more than one qualifies, ask which); read `progress.md`,

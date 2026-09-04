@@ -80,13 +80,13 @@ run after the merge. Tasks that share a file or a dependency still run in order.
 
 | Command | What it does |
 | ------- | ------------ |
-| `/pipeline` | Full run, starting at the brainstorm |
-| `/pipeline resume` | Re-enter an interrupted run; never starts a new one |
-| `/pipeline status` | Read-only report — no writes, no dispatches, no fixes |
+| `/superb:pipeline` | Full run, starting at the brainstorm |
+| `/superb:pipeline resume` | Re-enter an interrupted run; never starts a new one |
+| `/superb:pipeline status` | Read-only report — no writes, no dispatches, no fixes |
 
 Referred to by name — in a prompt, or by another skill — it is
 `superb:pipeline`. The `superb:` prefix is the plugin name and only matters for
-disambiguation; typing `/pipeline` is enough when nothing else claims it.
+disambiguation; typing `/superb:pipeline` is enough when nothing else claims it.
 
 ## Requires
 

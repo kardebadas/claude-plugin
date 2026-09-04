@@ -32,15 +32,17 @@ tier**: a bug finding (a failing or vacuous test, a broken build gate, a crash)
 is recorded as `Critical` or `Major` like any other blocking row, never as a
 bare `bug`, because this table has no such `Sev`.
 
-A reviewer reporting `Important` (the task-reviewer vocabulary) is re-tagged on
-the way in — **Major** if the finding names a measured behavioural defect, **a
-requirement the plan, spec or brief mandated that the phase did not implement**,
-a failing or vacuous test, a broken build gate, a security/PHI/data-loss
-reachability, or a fragility whose failure mode is reachable in the code as
-written; **Minor** otherwise, which is where maintainability damage and merely
-hypothetical fragility land deliberately. A missed requirement is Major, not
-deferred: nothing else in the run catches it. Write the re-tag in the row, so a
-tier nobody decided cannot end up gating a phase.
+`Important` is the task reviewer's vocabulary, not a tier: **an incoming
+`Important` is re-tagged** on the way in — **Major** if it names a measured
+behavioural defect, **a requirement the plan, spec or brief mandated that the
+phase did not implement**, a failing or vacuous test, a broken build gate, a
+security/PHI/data-loss reachability, or a fragility whose failure mode is
+**reachable in the code as written** (an unhandled empty or null case, an
+ordering or race dependency); **Minor** otherwise, which is where
+maintainability damage and merely hypothetical fragility ("this could break
+under load" with nothing shown that reaches it) land deliberately. A missed
+requirement is Major, not deferred: nothing else in the run catches it. Write
+the re-tag in the row, so a tier nobody decided cannot end up gating a phase.
 
 **State** is one of `open`, `closed`, `false-positive`. Closing requires either:
 the fix diff touched the code the finding names **AND** a re-review whose slice

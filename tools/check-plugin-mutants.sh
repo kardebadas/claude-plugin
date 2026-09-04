@@ -14,13 +14,20 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 PASS=0; SURV=0; SURVIVORS=()
 
+# The mutation script's own output is CAPTURED, and printed only when the mutant
+# SURVIVES. Several mutants assert their own preconditions ("mutant is a no-op:
+# the sentence has been reworded") precisely so that prose rot cannot turn them
+# into silent no-ops — and discarding that message left the operator reading
+# `SURVIVED  <name>` with no way to tell a rotted mutant from a real hole in the
+# gate. A killed mutant still prints exactly one line, as before.
 run_mutant() { # name, shell applied inside the copy
-  local name="$1" script="$2" dir="$WORK/m"
+  local name="$1" script="$2" dir="$WORK/m" out
   rm -rf "$dir"; mkdir -p "$dir"
   tar -C "$SRC" --exclude=.git --exclude=__pycache__ -cf - . | tar -C "$dir" -xf -
-  ( cd "$dir" && eval "$script" ) >/dev/null 2>&1
+  out="$( ( cd "$dir" && eval "$script" ) 2>&1 )"
   if ( cd "$dir" && ./tools/check-plugin.sh ) >/dev/null 2>&1; then
     printf '  SURVIVED  %s\n' "$name"; SURV=$((SURV+1)); SURVIVORS+=("$name")
+    if [ -n "$out" ]; then printf '%s\n' "$out" | sed 's/^/            | /'; fi
   else
     printf '  killed    %s\n' "$name"; PASS=$((PASS+1))
   fi
@@ -128,6 +135,14 @@ p.write_text(s.replace(a, 'an incoming '+tick+'Important'+tick+' is honoured as 
 # Line-addressed and asserted, not sed'd on prose: a regex spanning the wrapped
 # sentence would silently match nothing the next time the paragraph re-wrapped,
 # and a mutation that changes nothing reports `killed` for the wrong reason.
+#
+# TWO assertions, not three. Anchors 1 (the predicate line) and 2 (the `visible.`
+# terminator) fully determine the deletion range; trimming the opener stub off
+# the preceding line only makes the throwaway copy read cleanly, so it is applied
+# WHEN IT FITS and asserted never. Asserted, it pinned a line-break position
+# inside a wrapped sentence — the most volatile property of prose — and two of
+# four tested re-wraps tripped that anchor and nothing else. Deleting the range
+# without the trim still kills.
 run_mutant "cited re-tag predicate deleted from fix-loop.md" "$J \"import pathlib
 p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
 L=p.read_text().split(chr(10)); tick=chr(96)
@@ -137,10 +152,52 @@ b=[i for i,x in enumerate(L) if x.strip()=='visible.']
 assert len(a)==1, 'mutant is a no-op: the re-tag predicate has been reworded'
 assert len(b)==1 and b[0]>a[0], 'mutant is a no-op: the predicate no longer ends at visible.'
 i=a[0]
-assert L[i-1].endswith(head), 'mutant is a no-op: the predicate opener has been reworded'
-L[i-1]=L[i-1][:-len(head)].rstrip()
+if L[i-1].endswith(head): L[i-1]=L[i-1][:-len(head)].rstrip()
 del L[i:b[0]+1]
 p.write_text(chr(10).join(L))\""
+# The predicate exists TWICE — the authority in references/fix-loop.md and the
+# copy in templates/findings.md, which is what gets copied into the run
+# directory and is therefore the text the consolidating agent actually reads
+# while writing ledger rows. Deleting the copy left both gates green, which is
+# the same unheld-second-copy weakness the mutant above was added to fix. This
+# one deletes the copy.
+# Paragraph-scoped and whitespace-normalised, so it does not pin a line-break
+# position: it finds the ONE blank-line-delimited paragraph whose flattened text
+# carries the re-tag phrase and deletes the whole paragraph. If the phrase is
+# reworded or duplicated, the assert raises, the mutation does not apply, and the
+# mutant SURVIVES loudly with its message printed — never a silent no-op.
+run_mutant "cited re-tag predicate deleted from findings.md" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/templates/findings.md')
+s=p.read_text(); tick=chr(96); nl=chr(10)
+key='an incoming '+tick+'Important'+tick+' is re-tagged'
+paras=s.split(nl+nl)
+hit=[i for i,x in enumerate(paras) if key in ' '.join(x.split())]
+assert len(hit)==1, 'mutant is a no-op: findings.md has no single re-tag paragraph'
+del paras[hit[0]]
+p.write_text((nl+nl).join(paras))\""
+# The `if pe:` arm — the one that reports a cited predicate file it cannot READ —
+# cannot be proven by exit status. Delete that arm and the named FAIL becomes an
+# AttributeError traceback one line down; both are red builds, so no pass/fail
+# mutant separates them. This mutant asserts the MESSAGE instead: it removes the
+# cited file, and if the gate does not name that file and reason, it puts the file
+# back — leaving a clean copy that PASSES, so the harness reports SURVIVED. The
+# signal still travels as pass/fail, so run_mutant's contract is untouched and
+# every other mutant is unaffected.
+# check-plugin.sh's output is captured before grepping rather than piped into it:
+# under `set -o pipefail` a failing left-hand side would mask a matching grep and
+# revert a mutation that had in fact been caught.
+run_mutant "cited predicate file unreadable" '
+f=plugins/superb/skills/pipeline/references/fix-loop.md
+k="$(mktemp)"
+cp "$f" "$k"
+rm -f "$f"
+o="$(./tools/check-plugin.sh 2>&1)"
+if printf "%s\n" "$o" | grep -q "fix-loop.md must carry, but that file cannot be read"; then
+  rm -f "$k"
+else
+  echo "mutant is a no-op: the gate no longer names the unreadable cited file and its reason, so the file was restored and this mutant reports SURVIVED instead of passing on a traceback"
+  cp "$k" "$f"; rm -f "$k"
+fi'
 
 echo
 echo "killed=$PASS survived=$SURV"

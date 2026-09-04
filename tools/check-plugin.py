@@ -244,8 +244,20 @@ for n in skill_names:
         # the difference. An un-namespaced `/skill` is equally wrong in any file
         # of any skill, so there a wider net is the safer error. This rule is
         # about ONE seam: pipeline's consolidation of reviewer findings into a
-        # ledger. No other superb skill consolidates findings, so none of them
-        # can satisfy the rule and none needs to. Left blanket it red-builds on
+        # ledger whose blocking list is PHASE-scoped. Not "no other skill sees
+        # the tier" — `bug-fix` prefers `superpowers:subagent-driven-development`
+        # at its Step 4, so bug-fix invokes the very reviewer that emits
+        # `Important`. It is safe because it has only ONE scope: no ledger, no
+        # `Sev` column, no blocking list, no advancement condition. There SDD
+        # runs at SDD's native task scope, where `Important`'s "fix everything
+        # before this task completes" contract is the correct one. The F1 leak
+        # was a SCOPE MISMATCH — a task-scoped tier gating a phase — and bug-fix
+        # has no second scope to mismatch. So the durable reason: scoped because
+        # pipeline is the only skill with a phase gate a task-scoped tier can
+        # mis-gate. EXPIRY: revisit the moment another skill acquires one — a
+        # findings ledger, a blocking list, or a phase-advancement condition —
+        # because from then on `n == "pipeline"` is a hole, not a scope.
+        # Left blanket it red-builds on
         # `**Important:**` — the commonest markdown emphasis convention there is
         # — and hands an editor of craft, bug-fix, bug-investigate or setup an
         # order to document a seam their skill does not have, with no remedy
@@ -280,32 +292,65 @@ for n in skill_names:
         # gate green — the whole routing rule deletable in one edit. So whenever
         # SKILL.md cites the predicate, the cited file must actually carry it:
         # the re-tag sentence, a Major branch, and the Minor catch-all that makes
-        # the two a total partition. Read from the same `sdir / n` as the rest of
-        # this arm, so the check follows the skill, not a hard-coded path.
-        # Mutant: "cited re-tag predicate deleted from fix-loop.md".
+        # the two a total partition.
+        #
+        # TWO files, not one. The predicate exists twice: the authority in
+        # `references/fix-loop.md`, and a copy in `templates/findings.md`.
+        # `templates/` is read-only and COPIED INTO THE RUN DIRECTORY, so the
+        # run's own findings.md — not this repo's fix-loop.md — is the text the
+        # consolidating agent has open while it writes ledger rows. If the two
+        # drift, the agent applies the copy. So the copy is held to the same
+        # three phrases as the authority, by the same regexes, and deleting it
+        # red-builds exactly as deleting the authority does. Requiring the same
+        # PHRASES (not merely the same meaning) is the point: it is what makes
+        # drift detectable by a regex at all.
+        #
+        # Read from the same `sdir / n` as the rest of this arm, so the check
+        # follows the skill, not a hard-coded path.
+        # Mutants: "cited re-tag predicate deleted from fix-loop.md",
+        #          "cited re-tag predicate deleted from findings.md",
+        #          "cited predicate file unreadable".
         if n == "pipeline" and "by the predicate in `references/fix-loop.md`" in flat:
-            pt, pe = read(sdir / n / "references" / "fix-loop.md")
-            if pe:
-                bad(f"{n}/SKILL.md cites the `Important` re-tag predicate in "
-                    f"references/fix-loop.md, which cannot be read: {pe}")
-            else:
+            parts = (
+                ("the re-tag sentence", r"an incoming `?Important`? is\s+re-tagged"),
+                ("a Major branch", r"\*\*Major\*\* if it names"),
+                ("the Minor catch-all", r"\*\*Minor\*\* otherwise"),
+            )
+            for rel in ("references/fix-loop.md", "templates/findings.md"):
+                pt, pe = read(sdir / n / rel)
+                # UNPROVEN BY EXIT STATUS, PROVEN BY MESSAGE. Deleting this arm
+                # does not turn a green build red — it turns this named FAIL
+                # into an AttributeError traceback one line down (`pt` is None),
+                # which is also a red build, so no mutant judged on pass/fail
+                # alone can separate the two. The mutant "cited predicate file
+                # unreadable" therefore asserts the MESSAGE: it greps the gate's
+                # output for this file-and-reason wording and, when it is
+                # absent, restores the file so the copy is clean, the gate
+                # passes and the harness reports SURVIVED. That is the whole of
+                # this arm's proof; it is kept because a named reason beats a
+                # traceback, not because a traceback would be green.
+                if pe:
+                    bad(f"{n}/SKILL.md cites the `Important` re-tag predicate, which "
+                        f"{rel} must carry, but that file cannot be read: {pe}")
+                    continue
                 pflat = " ".join(pt.split())
-                missing = [lbl for lbl, rx in (
-                    ("the re-tag sentence", r"an incoming `?Important`? is\s+re-tagged"),
-                    ("a Major branch", r"\*\*Major\*\* if it names"),
-                    ("the Minor catch-all", r"\*\*Minor\*\* otherwise"),
-                ) if not re.search(rx, pflat)]
+                missing = [lbl for lbl, rx in parts if not re.search(rx, pflat)]
                 if missing:
                     bad(f"{n}/SKILL.md routes the `Important` re-tag \"by the "
-                        "predicate in references/fix-loop.md\", but that file is "
+                        f"predicate in references/fix-loop.md\", but {rel} is "
                         "missing " + ", ".join(missing) + " — a dangling pointer "
                         "re-tags nothing, and the rule is deletable without a red "
-                        "build. REMEDY: restore the predicate in fix-loop.md (Major "
-                        "on a measured behavioural defect, a mandated requirement the "
-                        "phase did not implement, a failing or vacuous test, a broken "
-                        "build gate, a security/PHI/data-loss reachability, or a "
-                        "reachable fragility; Minor otherwise), or stop citing it "
-                        "from SKILL.md and state the predicate inline")
+                        "build. Both files carry it: fix-loop.md is the authority "
+                        "and templates/findings.md is the copy that ships into the "
+                        "run directory, where the consolidating agent reads it. "
+                        "REMEDY: restore the predicate in "
+                        f"{rel} (an incoming `Important` is re-tagged; Major "
+                        "if it names a measured behavioural defect, a mandated "
+                        "requirement the phase did not implement, a failing or "
+                        "vacuous test, a broken build gate, a security/PHI/data-loss "
+                        "reachability, or a reachable fragility; Minor otherwise), "
+                        "or stop citing it from SKILL.md and state the predicate "
+                        "inline")
     for f in sorted((sdir / n).rglob("*.md")):
         t, e = read(f)
         if e: continue

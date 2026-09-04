@@ -25,9 +25,9 @@ Sub-plan, every task (the `writing-plans` task block, plus one line):
 
     **Depends on:** T1
     **Files:**
-    - Modify: extension/src/core/chunk_store.h
-    - Modify: extension/src/core/chunk_store.cpp
-    - Test:   extension/tests/core/chunk_store_test.cpp
+    - Modify: src/core/chunk_store.h
+    - Modify: src/core/chunk_store.cpp
+    - Test:   tests/core/chunk_store_test.cpp
 
 `Depends on:` lists task IDs in the same phase, or `none`. Cross-phase needs are
 phase `deps:`, not task deps. A task with no `Depends on:` line, or a `Files:`
@@ -101,10 +101,13 @@ Let the phase branch be `P` (checked out in the phase worktree) and the wave be
      that task back to `[ ]`, drop its branch and worktree, re-dispatch it
      **alone** on the merged head after the rest of the wave lands, and add a
      Minor finding to `findings.md` naming the wrong annotation.
-7. Run the project's build gates on `P` after the last merge (this repo:
-   `tools/build.sh`, plus `tools/build-physics.sh linux` when
-   `extension/src/physics/` changed). A failure is a bug finding with an F-ID
-   and goes through the fix loop before the next wave.
+7. Run **the project's build gates** on `P` after the last merge — the gates the
+   approved plan names, or the ones the repo's own `AGENTS.md` / `CLAUDE.md`
+   declares. This skill does not know what they are and must not guess: a gate
+   invented here fails a repo that never had it, and a gate omitted here lets a
+   broken wave merge. If the plan named none, that is an Ambiguity-guard stop,
+   not a licence to skip the step. A failure is a bug finding with an F-ID and
+   goes through the fix loop before the next wave.
 8. Mark each member `[x]` with **its own head hash** (the commit on its branch,
    preserved by the merge — never the merge commit). Update Current State to
    the next wave. Save. Re-read.

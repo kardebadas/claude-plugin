@@ -77,6 +77,8 @@ run_mutant "brief drifts between the two copies"   "sed -i 's/You are a bug inve
 run_mutant "SHARED BRIEF markers deleted in both"  "sed -i '/SHARED BRIEF/d' plugins/superb/agents/bug-investigator.md plugins/superb/skills/bug-fix/references/investigator.md"
 run_mutant "personal path reintroduced"            "echo 'see /home/someone/.claude/agent-memory/' >> plugins/superb/agents/bug-investigator.md"
 run_mutant "personal path hidden in a .py file"    "echo '# /home/someone/audio-chat-app' >> plugins/superb/skills/craft/ui/server.py"
+run_mutant "foreign build command reintroduced"   "echo 'run tools/build.sh after the merge' >> plugins/superb/skills/pipeline/references/parallel.md"
+run_mutant "foreign source tree reintroduced"     "echo 'when extension/src/physics/ changed' >> plugins/superb/skills/pipeline/references/parallel.md"
 run_mutant "manifest JSON corrupted"               "echo '{' >> .claude-plugin/marketplace.json"
 run_mutant "non-UTF8 byte in a checked file"       "printf '\\xff\\xfe' >> plugins/superb/skills/bug-fix/SKILL.md"
 run_mutant "skills directory deleted"              "rm -rf plugins/superb/skills"

@@ -189,7 +189,15 @@ else:
         if not FAIL: ok(f"checks.yml runs {len(refs)} scripts, all present and executable")
 
 print("== no personal leakage ==")
-pat = re.compile(r"/home/[a-z0-9_-]+/|audio-chat-app|agent-memory|MIPS-[0-9X]|HIPAA", re.I)
+# Foreign project conventions leak the same way absolute home paths do: a build
+# command or source tree from whichever repo the skill was last used in, frozen
+# into prose that reads as universal. tools/build.sh and extension/src/ arrived
+# that way and shipped in three releases.
+pat = re.compile(
+    r"/home/[a-z0-9_-]+/|audio-chat-app|agent-memory|MIPS-[0-9X]|HIPAA"
+    r"|tools/build|extension/src",
+    re.I,
+)
 hits = []
 for p in (ROOT/"plugins").rglob("*"):
     if not p.is_file() or p.suffix not in {".md", ".json", ".py", ".html", ".sh", ".txt"}: continue

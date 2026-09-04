@@ -94,6 +94,15 @@ run_mutant "every worked RV example deleted"       "sed -i '/· reports/d' plugi
 
 # --- the skill-invocation arm must itself stay honest ---
 run_mutant "skill dispatches on \$0 again"         "sed -i 's|Dispatch on the argument below|Dispatch on the argument (\`\$0\`)|' plugins/superb/skills/pipeline/SKILL.md"
+# A doubled backslash escapes NOTHING — both backslashes stay and $0 still expands.
+# So the arm's exemption must be odd-count, not one-character; nothing else here
+# reaches that input, and without this mutant the odd/even fix is untested.
+run_mutant "skill dispatches on a doubled-backslash \$0" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md'); s=p.read_text()
+a='Dispatch on the argument below'
+assert a in s, 'mutant is a no-op: the dispatch sentence has been reworded'
+tick=chr(96); ph=chr(92)*2+chr(36)+'0'
+p.write_text(s.replace(a, 'Dispatch on the argument ('+tick+ph+tick+')'))\""
 run_mutant "invocation loses its namespace"        "sed -i 's|/superb:pipeline|/pipeline|g' plugins/superb/skills/pipeline/SKILL.md"
 # The namespace arm reads every *.md in a skill directory, not just SKILL.md —
 # the two files that regressed last time were README.md and references/. Append

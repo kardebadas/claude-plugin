@@ -165,7 +165,11 @@ print("== skill invocation ==")
 # argument — but one with no argument at its position is left in the prompt
 # verbatim. So a dispatch table keyed on $0 renders a stray literal "$0" on a bare
 # invocation, in exactly the arm it calls "no argument". $ARGUMENTS collapses to
-# the empty string instead, which is what a dispatch table wants. Caught only by
+# the empty string instead, which is what a dispatch table wants — observed on
+# 2.1.261, not documented: the docs say only that it "expands to the full argument
+# string as typed", so the zero-argument case is documented by implication. It is
+# named here because it is why the arm prefers $ARGUMENTS, and labelled because
+# rationale a gate rests on should not read as a citable rule. Caught only by
 # reading the table, never by running it.
 #
 # The check aims at the DISPATCH INSTRUCTION, not any mention of $0: the corrected
@@ -179,8 +183,14 @@ print("== skill invocation ==")
 #     sentence with a comma or a dash and this arm FAILs with no hint why.
 #   * Substitution is global and backticks do not stop it, so a documentation
 #     mention must be BACKSLASH-ESCAPED (`\$0`) to render literally. An escaped
-#     mention is harmless, so the lookbehind (?<!\\) exempts it. Only an
-#     unescaped placeholder — one that would really be substituted — is flagged.
+#     mention is harmless, so the arm exempts it — but only an ODD number of
+#     backslashes escapes. `\\$0` leaves both backslashes in place and $0 still
+#     expands, so a doubled backslash must still FAIL. That is why the arm is
+#     (?<!\\)((?:\\\\)*) and not a bare (?<!\\): a lookbehind reads exactly one
+#     character back, so on its own it exempts every even count. It shipped that
+#     way for one round — the same even/odd escape trap the prose was fixed for,
+#     reappearing inside the gate that guards the prose. A gate is prose too, and
+#     gets the same reading. Mutant: "skill dispatches on a doubled-backslash $0".
 #
 # $\d, not $0: every indexed placeholder shares the defect, and a $0-only arm is
 # bypassable by "fixing" the 0-based index to $1.
@@ -196,6 +206,14 @@ print("== skill invocation ==")
 # a README or a references/ page is read by the same user and an un-namespaced
 # command there is just as wrong. The dispatch-instruction scan stays on SKILL.md,
 # which is the only file the harness substitutes.
+#
+# One sentence per skill legitimately has the unprefixed form as its SUBJECT — the
+# READMEs say the prefix is optional absent a collision. There, "use /superb:x" is
+# the wrong remedy: obeying it inverts the sentence into a claim the prefix is
+# required, which is the bug a previous round had to undo. So the failure message
+# names paraphrase as the remedy for that case; the arm stays blanket, because a
+# regex cannot tell a mention from an instruction and the wider net is the safer
+# error.
 _inv_before = len(FAIL)
 skill_names = sorted(d.name for d in sdir.iterdir() if d.is_dir()) if sdir.is_dir() else []
 _ns = re.compile(r"(?<![\w:/.])/(" + "|".join(map(re.escape, skill_names)) + r")(?![\w/-])") \
@@ -204,17 +222,21 @@ for n in skill_names:
     t, e = read(sdir / n / "SKILL.md")
     if e is None:
         flat = " ".join(t.split())
-        m0 = re.search(r"[Dd]ispatch on [^.]{0,40}((?<!\\)\$\d)", flat)
+        m0 = re.search(r"[Dd]ispatch on [^.]{0,40}?(?<!\\)((?:\\\\)*)(\$\d)", flat)
         if m0:
-            bad(f"{n}/SKILL.md dispatches on {m0.group(1)}; an indexed placeholder with "
+            esc, ph = m0.group(1), m0.group(2)
+            bad(f"{n}/SKILL.md dispatches on {esc}{ph}; an indexed placeholder with "
                 "no argument at its position stays literal, so a bare invocation leaks "
-                "it into the prompt — dispatch on $ARGUMENTS")
+                "it into the prompt — dispatch on $ARGUMENTS"
+                + (" (an even number of backslashes escapes nothing)" if esc else ""))
     for f in sorted((sdir / n).rglob("*.md")):
         t, e = read(f)
         if e: continue
         for m in (_ns.finditer(t) if _ns else []):
             rel = f.relative_to(sdir).as_posix()
-            bad(f"{rel} writes {m.group(0)!r} un-namespaced; use /superb:{m.group(1)}")
+            bad(f"{rel} writes {m.group(0)!r} un-namespaced; use /superb:{m.group(1)} — "
+                "unless the sentence is ABOUT the unprefixed form, in which case "
+                "paraphrase it, since prefixing it inverts the claim")
 if len(FAIL) == _inv_before:
     ok("no indexed-placeholder dispatch, invocations namespaced")
 

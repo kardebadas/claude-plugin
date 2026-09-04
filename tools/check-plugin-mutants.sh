@@ -121,6 +121,26 @@ p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md'); s=p.read_text()
 tick=chr(96); a='an incoming '+tick+'Important'+tick+' is re-tagged'
 assert a in s, 'mutant is a no-op: the re-tag sentence has been reworded'
 p.write_text(s.replace(a, 'an incoming '+tick+'Important'+tick+' is honoured as a fourth tier'))\""
+# SKILL.md only POINTS at the re-tag predicate ("by the predicate in
+# references/fix-loop.md"); the predicate itself lives in that file. Deleting it
+# there used to leave SKILL.md with a dangling pointer and the gate green, so the
+# whole routing rule was one edit from gone. This mutant deletes the predicate.
+# Line-addressed and asserted, not sed'd on prose: a regex spanning the wrapped
+# sentence would silently match nothing the next time the paragraph re-wrapped,
+# and a mutation that changes nothing reports `killed` for the wrong reason.
+run_mutant "cited re-tag predicate deleted from fix-loop.md" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+L=p.read_text().split(chr(10)); tick=chr(96)
+head='So **an incoming '+tick+'Important'+tick+' is'
+a=[i for i,x in enumerate(L) if 're-tagged** by consequence' in x]
+b=[i for i,x in enumerate(L) if x.strip()=='visible.']
+assert len(a)==1, 'mutant is a no-op: the re-tag predicate has been reworded'
+assert len(b)==1 and b[0]>a[0], 'mutant is a no-op: the predicate no longer ends at visible.'
+i=a[0]
+assert L[i-1].endswith(head), 'mutant is a no-op: the predicate opener has been reworded'
+L[i-1]=L[i-1][:-len(head)].rstrip()
+del L[i:b[0]+1]
+p.write_text(chr(10).join(L))\""
 
 echo
 echo "killed=$PASS survived=$SURV"

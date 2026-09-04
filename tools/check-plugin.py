@@ -236,17 +236,76 @@ for n in skill_names:
         # closed and different. In one 141-finding run, 50 findings gated phase
         # advancement under a tier that appeared NOWHERE in the skill. So the
         # skill may name the tier only alongside the sentence that re-tags it;
-        # naming it without one is how the leak got in. Matched against `flat`,
-        # not `t`: the rule is prose, it reflows, and a raw-text regex would stop
-        # matching the first time the sentence re-wrapped — failing on the very
-        # rule it exists to require. Keep the phrase in ONE sentence, since
-        # whitespace normalisation does not bridge a paragraph break.
+        # naming it without one is how the leak got in.
+        #
+        # SCOPED to one skill — `n == "pipeline"`, written on the arm itself so
+        # the scope is visible where the arm fires — unlike the namespace arm
+        # below, which is deliberately blanket. What the two rules are ABOUT is
+        # the difference. An un-namespaced `/skill` is equally wrong in any file
+        # of any skill, so there a wider net is the safer error. This rule is
+        # about ONE seam: pipeline's consolidation of reviewer findings into a
+        # ledger. No other superb skill consolidates findings, so none of them
+        # can satisfy the rule and none needs to. Left blanket it red-builds on
+        # `**Important:**` — the commonest markdown emphasis convention there is
+        # — and hands an editor of craft, bug-fix, bug-investigate or setup an
+        # order to document a seam their skill does not have, with no remedy
+        # they can act on.
+        #
+        # Matched against `flat`, not `t`: the rule is prose, it reflows, and a
+        # raw-text regex would stop matching the first time the sentence
+        # re-wrapped — failing on the very rule it exists to require. Keep the
+        # phrase in ONE sentence for the READER, not for the regex: `flat` is
+        # `" ".join(t.split())`, which splits on every whitespace run, blank
+        # lines included, so the match bridges a paragraph break perfectly. An
+        # earlier version of this comment claimed the opposite ("whitespace
+        # normalisation does not bridge a paragraph break") — a mechanism nobody
+        # tested, and false. The advice stands on readability alone: a rule
+        # broken across a paragraph break reads as two weaker claims.
         # Mutant: "fourth severity tier named without its re-tag rule".
-        if re.search(r"\bImportant\b", t) and not re.search(
+        if n == "pipeline" and re.search(r"\bImportant\b", t) and not re.search(
                 r"an incoming `?Important`? is\s+re-tagged", flat):
             bad(f"{n}/SKILL.md names a fourth severity tier (`Important`) with no "
                 "re-tag rule — pipeline blocks on Critical/Major/bug only, so a tier "
-                "this skill never named must be re-tagged at consolidation, not carried")
+                "this skill never named must be re-tagged at consolidation, not "
+                "carried. REMEDY: restore the sentence \"an incoming `Important` is "
+                "re-tagged\" to this file (the predicate it delegates to lives in "
+                "references/fix-loop.md), or — if this `Important` is only markdown "
+                "emphasis — reword it to `**Note:**`, since the tier vocabulary is "
+                "reserved in this skill")
+        # That sentence DELEGATES: SKILL.md names Major/Minor but routes the
+        # decision "by the predicate in `references/fix-loop.md`". A pointer is
+        # not a rule, and nothing was holding the far end. Reverting fix-loop.md's
+        # consolidation bullet to its pre-re-tag wording left zero `Important` in
+        # that file, SKILL.md citing a predicate that no longer existed, and this
+        # gate green — the whole routing rule deletable in one edit. So whenever
+        # SKILL.md cites the predicate, the cited file must actually carry it:
+        # the re-tag sentence, a Major branch, and the Minor catch-all that makes
+        # the two a total partition. Read from the same `sdir / n` as the rest of
+        # this arm, so the check follows the skill, not a hard-coded path.
+        # Mutant: "cited re-tag predicate deleted from fix-loop.md".
+        if n == "pipeline" and "by the predicate in `references/fix-loop.md`" in flat:
+            pt, pe = read(sdir / n / "references" / "fix-loop.md")
+            if pe:
+                bad(f"{n}/SKILL.md cites the `Important` re-tag predicate in "
+                    f"references/fix-loop.md, which cannot be read: {pe}")
+            else:
+                pflat = " ".join(pt.split())
+                missing = [lbl for lbl, rx in (
+                    ("the re-tag sentence", r"an incoming `?Important`? is\s+re-tagged"),
+                    ("a Major branch", r"\*\*Major\*\* if it names"),
+                    ("the Minor catch-all", r"\*\*Minor\*\* otherwise"),
+                ) if not re.search(rx, pflat)]
+                if missing:
+                    bad(f"{n}/SKILL.md routes the `Important` re-tag \"by the "
+                        "predicate in references/fix-loop.md\", but that file is "
+                        "missing " + ", ".join(missing) + " — a dangling pointer "
+                        "re-tags nothing, and the rule is deletable without a red "
+                        "build. REMEDY: restore the predicate in fix-loop.md (Major "
+                        "on a measured behavioural defect, a mandated requirement the "
+                        "phase did not implement, a failing or vacuous test, a broken "
+                        "build gate, a security/PHI/data-loss reachability, or a "
+                        "reachable fragility; Minor otherwise), or stop citing it "
+                        "from SKILL.md and state the predicate inline")
     for f in sorted((sdir / n).rglob("*.md")):
         t, e = read(f)
         if e: continue
@@ -256,7 +315,8 @@ for n in skill_names:
                 "unless the sentence is ABOUT the unprefixed form, in which case "
                 "paraphrase it, since prefixing it inverts the claim")
 if len(FAIL) == _inv_before:
-    ok("no indexed-placeholder dispatch, invocations namespaced, no unhandled fourth severity tier")
+    ok("no indexed-placeholder dispatch, invocations namespaced, no unhandled "
+       "fourth severity tier, re-tag predicate present where cited")
 
 print("== agents ==")
 adir = ROOT/"plugins/superb/agents"

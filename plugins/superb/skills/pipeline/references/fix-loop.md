@@ -79,9 +79,19 @@ phase autonomously.
      this task completes" — right for one task's diff, wrong for a phase, and it
      is not in this skill's blocking list. So **an incoming `Important` is
      re-tagged** by consequence: it becomes **Major** if it names a measured
-     behavioural defect, a failing or vacuous test, a broken build gate, or a
-     security/PHI/data-loss reachability, and **Minor** otherwise. Record the
-     re-tag in the ledger row so the call is visible.
+     behavioural defect, **a requirement the plan, spec or brief mandated that
+     the phase did not implement**, a failing or vacuous test, a broken build
+     gate, a security/PHI/data-loss reachability, or a fragility whose failure
+     mode is **reachable in the code as written** (an unhandled empty or null
+     case, an ordering or race dependency) — and **Minor** otherwise. Minor is
+     the total catch-all, and two things land there deliberately:
+     maintainability damage, and fragility that is only hypothetical ("this
+     could break under load" with nothing shown that reaches it). A missed
+     requirement is **not** deferrable — "the plan mandated X and the phase does
+     not do X" is the phase not being done, and no other check in this skill
+     catches it, so demoting it to Minor would let a spec gap ride out the run
+     as a deferred note. Record the re-tag in the ledger row so the call is
+     visible.
      When duplicate reports disagree within the three tiers, **the highest
      wins**. **Assign every new finding the next free `F-NNN`
      ID**; a rediscovered finding keeps the ID it already has. Reviewers return

@@ -26,12 +26,21 @@ compares **ID sets**, not prose.
 | F-001 | Critical | 2 | `src/x.php:41` | <one line> | open | |
 | F-002 | Major | 2 | `src/y.php:12` | <one line> | closed | fix `a1b2c3d` + re-review R3 covered it |
 
-**Three tiers, and no fourth.** `Sev` is `Critical`, `Major` or `Minor`. A
-reviewer reporting `Important` (the task-reviewer vocabulary) is re-tagged on the
-way in — Major if the finding names a measured behavioural defect, a failing or
-vacuous test, a broken build gate, or a security/PHI/data-loss reachability;
-Minor otherwise. Write the re-tag in the row, so a tier nobody decided cannot
-end up gating a phase.
+**Three tiers, and no fourth.** `Sev` is `Critical`, `Major` or `Minor`. `bug`
+— in this heading and in the skill's blocking list — is a **category, not a
+tier**: a bug finding (a failing or vacuous test, a broken build gate, a crash)
+is recorded as `Critical` or `Major` like any other blocking row, never as a
+bare `bug`, because this table has no such `Sev`.
+
+A reviewer reporting `Important` (the task-reviewer vocabulary) is re-tagged on
+the way in — **Major** if the finding names a measured behavioural defect, **a
+requirement the plan, spec or brief mandated that the phase did not implement**,
+a failing or vacuous test, a broken build gate, a security/PHI/data-loss
+reachability, or a fragility whose failure mode is reachable in the code as
+written; **Minor** otherwise, which is where maintainability damage and merely
+hypothetical fragility land deliberately. A missed requirement is Major, not
+deferred: nothing else in the run catches it. Write the re-tag in the row, so a
+tier nobody decided cannot end up gating a phase.
 
 **State** is one of `open`, `closed`, `false-positive`. Closing requires either:
 the fix diff touched the code the finding names **AND** a re-review whose slice

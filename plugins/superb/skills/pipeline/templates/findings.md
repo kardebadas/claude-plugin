@@ -26,6 +26,13 @@ compares **ID sets**, not prose.
 | F-001 | Critical | 2 | `src/x.php:41` | <one line> | open | |
 | F-002 | Major | 2 | `src/y.php:12` | <one line> | closed | fix `a1b2c3d` + re-review R3 covered it |
 
+**Three tiers, and no fourth.** `Sev` is `Critical`, `Major` or `Minor`. A
+reviewer reporting `Important` (the task-reviewer vocabulary) is re-tagged on the
+way in — Major if the finding names a measured behavioural defect, a failing or
+vacuous test, a broken build gate, or a security/PHI/data-loss reachability;
+Minor otherwise. Write the re-tag in the row, so a tier nobody decided cannot
+end up gating a phase.
+
 **State** is one of `open`, `closed`, `false-positive`. Closing requires either:
 the fix diff touched the code the finding names **AND** a re-review whose slice
 covered that fix diff reports it resolved; or the **user** ruled it a false

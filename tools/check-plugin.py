@@ -229,6 +229,24 @@ for n in skill_names:
                 "no argument at its position stays literal, so a bare invocation leaks "
                 "it into the prompt — dispatch on $ARGUMENTS"
                 + (" (an even number of backslashes escapes nothing)" if esc else ""))
+        # A FOURTH severity tier reaches the ledger from OUTSIDE this skill.
+        # subagent-driven-development's task reviewer emits `Important`, whose
+        # contract is "fix everything before this task completes" — right for one
+        # task's diff, wrong for a phase, because this skill's blocking list is
+        # closed and different. In one 141-finding run, 50 findings gated phase
+        # advancement under a tier that appeared NOWHERE in the skill. So the
+        # skill may name the tier only alongside the sentence that re-tags it;
+        # naming it without one is how the leak got in. Matched against `flat`,
+        # not `t`: the rule is prose, it reflows, and a raw-text regex would stop
+        # matching the first time the sentence re-wrapped — failing on the very
+        # rule it exists to require. Keep the phrase in ONE sentence, since
+        # whitespace normalisation does not bridge a paragraph break.
+        # Mutant: "fourth severity tier named without its re-tag rule".
+        if re.search(r"\bImportant\b", t) and not re.search(
+                r"an incoming `?Important`? is\s+re-tagged", flat):
+            bad(f"{n}/SKILL.md names a fourth severity tier (`Important`) with no "
+                "re-tag rule — pipeline blocks on Critical/Major/bug only, so a tier "
+                "this skill never named must be re-tagged at consolidation, not carried")
     for f in sorted((sdir / n).rglob("*.md")):
         t, e = read(f)
         if e: continue
@@ -238,7 +256,7 @@ for n in skill_names:
                 "unless the sentence is ABOUT the unprefixed form, in which case "
                 "paraphrase it, since prefixing it inverts the claim")
 if len(FAIL) == _inv_before:
-    ok("no indexed-placeholder dispatch, invocations namespaced")
+    ok("no indexed-placeholder dispatch, invocations namespaced, no unhandled fourth severity tier")
 
 print("== agents ==")
 adir = ROOT/"plugins/superb/agents"

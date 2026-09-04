@@ -576,8 +576,10 @@ For each phase — in dependency order, independent phases concurrently as lanes
    phase branch, including any you wrote inline yourself. Run the test suite —
    failing tests are bug findings.
    Consolidate + dedup into `findings.md`, **assigning each new finding a
-   stable `F-NNN` ID** (Critical / Major (= `/review` "Warning") / Minor;
-   severity ties resolve upward; a rediscovered finding keeps its old ID), then
+   stable `F-NNN` ID**. **Three tiers only** — Critical / Major (= `/review`
+   "Warning") / Minor; ties within them resolve upward; a rediscovered finding
+   keeps its old ID; **an incoming `Important` is re-tagged** to Major or Minor
+   by the predicate in `references/fix-loop.md` and never carried as a tier. Then
    close `RV` `[x]` with those F-IDs — or `no findings` — and the
    `agent-output/` paths.
 3. **Fix loop**: if any Critical/Major/bug → recurse `pipeline` in

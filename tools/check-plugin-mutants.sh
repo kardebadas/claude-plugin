@@ -109,6 +109,18 @@ run_mutant "invocation loses its namespace"        "sed -i 's|/superb:pipeline|/
 # rather than sed on prose: an appended line cannot become a silent no-op.
 run_mutant "namespace lost outside SKILL.md"       "echo 'start a run with /pipeline' >> plugins/superb/skills/pipeline/README.md"
 run_mutant "namespace lost in a references page"   "echo 'resume with /pipeline resume' >> plugins/superb/skills/pipeline/references/run-state.md"
+# The fourth-tier arm fires on `Important` NAMED WITHOUT the re-tag rule, so a
+# mutant has to keep the word and break the rule. Renaming "Three tiers only" to
+# "Important findings also block" — the obvious mutation — SURVIVES: it leaves
+# the re-tag sentence standing, so the arm is satisfied and proves nothing.
+# Asserted rather than sed'd on prose, because a mutation that matches nothing
+# reports `killed` for the wrong reason; two mutants here have already had to be
+# retargeted for exactly that.
+run_mutant "fourth severity tier named without its re-tag rule" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md'); s=p.read_text()
+tick=chr(96); a='an incoming '+tick+'Important'+tick+' is re-tagged'
+assert a in s, 'mutant is a no-op: the re-tag sentence has been reworded'
+p.write_text(s.replace(a, 'an incoming '+tick+'Important'+tick+' is honoured as a fourth tier'))\""
 
 echo
 echo "killed=$PASS survived=$SURV"

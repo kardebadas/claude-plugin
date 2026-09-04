@@ -72,9 +72,18 @@ phase autonomously.
      them — add them to the consolidated list with the failure output as
      evidence.
    - Consolidate findings from all reviewers **into `findings.md`**, dedup, and
-     tag each by severity: **Critical**, **Major** (maps to `/review`
-     "Warning"), **Minor**. When duplicate reports disagree on severity, **the
-     highest severity wins**. **Assign every new finding the next free `F-NNN`
+     tag each by severity. **There are exactly three tiers: Critical, Major
+     (= `/review`'s "Warning"), Minor.** A reviewer that reports in another
+     vocabulary is re-tagged here, never carried: `subagent-driven-development`'s
+     task reviewer emits **Important**, whose contract is "fix everything before
+     this task completes" — right for one task's diff, wrong for a phase, and it
+     is not in this skill's blocking list. So **an incoming `Important` is
+     re-tagged** by consequence: it becomes **Major** if it names a measured
+     behavioural defect, a failing or vacuous test, a broken build gate, or a
+     security/PHI/data-loss reachability, and **Minor** otherwise. Record the
+     re-tag in the ledger row so the call is visible.
+     When duplicate reports disagree within the three tiers, **the highest
+     wins**. **Assign every new finding the next free `F-NNN`
      ID**; a rediscovered finding keeps the ID it already has. Reviewers return
      ≤10 lines plus a `DETAIL:` path — read a full report only while
      consolidating, and never carry it forward in context.

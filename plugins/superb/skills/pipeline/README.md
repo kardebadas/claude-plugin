@@ -86,7 +86,7 @@ run after the merge. Tasks that share a file or a dependency still run in order.
 
 Referred to by name — in a prompt, or by another skill — it is
 `superb:pipeline`. The `superb:` prefix is the plugin name and only matters for
-disambiguation; typing `/superb:pipeline` is enough when nothing else claims it.
+disambiguation; dropping it also works when nothing else claims the name.
 
 ## Requires
 

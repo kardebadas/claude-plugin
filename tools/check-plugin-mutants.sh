@@ -95,6 +95,11 @@ run_mutant "every worked RV example deleted"       "sed -i '/· reports/d' plugi
 # --- the skill-invocation arm must itself stay honest ---
 run_mutant "skill dispatches on \$0 again"         "sed -i 's|Dispatch on the argument below|Dispatch on the argument (\`\$0\`)|' plugins/superb/skills/pipeline/SKILL.md"
 run_mutant "invocation loses its namespace"        "sed -i 's|/superb:pipeline|/pipeline|g' plugins/superb/skills/pipeline/SKILL.md"
+# The namespace arm reads every *.md in a skill directory, not just SKILL.md —
+# the two files that regressed last time were README.md and references/. Append
+# rather than sed on prose: an appended line cannot become a silent no-op.
+run_mutant "namespace lost outside SKILL.md"       "echo 'start a run with /pipeline' >> plugins/superb/skills/pipeline/README.md"
+run_mutant "namespace lost in a references page"   "echo 'resume with /pipeline resume' >> plugins/superb/skills/pipeline/references/run-state.md"
 
 echo
 echo "killed=$PASS survived=$SURV"

@@ -192,13 +192,16 @@ print("== no personal leakage ==")
 # Foreign project conventions leak the same way absolute home paths do: a build
 # command or source tree from whichever repo the skill was last used in, frozen
 # into prose that reads as universal. tools/build.sh and extension/src/ arrived
-# that way and shipped in three releases.
+# that way.
 pat = re.compile(
     r"/home/[a-z0-9_-]+/|audio-chat-app|agent-memory|MIPS-[0-9X]|HIPAA"
     r"|tools/build|extension/src",
     re.I,
 )
 hits = []
+# Scoped to plugins/ deliberately, and load-bearing: the banned tokens appear in
+# this file's own comment and pattern, and in the mutants exercising them, so
+# widening this walk past plugins/ would fail the gate on its own source.
 for p in (ROOT/"plugins").rglob("*"):
     if not p.is_file() or p.suffix not in {".md", ".json", ".py", ".html", ".sh", ".txt"}: continue
     if "__pycache__" in p.parts: continue

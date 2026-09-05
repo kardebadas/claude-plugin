@@ -345,13 +345,10 @@ When blocking findings exist (and the convergence rule permits another run):
    could be assigned, and a round owed over an empty diff is a round no fan-out
    can size. **A pin is not on that list**: it commits a test, and a test is an
    ownable commit, so a pin stays in `M` for the same reason a
-   fixed-and-verified closure does. That makes `M` and the iteration's set of
-   ownable commits agree exactly — `M` counts one for each targeted F-ID whose
-   closure left one — which is what keeps this a decision about reviewable
-   surface rather than a second opinion about findings. An iteration whose every
-   targeted F-ID left by one of those two routes therefore has `M=0` and **runs
-   no round**; a **pin-only iteration has `M=1`**, one ownable commit, and takes
-   the first row of the table below. `M=0` licenses skipping this step and
+   fixed-and-verified closure does. An iteration whose every targeted F-ID left
+   by one of those two routes therefore has `M=0` and **runs no round**; a
+   **pin-only iteration has `M=1`**, one ownable commit, and takes the first row
+   of the table below. `M=0` licenses skipping this step and
    nothing else does — one behavioural fix, or one pin, in the same iteration
    puts `M` above zero and the round is owed in full, sized from that
    iteration's fix diff and covering every fix commit a reviewer can own in
@@ -403,9 +400,8 @@ When blocking findings exist (and the convergence rule permits another run):
    per-round grammar — `→ round 2: M=9 → 1 slice + 0 integration · reports
    p3-rr2-a.md · coverage p3-rr2-coverage.md → F-012 closed, F-014 raised` — so
    every round has a declared number its file count is checked against, not only
-   the first. `M` records the targeted F-ID count for the convergence check; the
-   fan-out comes from the fix diff's clusters. Whoever ran the round writes it,
-   at whatever depth.
+   the first. The fan-out comes from the fix diff's clusters. Whoever ran the
+   round writes it, at whatever depth.
 4. Repeat until no Critical/Major/bug findings remain (green test suite
    included), subject to the convergence rule and the caps below.
 
@@ -431,9 +427,8 @@ because its round was never owed.
 **Findings are not diff surface.** `M` counts findings; a round of six comment
 corrections in one file is one small diff, and three reviewers over it re-read
 the same hunks and duplicate each other's findings. `M` is still **recorded** on
-the round, because the convergence check compares ID sets, and `M=0` is still
-what licenses a round that runs no reviewers at all (step 3, above); it just no
-longer sizes the fan-out.
+the round, and `M=0` is still what licenses a round that runs no reviewers at
+all (step 3, above); it just no longer sizes the fan-out.
 
 - **A file cluster** is the set of fix commits touching files that a single
   reviewer has to hold together to judge any of them — the same
@@ -455,10 +450,10 @@ longer sizes the fan-out.
   union, since it demands an owner for a diff that only removes a sentence. **A
   pin is counted, and its commit is in the union** — a pin commits a test, and
   "a failing or vacuous test" is one of the re-tag predicate's Major branches,
-  which no reviewer is in a position to apply to a test nobody was assigned. `M`
-  and the union therefore select the same commits, and a pin-only iteration is a
-  first-row iteration rather than no row at all. A **user-ruled false positive**
-  is out of `M` as well, and leaves no commit for the union to take a view on.
+  which no reviewer is in a position to apply to a test nobody was assigned. A
+  pin-only iteration is a first-row iteration rather than no row at all. A
+  **user-ruled false positive** is out of `M` as well, and leaves no commit for
+  the union to take a view on.
   Every other commit the fix-mode run produced needs an owner too.
 - The integration reviewer's scope is the union of all fix commits, hunting
   interactions between fixes and regressions the fixes introduced elsewhere.

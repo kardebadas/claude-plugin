@@ -205,7 +205,7 @@ someone who was not there, all paths relative to `agent-output/`:
 
 | Field | What it must satisfy |
 | --- | --- |
-| `N=<tasks> → <s> slice + <i> integration` | Which number `s` must match depends on the regime, and the declaration's own key says which. An **unwaved** `N=` phase takes `s = ceil(N/5)`, and there `N` makes the fan-out re-derivable from the line at closure instead of trusted from the step that gets skipped. The other regimes are **not** re-derivable from the line, and say so rather than borrowing that guarantee: a **waved** phase takes one slice per wave or per adjacent pair of small waves (write `waved` after `N`), which may be more or fewer than `ceil(N/5)` and never splits a wave across two reviewers, and the wave count is not on the line; an **`M=`** re-review takes one slice per file cluster in the fix diff, and the cluster count is not on the line either, so its `s` is checkable only against that round's own `coverage` table — `M` is recorded for the convergence check and sizes nothing; an **`RVJ`** is always `0 slice + 1 integration`, its `N` informational. `i` is 1 whenever `s > 1`. |
+| `N=<tasks> → <s> slice + <i> integration` | Which number `s` must match depends on the regime, and the declaration's own key says which. An **unwaved** `N=` phase takes `s = ceil(N/5)`, and there `N` makes the fan-out re-derivable from the line at closure instead of trusted from the step that gets skipped. The other regimes are **not** re-derivable from the line, and say so rather than borrowing that guarantee: a **waved** phase takes one slice per wave or per adjacent pair of small waves (write `waved` after `N`), which may be more or fewer than `ceil(N/5)` and never splits a wave across two reviewers, and the wave count is not on the line; an **`M=`** re-review takes one slice per file cluster in the fix diff, and the cluster count is not on the line either, so its `s` is checkable only against that round's own `coverage` table — `M` sizes nothing; an **`RVJ`** is always `0 slice + 1 integration`, its `N` informational. `i` is 1 whenever `s > 1`. |
 | `coverage <file>` | One file holding **the slice assignment table — each row keyed by its report filename, with that reviewer's exact range — above the `git log --oneline PB..PH`**, and ending with the verdict line `COVERED: <n>/<n> commits`. All three: a bare log is the input to a coverage judgement rather than the judgement, and a table with a gap in it sits above the log just as happily as one without. Anything short of `<n>/<n>` does not close the line. |
 | `→ <F-IDs>` or `→ no findings` | What the round produced. |
 
@@ -217,11 +217,11 @@ are read against the round they sit in, never against the whole line:
         · coverage p3-rr2-coverage.md → F-012 closed, F-014 raised
 ```
 
-`M` records the count of targeted F-IDs for the convergence check. The fan-out is
-**one reviewer per file cluster in the fix diff**, integration only above one
-reviewer — not `ceil(N/5)`, since fix diffs are not task-shaped, and not a count
-over the findings, since findings are not diff surface — with coverage over the
-fix commits. Whoever ran the round writes it, at whatever recursion depth.
+The fan-out is **one reviewer per file cluster in the fix diff**, integration
+only above one reviewer — not `ceil(N/5)`, since fix diffs are not task-shaped,
+and not a count over the findings, since findings are not diff surface — with
+coverage over the fix commits. Whoever ran the round writes it, at whatever
+recursion depth.
 
 **`M=0 → no round` is the one round that closes without reviewers.** `M` — the
 targeted-F-ID count, less every one closed by a route that leaves no ownable

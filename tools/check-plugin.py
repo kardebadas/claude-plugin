@@ -462,32 +462,46 @@ for n in skill_names:
             # The route-list phrase names all three dispositions in one clause —
             # deletion out, user-ruled false positive out, and (by "exactly
             # when") a pin in — so dropping any one of them, or admitting a
-            # fourth, breaks the literal. `M` and the fix diff's ownable commits
-            # then agree by construction, which is what lets *Re-review
-            # fan-out* key its rows on `ownable` with no exception for a
-            # skipped round.
-            # Mutants: "M-exclusion bullet deleted from fix-loop.md",
+            # fourth, breaks the literal.
+            # Mutants: "M-exclusion phrase blurred in fix-loop.md",
+            #          "coverage-union phrase blurred in fix-loop.md",
             #          "no-round RV form deleted from fix-loop.md",
             #          "no-round RV form deleted from SKILL.md",
             #          "no-round RV form deleted from run-state.md",
             #          "M's definition paragraph deleted from fix-loop.md",
+            #          "M's definition blurred in fix-loop.md",
             #          "M's exclusion-route list loses a route".
+            # ONE CLAUSE PER ENTRY, carried on the entry. The message used to
+            # enumerate what all five phrases do on every firing — 191 words,
+            # emitted per (entry × file), 5,818 bytes of near-identical prose in
+            # a five-firing run — and four of those clauses named a phrase that
+            # had not gone missing. The full rationale is this comment; a CI
+            # line gets the clause belonging to the phrase that fired.
             AUTH = ("references/fix-loop.md",)
             CLAIM_EFFECT = (
-                ("the `M`-exclusion bullet", "not counted in `m`", AUTH),
+                ("the `M`-exclusion bullet", "not counted in `m`", AUTH,
+                 "Lose it and a deletion puts a round back on the books that "
+                 "nobody needs."),
                 ("the coverage-union exclusion",
-                 "fix commit is not in that union", AUTH),
+                 "fix commit is not in that union", AUTH,
+                 'Lose it and that union is back to "Assignments MUST cover '
+                 'every fix diff".'),
                 ("the `M=0 → no round` form", "m=0 → no round",
                  ("references/fix-loop.md", "SKILL.md",
-                  "references/run-state.md")),
+                  "references/run-state.md"),
+                 "Lose it and an unrun round and a skipped one read alike on "
+                 "the `RV` line."),
                 ("`M`'s definition",
                  "the number of blocking f-ids this fix-mode run targeted",
-                 AUTH),
+                 AUTH,
+                 "Lose it and the `M=0` condition has no subject."),
                 ("`M`'s closed exclusion-route list",
                  "excluded exactly when its closure route is a deletion or a "
-                 "user-ruled false positive", AUTH),
+                 "user-ruled false positive", AUTH,
+                 "Lose it and the list shortens to two dispositions with the "
+                 "definition still standing."),
             )
-            for lbl, q, rels in CLAIM_EFFECT:
+            for lbl, q, rels, why in CLAIM_EFFECT:
                 for rel in rels:
                     at, ae = read(sdir / n / rel)
                     if ae:
@@ -495,30 +509,75 @@ for n in skill_names:
                             f"be read: {ae}")
                         continue
                     if q not in " ".join(at.split()).lower():
-                        bad(f"{n}/{rel} is missing {lbl} ({q!r} absent). The "
-                            "phrases held here are what make the fix loop's "
-                            "step 3 decidable, and this is one of them: what "
-                            "`M` is, which closure routes come out of `M`, "
-                            "which of their commits the fix-diff coverage union "
-                            "takes, and how a round that runs no reviewers is "
-                            "written. Lose "
-                            "the definition or its closed route list and the "
-                            "condition has no subject; lose the *Re-review "
-                            "fan-out* exclusion bullet and that union is back "
-                            "to \"Assignments MUST cover every fix diff\"; "
-                            "lose the `M=0 → no round` form and an unrun round "
-                            "and a skipped one read alike on the `RV` line. "
-                            "Each phrase is required verbatim, and the "
-                            "`M=0 → no round` form in all three files that "
-                            "define the `RV` grammar, because a rule with one "
-                            "unheld copy is one edit from gone on a green "
-                            f"build. REMEDY: restore the phrase in {rel} "
-                            "verbatim, where the authority states that rule — "
-                            "`M`'s definition and its exclusion-route list in "
-                            "fix-loop.md's step 3, the `M`/union exclusions in "
-                            "its *Re-review fan-out* bullet, the "
-                            "`M=0 → no round` form in step 3 and in each "
-                            "file's `RV` grammar")
+                        bad(f"{n}/{rel} is missing {lbl} ({q!r} absent). "
+                            f"{why} It is required verbatim, because a rule "
+                            "with one unheld copy is one edit from gone on a "
+                            f"green build. REMEDY: restore the phrase in {rel} "
+                            "verbatim, where the authority states that rule")
+        # `M` HAS ONE DEFINITION, AND NOTHING SHORTER MAY STATE IT.
+        # `SKILL.md`'s `M=0` paragraph asserts that `M` "is defined **once**",
+        # in `references/fix-loop.md`, fix loop step 3, and warns that a second
+        # copy of a closed list "can drift into being a shorter one". Nothing
+        # held that claim. `CLAIM_EFFECT` above checks the definition is PRESENT
+        # in the authority, and a present authority is compatible with any
+        # number of shorter glosses elsewhere: two had already appeared —
+        # `SKILL.md` "records the count of targeted F-IDs for the convergence
+        # check", and the same sentence inside the authority itself, below the
+        # definition it contradicts — each having dropped every exclusion, which
+        # reads `M=1` on a deletion-only iteration. That is a round mandated
+        # over an empty diff, which the fan-out table has no row to size, and it
+        # reached both files with both gates green.
+        #
+        # THE PREDICATE IS THE EXCLUSION TRAVELLING WITH THE COUNT: a sentence
+        # that says `M` is a count or number of F-IDs must also say `leaves no
+        # ownable commit`. That is not a paraphrase test. Both legal statements
+        # carry the phrase verbatim — the authority's definition, and
+        # `SKILL.md`'s one-line citation of it — and both glosses lacked it, so
+        # the one clause a gloss always drops is what separates them. Scoped to
+        # a sentence by `[^.;]*`, which is conservative: a `.` inside the window
+        # (a filename) ends it early, so the arm under-matches rather than
+        # inventing a gloss out of two adjacent sentences.
+        #
+        # UNIQUENESS IS THE OTHER HALF, and it fires on `> 1`, never on `!= 1`.
+        # Absence is `CLAIM_EFFECT`'s to report, with its own file and remedy;
+        # were this arm to fail on absence as well, the definition-blur mutant
+        # would die by two arms at once and neither kill would be attributable
+        # to the phrase its name claims.
+        # Mutants: "short `M` gloss reintroduced into SKILL.md",
+        #          "M's definition duplicated into a second file".
+        if n == "pipeline":
+            MDEF = "the number of blocking f-ids this fix-mode run targeted"
+            MEXCL = "leaves no ownable commit"
+            MGLOSS = re.compile(r"`M`(?=[^.;]*\bF-IDs?\b)"
+                                r"(?=[^.;]*\b(?:count|counts|number)\b)[^.;]*",
+                                re.I)
+            homes = []
+            for mf in sorted((sdir / n).rglob("*.md")):
+                mt, me = read(mf)
+                if me:
+                    continue
+                mrel = mf.relative_to(sdir / n).as_posix()
+                mflat = " ".join(mt.split())
+                homes += [mrel] * mflat.lower().count(MDEF)
+                for g in MGLOSS.finditer(mflat):
+                    if MEXCL in g.group(0).lower():
+                        continue
+                    bad(f"{n}/{mrel} glosses `M` as a count of F-IDs with no "
+                        f"exclusion: {g.group(0)[:100]!r}. `M` is that count "
+                        "LESS every targeted F-ID closed by a route that "
+                        "leaves no ownable commit, and a gloss that drops the "
+                        "exclusion reads `M=1` on a deletion-only iteration — a "
+                        "round mandated over an empty diff, which no fan-out "
+                        "row sizes. REMEDY: delete the gloss and cross-"
+                        "reference fix-loop.md's step 3, or state `leaves no "
+                        "ownable commit` with the count")
+            if len(homes) > 1:
+                bad(f"{n} defines `M` in {len(homes)} places ("
+                    + ", ".join(sorted(homes)) + ") — SKILL.md says it is "
+                    "defined once, in fix-loop.md's step 3, and a second copy "
+                    "of a closed route list is a copy that can drift into being "
+                    "a shorter one. REMEDY: keep the definition in "
+                    "fix-loop.md's step 3 and cross-reference it elsewhere")
     for f in sorted((sdir / n).rglob("*.md")):
         t, e = read(f)
         if e: continue
@@ -532,8 +591,9 @@ if len(FAIL) == _inv_before:
        "fourth severity tier, re-tag predicate present where cited, "
        "claim-finding closure rule present in both texts that ship it, its "
        "`M`/union exclusions plus `M`'s own definition and closed route list "
-       "present in the authority, and its `M=0 → no round` "
-       "form present in all three files that define the `RV` grammar")
+       "present in the authority, its `M=0 → no round` "
+       "form present in all three files that define the `RV` grammar, and `M` "
+       "defined in one place with no exclusion-less gloss of it anywhere")
 
 print("== agents ==")
 adir = ROOT/"plugins/superb/agents"

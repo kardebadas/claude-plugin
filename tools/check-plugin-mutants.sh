@@ -267,30 +267,57 @@ assert key not in ' '.join(out.split()).lower(), 'mutant is a no-op: the term su
 p.write_text(out)\""
 
 # The closure rule's consequences, held in the authority only: the `M`-exclusion
-# bullet in *Re-review fan-out* and the `M=0 → no round` condition on the fix
-# loop's step 3. Deleting either reinstates the contradiction the rule removed —
-# a fan-out demanding an owner for a diff the rule excluded, or a step 3
-# mandating a round the rule says never happens — and before the CLAIM_EFFECT
-# arm both deletions were green.
+# and coverage-union phrases in the *Re-review fan-out* bullet, and the
+# `M=0 → no round` condition on the fix loop's step 3. Deleting any of them
+# reinstates the contradiction the rule removed — a fan-out demanding an owner
+# for a diff the rule excluded, or a step 3 mandating a round the rule says
+# never happens — and before the CLAIM_EFFECT arm all of those deletions were
+# green.
 #
-# Each mutant asserts the phrase it targets is present BEFORE (or it is a no-op
-# on prose that already rotted) and gone AFTER, and that the OTHER consequence
-# survived — so the kill is attributable to the phrase named in the mutant's own
-# name and cannot be borrowed from its sibling. Backticks are built with
-# chr(96): a literal one inside this double-quoted shell argument would be
-# command substitution.
-run_mutant "M-exclusion bullet deleted from fix-loop.md" "$J \"import pathlib
+# ONE SURGICAL MUTANT PER PHRASE, because the `M`-exclusion and coverage-union
+# phrases now live in the SAME bullet. A mutant that deletes that bullet fires
+# both arms, so it is killed by whichever one survives the other's removal and
+# individually holds NEITHER: at the revision before the two phrases were
+# deduplicated, removing the `M`-exclusion entry made the bullet-deletion mutant
+# SURVIVE; after the dedup the same removal left `survived=0`. Blurring one
+# phrase while asserting the other is untouched is what restores the
+# attribution the bullet deletion lost.
+#
+# Each mutant asserts the phrase it targets is present exactly once BEFORE (or
+# it is a no-op on prose that already rotted), that the blur landed, and that
+# every OTHER held phrase survived — so the kill is attributable to the phrase
+# named in the mutant's own name and cannot be borrowed from a sibling.
+# Backticks are built with chr(96): a literal one inside this double-quoted
+# shell argument would be command substitution.
+# Both phrases are matched with `\s+` between words rather than as literals: the
+# gate reads them out of FLATTENED text, so either can sit across a line break
+# in the source — the coverage-union phrase does — and a literal match would
+# have been a silent no-op rather than a mutation.
+run_mutant "M-exclusion phrase blurred in fix-loop.md" "$J \"import pathlib,re
 p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
-s=p.read_text(); nl=chr(10); bt=chr(96); key='not counted in '+bt+'M'+bt
-assert key in s, 'mutant is a no-op: the M-exclusion bullet is already absent'
-L=s.split(nl); at=[i for i,x in enumerate(L) if key in x]
-assert len(at)==1, 'mutant is a no-op: the phrase is on more than one line, so deleting one bullet no longer removes it'
-i=at[0]; j=i+1
-while j<len(L) and L[j].startswith('  '): j+=1
-del L[i:j]
-out=nl.join(L)
-assert key not in out, 'mutant is a no-op: the bullet deletion left the phrase behind'
-assert 'M=0 ' in out, 'mutant is a no-op: it removed the no-round condition too, so a kill would not be attributable to the M-exclusion bullet'
+s=p.read_text(); bt=chr(96)
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile('is'+chr(92)+'s+not'+chr(92)+'s+counted'+chr(92)+'s+in'+chr(92)+'s+'+bt+'M'+bt)
+u=re.compile('fix'+chr(92)+'s+commit'+chr(92)+'s+is'+chr(92)+'s+not'+chr(92)+'s+in'+chr(92)+'s+that'+chr(92)+'s+union')
+assert len(a.findall(s))==1, 'mutant is a no-op: the M-exclusion phrase is absent, reworded or duplicated'
+out=a.sub('sits outside the round tally', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert len(u.findall(out))==1, 'mutant is a no-op: the coverage-union phrase went too, so a kill would not be attributable to the M-exclusion phrase'
+assert 'the number of blocking F-IDs this fix-mode run targeted' in out, 'mutant is a no-op: the definition went too, so a kill would not be attributable to the M-exclusion phrase'
+assert 'm=0 → no round' in flat(out), 'mutant is a no-op: the no-round form went too, so a kill would not be attributable to the M-exclusion phrase'
+p.write_text(out)\""
+run_mutant "coverage-union phrase blurred in fix-loop.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+s=p.read_text(); bt=chr(96)
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile('is'+chr(92)+'s+not'+chr(92)+'s+counted'+chr(92)+'s+in'+chr(92)+'s+'+bt+'M'+bt)
+u=re.compile('fix'+chr(92)+'s+commit'+chr(92)+'s+is'+chr(92)+'s+not'+chr(92)+'s+in'+chr(92)+'s+that'+chr(92)+'s+union')
+assert len(u.findall(s))==1, 'mutant is a no-op: the coverage-union phrase is absent, reworded or duplicated'
+out=u.sub('fix commit stays outside it', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert len(a.findall(out))==1, 'mutant is a no-op: the M-exclusion phrase went too, so a kill would not be attributable to the coverage-union phrase'
+assert 'the number of blocking F-IDs this fix-mode run targeted' in out, 'mutant is a no-op: the definition went too, so a kill would not be attributable to the coverage-union phrase'
+assert 'm=0 → no round' in flat(out), 'mutant is a no-op: the no-round form went too, so a kill would not be attributable to the coverage-union phrase'
 p.write_text(out)\""
 run_mutant "no-round RV form deleted from fix-loop.md" "$J \"import pathlib
 p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
@@ -377,6 +404,27 @@ assert key not in flat(out), 'mutant is a no-op: the definition survives the par
 assert 'not counted in '+bt+'M'+bt in out, 'mutant is a no-op: it removed the M-exclusion bullet too, so a kill would not be attributable to the definition paragraph'
 assert 'm=0 → no round' in flat(out), 'mutant is a no-op: it removed the no-round form too, so a kill would not be attributable to the definition paragraph'
 p.write_text(out)\""
+# The DEFINITION half, surgically. The paragraph mutant above kills through
+# either phrase, so it holds neither on its own: with the `M`'s-definition entry
+# removed from CLAIM_EFFECT the whole suite still reported `survived=0`, because
+# the route-list entry killed the paragraph deletion by itself. This blurs the
+# definition ALONE — the route list, the exclusion bullet and the no-round form
+# all stay — so the only arm that can reject it is the one whose name it bears.
+# The replacement keeps a count-shaped sentence on purpose: a gate that only
+# noticed the sentence vanishing would miss the shorter gloss that is what
+# actually happens to a definition.
+run_mutant "M's definition blurred in fix-loop.md" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+s=p.read_text(); bt=chr(96)
+flat=lambda x: ' '.join(x.split()).lower()
+a='**the number of blocking F-IDs this fix-mode run targeted**'
+assert s.count(a)==1, 'mutant is a no-op: the definition is absent, reworded or duplicated'
+out=s.replace(a, '**the count this round declares**')
+assert out!=s, 'mutant is a no-op: the definition was not blurred'
+assert 'excluded exactly when its closure route is a deletion or a user-ruled false positive' in flat(out), 'mutant is a no-op: the exclusion-route list went too, so a kill would not be attributable to the definition'
+assert 'is not counted in '+bt+'M'+bt in out, 'mutant is a no-op: the M-exclusion phrase went too, so a kill would not be attributable to the definition'
+assert 'm=0 → no round' in flat(out), 'mutant is a no-op: the no-round form went too, so a kill would not be attributable to the definition'
+p.write_text(out)\""
 # The other half, and the one that reproduces a defect that actually shipped:
 # the exclusion-route list SHORTENED rather than deleted. `SKILL.md`'s
 # *Re-review fan-out* glossed `M` with two of the three dispositions and lost
@@ -397,6 +445,47 @@ assert s.count(a)==1, 'mutant is a no-op: the closed exclusion-route list is abs
 out=s.replace(a, 'is a deletion')
 assert out!=s, 'mutant is a no-op: the route was not dropped'
 assert 'the number of blocking f-ids this fix-mode run targeted' in flat(out), 'mutant is a no-op: the definition went too, so a kill would not be attributable to the route list'
+p.write_text(out)\""
+
+# --- `M` is defined once, and no shorter gloss of it survives ---
+# `SKILL.md` asserts that `M` "is defined **once**" in the authority, and warns
+# that a second copy "can drift into being a shorter one". Nothing held that: a
+# gloss that dropped every exclusion sat 18 lines above the warning in
+# `SKILL.md` and again inside the authority itself, both gates green, reading
+# `M=1` on a deletion-only iteration — a round mandated over an empty diff. The
+# two mutants below are the two halves of the pin that now holds it, kept apart
+# for attribution: the first reintroduces the exact gloss that shipped, the
+# second duplicates the definition verbatim.
+#
+# The duplicate carries `leaves no ownable commit` deliberately. That is what
+# the gloss half tests for, so a duplicate that includes it can only be caught
+# by the uniqueness half — the kill is attributable, and the mutant proves the
+# claim is "defined ONCE" rather than merely "not glossed".
+run_mutant "short \`M\` gloss reintroduced into SKILL.md" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+q=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+s=p.read_text(); bt=chr(96)
+flat=lambda x: ' '.join(x.split()).lower()
+g=bt+'M'+bt+' records the count of targeted F-IDs for the convergence check.'
+a='The fan-out is **one reviewer per file cluster in the fix diff**'
+assert s.count(a)==1, 'mutant is a no-op: the re-review fan-out sentence is absent, reworded or duplicated'
+assert g not in s, 'mutant is a no-op: the gloss is already there, so the tree was broken before the mutation'
+out=s.replace(a, g+' '+a)
+assert g in out, 'mutant is a no-op: the gloss was not inserted'
+assert 'the number of blocking F-IDs this fix-mode run targeted' in q.read_text(), 'mutant is a no-op: the authority lost the definition too, so a kill would not be attributable to the gloss'
+p.write_text(out)\""
+run_mutant "M's definition duplicated into a second file" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/references/run-state.md')
+q=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+s=p.read_text(); nl=chr(10); bt=chr(96)
+flat=lambda x: ' '.join(x.split()).lower()
+d=bt+'M'+bt+' is **the number of blocking F-IDs this fix-mode run targeted**, less every one the ledger closed by a route that leaves no ownable commit.'
+key='the number of blocking f-ids this fix-mode run targeted'
+assert flat(s).count(key)==0, 'mutant is a no-op: run-state.md already carries the definition, so the tree was broken before the mutation'
+assert flat(q.read_text()).count(key)==1, 'mutant is a no-op: the authority does not hold exactly one definition, so a second copy proves nothing'
+out=s.rstrip(nl)+nl+nl+d+nl
+assert flat(out).count(key)==1, 'mutant is a no-op: the copy did not land'
+assert 'leaves no ownable commit' in d, 'mutant is a no-op: the copy drops the exclusion, so the gloss arm could kill it instead of the uniqueness arm'
 p.write_text(out)\""
 
 # --- the no-round record is the one round that closes with no reviewer evidence ---

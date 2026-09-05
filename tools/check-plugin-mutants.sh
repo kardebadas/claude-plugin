@@ -246,6 +246,26 @@ else
   sed -i "s|reports p1-review-a.md|reports p1-review-z.md|" "$f"
   grep -qF "reports p1-review-z.md" "$f" || echo "mutant is a no-op: the rename did not apply"
 fi'
+# The same check for the OTHER named artifact. The coverage test used to
+# establish only that the FIELD was present, so a round naming a coverage file
+# nobody wrote passed while the same round's report names were checked against
+# the directory. This renames the coverage FILENAME and leaves the field, so
+# neither the missing-field branch nor the reviewer-count arm can fire and the
+# kill belongs to the existence check alone. Guarded at both ends, and the
+# renamed target is verified absent from agent-output/ — otherwise the mutation
+# would name a file that happens to exist and prove nothing.
+run_mutant "run tracker cites a coverage file that is not in agent-output" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if [ "$(grep -cF "coverage p1-coverage.md" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture no longer names coverage p1-coverage.md exactly once"
+elif [ -e tools/fixtures/run-ok/agent-output/p1-coverage-z.md ]; then
+  echo "mutant is a no-op: p1-coverage-z.md exists in the fixture, so the renamed file would be found"
+else
+  sed -i "s|coverage p1-coverage.md|coverage p1-coverage-z.md|" "$f"
+  grep -qF "coverage p1-coverage-z.md" "$f" || echo "mutant is a no-op: the rename did not apply"
+  grep -qF "reports p1-review-a.md" "$f" || echo "mutant is a no-op: it took the reports field too, so a kill could come from the reviewer-count arm instead"
+fi'
 # Renames the coverage FIELD rather than deleting the segment, so the kill is
 # attributable to the coverage arm alone. Asserts the reports field survives.
 run_mutant "run tracker round loses its coverage field" '
@@ -674,6 +694,78 @@ assert out!=s, 'mutant is a no-op: the route was not dropped'
 assert 'the number of blocking f-ids this fix-mode run targeted' in flat(out), 'mutant is a no-op: the definition went too, so a kill would not be attributable to the route list'
 p.write_text(out)\""
 
+# --- the rule the exclusions qualify: one reviewer per file cluster ---
+# `M`'s definition, its exclusions and the `M=0` licence were all held before
+# this; the SIZING rule they qualify was not. Reverting the fan-out table's
+# rows, the file-cluster bullet and the Invariant to a count over the findings
+# left `check-plugin: PASS` with every mutant killed. These two mutants are the
+# pin, one per file that states the rule.
+#
+# Each blurs EVERY occurrence in its own file — the phrase has two homes in the
+# authority (the table row and the Invariant) and three in `SKILL.md`, and the
+# arm reads flattened text, so a mutation that leaves one standing is a no-op
+# that reports `killed` for no reason. Matched with `\s+` between words rather
+# than as a literal, because the gate reads the phrase out of FLATTENED text
+# and two of the homes sit across a line break.
+#
+# Attribution is by the OTHER FILE: the phrase is asserted to survive there, so
+# a kill cannot be borrowed from the sibling entry. The authority's held
+# neighbours are asserted intact as well, so a kill cannot be borrowed from the
+# definition, the exclusions or the no-round form.
+run_mutant "the fan-out sizing rule blurred in fix-loop.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+o=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+s=p.read_text(); bt=chr(96); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join(['one', 'reviewer', 'per', 'file', 'cluster']), re.I)
+assert len(a.findall(s))>=1, 'mutant is a no-op: fix-loop.md no longer states the sizing rule in these words'
+out=a.sub('reviewers as the round sees fit', s)
+assert out!=s, 'mutant is a no-op: the sizing phrase was not blurred'
+assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
+assert 'the number of blocking f-ids this fix-mode run targeted' in flat(out), 'mutant is a no-op: the definition went too, so a kill would not be attributable to the sizing rule'
+assert 'is not counted in '+bt+'M'+bt in out, 'mutant is a no-op: the M-exclusion phrase went too, so a kill would not be attributable to the sizing rule'
+assert 'm=0 → no round' in flat(out), 'mutant is a no-op: the no-round form went too, so a kill would not be attributable to the sizing rule'
+assert len(a.findall(o.read_text()))>=1, 'mutant is a no-op: SKILL.md lost the phrase too, so a kill would not be attributable to the fix-loop.md copy'
+p.write_text(out)\""
+run_mutant "the fan-out sizing rule blurred in SKILL.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+o=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+s=p.read_text(); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join(['one', 'reviewer', 'per', 'file', 'cluster']), re.I)
+assert len(a.findall(s))>=1, 'mutant is a no-op: SKILL.md no longer states the sizing rule in these words'
+out=a.sub('reviewers as the round sees fit', s)
+assert out!=s, 'mutant is a no-op: the sizing phrase was not blurred'
+assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
+assert 'm=0 → no round' in flat(out), 'mutant is a no-op: the no-round form went too, so a kill would not be attributable to the sizing rule'
+assert 'is the only declaration that licenses it' in flat(out), 'mutant is a no-op: the M=0 licence rule went too, so a kill would not be attributable to the sizing rule'
+assert 'never a count, a line number, a signature or a file list' in flat(out), 'mutant is a no-op: the Rule 5b prohibition went too, so a kill would not be attributable to the sizing rule'
+assert len(a.findall(o.read_text()))>=1, 'mutant is a no-op: fix-loop.md lost the phrase too, so a kill would not be attributable to the SKILL.md copy'
+p.write_text(out)\""
+
+# --- the `M=0` licence rule, held by a phrase the worked example cannot carry ---
+# `m=0 → no round` occurs in `SKILL.md` in the rule prose and again inside the
+# fence. So the rule prose could be deleted with the fence left standing, and
+# the gate stayed green (measured). This
+# mutant reproduces that: it deletes every paragraph carrying the licence
+# sentence and ASSERTS THE FENCE SURVIVES, which is what makes the kill
+# attributable to the new entry rather than to the `M=0 → no round` one.
+# Paragraph-scoped and whitespace-normalised, so no line-break position is
+# pinned; a full reword refuses loudly instead of passing as a no-op.
+run_mutant "the M=0 licence rule deleted from SKILL.md" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+s=p.read_text(); nl=chr(10)
+flat=lambda x: ' '.join(x.split()).lower()
+key='is the only declaration that licenses it'
+assert key in flat(s), 'mutant is a no-op: SKILL.md no longer carries the M=0 licence rule'
+paras=s.split(nl+nl)
+keep=[x for x in paras if key not in flat(x)]
+assert len(keep)<len(paras), 'mutant is a no-op: no SKILL.md paragraph carries the licence rule'
+out=(nl+nl).join(keep)
+assert key not in flat(out), 'mutant is a no-op: the licence rule survives the paragraph deletion'
+assert 'm=0 → no round' in flat(out), 'mutant is a no-op: the fenced no-round example went too, so a kill would not be attributable to the licence rule'
+p.write_text(out)\""
+
 # --- `M` is defined once, and no shorter gloss of it survives ---
 # `SKILL.md` asserts that `M` "is defined **once**" in the authority, and warns
 # that a second copy "can drift into being a shorter one". Nothing held that: a
@@ -952,6 +1044,32 @@ assert g in out, 'mutant is a no-op: the count was not reintroduced'
 assert 'never a count, a line number, a signature or a file list' in flat(out), 'mutant is a no-op: the Rule 5b prohibition went too, so a kill would not be attributable to the template count'
 assert 'written once, here, from the approved plan' in flat(out), 'mutant is a no-op: the GATE 2 writing point went too, so a kill would not be attributable to the template count'
 p.write_text(out)\""
+
+# --- and a file the run-directory tree names must still ship a template ---
+# `references/run-state.md` draws the run directory and says a template ships
+# for each of its files. Nothing held that: removing `templates/kit.md` — the
+# file that arrival added — left the gate green and the sentence false. This
+# mutant removes it again.
+#
+# Asserted at both ends, and the tree is asserted to still NAME the file: with
+# the name gone the arm has nothing to look up, the deletion is legitimate, and
+# a kill would mean something else. The other templates are asserted present,
+# so the kill is attributable to this one file rather than to a directory that
+# emptied.
+run_mutant "a run-state file the tree names loses its template" '
+d=plugins/superb/skills/pipeline/templates
+f=$d/kit.md
+if [ ! -f "$f" ]; then
+  echo "mutant is a no-op: templates/kit.md is already absent, so the tree was broken before the mutation"
+else
+  grep -qF "kit.md" plugins/superb/skills/pipeline/references/run-state.md ||
+    echo "mutant is a no-op: run-state.md no longer names kit.md, so the arm has nothing to look up and a kill would not be attributable to the missing template"
+  rm -f "$f"
+  [ ! -e "$f" ] || echo "mutant is a no-op: the template was not removed"
+  for o in progress.md register.md findings.md; do
+    [ -f "$d/$o" ] || echo "mutant is a no-op: $o went too, so a kill would not be attributable to kit.md"
+  done
+fi'
 
 # check-plugin.py cites its mutants BY NAME, and nothing kept those names true
 # until the citation check was added. The real-world failure is a rename in this

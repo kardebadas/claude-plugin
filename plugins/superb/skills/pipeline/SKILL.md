@@ -215,14 +215,14 @@ plugin's own repository ships a linter for this grammar: from a checkout of
 that repo, `./tools/check-plugin.sh --run <run-directory>` reads the tracker's
 closed `RV`/`RVJ` rounds and names any whose declared count and listed report
 files disagree, whose `RVJ` is not `0 slice + 1 integration`, whose `coverage`
-field is absent, whose named report files are not in `agent-output/`, or whose
-`M=0 → no round` record carries reviewer evidence. It is not in a project's own
-tree unless that project is the plugin, so it is a check a run can use, not a
-gate every run passes. **It cannot check that the fan-out was sized right, and
-no version of it will**: outside the unwaved `N=` regime the size is not
-derivable from the line — neither the wave count nor the cluster count is on
-it — so a reader of the tracker alone can only establish that what a round
-declares and what it lists agree.
+field is absent, whose named report or coverage files are not in
+`agent-output/`, or whose `M=0 → no round` record carries reviewer evidence. It
+is not in a project's own tree unless that project is the plugin, so it is a
+check a run can use, not a gate every run passes. **It cannot check that the
+fan-out was sized right, and no version of it will**: outside the unwaved `N=`
+regime the size is not derivable from the line — neither the wave count nor
+the cluster count is on it — so a reader of the tracker alone can only
+establish that what a round declares and what it lists agree.
 
 **Every field is per round, and re-review rounds append their own.** The counts
 are read against the round they sit in, never against the whole line:
@@ -252,10 +252,10 @@ round, because an absent round and a skipped one are the same absence here:
 
 `no round` stands where the reviewer counts would, and `M=0` is the only
 declaration that licenses it. In place of `reports` and `coverage` the round
-carries each F-ID it closed and that F-ID's route — `deleted` or `user-ruled
-false positive`, and no third — which must match its `Closed by` cell in the
-ledger. `pinned by <test>` cannot appear here: a pin commits a test, so it stays
-in `M` and its commit is owed a reviewer.
+carries each F-ID it closed and that F-ID's route, taken from the closed list
+in `references/fix-loop.md`, fix loop step 3, and matching that F-ID's
+`Closed by` cell in the ledger. `pinned by <test>` cannot appear here: a pin
+commits a test, so it stays in `M` and its commit is owed a reviewer.
 One behavioural fix, or one pin, in the same iteration makes `M > 0`, and then
 the full fan-out is owed.
 
@@ -395,6 +395,12 @@ A brief, a plan or a comment states the **source** of a code fact — the symbol
 it lives on, or the command that regenerates it — and never a count, a line
 number, a signature or a file list. No method or field named as already
 existing, no type, no "the four reachable states".
+
+**A task's `Files:` block is the exception, at both ends** (Rule 6): writing it
+into a plan — and into a task brief cut from one — is required, and receiving it
+is not grounds for the refusal below. `references/parallel.md` says why no
+derivation can stand in for those paths. Nothing else about a task's code
+travels with a brief.
 
 The reason is mechanical: a restated fact is correct at the moment it is written
 and at no moment after. The orchestrator writes briefs from a tree that moves
@@ -779,7 +785,10 @@ that every phase's `RV` — and every `RVJ` — is `[x]`**. Do not take the tick
 trust: this is the run's one independent pass over lines whose author had the
 motive to skip them, so **stat the `reports` paths and count them against the
 `<s> + <i>` on each line, per round, and check each coverage file ends
-`COVERED: <n>/<n>`.** A line that fails that is an unreviewed phase wearing a
+`COVERED: <n>/<n>`.** A round that carries no reviewer evidence at all does
+not fail that count — the round forms that owe none are the exception named in
+`references/fix-loop.md`'s *Invariants*, and each is read against its own
+closure fields. A line that fails what it owes is an unreviewed phase wearing a
 green tick — treat it as `[ ]`. Any `[ ]` or `[~]` is unfinished work,
 not a bookkeeping lapse — go finish it (a `[~]` goes through Rule 4
 reconciliation first). An open `RV` means that phase was implemented and never
@@ -1057,7 +1066,8 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
   `RVJ`) is `[ ]` or `[~]`** — that phase was implemented and never reviewed.
 - You are closing an `RV`/`RVJ` round with fewer `reports` files than the
   reviewers that round declares, or a coverage file that does not end
-  `COVERED: <n>/<n>`.
+  `COVERED: <n>/<n>` — on a round that owes those fields. The forms that owe
+  none are the exception in `references/fix-loop.md`'s *Invariants*.
 - You are writing a `Next action` that names the **next phase** while this
   phase's `RV` is still open.
 - You are at Stage 5 and any phase's `RV` is not `[x]`, or `findings.md` is

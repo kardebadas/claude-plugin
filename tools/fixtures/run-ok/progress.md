@@ -16,14 +16,22 @@ file in its own subject, so it is the witness that a record ends at the next
 `- [` bullet: read on to the next round instead and the RV record above it
 would borrow that field, letting a round carrying no coverage of its own pass.
 
+**That bullet sits after its phase's `RV`, which the tracker grammar forbids** —
+`templates/progress.md` puts a phase's `RV` last among its own task lines — and
+the departure is deliberate and confined to Phase 3 of this fixture: the record
+boundary is only observable when something follows the round, so a conforming
+layout could not exercise it. The other phases close on their `RV`, the way a
+real tracker does. Read this file as a linter input, not as a model of a run.
+
 ## What `--run` establishes over this file, and what it cannot
 
 It establishes, for every closed `RV`/`RVJ` round in the tracker: the
 declared `<s> slice + <i> integration` count equals the number of report
 files that round lists, with brace sets expanded; an `RVJ` round declares
 `0 slice + 1 integration`; the round names a `coverage` file; every report
-file it names exists in `agent-output/`; and an `M=0 → no round` record
-carries its closure routes and no reviewer evidence. It also establishes that
+file it names, and the coverage file it names, exist in `agent-output/`; and
+an `M=0 → no round` record carries its closure routes and no reviewer
+evidence. It also establishes that
 the tracker is readable and that at least one round is closed.
 
 It does not establish that the fan-out was **sized** correctly, and that is
@@ -31,8 +39,9 @@ not a gap to be closed later — the size is not derivable from the line. The
 rule is one reviewer per file cluster in the fix diff, whose input is the
 diff; the line records only what was declared and what was listed, so a round
 declaring one reviewer over a seven-cluster diff is internally consistent and
-passes here. Nor does it establish that a named report file says anything,
-that coverage reached `<n>/<n>`, or that a round happened when it claims to.
+passes here. Nor does it establish that a named report or coverage file says
+anything — their existence is checked, their contents are not, so
+`COVERED: <n>/<n>` goes unread — or that a round happened when it claims to.
 
 ## Current State
 - **Phase:** done (fixture)

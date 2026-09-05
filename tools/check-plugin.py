@@ -484,6 +484,45 @@ for n in skill_names:
             # deletion out, user-ruled false positive out, and (by "exactly
             # when") a pin in — so dropping any one of them, or admitting a
             # fourth, breaks the literal.
+            # THE SIZING RULE THE EXCLUSIONS QUALIFY was held by nothing.
+            # The entries above hold what `M` is, what it excludes and what
+            # `M=0` licenses — the consequences — while the rule they are
+            # consequences OF, one reviewer per file cluster in the fix diff,
+            # had no arm: reverting the fan-out table's rows, the file-cluster
+            # bullet and the Invariant to a count over the findings left
+            # `check-plugin: PASS` with every mutant killed (measured). So the
+            # sizing phrase is held too, in both files that state the rule.
+            #
+            # MORE THAN ONE HOME PER FILE IS DELIBERATE in the authority:
+            # the phrase sits on the fan-out table's own row AND in the
+            # Invariant. A home only in the Invariant would put it in the same
+            # paragraph the claim-finding mutant deletes wholesale, and that
+            # mutant would then die by two arms with neither individually
+            # load-bearing — the attribution defect that split the
+            # `M`-exclusion bullet's mutants in two. With the row carrying it
+            # as well, that deletion leaves this arm silent and stays
+            # attributable.
+            #
+            # `SKILL.md`'s copy is held for the reason every second copy in
+            # this arm is: an unheld copy is one edit from gone on a green
+            # build, whatever else happens to reach it.
+            #
+            # THE `M=0` LICENCE RULE is held in `SKILL.md` by a phrase its
+            # WORKED EXAMPLE DOES NOT CARRY. The entry above holds
+            # `m=0 → no round`, and in `SKILL.md` that phrase occurs in the
+            # rule prose and again inside the fence, so deleting the whole rule
+            # — the licence, the route list, the pin exclusion — while keeping
+            # the fence left the gate green (measured). The fence cannot carry
+            # "is the only declaration that licenses it", which is why that is
+            # the phrase.
+            #
+            # SCOPED TO `SKILL.md`, though `references/run-state.md` states the
+            # same rule in the same words. There the sentence sits in the very
+            # paragraph the "no-round RV form deleted from run-state.md" mutant
+            # removes, so holding it in both files would make that mutant die
+            # by two arms. run-state.md's copy is prose only — it has no fence
+            # for a deletion to hide behind — so the existing entry already
+            # holds it, and this one does not need to.
             # Mutants: "M-exclusion phrase blurred in fix-loop.md",
             #          "coverage-union phrase blurred in fix-loop.md",
             #          "no-round RV form deleted from fix-loop.md",
@@ -491,7 +530,10 @@ for n in skill_names:
             #          "no-round RV form deleted from run-state.md",
             #          "M's definition paragraph deleted from fix-loop.md",
             #          "M's definition blurred in fix-loop.md",
-            #          "M's exclusion-route list loses a route".
+            #          "M's exclusion-route list loses a route",
+            #          "the fan-out sizing rule blurred in fix-loop.md",
+            #          "the fan-out sizing rule blurred in SKILL.md",
+            #          "the M=0 licence rule deleted from SKILL.md".
             # ONE CLAUSE PER ENTRY, carried on the entry. The message used to
             # enumerate what all five phrases do on every firing — 191 words,
             # emitted per (entry × file), 5,818 bytes of near-identical prose in
@@ -521,6 +563,16 @@ for n in skill_names:
                  "user-ruled false positive", AUTH,
                  "Lose it and the list shortens to two dispositions with the "
                  "definition still standing."),
+                ("the re-review fan-out's sizing rule",
+                 "one reviewer per file cluster",
+                 ("references/fix-loop.md", "SKILL.md"),
+                 "Lose it and the rule the fan-out table's rows encode is "
+                 "stated nowhere, and a count over the findings can take its "
+                 "place again."),
+                ("the `M=0` licence rule",
+                 "is the only declaration that licenses it", ("SKILL.md",),
+                 "Lose it and the rule goes while the worked example keeps "
+                 "the phrase the `M=0 → no round` entry reads."),
             )
             for lbl, q, rels, why in CLAIM_EFFECT:
                 for rel in rels:
@@ -709,6 +761,60 @@ for n in skill_names:
                             f"build. REMEDY: restore the phrase in {rel}, where "
                             "that file states its half of the dispatch "
                             "contract")
+        # EVERY RUN-STATE FILE THE TREE NAMES SHIPS A TEMPLATE, and nothing
+        # held that. `references/run-state.md` draws the run directory as a
+        # tree and says, one line under it, that `templates/` ships a template
+        # for each of those files; removing `templates/kit.md` left
+        # `check-plugin: PASS` with every mutant killed (measured), so the
+        # claim was false on a green build and GATE 2's step cited a file that
+        # was not there. It is the far end of the pointer `DISPATCH_CONTRACT`
+        # holds elsewhere: that arm's own argument is that a citation to a file
+        # GATE 2 no longer writes is a dangling pointer, and this is the file.
+        #
+        # READ FROM THE TREE, never from a list in this file. A hard-coded list
+        # of run-state files would be a second copy of that directory's
+        # contents, wrong the first time a file joins it — the same failure as
+        # the counts the arm below replaced, one level out. The tree is located
+        # by the run path inside it rather than by fence ordinality, and both
+        # the fence and the names it yields are required: an arm whose subject
+        # can vanish from the docs is an arm that silently starts checking
+        # nothing.
+        #
+        # WHAT IT ESTABLISHES is that a file named in the tree has a template
+        # of the same name — not that the template says anything, and not the
+        # converse, since `templates/` may legitimately hold a template for
+        # something the tree does not draw.
+        # Mutants: "a run-state file the tree names loses its template".
+        if n == "pipeline":
+            RSREL = "references/run-state.md"
+            rst, rserr = read(sdir / n / RSREL)
+            if rserr:
+                bad(f"{n}/{RSREL} draws the run directory this arm reads, but "
+                    f"that file cannot be read: {rserr}")
+            else:
+                trees = [b for b in re.findall(r"```[^\n]*\n(.*?)```", rst, re.S)
+                         if "docs/superpowers/runs/" in b]
+                names = sorted({m.group(1) for b in trees
+                                for m in re.finditer(r"^\s+(\S+\.md)\b", b,
+                                                     re.M)})
+                if len(trees) != 1 or not names:
+                    bad(f"{n}/{RSREL} no longer holds exactly one fenced run "
+                        "directory tree naming at least one `.md` file "
+                        f"({len(trees)} such fences, {len(names)} names), so "
+                        "this arm can no longer check that each of those files "
+                        "ships a template and is checking nothing on a green "
+                        "build. REMEDY: keep the tree, or delete this arm with "
+                        "the claim that a template ships for each of its files")
+                for nm in names:
+                    if not (sdir / n / "templates" / nm).exists():
+                        bad(f"{n}/{RSREL} names {nm} in the run directory tree "
+                            f"and says a template ships for each of those "
+                            f"files, but templates/{nm} does not exist. A run "
+                            "copies its state files from that directory, and a "
+                            "name with no template behind it is a step in "
+                            "Stage 1 or GATE 2 with nothing to copy. REMEDY: "
+                            f"add templates/{nm}, or stop naming it in the "
+                            "tree and in the sentence under it")
         # RULE 5b BINDS THIS SKILL'S OWN PROSE, AND THE TEMPLATE COUNTS ARE
         # WHERE IT WAS ALREADY BROKEN. Sentences in `SKILL.md` and
         # `references/run-state.md` counted the skill's own run-state file
@@ -770,7 +876,11 @@ if len(FAIL) == _inv_before:
        "form present in every file that defines the `RV` grammar, `M` "
        "defined in one place with no exclusion-less gloss that names `M` ahead "
        "of the count and the F-IDs it glosses, every requirement of the "
-       "dispatch contract held in the file that states it, and no count of the "
+       "dispatch contract held in the file that states it, the re-review "
+       "sizing phrase present in the authority and in `SKILL.md`, the `M=0` "
+       "licence rule present in `SKILL.md` by a phrase its worked example "
+       "does not carry, a template shipped for every run-state file the "
+       "run-directory tree names, and no count of the "
        "skill's own templates standing ahead of the word")
 
 print("== agents ==")
@@ -943,10 +1053,10 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
         round record carries prose, and a `coverage` field sitting past 400
         flattened characters of its own start was reported as missing —
         measured, on a conforming file that passed once the prose was removed.
-        Dropping the window for the examples too is not the fix: it lets the
-        re-review round at SKILL.md:217 swallow the `M=0 → no round`
-        paragraph that follows it and fires the no-round arm on both files
-        that carry one (measured).
+        Dropping the window for the examples too is not the fix: it lets
+        `SKILL.md`'s worked re-review round, in *The `RV` line*, swallow the
+        `M=0 → no round` paragraph that follows it and fires the no-round arm
+        on both files that carry one (measured).
 
         The bounded form ends the LAST record at end-of-file, since there is
         no following bullet. That is the false-PASS direction — trailing prose
@@ -1037,6 +1147,29 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
                             "round closes on reviewer evidence a later reader "
                             "can re-open, so a name with no file behind it is "
                             "a reviewer count that was never met")
+            # THE COVERAGE FILE GETS THE SAME EXISTENCE CHECK AS THE REPORTS.
+            # The `cov` test above establishes only that the FIELD is there, so
+            # a round naming a coverage file nobody wrote passed (measured) —
+            # while the same round's report names were checked against the
+            # directory, leaving an asymmetry that was neither closed nor
+            # written down. The two fields carry the same kind of evidence and
+            # are owed the same test.
+            # `agent_output`-gated for the reason the report loop is: the
+            # skill's worked examples name illustrative files nobody wrote.
+            # Its mutant is cited with the other run-mode ones, below.
+            if agent_output is not None:
+                c = cov.search(rec)
+                if c:
+                    cnm = c.group(0).split()[-1]
+                    if not (agent_output / cnm).exists():
+                        viol += 1
+                        bad(f"{where}: coverage file {cnm!r} is named on a "
+                            f"closed round but is not in "
+                            f"{agent_output.name}/ — that file is the whole "
+                            "of the round's claim that every commit fell "
+                            "inside some slice, so a name with nothing behind "
+                            "it is a coverage judgement no later reader can "
+                            "re-open")
     return seen, nseen, viol
 
 pdir = ROOT / "plugins" / "superb" / "skills" / "pipeline"
@@ -1090,10 +1223,10 @@ if seen and nseen and not viol:
 #     the declared `<s> slice + <i> integration` count equals the number of
 #     report files the same round lists (brace sets expanded); an `RVJ` round
 #     declares `0 slice + 1 integration`; the round names a `coverage` file;
-#     every report file it names exists in `<dir>/agent-output/`; and an
-#     `M=0 → no round` record carries its closure routes and no reviewer
-#     evidence. Plus: the tracker is readable, and at least one round is
-#     closed.
+#     every report file it names, and the coverage file it names, exist in
+#     `<dir>/agent-output/`; and an `M=0 → no round` record carries its closure
+#     routes and no reviewer evidence. Plus: the tracker is readable, and at
+#     least one round is closed.
 #   IT DOES NOT ESTABLISH that the fan-out was SIZED correctly. That is not a
 #     limitation to be lifted later — it is not derivable from the line at all.
 #     The rule is "one reviewer per file cluster in the fix diff", whose input
@@ -1101,10 +1234,12 @@ if seen and nseen and not viol:
 #     and a round declaring `1 slice + 0 integration` over a seven-cluster
 #     diff is internally consistent and passes here (measured). Any prose
 #     saying otherwise is a claim this mode cannot hold up.
-#   IT ALSO DOES NOT establish that a named report file says anything, that
-#     coverage reached `<n>/<n>`, or that the round happened when it says.
+#   IT ALSO DOES NOT establish that a named report or coverage file says
+#     anything — existence is checked, content is not, so `COVERED: <n>/<n>`
+#     is unread here — or that the round happened when it says.
 # Mutants: "run tracker over-declares reviewers",
 #          "run tracker cites a report file that is not in agent-output",
+#          "run tracker cites a coverage file that is not in agent-output",
 #          "run tracker round loses its coverage field",
 #          "long run-tracker round loses its coverage field",
 #          "run tracker loses one brace-expanded report file",
@@ -1145,7 +1280,8 @@ if RUN_DIR is not None:
             # against, so this line must not be the thing that says it was.
             ok(f"{rseen} closed review rounds in the tracker"
                + (f" ({rnseen} of them `M=0 → no round`)" if rnseen else "")
-               + ", every declared report file present in agent-output/")
+               + ", every declared report file and every declared coverage "
+                 "file present in agent-output/")
 
 # ---- every mutant this file cites by name must actually exist ----
 # The arms above cite their proofs by NAME: a `Mutant`/`Mutants` comment marker

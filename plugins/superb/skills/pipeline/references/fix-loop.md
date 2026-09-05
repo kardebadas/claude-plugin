@@ -116,9 +116,12 @@ phase autonomously.
 4. **Close out and advance.** In this order, no reordering:
    0. Confirm this phase's **`RV` — and, for a split's last sibling, its
       `RVJ` — is `[x]`** with every round's report files present and counted and
-      each coverage file ending `COVERED: <n>/<n>`. If the line is `[ ]`, or is
-      `[x]` but fails that count, **set it back to `[ ]`** — an unbacked closure
-      is not a partial review — and go to step 2.
+      each coverage file ending `COVERED: <n>/<n>` — for every round that owes
+      those fields at all; the round forms that owe none are the exception the
+      *Invariants* below name, and a round on one of them is read against its
+      own closure fields instead. If the line is `[ ]`, or is `[x]` but fails
+      that count on a round that owes it, **set it back to `[ ]`** — an unbacked
+      closure is not a partial review — and go to step 2.
    1. Write `progress.md`: every task in this phase `[x]` **with its commit
       hash**, Current State set to the **next unchecked line** — a joining
       phase's `RVJ` sits above its first task — timestamp refreshed.
@@ -395,6 +398,15 @@ When blocking findings exist (and the convergence rule permits another run):
    (`<phase> pre-RV`), never the phase's review budget: gates failing three
    times during implementation must not leave the real review two iterations.
 
+   **A pre-`RV` round is recorded in `findings.md`, and nowhere else** — its
+   `<phase> pre-RV` Counters row, plus the Iteration-log row step 1 above
+   opens for it. That is where "recorded, not
+   omitted" is satisfied for such a round, including one that ran no reviewers
+   at all: while the `RV` line stays `[ ]` it has no closed form for a round to
+   be appended to, and the per-round grammar above is a grammar for closed
+   rounds. Its closure routes are read where every route is, from each F-ID's
+   `Closed by` cell in the ledger.
+
    Only when `RV` is already `[x]` from a completed step 2 does a re-review
    reopen it to `[~]` and reclose it with the round appended in the full
    per-round grammar — `→ round 2: M=9 → 1 slice + 0 integration · reports
@@ -414,7 +426,7 @@ fix commits, not tasks, so re-reviews get their own rule — and it is a rule ab
 | Ownable fix diff | Slice reviewers | Integration reviewer |
 |------------------|-----------------|----------------------|
 | One commit, or one file cluster | 1 | 0 (the one slice sees all) |
-| Two or more disjoint file clusters | 1 per cluster | 1 |
+| Two or more disjoint file clusters | one reviewer per file cluster | 1 |
 
 **Ownable** is the qualifier the rows are keyed on: an ownable commit is one a
 reviewer can be assigned, which is every commit the fix-mode run produced except
@@ -506,8 +518,13 @@ however complete, authorizes nothing.
   Slice ranges, resume verification and fix-diff checks all read those hashes.
 - **Every `[x]` `RV`/`RVJ` round carries its evidence** — one `agent-output/`
   file per reviewer, counted against the reviewers *that round* declares, plus a
-  coverage file ending `COVERED: <n>/<n>`, and the F-IDs or `no findings` — or
-  the quoted user waiver. A phase is never advanced, and Stage 5
+  coverage file ending `COVERED: <n>/<n>`, and the F-IDs or `no findings`.
+  **The round forms that carry no reviewer evidence are the whole of the
+  exception**: the quoted user waiver, and a round the fix loop's step 3
+  licensed to run no reviewers at all (`M=0`), which closes on its named
+  closure routes in their place. Every other `[x]` that fails that count is an
+  unbacked closure, and a site that checks one reads the exception from here
+  rather than restating it. A phase is never advanced, and Stage 5
   never entered, with an `RV`/`RVJ` still open: that state means implemented and
   unreviewed, and no other check in this file detects it, because they all read
   a ledger that an unrun review leaves empty.

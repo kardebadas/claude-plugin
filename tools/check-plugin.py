@@ -15,6 +15,23 @@ Run tools/check-plugin-mutants.sh to verify this gate can still fail.
 import json, pathlib, re, sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+# ---- argv: default mode takes no arguments and must stay byte-identical ----
+# `--run <dir>` points the review-line linter at a real run's `progress.md` as
+# well as the skill's worked examples. Anything else is rejected rather than
+# ignored: a silently-swallowed typo (`--rn`, `-run`) runs the DEFAULT mode and
+# reports PASS, which reads as "the run directory conforms".
+# Mutants: "wrapper passes an unrecognised argument".
+RUN_DIR = None
+_argv = sys.argv[1:]
+if _argv and _argv[0] == "--run":
+    if len(_argv) < 2:
+        print("usage: check-plugin.py [--run <run-directory>]"); sys.exit(2)
+    RUN_DIR = pathlib.Path(_argv[1]).expanduser().resolve()
+elif _argv:
+    print(f"unknown argument {_argv[0]!r}; "
+          "usage: check-plugin.py [--run <run-directory>]"); sys.exit(2)
+
 FAIL = []
 def ok(m):  print(f"  ok    {m}")
 def bad(m): print(f"  FAIL  {m}"); FAIL.append(m)
@@ -696,73 +713,122 @@ def nfiles(spec):
     m = re.search(r"\{([^}]*)\}", spec)
     src = m.group(1) if m else spec
     return len([x for x in src.split(",") if x.strip()])
-seen = nseen = viol = 0
+
+def expand_braces(spec):
+    """`p3-review-{a,b,int}.md` -> the three names; a plain list passes through.
+
+    The counterpart to `nfiles`, which counts the same spec. Counting and
+    naming had to agree or the existence check below would look for a file
+    called `p3-review-{a,b,int}.md`, which no run ever writes.
+    """
+    spec = spec.strip()
+    m = re.search(r"\{([^}]*)\}", spec)
+    if not m:
+        return [x for x in re.split(r"[,\s]+", spec) if x.endswith(".md")]
+    pre, post = spec[:m.start()], spec[m.end():]
+    return [f"{pre}{x.strip()}{post}" for x in m.group(1).split(",") if x.strip()]
+
+def rel(p):
+    """Repo-relative when the path is in the repo, absolute when it is not.
+
+    A run directory is a caller's argument and need not sit under ROOT, so
+    `relative_to` cannot be assumed — it raises, and a traceback is not a
+    finding.
+    """
+    try:
+        return p.relative_to(ROOT)
+    except ValueError:
+        return p
+
+def lint_review_lines(paths, agent_output=None):
+    """Lint every closed RV/RVJ round found in `paths`.
+
+    paths: iterable of .md files to scan.
+    agent_output: when given, a directory each named report file must exist
+        in. Available for a real run only — the skill's worked examples name
+        illustrative files that were never written, so passing it there would
+        fail the documentation for being documentation.
+    Returns (closed_rounds, no_round_records, violations).
+    """
+    seen = nseen = viol = 0
+    for f in sorted(paths):
+        t, e = read(f)
+        if e: continue
+        flat, starts, off = [], [], 0
+        for ln in t.split("\n"):
+            starts.append(off); flat.append(ln.strip()); off += len(ln.strip()) + 1
+        flat = " ".join(flat)
+        def lineno(pos):
+            n = 1
+            for k, st in enumerate(starts, 1):
+                if st <= pos: n = k
+                else: break
+            return n
+        marks = [(m.start(), (m.group(1) or m.group(2))) for m in start.finditer(flat)]
+        for idx, (pos, kind) in enumerate(marks):
+            end = marks[idx + 1][0] if idx + 1 < len(marks) else len(flat)
+            rec = flat[pos:min(end, pos + 400)]
+            if nor.search(rec):
+                nseen += 1
+                body = rec.split("```")[0] if "```" in rec else rec
+                where = f"{rel(f)}:{lineno(pos)}"
+                probs = []
+                if rpt.search(body):
+                    probs.append("lists a `reports` field")
+                if cov.search(body):
+                    probs.append("lists a `coverage` field")
+                if decl.search(body):
+                    probs.append("declares reviewer counts as well as `no round`")
+                if not route.search(body):
+                    probs.append("names no closure route — every F-ID needs "
+                                 "`deleted` or `user-ruled false positive` after "
+                                 "it")
+                if pinrt.search(body):
+                    probs.append("names a `pinned by <test>` route, which no "
+                                 "`M=0` round can carry — a pin commits a test, so "
+                                 "it stays in `M` and its commit is owed a "
+                                 "reviewer")
+                if not outc.search(body):
+                    probs.append("has no outcome slot (`→ no findings` or F-IDs)")
+                if probs:
+                    viol += 1
+                    bad(f"{where}: `M=0 → no round` round " + "; ".join(probs)
+                        + ". This is the only round form that closes with no "
+                        "reviewer evidence, so the named closure routes are all "
+                        "the evidence there is: a `no round` whose routes are "
+                        "unnamed is a skipped review wearing this form, one "
+                        "carrying `reports` or `coverage` is claiming reviewers a "
+                        "round of nobody never had, and one naming a pin is not an "
+                        "`M=0` iteration at all. REMEDY: write it as "
+                        "`→ round <n>: M=0 → no round · closures: F-018 deleted, "
+                        "F-019 user-ruled false positive → no findings`")
+                continue
+            d = decl.search(rec)
+            if not d: continue          # e.g. the WAIVED form, which carries no counts
+            seen += 1
+            want = int(d.group(1)) + int(d.group(2))
+            where = f"{rel(f)}:{lineno(pos)}"
+            if kind == "RVJ" and (int(d.group(1)), int(d.group(2))) != (0, 1):
+                viol += 1; bad(f"{where}: RVJ must be 0 slice + 1 integration, declares {d.group(1)}+{d.group(2)}")
+            r = rpt.search(rec)
+            got = nfiles(r.group(1)) if r else 0
+            if got != want:
+                viol += 1; bad(f"{where}: declares {want} reviewers, lists {got} report files")
+            if not cov.search(rec):
+                viol += 1; bad(f"{where}: closed review round with no coverage file")
+            if agent_output is not None and r:
+                for nm in expand_braces(r.group(1)):
+                    if not (agent_output / nm).exists():
+                        viol += 1
+                        bad(f"{where}: report file {nm!r} is named on a closed "
+                            f"round but is not in {agent_output.name}/ — a "
+                            "round closes on reviewer evidence a later reader "
+                            "can re-open, so a name with no file behind it is "
+                            "a reviewer count that was never met")
+    return seen, nseen, viol
+
 pdir = ROOT / "plugins" / "superb" / "skills" / "pipeline"
-for f in sorted(pdir.rglob("*.md")):
-    t, e = read(f)
-    if e: continue
-    flat, starts, off = [], [], 0
-    for ln in t.split("\n"):
-        starts.append(off); flat.append(ln.strip()); off += len(ln.strip()) + 1
-    flat = " ".join(flat)
-    def lineno(pos):
-        n = 1
-        for k, st in enumerate(starts, 1):
-            if st <= pos: n = k
-            else: break
-        return n
-    marks = [(m.start(), (m.group(1) or m.group(2))) for m in start.finditer(flat)]
-    for idx, (pos, kind) in enumerate(marks):
-        end = marks[idx + 1][0] if idx + 1 < len(marks) else len(flat)
-        rec = flat[pos:min(end, pos + 400)]
-        if nor.search(rec):
-            nseen += 1
-            body = rec.split("```")[0] if "```" in rec else rec
-            where = f"{f.relative_to(ROOT)}:{lineno(pos)}"
-            probs = []
-            if rpt.search(body):
-                probs.append("lists a `reports` field")
-            if cov.search(body):
-                probs.append("lists a `coverage` field")
-            if decl.search(body):
-                probs.append("declares reviewer counts as well as `no round`")
-            if not route.search(body):
-                probs.append("names no closure route — every F-ID needs "
-                             "`deleted` or `user-ruled false positive` after "
-                             "it")
-            if pinrt.search(body):
-                probs.append("names a `pinned by <test>` route, which no "
-                             "`M=0` round can carry — a pin commits a test, so "
-                             "it stays in `M` and its commit is owed a "
-                             "reviewer")
-            if not outc.search(body):
-                probs.append("has no outcome slot (`→ no findings` or F-IDs)")
-            if probs:
-                viol += 1
-                bad(f"{where}: `M=0 → no round` round " + "; ".join(probs)
-                    + ". This is the only round form that closes with no "
-                    "reviewer evidence, so the named closure routes are all "
-                    "the evidence there is: a `no round` whose routes are "
-                    "unnamed is a skipped review wearing this form, one "
-                    "carrying `reports` or `coverage` is claiming reviewers a "
-                    "round of nobody never had, and one naming a pin is not an "
-                    "`M=0` iteration at all. REMEDY: write it as "
-                    "`→ round <n>: M=0 → no round · closures: F-018 deleted, "
-                    "F-019 user-ruled false positive → no findings`")
-            continue
-        d = decl.search(rec)
-        if not d: continue          # e.g. the WAIVED form, which carries no counts
-        seen += 1
-        want = int(d.group(1)) + int(d.group(2))
-        where = f"{f.relative_to(ROOT)}:{lineno(pos)}"
-        if kind == "RVJ" and (int(d.group(1)), int(d.group(2))) != (0, 1):
-            viol += 1; bad(f"{where}: RVJ must be 0 slice + 1 integration, declares {d.group(1)}+{d.group(2)}")
-        r = rpt.search(rec)
-        got = nfiles(r.group(1)) if r else 0
-        if got != want:
-            viol += 1; bad(f"{where}: declares {want} reviewers, lists {got} report files")
-        if not cov.search(rec):
-            viol += 1; bad(f"{where}: closed review round with no coverage file")
+seen, nseen, viol = lint_review_lines(pdir.rglob("*.md"))
 if not seen: bad("no closed RV/RVJ examples found — the grammar lost its worked instances")
 # Counted and reported SEPARATELY from `seen`, and required non-zero, for the
 # reason the mutant-citation arm below requires its own list non-empty: an arm
@@ -780,6 +846,62 @@ if seen and nseen and not viol:
        "reviewer counts, RVJ shape and coverage all conform, and every "
        "no-round record names its closure routes and carries no reviewer "
        "evidence")
+
+# ---- the same linter, over a REAL run's tracker ----
+# The arm above scans `pdir` only — the skill's own worked examples — so no
+# invocation of this gate has ever read a run's own tracker. `--run <dir>`
+# does, over `<dir>/progress.md`, with the same rules.
+#
+# A real run also supports the one check the examples cannot: the named report
+# files either exist in `agent-output/` or they do not. The examples' filenames
+# are illustrative and were never written, so `agent_output` is passed HERE and
+# nowhere else — passing it above would fail the documentation for being
+# documentation.
+#
+# `nseen` is deliberately NOT required non-zero here. `M=0 → no round` is a
+# legitimate but optional round form; a run that never produced one is not
+# thereby defective, and requiring it would make the mode reject conforming
+# runs. `rseen` IS required, because a `--run` over a tracker with no closed
+# round is a caller who thinks a review has been checked when none has.
+#
+# Both "does not exist" branches report a NAMED failure rather than raising:
+# `bad()` is the gate's only way to say something, and a traceback exits before
+# the remaining sections ever run.
+# Mutants: "run tracker over-declares reviewers",
+#          "run tracker cites a report file that is not in agent-output",
+#          "run tracker round loses its coverage field",
+#          "run tracker loses one brace-expanded report file",
+#          "run tracker has no closed review round",
+#          "run directory has no progress.md",
+#          "run directory has no agent-output".
+if RUN_DIR is not None:
+    print(f"\n== run tracker: {rel(RUN_DIR)} ==")
+    tracker = RUN_DIR / "progress.md"
+    if not tracker.exists():
+        bad(f"{rel(tracker)} does not exist — `--run` was pointed at "
+            "something that is not a pipeline run directory, so nothing was "
+            "checked. REMEDY: pass the run directory that holds the run's "
+            "`progress.md`")
+    else:
+        ao = RUN_DIR / "agent-output"
+        if not ao.is_dir():
+            bad(f"{rel(ao)} does not exist — a closed review round has "
+                "nowhere to have written its reports, so every report file "
+                "this tracker names is unverifiable. REMEDY: keep the run's "
+                "`agent-output/` beside its `progress.md`")
+            ao = None
+        rseen, rnseen, rviol = lint_review_lines([tracker], agent_output=ao)
+        if not rseen:
+            bad(f"{rel(tracker)}: no closed RV/RVJ round — nothing in this run "
+                "has been reviewed yet, so a PASS here would report a review "
+                "that has not happened")
+        elif not rviol and ao is not None:
+            # `ao is not None` guards the PASS LINE as well as the check:
+            # presence was not checked when there was no directory to check it
+            # against, so this line must not be the thing that says it was.
+            ok(f"{rseen} closed review rounds in the tracker"
+               + (f" ({rnseen} of them `M=0 → no round`)" if rnseen else "")
+               + ", every declared report file present in agent-output/")
 
 # ---- every mutant this file cites by name must actually exist ----
 # The arms above cite their proofs by NAME: a `Mutant`/`Mutants` comment marker

@@ -360,12 +360,13 @@ for n in skill_names:
         # failure this rule is about.
         #
         # Each file that ships the rule is held. `references/fix-loop.md` is the
-        # authority the fix loop reads; `templates/findings.md` says of itself
-        # that it is copied into the run directory, so the run's own ledger — not
-        # this repo's fix-loop.md — is the text open in front of a closing agent.
-        # SKILL.md is deliberately out of scope: this arm holds the texts a
-        # closing agent acts from, not every place the rule is restated for a
-        # reader.
+        # authority the fix loop reads; `templates/findings.md`'s own header says
+        # it is copied into the run directory, which is why the copy is held to
+        # the same phrases as the authority. Which of the two a closing agent
+        # actually has open is an inference from that header, not something this
+        # arm checks — and it does not have to be, because both are held.
+        # SKILL.md is out of scope by the same reasoning: it restates the rule
+        # for a reader, and no obligation here rests on which file gets read.
         #
         # PHRASES, not paraphrases: a check compares strings, never meanings, so
         # the shared phrase IS the drift detector. Substring rather than regex,
@@ -401,11 +402,58 @@ for n in skill_names:
                         "opens no re-review round; without the rule a fix round "
                         "keeps raising the successor of its own fix. Both texts "
                         "carry it: fix-loop.md is the authority and "
-                        "templates/findings.md is the copy that ships into the run "
-                        "directory, where the closing agent reads it. REMEDY: "
+                        "templates/findings.md is the copy its own header says "
+                        "ships into the run directory. REMEDY: "
                         f"restore the wording in {rel} — these phrases are required "
                         "verbatim, which is what makes drift between the two texts "
                         "detectable")
+            # The closure rule ends in a CROSS-REFERENCE: a deletion-or-pin
+            # closure is outside `M` and outside the fix-diff coverage union,
+            # "so `M` and the fix-diff coverage union both exclude it". Two
+            # other structures are what make that true — the exclusion bullet in
+            # *Re-review fan-out*, and the `M=0 → no round` condition on the fix
+            # loop's step 3 — and CLAIM_RULE above reaches neither. Deleting
+            # only the bullet left a green gate, a dangling cross-reference, and
+            # the fan-out back to its unqualified "Assignments MUST cover every
+            # fix diff": the exact contradiction the closure rule was written to
+            # remove, reinstated in one edit.
+            #
+            # ONE file, unlike CLAIM_RULE's two. Both consequences live in
+            # structures only `references/fix-loop.md` has — the fan-out table's
+            # bullets and the numbered fix loop. `templates/findings.md` states
+            # the rule and says the closure "opens no re-review round"; it never
+            # describes a fan-out, so there is nothing there for these phrases
+            # to be true of.
+            #
+            # Unconditional, NOT gated on the cross-reference still being
+            # present. Gating it would let one edit that removes the
+            # cross-reference and the bullet together pass green — the same hole
+            # by two deletions instead of one.
+            # Mutants: "M-exclusion bullet deleted from fix-loop.md",
+            #          "no-round RV form deleted from fix-loop.md".
+            CLAIM_EFFECT = (
+                ("the `M`-exclusion bullet", "not counted in `m`"),
+                ("the coverage-union exclusion", "its fix commit is not in that union"),
+                ("the `M=0 → no round` form", "m=0 → no round"),
+            )
+            at, ae = read(sdir / n / "references/fix-loop.md")
+            if ae is None:
+                aflat = " ".join(at.split()).lower()
+                lost = [lbl for lbl, q in CLAIM_EFFECT if q not in aflat]
+                if lost:
+                    bad(f"{n}/references/fix-loop.md carries the claim-finding "
+                        "closure rule but not its consequences — missing "
+                        + ", ".join(lost) + ". The rule says a deletion-or-pin "
+                        "closure opens no re-review round, \"so `M` and the "
+                        "fix-diff coverage union both exclude it\"; without the "
+                        "*Re-review fan-out* exclusion bullet that union is back "
+                        "to \"Assignments MUST cover every fix diff\", and "
+                        "without the `M=0 → no round` condition step 3 still "
+                        "mandates a round over a diff the rule just excluded. "
+                        "REMEDY: restore, in fix-loop.md, the fan-out bullet (a "
+                        "claim finding closed by deletion or by a pin is not "
+                        "counted in `M`, and its fix commit is not in that union) "
+                        "and step 3's `M=0 → no round` condition with its RV form")
     for f in sorted((sdir / n).rglob("*.md")):
         t, e = read(f)
         if e: continue
@@ -417,7 +465,8 @@ for n in skill_names:
 if len(FAIL) == _inv_before:
     ok("no indexed-placeholder dispatch, invocations namespaced, no unhandled "
        "fourth severity tier, re-tag predicate present where cited, "
-       "claim-finding closure rule present in both texts that ship it")
+       "claim-finding closure rule present in both texts that ship it, its "
+       "`M`-exclusion and `M=0 → no round` consequences present in the authority")
 
 print("== agents ==")
 adir = ROOT/"plugins/superb/agents"
@@ -520,6 +569,65 @@ for f in sorted(pdir.rglob("*.md")):
             viol += 1; bad(f"{where}: closed review round with no coverage file")
 if not seen: bad("no closed RV/RVJ examples found — the grammar lost its worked instances")
 elif not viol: ok(f"{seen} closed review rounds: reviewer counts, RVJ shape and coverage all conform")
+
+# ---- every mutant this file cites by name must actually exist ----
+# The arms above cite their proofs by NAME: a `Mutant`/`Mutants` comment marker
+# followed by the quoted mutant names — a citation into another file that
+# nothing kept true. Rename or delete a mutant and these comments point at
+# nothing, on a green build. That is a
+# claim finding by this skill's own rule, and "neither enforcement code nor a
+# run's own records is exempt" leaves it no carve-out; the rule offers a pin as
+# well as a deletion, and this is the pin. It also retires the grandfather
+# clause a previous round granted these citations as "file convention".
+#
+# Citation side: that marker plus a colon, anywhere in a `#` comment line, whose
+# quoted names may wrap onto following comment lines and end at the first line
+# whose text closes with a period. This paragraph deliberately writes the marker
+# without its colon, since a comment ABOUT the form is not a citation and the
+# reader is the only thing that can tell them apart. Harness side: the first
+# argument of each
+# `run_mutant`, read from the SHELL SOURCE — so a name containing `$0` is
+# written `\$0` there (or the shell substitutes it) while the comment writes the
+# literal. Escapes are stripped from BOTH sides before comparing; without that
+# step exactly one name — "skill dispatches on a doubled-backslash $0" —
+# false-positives on every run and the check is worthless.
+# Mutants: "cited mutant renamed out from under its citation".
+print("\n== mutant citations ==")
+gt, ge = read(ROOT / "tools/check-plugin.py")
+ht, he = read(ROOT / "tools/check-plugin-mutants.sh")
+if ge or he:
+    bad("cannot read the gate/harness pair the mutant citations join: "
+        + (ge or he))
+else:
+    cited, gl, i = [], gt.split("\n"), 0
+    while i < len(gl):
+        m = re.search(r"\bMutants?:\s*(.*)$", gl[i]) if gl[i].lstrip().startswith("#") else None
+        if not m:
+            i += 1; continue
+        buf, j = m.group(1), i + 1
+        while not buf.rstrip().endswith(".") and j < len(gl) and gl[j].lstrip().startswith("#"):
+            buf += " " + gl[j].lstrip()[1:].strip(); j += 1
+        cited += re.findall(r'"([^"]*)"', buf)
+        i = max(j, i + 1)
+    unesc = lambda s: re.sub(r"\\(.)", r"\1", s)
+    have = {unesc(m.group(1)) for m in re.finditer(r'run_mutant\s+"((?:[^"\\]|\\.)*)"', ht)}
+    dangling = [c for c in cited if unesc(c) not in have]
+    if not cited:
+        bad("check-plugin.py cites no mutant by name — either the citations that "
+            "made each arm traceable to the mutant proving it are gone, or the "
+            "marker-plus-colon form this check reads them by has changed. "
+            "REMEDY: cite each arm's mutants by name again, or delete this check "
+            "along with the last citation")
+    elif dangling:
+        bad("check-plugin.py cites mutants check-plugin-mutants.sh does not "
+            "define: " + ", ".join(map(repr, dangling)) + " — a citation by name "
+            "into another file goes stale in silence, which is the failure the "
+            "claim-finding rule is about. REMEDY: add the missing mutant, or "
+            "correct the citation to the name the harness uses. Names compare "
+            "after shell backslash-escapes are stripped, so `\\$0` and `$0` are "
+            "the same name and are not what this is reporting")
+    else:
+        ok(f"{len(cited)} cited mutant names all defined in check-plugin-mutants.sh")
 
 print()
 print("check-plugin: FAIL" if FAIL else "check-plugin: PASS")

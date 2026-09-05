@@ -221,6 +221,23 @@ are read against the round they sit in, never against the whole line:
 `ceil(N/5)` — fix diffs are not task-shaped), with coverage over the fix commits.
 Whoever ran the round writes it, at whatever recursion depth.
 
+**`M=0 → no round` is the one round that closes without reviewers.** A fix
+iteration whose every targeted finding was a claim finding closed by deletion or
+by a pin leaves nothing for a reviewer to cover, so it runs no fan-out
+(`references/fix-loop.md`, fix loop step 3) — and it still writes its round,
+because an absent round and a skipped one are the same absence here:
+
+```markdown
+      → round 4: M=0 → no round · claim closures: F-021 deleted → no findings
+```
+
+`no round` stands where the reviewer counts would, and `M=0` is the only
+declaration that licenses it. In place of `reports` and `coverage` the round
+carries each F-ID it closed and that F-ID's route — `deleted`, or `pinned by
+<test>` naming the test — which must match its `Closed by` cell in the ledger.
+One behavioural fix in the same iteration makes `M > 0`, and then the full
+fan-out is owed.
+
 The one other closure: `[x] RV — WAIVED by user: "<their words>"`, which needs
 those words verbatim in `register.md`, applies only to the phases the user named
 (if that is unclear it is an Ambiguity stop, not a guess), and is listed in the
@@ -753,8 +770,9 @@ tasks, so a re-review uses `M` = the number of blocking F-IDs that run targeted:
 verified against the code it names), plus an integration reviewer once there is
 more than one slice. Slice boundaries are the fix commits' ranges, and **the
 assigned ranges must union to cover every fix commit** — a clean round from
-reviewers who never looked at a fix closes nothing. Table in
-`references/fix-loop.md`.
+reviewers who never looked at a fix closes nothing. A claim finding closed by
+deletion or by a pin is outside both counts: not in `M`, and its commit not in
+the union, since it opens no round. Table in `references/fix-loop.md`.
 
 ### Joint integration review after a split (Rule 3)
 
@@ -933,8 +951,9 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
 - You are about to state an iteration number or recursion depth you did not
   just read out of `findings.md`.
 - You are sizing a re-review fan-out off task count instead of targeted F-IDs.
-- You are closing a finding without having checked that a re-review range
-  actually covered its fix.
+- You are closing a **behavioural** finding without having checked that a
+  re-review range actually covered its fix. (A claim finding closed by deletion
+  or by a pin is not this: it opens no round, so there is no range to check.)
 - You are between GATE 2 and Stage 5, about to end your turn, and the message
   you are sending contains no guard-rail question. **Keep going instead.**
 - Your message ends with a phase summary, "let me know if…", or "shall I
@@ -1035,9 +1054,12 @@ memory — decide what happens next.**
 - **Looping forever** — honor both caps; surface to the user at the cap.
 - **Burning iterations on a non-converging finding** — the convergence rule
   stops at the first evidenced wasted iteration; don't ride it to the cap.
-- **Trusting a clean re-review that never covered the fix** — findings close
-  via the ledger (fix diff touched the named code + covering re-review), not
-  by failing to be rediscovered.
+- **Trusting a clean re-review that never covered the fix** — a round whose
+  ranges never looked at the fix diff closes nothing; failing to be
+  rediscovered is not a closure. The ledger's route for a behavioural finding
+  is fix-diff-touched **plus** a covering re-review; a claim finding takes a
+  different route (deleted or pinned, and no round at all), so the lesson is
+  what a clean round cannot buy you, not that this is the only way to close.
 - **Advancing with a red test suite** — failing tests are bug findings even
   when no reviewer reported them.
 - **Blocking on Minor findings** — only Critical/Major/bug gate advancement;

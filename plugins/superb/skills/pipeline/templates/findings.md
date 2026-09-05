@@ -33,7 +33,9 @@ is recorded as `Critical` or `Major` like any other blocking row, never as a
 bare `bug`, because this table has no such `Sev`.
 
 `Important` is the task reviewer's vocabulary, not a tier: **an incoming
-`Important` is re-tagged** on the way in.
+`Important` is re-tagged** on the way in. The branches below are also the
+severity decider wherever this ledger has to set a tier itself — a **claim
+finding** included, whatever tier it arrived under.
 
 - **Major** if it names any of:
   - a measured behavioural defect;
@@ -58,7 +60,8 @@ covered that fix diff reports it resolved; or the **user** ruled it a false
 positive. A finding that merely stops appearing in review output stays `open`.
 A **claim finding** — one whose defect is an assertion rather than a behaviour:
 a false count, a stale `file:line` citation, a wrong sole-writer claim, in
-source, in a gate's own comments or in this run's reports — closes only by
+source, in a gate's own comments or in this run's reports — closes
+**differently**: neither route above is open to it. It closes only by
 **deleting the claim** or by **pinning it with a test** that fails when the
 claim stops being true. **A rewrite is not a closure**: the corrected sentence
 is still unexecuted, so nothing keeps it true as the code under it changes,

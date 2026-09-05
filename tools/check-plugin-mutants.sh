@@ -213,10 +213,19 @@ fi'
 #
 # Paragraph-scoped and whitespace-normalised, so no line-break position is
 # pinned: the mutation deletes every blank-line-delimited paragraph whose
-# flattened text names the term. It asserts the mutation rather than the prose's
-# shape — the deletion must remove a paragraph, and the term must be gone
-# afterwards. Reword the rule and the mutant refuses loudly with its message
-# printed instead of turning into a silent no-op.
+# flattened text names the term.
+#
+# What the two asserts actually check, precisely: that at least one paragraph
+# was removed, and that the flattened term is absent from the result. That kills
+# the case this mutant exists for — a COMPLETE reword, after which no paragraph
+# matches and the first assert fires loudly. It does NOT catch a partial reword:
+# a line-based edit that misses a wrapped occurrence leaves the flattened term
+# matching somewhere, so some paragraph is still deleted, the term is still gone
+# afterwards, both asserts pass — and the paragraph deleted may not be the rule.
+# That case mutates something other than intended and prints nothing. It is
+# harmless only while the gate arm is live, since a rule the arm no longer finds
+# fails the gate whichever paragraph went; the arm is the guarantee here, and
+# these asserts only close the silent-no-op door on a full reword.
 run_mutant "claim-finding closure rule deleted from fix-loop.md" "$J \"import pathlib
 p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
 s=p.read_text(); nl=chr(10); key='claim finding'
@@ -238,6 +247,63 @@ assert len(keep)<len(paras), 'mutant is a no-op: findings.md no longer names a c
 out=(nl+nl).join(keep)
 assert key not in ' '.join(out.split()).lower(), 'mutant is a no-op: the term survives the paragraph deletion'
 p.write_text(out)\""
+
+# The closure rule's consequences, held in the authority only: the `M`-exclusion
+# bullet in *Re-review fan-out* and the `M=0 → no round` condition on the fix
+# loop's step 3. Deleting either reinstates the contradiction the rule removed —
+# a fan-out demanding an owner for a diff the rule excluded, or a step 3
+# mandating a round the rule says never happens — and before the CLAIM_EFFECT
+# arm both deletions were green.
+#
+# Each mutant asserts the phrase it targets is present BEFORE (or it is a no-op
+# on prose that already rotted) and gone AFTER, and that the OTHER consequence
+# survived — so the kill is attributable to the phrase named in the mutant's own
+# name and cannot be borrowed from its sibling. Backticks are built with
+# chr(96): a literal one inside this double-quoted shell argument would be
+# command substitution.
+run_mutant "M-exclusion bullet deleted from fix-loop.md" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+s=p.read_text(); nl=chr(10); bt=chr(96); key='not counted in '+bt+'M'+bt
+assert key in s, 'mutant is a no-op: the M-exclusion bullet is already absent'
+L=s.split(nl); at=[i for i,x in enumerate(L) if key in x]
+assert len(at)==1, 'mutant is a no-op: the phrase is on more than one line, so deleting one bullet no longer removes it'
+i=at[0]; j=i+1
+while j<len(L) and L[j].startswith('  '): j+=1
+del L[i:j]
+out=nl.join(L)
+assert key not in out, 'mutant is a no-op: the bullet deletion left the phrase behind'
+assert 'M=0 ' in out, 'mutant is a no-op: it removed the no-round condition too, so a kill would not be attributable to the M-exclusion bullet'
+p.write_text(out)\""
+run_mutant "no-round RV form deleted from fix-loop.md" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+s=p.read_text(); nl=chr(10); bt=chr(96)
+flat=lambda x: ' '.join(x.split()).lower()
+key='m=0 \u2192 no round'
+assert key in flat(s), 'mutant is a no-op: the no-round RV form is already absent or reworded'
+paras=s.split(nl+nl)
+keep=[x for x in paras if key not in flat(x)]
+assert len(keep)<len(paras), 'mutant is a no-op: no paragraph carries the form'
+out=(nl+nl).join(keep)
+assert key not in flat(out), 'mutant is a no-op: the form survives the paragraph deletion'
+assert 'not counted in '+bt+'M'+bt in out, 'mutant is a no-op: it removed the M-exclusion bullet too, so a kill would not be attributable to the no-round form'
+p.write_text(out)\""
+
+# check-plugin.py cites its mutants BY NAME, and nothing kept those names true
+# until the citation check was added. The real-world failure is a rename in this
+# file, so that is what this mutant does: it renames a cited mutant and leaves
+# the citation pointing at a name that no longer exists. The gate must notice.
+# Guarded both ways — if the old name is not here the mutation is a no-op and
+# says so, and the rename is verified to have landed.
+run_mutant "cited mutant renamed out from under its citation" '
+f=tools/check-plugin-mutants.sh
+old="run_mutant \"cited predicate file unreadable\""
+new="run_mutant \"cited predicate file cannot be read\""
+if grep -qF "$old" "$f"; then
+  sed -i "s|$old|$new|" "$f"
+  grep -qF "$new" "$f" || echo "mutant is a no-op: the rename did not apply, so no citation was orphaned"
+else
+  echo "mutant is a no-op: this harness no longer defines the mutant whose name the gate cites, so the citation under test is not the one renamed"
+fi'
 
 echo
 echo "killed=$PASS survived=$SURV"

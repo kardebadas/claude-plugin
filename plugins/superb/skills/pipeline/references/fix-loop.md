@@ -92,6 +92,13 @@ phase autonomously.
      catches it, so demoting it to Minor would let a spec gap ride out the run
      as a deferred note. Record the re-tag in the ledger row so the call is
      visible.
+     **These branches are the severity decider, not only a re-tag rule.** The
+     predicate is stated over an incoming `Important` because that is the
+     vocabulary it was written to convert, but it decides severity wherever
+     this skill has to set a tier itself — a **claim finding** below is one such
+     place, whatever tier it arrived under — and it decides it on these same
+     branches' own terms. The tier a finding arrived under is not evidence of
+     which branch it reaches.
      When duplicate reports disagree within the three tiers, **the highest
      wins**. **Assign every new finding the next free `F-NNN`
      ID**; a rediscovered finding keeps the ID it already has. Reviewers return
@@ -319,6 +326,37 @@ When blocking findings exist (and the convergence rule permits another run):
    assignments cover every fix diff. Update the ledger and complete the
    Iteration-log row with the set of F-IDs still open after the re-review.
 
+   **Unless `M=0`.** `M` counts the targeted F-IDs a re-review could cover, and
+   a claim finding closed by deletion or by a pin is not one of them (*Re-review
+   fan-out*, below). An iteration whose every targeted finding closed that way
+   therefore has `M=0`, falls off the first row of the fan-out table, and **runs
+   no round**: there is no behaviour to review, and no fix diff for an
+   assignment to own. `M=0` licenses skipping this step and nothing else does —
+   one behavioural fix in the same iteration puts `M` back above zero and the
+   round is owed in full, over every fix diff including the claim closures'
+   neighbours. The ledger update and the Iteration-log row still happen; only
+   the fan-out is skipped.
+
+   **A round correctly not run is recorded, not omitted.** An absent round and a
+   skipped review read identically on the `RV` line, which is the failure that
+   line exists to catch, so the iteration writes itself in the same per-round
+   grammar with `no round` where the reviewer counts would go:
+
+   ```markdown
+         → round 3: M=0 → no round · claim closures: F-018 deleted,
+           F-019 pinned by `tests/test_x.py::test_claim` → no findings
+   ```
+
+   The ordinal is the round that iteration owed, so the sequence has no gap a
+   reader has to interpret. `M=0` is the only declaration that licenses `no
+   round`, and the round closes on the F-IDs plus each one's route — `deleted`,
+   or `pinned by <test>` naming the test — each of which must match that F-ID's
+   `Closed by` cell in the ledger. There is no `reports` field and no `coverage`
+   field, because there were no reviewers to file either; those two fields are
+   what a round of nobody can carry in their place. A `no round` whose routes
+   are unnamed, or that names an F-ID the ledger closed some other way, is a
+   skipped review wearing this form.
+
    **What this does to the `RV` line depends on whether the fan-out has run.**
    A fix loop can be entered from step 1 — a wave's build gates failing is a bug
    finding before any reviewer exists (`parallel.md`). In that case `RV` is
@@ -453,9 +491,12 @@ however complete, authorizes nothing.
   precedent, defaults, reversibility, or decision logs — ask the user.
 - Never dispatch fix-mode on a spec that already failed unchanged — the
   convergence rule stop comes first.
-- A blocking finding is closed only via the finding-closure ledger (fixed and
-  verified, or user-ruled false positive) — never by a review round that
-  didn't cover its fix.
+- A blocking finding is closed only via one of the finding-closure ledger's
+  routes — fixed and verified, user-ruled false positive, or, for a claim
+  finding, the claim deleted or pinned with a test. Which route forbids what
+  differs: a **fixed-and-verified** closure is never granted by a review round
+  that didn't cover its fix, while a **deletion-or-pin** closure opens no round
+  for any review to cover and is not made suspect by that.
 - Never advance a phase with an open Critical/Major/bug ledger entry.
 - Never advance a phase with failing tests or a broken build on its changes.
 - Never advance a phase with an unanswered ambiguity question.

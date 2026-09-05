@@ -187,9 +187,39 @@ renumbered. A ledger entry is **closed** only by one of:
   round from reviewers who never looked at the fix closes nothing.
 - **User-ruled false positive**: the user (not you) declared it not a bug.
 
+**A claim finding closes differently, and the difference is a termination
+argument.** A *claim finding* is one whose defect is an assertion rather than a
+behaviour: a comment, a docblock, a commit message or a run report that states a
+count, a `file:line` citation, a sole-writer or sole-caller claim, or "X is what
+protects Y". **Neither enforcement code nor a run's own records is exempt.** A
+comment in a gate, a linter or a test harness is prose the same way — "it is
+rationale, not model-facing text" is exactly the carve-out that lets a rule's own
+enforcement keep the claims the rule exists to remove — and a run's own records,
+its reports and its ledger rows, are prose the same way. Such a finding closes by
+exactly one of:
+
+- **Deleting the claim.** Always available, always terminating.
+- **Pinning it with a test** that fails when the claim stops being true, or
+  re-anchoring it to a symbol that moves with the code.
+
+**A rewrite is not a closure.** A corrected assertion is still an unexecuted
+assertion: nothing keeps it true as the code under it changes, so the fix round
+raises its own successor and the loop has no fixed point. So a claim finding
+closed by deletion or by a pin **opens no re-review round** — there is no
+behaviour to re-review, and the pin, if any, is a test the suite already runs,
+so `M` and the fix-diff coverage union both exclude it. A claim finding whose
+fix rewrote the prose is **not closed**: send it back for a deletion or a pin.
+
+Severity is decided by the re-tag predicate above, not by this rule: a claim
+finding is **Minor** unless one of that predicate's branches applies to it on
+its own terms. The branch such a finding usually reaches is **a requirement the
+plan, spec or brief mandated that the phase did not implement** — a claim that
+another task's work is already done is how that requirement comes to be skipped
+— and there it is **Major**, not a cosmetic note.
+
 Every open ID carries forward into the next consolidation **by construction** —
 the ledger is read, not remembered. A finding that silently disappears from
-review output stays `open` in the file until closed by one of the two paths
+review output stays `open` in the file until closed by one of the routes
 above.
 
 ## Convergence rule (checked before every fix-mode dispatch)
@@ -332,6 +362,11 @@ of blocking F-IDs this fix-mode run targeted:
   the files its findings named still needs an owner. **A clean round from
   reviewers who never looked at a fix closes nothing** — that is the ledger's
   closure condition, and this is how you satisfy it.
+- **A claim finding closed by deletion or by a pin is not counted in `M`, and
+  its fix commit is not in that union.** It opens no re-review round at all
+  (*Finding-closure ledger*, above), so counting it would size a round nobody
+  needs and demand an owner for a diff with no behaviour in it. Every other
+  commit the fix-mode run produced still needs one.
 - The integration reviewer's scope is the union of all fix commits, hunting
   interactions between fixes and regressions the fixes introduced elsewhere.
 - Re-reviews also re-run the test suite; failures are bug findings as always,

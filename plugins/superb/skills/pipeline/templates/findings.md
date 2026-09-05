@@ -56,6 +56,16 @@ phase.
 the fix diff touched the code the finding names **AND** a re-review whose slice
 covered that fix diff reports it resolved; or the **user** ruled it a false
 positive. A finding that merely stops appearing in review output stays `open`.
+A **claim finding** — one whose defect is an assertion rather than a behaviour:
+a false count, a stale `file:line` citation, a wrong sole-writer claim, in
+source, in a gate's own comments or in this run's reports — closes only by
+**deleting the claim** or by **pinning it with a test** that fails when the
+claim stops being true. **A rewrite is not a closure**: the corrected sentence
+is still unexecuted, so nothing keeps it true as the code under it changes,
+which is how a fix round raises its own successor. Such a closure **opens no
+re-review round**. Its `Sev` comes from the re-tag predicate above — `Minor`
+unless a branch there applies, and **a mandated requirement the phase did not
+implement** is the branch a false "that work is done" claim usually reaches.
 
 ## Counters — the caps are enforced from HERE, not from memory
 

@@ -205,6 +205,40 @@ else
   cp "$k" "$f"; rm -f "$k"
 fi'
 
+# The claim-finding closure rule is held BY PHRASE in the authority
+# (references/fix-loop.md) and in the copy that ships into the run directory
+# (templates/findings.md), where the closing agent actually reads it. A rule held
+# in neither text is deletable on a green build — which is the failure the rule
+# is itself about, so it does not get to be the one rule nothing holds.
+#
+# Paragraph-scoped and whitespace-normalised, so no line-break position is
+# pinned: the mutation deletes every blank-line-delimited paragraph whose
+# flattened text names the term. It asserts the mutation rather than the prose's
+# shape — the deletion must remove a paragraph, and the term must be gone
+# afterwards. Reword the rule and the mutant refuses loudly with its message
+# printed instead of turning into a silent no-op.
+run_mutant "claim-finding closure rule deleted from fix-loop.md" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+s=p.read_text(); nl=chr(10); key='claim finding'
+paras=s.split(nl+nl)
+keep=[x for x in paras if key not in ' '.join(x.split()).lower()]
+assert len(keep)<len(paras), 'mutant is a no-op: fix-loop.md no longer names a claim finding'
+out=(nl+nl).join(keep)
+assert key not in ' '.join(out.split()).lower(), 'mutant is a no-op: the term survives the paragraph deletion'
+p.write_text(out)\""
+# The same deletion against the copy. Held separately: the authority and the copy
+# are edited independently, so a kill on one says nothing about the other — and
+# the copy is the one the template says gets copied into the run directory.
+run_mutant "claim-finding closure rule deleted from findings.md" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/templates/findings.md')
+s=p.read_text(); nl=chr(10); key='claim finding'
+paras=s.split(nl+nl)
+keep=[x for x in paras if key not in ' '.join(x.split()).lower()]
+assert len(keep)<len(paras), 'mutant is a no-op: findings.md no longer names a claim finding'
+out=(nl+nl).join(keep)
+assert key not in ' '.join(out.split()).lower(), 'mutant is a no-op: the term survives the paragraph deletion'
+p.write_text(out)\""
+
 echo
 echo "killed=$PASS survived=$SURV"
 if [ "$SURV" -ne 0 ]; then

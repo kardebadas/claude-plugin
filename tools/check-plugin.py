@@ -351,6 +351,61 @@ for n in skill_names:
                         "reachability, or a reachable fragility; Minor otherwise), "
                         "or stop citing it from SKILL.md and state the predicate "
                         "inline")
+        # A CLAIM FINDING — one whose defect is an assertion rather than a
+        # behaviour — closes by deleting the claim or by pinning it with a test,
+        # never by rewriting the sentence, and such a closure opens no re-review
+        # round. The rule needs an arm for the same reason the predicate above
+        # needed one: a rule this skill states only in prose is deletable in one
+        # edit with both gates green, and a rule no arm holds is exactly the
+        # failure this rule is about.
+        #
+        # Each file that ships the rule is held. `references/fix-loop.md` is the
+        # authority the fix loop reads; `templates/findings.md` says of itself
+        # that it is copied into the run directory, so the run's own ledger — not
+        # this repo's fix-loop.md — is the text open in front of a closing agent.
+        # SKILL.md is deliberately out of scope: this arm holds the texts a
+        # closing agent acts from, not every place the rule is restated for a
+        # reader.
+        #
+        # PHRASES, not paraphrases: a check compares strings, never meanings, so
+        # the shared phrase IS the drift detector. Substring rather than regex,
+        # and case-folded — a substring test has no pattern syntax to get wrong.
+        # Matched against flattened text so the rule may re-wrap freely; a
+        # raw-text match would break on the first reflow, failing on the very
+        # rule it exists to require. A phrase check proves presence, never
+        # coherence: it refuses a deletion, not a bad paraphrase around the
+        # phrases it keeps.
+        # Mutants: "claim-finding closure rule deleted from fix-loop.md",
+        #          "claim-finding closure rule deleted from findings.md".
+        if n == "pipeline":
+            CLAIM_RULE = (
+                "claim finding",             # the term
+                "deleting the claim",        # closure path
+                "pinning it with a test",    # closure path
+                "rewrite is not a closure",  # the non-closure
+                "opens no re-review round",  # the no-round consequence
+            )
+            for rel in ("references/fix-loop.md", "templates/findings.md"):
+                ct, ce = read(sdir / n / rel)
+                if ce:
+                    bad(f"{n}/{rel} must carry the claim-finding closure rule, but "
+                        f"that file cannot be read: {ce}")
+                    continue
+                gone = [q for q in CLAIM_RULE if q not in " ".join(ct.split()).lower()]
+                if gone:
+                    bad(f"{n}/{rel} is missing the claim-finding closure rule ("
+                        + ", ".join(map(repr, gone)) + " absent). A claim finding — "
+                        "a false count, a stale citation, a wrong sole-writer claim "
+                        "— closes by deleting the claim or by pinning it with a "
+                        "test, never by rewriting the sentence, and such a closure "
+                        "opens no re-review round; without the rule a fix round "
+                        "keeps raising the successor of its own fix. Both texts "
+                        "carry it: fix-loop.md is the authority and "
+                        "templates/findings.md is the copy that ships into the run "
+                        "directory, where the closing agent reads it. REMEDY: "
+                        f"restore the wording in {rel} — these phrases are required "
+                        "verbatim, which is what makes drift between the two texts "
+                        "detectable")
     for f in sorted((sdir / n).rglob("*.md")):
         t, e = read(f)
         if e: continue
@@ -361,7 +416,8 @@ for n in skill_names:
                 "paraphrase it, since prefixing it inverts the claim")
 if len(FAIL) == _inv_before:
     ok("no indexed-placeholder dispatch, invocations namespaced, no unhandled "
-       "fourth severity tier, re-tag predicate present where cited")
+       "fourth severity tier, re-tag predicate present where cited, "
+       "claim-finding closure rule present in both texts that ship it")
 
 print("== agents ==")
 adir = ROOT/"plugins/superb/agents"

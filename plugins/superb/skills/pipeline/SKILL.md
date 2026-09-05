@@ -860,6 +860,8 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
 | "This `[~]` looks done, I'll tick it and move on" | Rule 4: verify against git and the tests. Looks-done is exactly how half-applied work gets built on. |
 | "The register/ledger is in my context, writing it to a file is duplication" | Your context is one compaction from empty. A rule with no file behind it is unenforceable. |
 | "These two findings are basically the same one from last round" | That's the interpretive call the ID system exists to remove. Look up the F-ID. |
+| "The comment was wrong, I corrected it — finding closed" | A corrected assertion is still unexecuted, and nothing keeps it true as the code under it changes. A claim finding closes by deleting the claim or pinning it with a test. Nothing else. |
+| "I'll re-review the fix to the docblock to be safe" | There is no behaviour to re-review. A claim finding closed by deletion or a pin opens no round; one closed by a rewrite is not closed. |
 | "I'll read the full review report so I don't miss anything" | Full reports in orchestrator context are the bloat that causes drift. Consolidate to `findings.md`; read details on demand. |
 | "4a and 4b each passed review, the phase is covered" | Each reviewer saw half a designed unit. Run the joint integration review over the combined diff. |
 | "This is iteration 2, I'm well under the cap of 5" | Unless you read that from `findings.md`, you are guessing after a compaction that may have eaten iterations 1–4. Read the row. |
@@ -988,6 +990,9 @@ memory — decide what happens next.**
   erases them, and "a finding stays open until closed" becomes unenforceable.
 - **Minting a new F-ID for a rediscovered finding** — it keeps its original ID,
   or the convergence rule can never fire.
+- **Closing a claim finding by rewriting the sentence** — the rewrite is the
+  next round's finding. Delete the claim, or pin it with a test; a rewrite
+  closes nothing, and the fix loop it starts has no fixed point.
 - **Pulling full review reports or diffs into orchestrator context** — hold the
   `DETAIL:` path; read it only when a decision needs it.
 - **Advancing past a split without the joint integration review** — per-sibling

@@ -43,6 +43,18 @@ else
   ( cd "$D" && ./tools/check-plugin.sh ) | grep FAIL
   exit 1
 fi
+# The run-mode mutants below all start from tools/fixtures/run-ok CONFORMING:
+# each one breaks it in a single named way, and a kill only means what its name
+# says if everything else about the fixture was green first. Nothing else checks
+# that — the default mode never reads tools/fixtures/ — so it is checked here,
+# where the rest of the baseline is.
+if ( cd "$D" && ./tools/check-plugin.sh --run tools/fixtures/run-ok ) >/dev/null 2>&1; then
+  echo "  ok    clean copy passes with --run over tools/fixtures/run-ok"
+else
+  echo "  FAIL  tools/fixtures/run-ok does not conform on a clean copy — every run-mode mutant below would then kill for that reason instead of its own"
+  ( cd "$D" && ./tools/check-plugin.sh --run tools/fixtures/run-ok ) | grep FAIL
+  exit 1
+fi
 
 echo "mutants:"
 J="python3 -c"
@@ -116,6 +128,130 @@ out=s.replace(a, 'M=9 \u2192 3 slice + 1 integration')
 assert out!=s, 'mutant is a no-op: the over-declaration did not apply'
 p.write_text(out)\""
 run_mutant "every worked RV example deleted"       "sed -i '/· reports/d' plugins/superb/skills/pipeline/*.md plugins/superb/skills/pipeline/*/*.md"
+
+# --- the linter must also be able to fail over a REAL run directory ---
+# `--run <dir>` lints `<dir>/progress.md` with the same rules plus one the
+# worked examples cannot support: the named report files either exist in
+# `agent-output/` or they do not. tools/fixtures/run-ok/ is a conforming run
+# directory that exists for these mutants to break.
+#
+# This harness only ever invokes `./tools/check-plugin.sh` with NO arguments,
+# so every mutant below first has to make the mode reachable. `enable_run`
+# injects `--run tools/fixtures/run-ok` into the copy's wrapper, and refuses
+# loudly rather than silently if the wrapper stops forwarding its arguments —
+# an unreachable mode would make each of these a no-op that reports SURVIVED
+# for a reason that has nothing to do with what it set out to break. Injecting
+# alone is deliberately NOT a mutation: the fixture conforms, so a copy with
+# only `enable_run` applied must still PASS, which is what makes each fixture
+# edit below the whole cause of its own kill.
+enable_run() { # inside the copy: make the wrapper pass --run by default
+  local f=tools/check-plugin.sh a='check-plugin.py" "$@"'
+  if ! grep -qF "$a" "$f"; then
+    echo "mutant is a no-op: the wrapper no longer invokes check-plugin.py with forwarded arguments, so --run cannot be reached"
+    return 1
+  fi
+  sed -i 's|check-plugin.py" "$@"|check-plugin.py" --run tools/fixtures/run-ok "$@"|' "$f"
+  if ! grep -qF -- '--run tools/fixtures/run-ok' "$f"; then
+    echo "mutant is a no-op: --run was not injected into the wrapper, so the run mode was never entered"
+    return 1
+  fi
+}
+# An unrecognised argument must be REFUSED, not ignored. Ignored, `--rn` runs
+# the default mode and prints PASS, which a caller reads as "the run directory
+# conforms" when the run directory was never opened.
+run_mutant "wrapper passes an unrecognised argument" '
+f=tools/check-plugin.sh; a="check-plugin.py\" \""
+if ! grep -qF "$a" "$f"; then
+  echo "mutant is a no-op: the wrapper no longer invokes check-plugin.py with an argument list"
+else
+  sed -i "s|check-plugin.py\" \"|check-plugin.py\" --rn tools/fixtures/run-ok \"|" "$f"
+  grep -qF -- "--rn tools/fixtures/run-ok" "$f" || echo "mutant is a no-op: the bad argument was not injected"
+fi'
+# Anchored on the ASCII half of the declaration, not on the arrow: the arrow is
+# a multi-byte character an editor can re-encode, and a sed that matches
+# nothing is a mutant that proves nothing. Both ends asserted.
+run_mutant "run tracker over-declares reviewers" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if [ "$(grep -cF "1 slice + 0 integration" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture no longer declares 1 slice + 0 integration exactly once"
+else
+  sed -i "s|1 slice + 0 integration|3 slice + 1 integration|" "$f"
+  grep -qF "3 slice + 1 integration" "$f" || echo "mutant is a no-op: the over-declaration did not apply"
+fi'
+# The one check a run directory permits and the worked examples cannot: rename
+# the report file the round names, leave the file itself in place. The declared
+# count still matches the listed count, so this kill is attributable to the
+# existence check and to nothing else.
+run_mutant "run tracker cites a report file that is not in agent-output" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if ! grep -qF "reports p1-review-a.md" "$f"; then
+  echo "mutant is a no-op: the fixture round no longer names p1-review-a.md"
+elif [ -e tools/fixtures/run-ok/agent-output/p1-review-z.md ]; then
+  echo "mutant is a no-op: p1-review-z.md exists in the fixture, so the renamed file would be found"
+else
+  sed -i "s|reports p1-review-a.md|reports p1-review-z.md|" "$f"
+  grep -qF "reports p1-review-z.md" "$f" || echo "mutant is a no-op: the rename did not apply"
+fi'
+# Renames the coverage FIELD rather than deleting the segment, so the kill is
+# attributable to the coverage arm alone. Asserts the reports field survives.
+run_mutant "run tracker round loses its coverage field" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if [ "$(grep -cF "coverage p1-coverage.md" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture no longer names coverage p1-coverage.md exactly once"
+else
+  sed -i "s|coverage p1-coverage.md|notes p1-coverage.md|" "$f"
+  grep -qF "notes p1-coverage.md" "$f" || echo "mutant is a no-op: the coverage field was not renamed"
+  grep -qF "reports p1-review-a.md" "$f" || echo "mutant is a no-op: it took the reports field too, so a kill could come from the reviewer-count arm instead"
+fi'
+# `p2-review-{a,b,int}.md` is one written name and three files. Deleting ONE
+# member proves the existence check expands the brace set instead of testing
+# the literal string — which the conforming fixture already proves it must,
+# since a literal `p2-review-{a,b,int}.md` exists nowhere.
+run_mutant "run tracker loses one brace-expanded report file" '
+enable_run || exit 0
+t=tools/fixtures/run-ok/agent-output/p2-review-b.md
+if [ ! -f "$t" ]; then
+  echo "mutant is a no-op: the brace-expanded member p2-review-b.md is already absent from the fixture"
+else
+  grep -qF "reports p2-review-{a,b,int}.md" tools/fixtures/run-ok/progress.md ||
+    echo "mutant is a no-op: the fixture round no longer names a brace-expanded report set"
+  rm -f "$t"
+  [ ! -e "$t" ] || echo "mutant is a no-op: the report file was not removed"
+fi'
+# A `--run` over a tracker with nothing closed must not read as a clean review.
+run_mutant "run tracker has no closed review round" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if [ "$(grep -c "\[x\] RV" "$f")" != 2 ]; then
+  echo "mutant is a no-op: the fixture no longer holds exactly two closed RV records"
+else
+  sed -i "/\[x\] RV/d" "$f"
+  grep -q "\[x\] RV" "$f" && echo "mutant is a no-op: the closed records were not removed"
+fi'
+# Both "missing" branches must report a NAMED failure of their own, and each
+# mutant below is what says so: neutralise either branch and its mutant is the
+# only one in the whole harness that survives.
+run_mutant "run directory has no progress.md" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if [ ! -f "$f" ]; then
+  echo "mutant is a no-op: the fixture has no progress.md to remove"
+else
+  rm -f "$f"
+  [ ! -e "$f" ] || echo "mutant is a no-op: progress.md was not removed"
+fi'
+run_mutant "run directory has no agent-output" '
+enable_run || exit 0
+d=tools/fixtures/run-ok/agent-output
+if [ ! -d "$d" ]; then
+  echo "mutant is a no-op: the fixture has no agent-output/ to remove"
+else
+  rm -rf "$d"
+  [ ! -e "$d" ] || echo "mutant is a no-op: agent-output/ was not removed"
+fi'
 
 # --- the skill-invocation arm must itself stay honest ---
 run_mutant "skill dispatches on \$0 again"         "sed -i 's|Dispatch on the argument below|Dispatch on the argument (\`\$0\`)|' plugins/superb/skills/pipeline/SKILL.md"

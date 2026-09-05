@@ -254,17 +254,30 @@ else
     fi
   fi
 fi'
-# Anchored on the ASCII half of the declaration, not on the arrow: the arrow is
-# a multi-byte character an editor can re-encode, and a sed that matches
-# nothing is a mutant that proves nothing. Both ends asserted.
+# THE DECLARATION IS LEFT ALONE AND THE LIST IS SHORTENED, which is a change
+# from how this mutant used to over-declare. It raised Phase 1 from
+# `1 slice + 0 integration` to `3 slice + 1 integration`, and once the two
+# arithmetic arms landed that record broke two rules at once — `ceil(1/5)` is 1,
+# so the sizing arm fires as well — and a kill by two arms is attributable to
+# neither. Shrinking the brace set instead leaves every declared number
+# conforming and only the reviewer COUNT disagreeing, which is what this mutant
+# is named for. `p2-review-b.md` stays in `agent-output/` and keeps its coverage
+# row, so no existence arm and no coverage-table arm can fire either: the round
+# simply stops naming it.
+# Anchored on ASCII, never on the arrow: the arrow is a multi-byte character an
+# editor can re-encode, and a sed that matches nothing is a mutant that proves
+# nothing. Both ends asserted.
 run_mutant "run tracker over-declares reviewers" '
 enable_run || exit 0
 f=tools/fixtures/run-ok/progress.md
-if [ "$(grep -cF "1 slice + 0 integration" "$f")" != 1 ]; then
-  echo "mutant is a no-op: the fixture no longer declares 1 slice + 0 integration exactly once"
+if [ "$(grep -cF "reports p2-review-{a,b,int}.md" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture no longer names the brace set p2-review-{a,b,int}.md exactly once"
 else
-  sed -i "s|1 slice + 0 integration|3 slice + 1 integration|" "$f"
-  grep -qF "3 slice + 1 integration" "$f" || echo "mutant is a no-op: the over-declaration did not apply"
+  sed -i "s|reports p2-review-{a,b,int}.md|reports p2-review-{a,int}.md|" "$f"
+  grep -qF "reports p2-review-{a,int}.md" "$f" || echo "mutant is a no-op: the report list was not shortened"
+  grep -qF "N=8" "$f" || echo "mutant is a no-op: the task count went with the list, so a kill could come from the sizing arm instead"
+  grep -qF "2 slice + 1 integration" "$f" || echo "mutant is a no-op: the declared counts moved with the list, so a kill could come from a sizing arm instead"
+  [ -f tools/fixtures/run-ok/agent-output/p2-review-b.md ] || echo "mutant is a no-op: the dropped report file went too, so a kill could come from the report-existence arm instead"
 fi'
 # The one check a run directory permits and the worked examples cannot: rename
 # the report file the round names, leave the file itself in place. The declared
@@ -316,8 +329,9 @@ fi'
 # THE RECORD BOUNDARY, and the one mutation that can see it. A run record used
 # to end at 400 flattened characters — a window calibrated on the skill's terse
 # worked examples — so a conforming round whose `coverage` field sat past that
-# was reported as missing one. The fixture's Phase 3 is such a round (its
-# fields sit at offsets 665 and 700), and the harness's own baseline `--run`
+# was reported as missing one. The fixture's Phase 3 is such a round — its
+# `scope` and `note` prose push both fields well past any 400-character
+# window — and the harness's own baseline `--run`
 # check is what holds the window's removal: put a byte cap back and the clean
 # copy stops passing, which aborts this run with that named message before any
 # mutant is attempted.
@@ -342,7 +356,7 @@ enable_run || exit 0
 '"$J"' "import pathlib
 p=pathlib.Path(\"tools/fixtures/run-ok/progress.md\")
 L=p.read_text().split(chr(10))
-key=\"reports p3-review-{a,b,c,int}.md\"
+key=\"reports p3-review-{a,b,int}.md\"
 i=[n for n,x in enumerate(L) if key in x]
 assert len(i)==1, \"mutant is a no-op: the long round no longer names its brace-expanded report set exactly once\"
 assert \"coverage p3-coverage.md\" in L[i[0]], \"mutant is a no-op: the long round no longer carries a coverage field on that line\"
@@ -404,9 +418,11 @@ fi'
 # both gates passed a fixture that did it: Phase 3 declared three slice
 # reviewers plus an integration reviewer over one commit, all four coverage rows
 # carrying one byte-identical range. The four mutants below hold the arm that
-# reads those ranges.
+# reads those ranges. Phase 3 has since been resized to `ceil(N/5)` — two
+# slices, three distinct ranges — which is the smallest shape that still
+# exercises distinctness on the happy path.
 #
-# All four work on Phase 3, whose round declares `3 slice + 1 integration` —
+# All four work on Phase 3, whose round declares `2 slice + 1 integration` —
 # the arm is scoped to `s >= 2`, so Phase 1's single-slice round cannot
 # exercise it. NONE of them touches the tracker's `reports` field or its
 # declared counts: three edit only the coverage file, and the fourth asserts
@@ -423,7 +439,7 @@ b=\"| p3-review-b.md | c0c0c0c^..c0c0c0c |\"
 assert s.count(a)==1 and s.count(b)==1, \"mutant is a no-op: the two slice rows are no longer written as the fixture wrote them\"
 out=s.replace(b, \"| p3-review-b.md | ccccccc^..ccccccc |\")
 assert out.count(\"ccccccc^..ccccccc |\")==2, \"mutant is a no-op: the duplicate range did not land\"
-assert \"| p3-review-int.md | ccccccc^..c1c1c1c |\" in out, \"mutant is a no-op: it took the integration row too, so a kill would not be attributable to two SLICE reviewers sharing a range\"
+assert \"| p3-review-int.md | ccccccc^..c0c0c0c |\" in out, \"mutant is a no-op: it took the integration row too, so a kill would not be attributable to two SLICE reviewers sharing a range\"
 p.write_text(out)"'
 # The row LOOKUP, not the comparison: the report is still named on the round and
 # its file is still in agent-output/, so neither existence arm can fire. What
@@ -435,12 +451,12 @@ enable_run || exit 0
 p=pathlib.Path(\"tools/fixtures/run-ok/agent-output/p3-coverage.md\")
 t=pathlib.Path(\"tools/fixtures/run-ok/progress.md\")
 s=p.read_text(); nl=chr(10)
-row=\"| p3-review-c.md | c1c1c1c^..c1c1c1c |\"
-assert s.count(row)==1, \"mutant is a no-op: the third slice no longer has the row the fixture gave it\"
+row=\"| p3-review-b.md | c0c0c0c^..c0c0c0c |\"
+assert s.count(row)==1, \"mutant is a no-op: the second slice no longer has the row the fixture gave it\"
 out=nl.join([x for x in s.split(nl) if x.strip()!=row])
-assert \"p3-review-c.md\" not in out, \"mutant is a no-op: the row was not removed\"
-assert \"p3-review-{a,b,c,int}.md\" in t.read_text(), \"mutant is a no-op: the round no longer names that report, so its missing row is not a missing row\"
-assert pathlib.Path(\"tools/fixtures/run-ok/agent-output/p3-review-c.md\").exists(), \"mutant is a no-op: the report file went too, so a kill could come from the report-existence arm instead\"
+assert \"p3-review-b.md\" not in out, \"mutant is a no-op: the row was not removed\"
+assert \"p3-review-{a,b,int}.md\" in t.read_text(), \"mutant is a no-op: the round no longer names that report, so its missing row is not a missing row\"
+assert pathlib.Path(\"tools/fixtures/run-ok/agent-output/p3-review-b.md\").exists(), \"mutant is a no-op: the report file went too, so a kill could come from the report-existence arm instead\"
 p.write_text(out)"'
 # THE DECISION NOT TO EXCLUDE THE INTEGRATION ROW, held. Its range is the union
 # of the slices, so on a conforming round it is distinct from each of them and
@@ -452,11 +468,11 @@ enable_run || exit 0
 '"$J"' "import pathlib
 p=pathlib.Path(\"tools/fixtures/run-ok/agent-output/p3-coverage.md\")
 s=p.read_text()
-a=\"| p3-review-int.md | ccccccc^..c1c1c1c |\"
+a=\"| p3-review-int.md | ccccccc^..c0c0c0c |\"
 assert s.count(a)==1, \"mutant is a no-op: the integration row no longer spans the slices the way the fixture wrote it\"
 out=s.replace(a, \"| p3-review-int.md | ccccccc^..ccccccc |\")
 assert out.count(\"ccccccc^..ccccccc |\")==2, \"mutant is a no-op: the collapse did not land\"
-assert \"| p3-review-b.md | c0c0c0c^..c0c0c0c |\" in out and \"| p3-review-c.md | c1c1c1c^..c1c1c1c |\" in out, \"mutant is a no-op: a slice row went too, so a kill could come from the slice-distinctness reading instead\"
+assert \"| p3-review-a.md | ccccccc^..ccccccc |\" in out and \"| p3-review-b.md | c0c0c0c^..c0c0c0c |\" in out, \"mutant is a no-op: a slice row went too, so a kill could come from the slice-distinctness reading instead\"
 p.write_text(out)"'
 # An UNREADABLE coverage file must report itself as unreadable, and this mutant
 # asserts the MESSAGE rather than the verdict, on the `cited predicate file
@@ -1262,6 +1278,310 @@ if grep -qF "$old" "$f"; then
 else
   echo "mutant is a no-op: this harness no longer defines the mutant whose name the gate cites, so the citation under test is not the one renamed"
 fi'
+
+
+# --- the rules the last two rounds added, each measured deletable on green ---
+# Nine rule statements reached this branch stated in prose and held by nothing:
+# the `C=<n>` rule in all three files that state it, the coverage table's
+# distinctness rule in both, the fix diff's slice distinctness in both, the
+# Invariant's reviewer-evidence exception, the pre-`RV` recording rule, the
+# coverage table's row grammar, and Rule 5b's one `Files:` exception at both
+# ends. Every one was removed individually and `check-plugin.sh` reported PASS.
+# Two of them are worse than unheld: the gate hard-FAILs an `M=` round with no
+# `C` and a multi-slice round repeating a range, so deleting the prose left the
+# linter red on a rule no document stated.
+#
+# ONE SURGICAL MUTANT PER (PHRASE, FILE), on the pattern the mutants above
+# established: the phrase is matched with `\s+` between its words, since the
+# gate reads it out of FLATTENED text and several of these sit across a line
+# break, and a literal match would be a silent no-op. Each asserts its anchor
+# was present exactly once before, that no occurrence survived the blur, that
+# the OTHER held phrases in the same file came through, and — where the phrase
+# has a second home — that the other file still carries it, so no kill can be
+# borrowed from a sibling entry. Backticks are built with chr(96) and
+# apostrophes with chr(39): a literal backtick inside these double-quoted shell
+# arguments would be command substitution, and a literal apostrophe would close
+# the single-quoted python string it sits in.
+run_mutant "the re-review C rule blurred in fix-loop.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+s=p.read_text(); bt=chr(96); ap=chr(39); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(x) for x in ['The', 'cluster', 'count', 'rides', 'the', 'round', 'as', bt+'C=<n>'+bt]]), re.I)
+assert len(a.findall(s))==1, 'mutant is a no-op: the phrase this mutant names is absent, reworded or duplicated in that file'
+out=a.sub('The cluster count is left off the round', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
+assert 'the number of blocking f-ids this fix-mode run targeted' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'm=0 \u2192 no round' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'one reviewer per file cluster' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'no two slices carry the same range' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+p.write_text(out)\""
+run_mutant "the C rule blurred in SKILL.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+s=p.read_text(); bt=chr(96); ap=chr(39); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(x) for x in ['cluster', 'count', 'is', 'recorded', 'on', 'the', 'round', 'as', bt+'C=<n>'+bt, 'and', bt+'s'+bt, 'must', 'equal', 'it']]), re.I)
+assert len(a.findall(s))==1, 'mutant is a no-op: the phrase this mutant names is absent, reworded or duplicated in that file'
+out=a.sub('cluster count is a matter for whoever ran the round', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
+assert 'never a count, a line number, a signature or a file list' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'is the only declaration that licenses it' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'one reviewer per file cluster' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'no two rows carry the same range' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+o=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+assert 'the cluster count rides the round as '+bt+'c=<n>'+bt in flat(o.read_text()), 'mutant is a no-op: the other file that holds this rule lost it too, so a kill would not be attributable to the copy this mutant names'
+p.write_text(out)\""
+run_mutant "the C clause blurred in run-state.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/references/run-state.md')
+s=p.read_text(); bt=chr(96); ap=chr(39); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(x) for x in ['writes', 'its', 'cluster', 'count', 'on', 'the', 'line', 'as', bt+'C=<n>'+bt, 'and', bt+'s'+bt, 'must', 'equal', 'it']]), re.I)
+assert len(a.findall(s))==1, 'mutant is a no-op: the phrase this mutant names is absent, reworded or duplicated in that file'
+out=a.sub('sizes itself from the fix diff and writes no count', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
+assert 'never a count, a line number, a signature or a file list' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'refuses the brief and says which fact' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'm=0 \u2192 no round' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'no two rows carry the same range' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+o=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+assert 'cluster count is recorded on the round as '+bt+'c=<n>'+bt+' and '+bt+'s'+bt+' must equal it' in flat(o.read_text()), 'mutant is a no-op: the other file that holds this rule lost it too, so a kill would not be attributable to the copy this mutant names'
+p.write_text(out)\""
+run_mutant "the coverage-row distinctness rule blurred in SKILL.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+s=p.read_text(); bt=chr(96); ap=chr(39); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(x) for x in ['no', 'two', 'rows', 'carry', 'the', 'same', 'range']]), re.I)
+assert len(a.findall(s))==1, 'mutant is a no-op: the phrase this mutant names is absent, reworded or duplicated in that file'
+out=a.sub('rows may repeat a range', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
+assert 'never a count, a line number, a signature or a file list' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'is the only declaration that licenses it' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'one reviewer per file cluster' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'no two slices carry the same range' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+o=pathlib.Path('plugins/superb/skills/pipeline/references/run-state.md')
+assert 'no two rows carry the same range' in flat(o.read_text()), 'mutant is a no-op: the other file that holds this rule lost it too, so a kill would not be attributable to the copy this mutant names'
+p.write_text(out)\""
+run_mutant "the coverage-row distinctness rule blurred in run-state.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/references/run-state.md')
+s=p.read_text(); bt=chr(96); ap=chr(39); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(x) for x in ['No', 'two', 'rows', 'carry', 'the', 'same', 'range']]), re.I)
+assert len(a.findall(s))==1, 'mutant is a no-op: the phrase this mutant names is absent, reworded or duplicated in that file'
+out=a.sub('Rows may repeat a range', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
+assert 'never a count, a line number, a signature or a file list' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'refuses the brief and says which fact' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'm=0 \u2192 no round' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+o=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+assert 'no two rows carry the same range' in flat(o.read_text()), 'mutant is a no-op: the other file that holds this rule lost it too, so a kill would not be attributable to the copy this mutant names'
+p.write_text(out)\""
+run_mutant "the slice distinctness rule blurred in fix-loop.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+s=p.read_text(); bt=chr(96); ap=chr(39); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(x) for x in ['No', 'two', 'slices', 'carry', 'the', 'same', 'range']]), re.I)
+assert len(a.findall(s))==1, 'mutant is a no-op: the phrase this mutant names is absent, reworded or duplicated in that file'
+out=a.sub('Slices may repeat a range', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
+assert 'the number of blocking f-ids this fix-mode run targeted' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'm=0 \u2192 no round' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'one reviewer per file cluster' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'the cluster count rides the round as '+bt+'c=<n>'+bt in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+o=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+assert 'no two slices carry the same range' in flat(o.read_text()), 'mutant is a no-op: the other file that holds this rule lost it too, so a kill would not be attributable to the copy this mutant names'
+p.write_text(out)\""
+run_mutant "the slice distinctness rule blurred in SKILL.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+s=p.read_text(); bt=chr(96); ap=chr(39); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(x) for x in ['no', 'two', 'slices', 'carry', 'the', 'same', 'range']]), re.I)
+assert len(a.findall(s))==1, 'mutant is a no-op: the phrase this mutant names is absent, reworded or duplicated in that file'
+out=a.sub('slices may repeat a range', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
+assert 'never a count, a line number, a signature or a file list' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'is the only declaration that licenses it' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'one reviewer per file cluster' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'no two rows carry the same range' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+o=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+assert 'no two slices carry the same range' in flat(o.read_text()), 'mutant is a no-op: the other file that holds this rule lost it too, so a kill would not be attributable to the copy this mutant names'
+p.write_text(out)\""
+run_mutant "the Invariant's reviewer-evidence exception blurred in fix-loop.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+s=p.read_text(); bt=chr(96); ap=chr(39); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(x) for x in ['The', 'round', 'forms', 'that', 'carry', 'no', 'reviewer', 'evidence', 'are', 'the', 'whole', 'of', 'the', 'exception']]), re.I)
+assert len(a.findall(s))==1, 'mutant is a no-op: the phrase this mutant names is absent, reworded or duplicated in that file'
+out=a.sub('Some rounds carry no reviewer evidence', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
+assert 'the number of blocking f-ids this fix-mode run targeted' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'm=0 \u2192 no round' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'one reviewer per file cluster' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'a pre-'+bt+'rv'+bt+' round is recorded in '+bt+'findings.md'+bt+', and nowhere else' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+p.write_text(out)\""
+run_mutant "the pre-RV recording rule blurred in fix-loop.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+s=p.read_text(); bt=chr(96); ap=chr(39); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(x) for x in ['A', 'pre-'+bt+'RV'+bt, 'round', 'is', 'recorded', 'in', bt+'findings.md'+bt+',', 'and', 'nowhere', 'else']]), re.I)
+assert len(a.findall(s))==1, 'mutant is a no-op: the phrase this mutant names is absent, reworded or duplicated in that file'
+out=a.sub('A round run before the review is recorded wherever it fits', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
+assert 'the number of blocking f-ids this fix-mode run targeted' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'm=0 \u2192 no round' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'one reviewer per file cluster' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'the round forms that carry no reviewer evidence are the whole of the exception' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+p.write_text(out)\""
+run_mutant "the coverage-row grammar blurred in SKILL.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+s=p.read_text(); bt=chr(96); ap=chr(39); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(x) for x in ['keyed', 'by', 'its', 'report', 'filename,', 'with', 'that', 'reviewer'+ap+'s', 'exact', 'range', 'in', 'the', 'row'+ap+'s', 'second', 'cell,', 'and', 'every', 'report', 'file', 'the', 'round', 'names', 'has', 'a', 'row', 'of', 'its', 'own']]), re.I)
+assert len(a.findall(s))==1, 'mutant is a no-op: the phrase this mutant names is absent, reworded or duplicated in that file'
+out=a.sub('laid out however the round likes', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
+assert 'never a count, a line number, a signature or a file list' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'is the only declaration that licenses it' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'one reviewer per file cluster' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'no two rows carry the same range' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+o=pathlib.Path('plugins/superb/skills/pipeline/references/run-state.md')
+assert 'keyed by its report filename, with that reviewer'+ap+'s exact range in the row'+ap+'s second cell, and every report file the round names has a row of its own' in flat(o.read_text()), 'mutant is a no-op: the other file that holds this rule lost it too, so a kill would not be attributable to the copy this mutant names'
+p.write_text(out)\""
+run_mutant "the coverage-row grammar blurred in run-state.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/references/run-state.md')
+s=p.read_text(); bt=chr(96); ap=chr(39); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(x) for x in ['keyed', 'by', 'its', 'report', 'filename,', 'with', 'that', 'reviewer'+ap+'s', 'exact', 'range', 'in', 'the', 'row'+ap+'s', 'second', 'cell,', 'and', 'every', 'report', 'file', 'the', 'round', 'names', 'has', 'a', 'row', 'of', 'its', 'own']]), re.I)
+assert len(a.findall(s))==1, 'mutant is a no-op: the phrase this mutant names is absent, reworded or duplicated in that file'
+out=a.sub('laid out however the round likes', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
+assert 'never a count, a line number, a signature or a file list' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'refuses the brief and says which fact' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'm=0 \u2192 no round' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'no two rows carry the same range' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+o=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+assert 'keyed by its report filename, with that reviewer'+ap+'s exact range in the row'+ap+'s second cell, and every report file the round names has a row of its own' in flat(o.read_text()), 'mutant is a no-op: the other file that holds this rule lost it too, so a kill would not be attributable to the copy this mutant names'
+p.write_text(out)\""
+run_mutant "Rule 5b's Files: exception blurred in SKILL.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+s=p.read_text(); bt=chr(96); ap=chr(39); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(x) for x in ['A', 'task'+ap+'s', bt+'Files:'+bt, 'block', 'is', 'the', 'exception,', 'at', 'both', 'ends']]), re.I)
+assert len(a.findall(s))==1, 'mutant is a no-op: the phrase this mutant names is absent, reworded or duplicated in that file'
+out=a.sub('A task file list is treated like every other stated fact', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
+assert 'never a count, a line number, a signature or a file list' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'is the only declaration that licenses it' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'one reviewer per file cluster' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+o=pathlib.Path('plugins/superb/skills/pipeline/references/run-state.md')
+assert 'the task'+ap+'s own '+bt+'files:'+bt+' block being the one exception that rule names' in flat(o.read_text()), 'mutant is a no-op: the other file that holds this rule lost it too, so a kill would not be attributable to the copy this mutant names'
+p.write_text(out)\""
+run_mutant "Rule 5b's Files: exception blurred in run-state.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/references/run-state.md')
+s=p.read_text(); bt=chr(96); ap=chr(39); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(x) for x in ['the', 'task'+ap+'s', 'own', bt+'Files:'+bt, 'block', 'being', 'the', 'one', 'exception', 'that', 'rule', 'names']]), re.I)
+assert len(a.findall(s))==1, 'mutant is a no-op: the phrase this mutant names is absent, reworded or duplicated in that file'
+out=a.sub('with no exception to it', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
+assert 'never a count, a line number, a signature or a file list' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'refuses the brief and says which fact' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'm=0 \u2192 no round' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+o=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+assert 'a task'+ap+'s '+bt+'files:'+bt+' block is the exception, at both ends' in flat(o.read_text()), 'mutant is a no-op: the other file that holds this rule lost it too, so a kill would not be attributable to the copy this mutant names'
+p.write_text(out)\""
+run_mutant "the fan-out sizing rule blurred in README.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/README.md')
+s=p.read_text(); bt=chr(96); ap=chr(39); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(x) for x in ['one', 'reviewer', 'per', 'file', 'cluster']]), re.I)
+assert len(a.findall(s))==1, 'mutant is a no-op: the phrase this mutant names is absent, reworded or duplicated in that file'
+out=a.sub('reviewers as the round sees fit', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
+o=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+assert 'one reviewer per file cluster' in flat(o.read_text()), 'mutant is a no-op: the other file that holds this rule lost it too, so a kill would not be attributable to the copy this mutant names'
+o=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+assert 'one reviewer per file cluster' in flat(o.read_text()), 'mutant is a no-op: the other file that holds this rule lost it too, so a kill would not be attributable to the copy this mutant names'
+p.write_text(out)\""
+run_mutant "Stage 5's linter-FAIL rule blurred in SKILL.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+s=p.read_text(); bt=chr(96); ap=chr(39); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(x) for x in [bt+'FAIL'+bt, 'on', 'any', 'check', 'the', 'by-hand', 'pass', 'also', 'owes', 'is', 'that', 'pass', 'failing']]), re.I)
+assert len(a.findall(s))==1, 'mutant is a no-op: the phrase this mutant names is absent, reworded or duplicated in that file'
+out=a.sub('result is noted in the hand-off and nothing more', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
+assert 'never a count, a line number, a signature or a file list' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'is the only declaration that licenses it' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'one reviewer per file cluster' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+assert 'over this run'+ap+'s own directory' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
+p.write_text(out)\""
+
+# --- the two arithmetic arms: ceil(N/5) in the unwaved regime, and i after s ---
+# The declared slice count went unchecked against `ceil(N/5)` in the one regime
+# two documents call re-derivable from the line, and this repo's own conforming
+# fixture broke it: `N=9 → 3 slice + 1 integration` passed both gates. So did
+# `N=1 → 2 slice + 1 integration`, and `N=9 → 4 slice + 0 integration`, which
+# also breaks "`i` is 1 whenever `s > 1`" — stated in `SKILL.md` and in
+# `references/run-state.md` and encoded a third time in the fan-out table.
+#
+# Each mutant below changes ONLY the numbers its arm reads, and asserts that
+# the reviewer count, the cluster count and the report list all still agree, so
+# no kill can be borrowed from the count arms. The first two edit the fixture's
+# Phase 2 round, identified by the line it sits on rather than by a literal
+# that occurs in the fixture's prose as well; the third edits a worked example,
+# because the fixture has no one-slice round that could gain an integration
+# reviewer without also gaining a report file.
+run_mutant "run tracker's unwaved round departs from ceil(N/5)" '
+enable_run || exit 0
+'"$J"' "import pathlib
+p=pathlib.Path(\"tools/fixtures/run-ok/progress.md\")
+L=p.read_text().split(chr(10))
+i=[n for n,x in enumerate(L) if x.lstrip().startswith(\"- [x] RV\") and \"N=8\" in x]
+assert len(i)==1, \"mutant is a no-op: the fixture no longer has exactly one closed round declaring N=8\"
+assert \"waved\" not in L[i[0]], \"mutant is a no-op: that round carries a waved marker, which exempts it from this arm\"
+assert \"2 slice + 1 integration\" in L[i[0]], \"mutant is a no-op: that round no longer declares 2 slice + 1 integration\"
+L[i[0]]=L[i[0]].replace(\"N=8\", \"N=11\")
+out=chr(10).join(L)
+assert \"N=11\" in out, \"mutant is a no-op: the task count was not raised\"
+assert \"2 slice + 1 integration\" in out, \"mutant is a no-op: the declared counts moved with it, so a kill could come from the integration arm instead\"
+assert \"reports p2-review-{a,b,int}.md\" in out, \"mutant is a no-op: the reports field went too, so a kill could come from the reviewer-count arm instead\"
+p.write_text(out)"'
+run_mutant "run tracker's multi-slice round drops its integration reviewer" '
+enable_run || exit 0
+'"$J"' "import pathlib
+p=pathlib.Path(\"tools/fixtures/run-ok/progress.md\")
+L=p.read_text().split(chr(10))
+i=[n for n,x in enumerate(L) if x.lstrip().startswith(\"- [x] RV\") and \"N=8\" in x]
+assert len(i)==1, \"mutant is a no-op: the fixture no longer has exactly one closed round declaring N=8\"
+assert \"2 slice + 1 integration\" in L[i[0]], \"mutant is a no-op: that round no longer declares 2 slice + 1 integration\"
+L[i[0]]=L[i[0]].replace(\"N=8\", \"N=15\").replace(\"2 slice + 1 integration\", \"3 slice + 0 integration\")
+out=chr(10).join(L)
+assert \"N=15\" in out and \"3 slice + 0 integration\" in out, \"mutant is a no-op: the integration reviewer was not dropped\"
+assert \"reports p2-review-{a,b,int}.md\" in out, \"mutant is a no-op: the reports field went too, so a kill could come from the reviewer-count arm instead\"
+p.write_text(out)"'
+run_mutant "worked one-slice round adds an integration reviewer" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+s=p.read_text(); mid=chr(183)
+a='M=1 C=1 → 1 slice + 0 integration ' + mid + ' reports p3-rr4-a.md'
+assert s.count(a)==1, 'mutant is a no-op: the worked pin round is absent, reworded or duplicated'
+out=s.replace(a, 'M=1 C=1 → 1 slice + 1 integration ' + mid + ' reports p3-rr4-{a,b}.md')
+assert out!=s, 'mutant is a no-op: the integration reviewer was not added'
+assert 'M=1 C=1' in out, 'mutant is a no-op: the cluster count went too, so a kill could come from the cluster-count arm instead'
+p.write_text(out)\""
 
 echo
 echo "killed=$PASS survived=$SURV"

@@ -83,19 +83,22 @@ four fields, all paths relative to `agent-output/`:
   is re-derivable at closure rather than trusted from the step most likely to
   have been skipped. An **unwaved** phase takes `s = ceil(N/5)`; a **waved** one
   takes a slice per wave or adjacent wave-pair (write `waved` after `N`), which
-  may be more or fewer; an **`M=`** re-review writes its cluster count on the
-  line as `C=<n>` — `M=9 C=3 → 3 slice + 1 integration` — and `s` must equal
-  `C` (the cluster rule, and what declaring `C` does and does not establish, is
-  in `fix-loop.md`'s *Re-review fan-out*); an **`RVJ`** is always
+  may be more or fewer; an **`M=`** re-review **writes its cluster count on the
+  line as `C=<n>` and `s` must equal it** — `M=9 C=3 → 3 slice + 1 integration`
+  (the cluster rule, and what declaring `C` does and does not establish, is in
+  `fix-loop.md`'s *Re-review fan-out*); an **`RVJ`** is always
   `0 slice + 1 integration` with `N` informational. `i` is 1 whenever `s > 1`.
 - `reports <files>` — **exactly `s + i` files, one per reviewer**, each the
   `DETAIL:` path that reviewer returned. A review dispatch always requires its
   report file, clean or not — the "omit `DETAIL:` if nothing is longer" licence
   below does not reach reviewers, or a clean phase could never close. The
   coverage file is never counted here.
-- `coverage <file>` — the slice assignment table, **each row keyed by its report
-  filename**, above the `git log --oneline PB..PH`, ending `COVERED: <n>/<n>
-  commits`. Record slices individually: one union range reads as complete even
+- `coverage <file>` — the slice assignment table above the
+  `git log --oneline PB..PH`, ending `COVERED: <n>/<n> commits`. Every row is
+  **keyed by its report filename, with that reviewer's exact range in the row's
+  second cell, and every report file the round names has a row of its own** — a
+  reviewer with no row has no recorded range for anyone to check any other
+  against. Record slices individually: one union range reads as complete even
   when two slices leave a gap between them, and that gap is the defect being
   hunted. **No two rows carry the same range** — two reviewers over one range
   read the same diff, and the integration reviewer's row is the union of the

@@ -2,7 +2,6 @@
 | --- | --- |
 | p3-review-a.md | ccccccc^..ccccccc |
 | p3-review-b.md | c0c0c0c^..c0c0c0c |
-| p3-review-c.md | c1c1c1c^..c1c1c1c |
-| p3-review-int.md | ccccccc^..c1c1c1c |
+| p3-review-int.md | ccccccc^..c0c0c0c |
 
-COVERED: 3/3 commits
+COVERED: 2/2 commits

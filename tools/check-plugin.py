@@ -523,6 +523,52 @@ for n in skill_names:
             # by two arms. run-state.md's copy is prose only — it has no fence
             # for a deletion to hide behind — so the existing entry already
             # holds it, and this one does not need to.
+            # THE RULES THE LAST TWO COMMITS ADDED, held here for the reason
+            # every phrase above is: each was measured DELETABLE on a green
+            # build, one at a time, `check-plugin: PASS` after each. Two of
+            # them are worse than an unheld rule, because the LINTER hard-FAILs
+            # what they describe — every `M=` round without a `C`, and every
+            # round of two or more slices repeating a range — so deleting the
+            # prose leaves the gate red on a rule no document states, with a
+            # REMEDY string as the only surviving description of it.
+            #
+            # THREE ENTRIES FOR THE `C=<n>` RULE, one per file, because the
+            # three texts word it differently and no phrase spans them: the
+            # authority says the count "rides the round", `SKILL.md` that it
+            # "is recorded on the round", `references/run-state.md` that the
+            # round "writes" it. A shared phrase would have been better and
+            # was not available without rewriting all three; three phrases
+            # each held in their own file is the same guarantee, and each
+            # mutant is attributable to the file it names.
+            #
+            # THE DISTINCTNESS RULE IS TWO RULES, and they are held apart. The
+            # `coverage` table's version — no two ROWS — is about recorded
+            # evidence and lives in the two files that define the `RV` grammar;
+            # the fix-diff version — no two SLICES — is about assignment and
+            # lives in the authority's *Re-review fan-out* and in `SKILL.md`'s
+            # summary of it. Either can go while the other stands.
+            #
+            # THE TWO CROSS-REFERENCED EXCEPTIONS are held because other
+            # sites cite them BY NAME rather than restating them. The
+            # Invariant's reviewer-evidence exception is cited as
+            # `references/fix-loop.md`'s *Invariants* from that file's own
+            # ledger step and from `SKILL.md` in two places — grep the marker
+            # for the current set — and delete it and every one of those
+            # citations dangles while the texts still read as if the rule were
+            # somewhere. The pre-`RV`
+            # recording rule is the other: it is what says a round run before
+            # any reviewer existed is recorded in `findings.md` and does NOT
+            # close the `RV` line, so losing it re-opens a green tick over a
+            # phase no slice reviewer ever read.
+            #
+            # THE COVERAGE ROW GRAMMAR is held because an ARM READS IT. This
+            # gate takes the report key from a row's first cell and the range
+            # from its second; the grammar used to pin neither, so a table
+            # conforming to the words with a column in between was reported
+            # for over-fan-out (measured, see `cov_rows`). The column and the
+            # row-per-report duty are now prose, which is what makes the arm's
+            # assumption an assumption no longer — so the prose has to be held
+            # or the arm is back to guessing.
             # Mutants: "M-exclusion phrase blurred in fix-loop.md",
             #          "coverage-union phrase blurred in fix-loop.md",
             #          "no-round RV form deleted from fix-loop.md",
@@ -533,7 +579,19 @@ for n in skill_names:
             #          "M's exclusion-route list loses a route",
             #          "the fan-out sizing rule blurred in fix-loop.md",
             #          "the fan-out sizing rule blurred in SKILL.md",
-            #          "the M=0 licence rule deleted from SKILL.md".
+            #          "the fan-out sizing rule blurred in README.md",
+            #          "the M=0 licence rule deleted from SKILL.md",
+            #          "the re-review C rule blurred in fix-loop.md",
+            #          "the C rule blurred in SKILL.md",
+            #          "the C clause blurred in run-state.md",
+            #          "the coverage-row distinctness rule blurred in SKILL.md",
+            #          "the coverage-row distinctness rule blurred in run-state.md",
+            #          "the slice distinctness rule blurred in fix-loop.md",
+            #          "the slice distinctness rule blurred in SKILL.md",
+            #          "the Invariant's reviewer-evidence exception blurred in fix-loop.md",
+            #          "the pre-RV recording rule blurred in fix-loop.md",
+            #          "the coverage-row grammar blurred in SKILL.md",
+            #          "the coverage-row grammar blurred in run-state.md".
             # ONE CLAUSE PER ENTRY, carried on the entry. The message used to
             # enumerate what all five phrases do on every firing — 191 words,
             # emitted per (entry × file), 5,818 bytes of near-identical prose in
@@ -565,7 +623,7 @@ for n in skill_names:
                  "definition still standing."),
                 ("the re-review fan-out's sizing rule",
                  "one reviewer per file cluster",
-                 ("references/fix-loop.md", "SKILL.md"),
+                 ("references/fix-loop.md", "SKILL.md", "README.md"),
                  "Lose it and the rule the fan-out table's rows encode is "
                  "stated nowhere, and a count over the findings can take its "
                  "place again."),
@@ -573,6 +631,47 @@ for n in skill_names:
                  "is the only declaration that licenses it", ("SKILL.md",),
                  "Lose it and the rule goes while the worked example keeps "
                  "the phrase the `M=0 → no round` entry reads."),
+                ("the `C=<n>` rule, in the authority",
+                 "the cluster count rides the round as `c=<n>`", AUTH,
+                 "Lose it and the gate hard-FAILs every `M=` round without a "
+                 "`C` on a rule the authority no longer states."),
+                ("`SKILL.md`'s statement of the `C=<n>` rule",
+                 "cluster count is recorded on the round as `c=<n>` and `s` "
+                 "must equal it", ("SKILL.md",),
+                 "Lose it and the section a reader consults to size a "
+                 "re-review stops naming the number `s` is checked against."),
+                ("the `RV` grammar's `C=<n>` clause",
+                 "writes its cluster count on the line as `c=<n>` and `s` "
+                 "must equal it", ("references/run-state.md",),
+                 "Lose it and the file that defines the line's fields stops "
+                 "listing a field the line is rejected for omitting."),
+                ("the coverage table's distinctness rule",
+                 "no two rows carry the same range",
+                 ("SKILL.md", "references/run-state.md"),
+                 "Lose it and the gate hard-FAILs a repeated range on a rule "
+                 "the `RV` grammar no longer carries."),
+                ("the fix-diff slices' distinctness rule",
+                 "no two slices carry the same range",
+                 ("references/fix-loop.md", "SKILL.md"),
+                 "Lose it and the assignment side of the same prohibition is "
+                 "gone, leaving only the recorded-evidence side."),
+                ("the Invariant's reviewer-evidence exception",
+                 "the round forms that carry no reviewer evidence are the "
+                 "whole of the exception", AUTH,
+                 "Lose it and every site that reads the exception from here "
+                 "rather than restating it cites a rule stated nowhere."),
+                ("the pre-`RV` round's recording rule",
+                 "a pre-`rv` round is recorded in `findings.md`, and nowhere "
+                 "else", AUTH,
+                 "Lose it and a fix round run before any reviewer existed can "
+                 "close the `RV` line no slice reviewer ever read."),
+                ("the coverage table's row grammar",
+                 "keyed by its report filename, with that reviewer's exact "
+                 "range in the row's second cell, and every report file the "
+                 "round names has a row of its own",
+                 ("SKILL.md", "references/run-state.md"),
+                 "Lose it and the arm reading a row's second cell is back to "
+                 "assuming a column position no grammar pins."),
             )
             for lbl, q, rels, why in CLAIM_EFFECT:
                 for rel in rels:
@@ -619,8 +718,19 @@ for n in skill_names:
             # The linter paragraph in *The `RV` line* deliberately does not
             # repeat the duty phrase — if it did, blurring Stage 5's two copies
             # would leave this arm green.
+            # WHAT A `FAIL` DOES IS THE THIRD OBLIGATION, and it was
+            # undefined. Stage 5's by-hand pass says a line that fails what it
+            # owes is "an unreviewed phase wearing a green tick — treat it as
+            # `[ ]`", while the linter clause said only that the result "goes
+            # in the hand-off either way rather than being a gate". The
+            # linter's checks are a SUPERSET of that hand count, so one defect
+            # reopened `RV` when a human found it and shipped as a hand-off
+            # line when the linter found it. The clause that closes it is held
+            # here, with the two duties, because it is the same passage's third
+            # obligation and was equally deletable.
             # Mutants: "Stage 5's linter duty blurred in SKILL.md",
-            #          "Stage 5's linter-unavailable duty blurred in SKILL.md".
+            #          "Stage 5's linter-unavailable duty blurred in SKILL.md",
+            #          "Stage 5's linter-FAIL rule blurred in SKILL.md".
             STAGE5_LINT = (
                 ("the duty to run the linter over the run's own tracker",
                  "over this run's own directory",
@@ -634,6 +744,14 @@ for n in skill_names:
                  "indistinguishable from one whose linter passed — and the "
                  "linter is a sibling of `plugins/`, so absence is the common "
                  "case, not the odd one."),
+                ("the rule that a linter `FAIL` on a check the by-hand pass "
+                 "also owes is that pass failing",
+                 "`fail` on any check the by-hand pass also owes is that pass "
+                 "failing",
+                 "Lose it and the same defect reopens `RV` when a human finds "
+                 "it and ships in a hand-off line when the linter finds it, "
+                 "because the linter's checks are a superset of the hand "
+                 "count."),
             )
             st, se = read(sdir / n / "SKILL.md")
             if se:
@@ -772,13 +890,28 @@ for n in skill_names:
         # survived — a paragraph deletion would fire several arms and be
         # attributable to none, the defect the `M`-exclusion bullet's mutants
         # were split to fix.
+        # RULE 5b'S ONE EXCEPTION IS HELD ALONGSIDE THE PROHIBITION, and
+        # separately from it, because it is the half that fails SILENTLY. Lose
+        # the prohibition and briefs start restating code facts, which the
+        # receiving agent's refusal duty still catches. Lose the exception and a
+        # task's `Files:` block becomes a stated file list — indistinguishable,
+        # under the prohibition alone, from the thing the rule forbids — so the
+        # correct behaviour becomes refusing every dispatch that carries one,
+        # and `references/parallel.md`'s argument that no derivation can stand
+        # in for those paths is cited by a rule that no longer admits them.
+        # Measured deletable on a green build in BOTH files, which is why both
+        # hold it: the two ends are edited independently, and the rule says the
+        # exception holds "at both ends" precisely because either end alone
+        # reopens it.
         # Mutants: "Rule 5b's prohibition blurred in SKILL.md",
         #          "Rule 5b's prohibition blurred in run-state.md",
         #          "the brief-refusal duty blurred in run-state.md",
         #          "the kit.md citation blurred in run-state.md",
         #          "kit.md's GATE 2 writing point blurred in SKILL.md",
         #          "the ticket-key question blurred in SKILL.md",
-        #          "the ticket key's dispatch field blurred in run-state.md".
+        #          "the ticket key's dispatch field blurred in run-state.md",
+        #          "Rule 5b's Files: exception blurred in SKILL.md",
+        #          "Rule 5b's Files: exception blurred in run-state.md".
         if n == "pipeline":
             LAW, CONTRACT = ("SKILL.md",), ("references/run-state.md",)
             DISPATCH_CONTRACT = (
@@ -807,6 +940,15 @@ for n in skill_names:
                  CONTRACT,
                  "Lose it and the answer Stage 1 obtained never reaches the "
                  "agent that has to type it."),
+                ("Rule 5b's `Files:` exception, in the Law",
+                 "a task's `files:` block is the exception, at both ends", LAW,
+                 "Lose it and the one file list a brief must carry reads as "
+                 "the file list the prohibition forbids."),
+                ("Rule 5b's `Files:` exception, in the contract",
+                 "the task's own `files:` block being the one exception that "
+                 "rule names", CONTRACT,
+                 "Lose it and the receiving agent's refusal duty, stated in "
+                 "the same breath, applies to the block it must accept."),
             )
             for lbl, q, rels, why in DISPATCH_CONTRACT:
                 for rel in rels:
@@ -937,8 +1079,14 @@ if len(FAIL) == _inv_before:
        "form present in every file that defines the `RV` grammar, `M` "
        "defined in one place with no exclusion-less gloss that names `M` ahead "
        "of the count and the F-IDs it glosses, every requirement of the "
-       "dispatch contract held in the file that states it, the re-review "
-       "sizing phrase present in the authority and in `SKILL.md`, the `M=0` "
+       "dispatch contract held in the file that states it — Rule 5b's one "
+       "`Files:` exception included — the re-review sizing phrase present in "
+       "every file that states it, the `C=<n>` rule and both distinctness "
+       "rules and the coverage table's row grammar present in every file that "
+       "states them, the `RV` evidence exception and the pre-`RV` recording "
+       "rule present in the authority that the sites citing them read them "
+       "from, Stage 5's linter duty, its absence statement and what it does "
+       "with a `FAIL` all held, the `M=0` "
        "licence rule present in `SKILL.md` by a phrase its worked example "
        "does not carry, a template shipped for every run-state file the "
        "run-directory tree names, and no count of the "
@@ -1016,8 +1164,11 @@ else: ok("no absolute home paths, private project names, or foreign ticket prefi
 # <s> slice + <i> integration declared on that round". Every worked example must
 # obey it, or the gate teaches its own violation. Each record is bounded at the
 # next record so one example cannot borrow its neighbour's evidence.
-# Deliberately NOT checked: the declared slice count against ceil(N/5), since a
-# waved phase legitimately departs from it.
+# The declared slice count IS checked against `ceil(N/5)`, but only in the
+# regime that rule is defined over: an unwaved `N=` phase. A waved phase
+# legitimately departs from it and says so with the `waved` marker; an `M=`
+# round is sized by clusters and declares `C`; an `RVJ` is always
+# `0 slice + 1 integration`. The arm's own comment carries the scope argument.
 #
 # The `M=0 → no round` declaration gets its OWN arm below, because it is the one
 # round form that closes with zero reviewer evidence: no `reports`, no
@@ -1050,7 +1201,7 @@ else: ok("no absolute home paths, private project names, or foreign ticket prefi
 #          "no-round round names a pinned route".
 print("\n== pipeline review-line examples ==")
 start = re.compile(r"(?:-\s*)?\[x\]\s*(RVJ|RV)\b|(?:->|→)\s*(round)\s+\d+\s*:")
-decl  = re.compile(r"(?P<key>N|M)=\d+\s*(?:waved\s+)?(?:C=(?P<C>\d+)\s*)?"
+decl  = re.compile(r"(?P<key>N|M)=(?P<n>\d+)\s*(?P<waved>waved\s+)?(?:C=(?P<C>\d+)\s*)?"
                    r"(?:->|→)\s*(?P<s>\d+)\s*slice\s*\+\s*(?P<i>\d+)\s*integration")
 rpt   = re.compile(r"reports\s+(.+?)(?=\s*[·|]|\s+coverage\b|\s*$)")
 cov   = re.compile(r"coverage\s+\S+\.md")
@@ -1058,17 +1209,20 @@ nor   = re.compile(r"\bM=0\s*(?:->|→)\s*no\s+round\b")
 route = re.compile(r"\bF-\d+\s*,?\s+(deleted|user-ruled false positive)")
 pinrt = re.compile(r"\bpinned by\b")
 outc  = re.compile(r"(?:->|→)\s*(?:no findings\b|F-\d+)")
-def nfiles(spec):
-    m = re.search(r"\{([^}]*)\}", spec)
-    src = m.group(1) if m else spec
-    return len([x for x in src.split(",") if x.strip()])
-
 def expand_braces(spec):
     """`p3-review-{a,b,int}.md` -> the three names; a plain list passes through.
 
-    The counterpart to `nfiles`, which counts the same spec. Counting and
-    naming had to agree or the existence check below would look for a file
-    called `p3-review-{a,b,int}.md`, which no run ever writes.
+    Counting and naming had to agree, or the existence check below would look
+    for a file called `p3-review-{a,b,int}.md`, which no run ever writes. They
+    now agree BY CONSTRUCTION rather than by assertion: `nfiles` is the length
+    of this list, so there is no second splitter to drift from this one.
+    That is not a tidying preference. The two used to split differently — this
+    one on `[,\s]+`, `nfiles` on `,` alone — while a docstring here asserted
+    they counted the same spec. A whitespace-separated `reports` list, which
+    nothing in the grammar forbade, was read as three reviewers and one file
+    (measured: "declares 3 reviewers, lists 1 report files"), so a conforming
+    round was accused of under-filing. The claim is deleted and the divergence
+    with it.
     """
     spec = spec.strip()
     m = re.search(r"\{([^}]*)\}", spec)
@@ -1076,6 +1230,10 @@ def expand_braces(spec):
         return [x for x in re.split(r"[,\s]+", spec) if x.endswith(".md")]
     pre, post = spec[:m.start()], spec[m.end():]
     return [f"{pre}{x.strip()}{post}" for x in m.group(1).split(",") if x.strip()]
+
+def nfiles(spec):
+    """How many reviewer reports a `reports` spec names — one splitter only."""
+    return len(expand_braces(spec))
 
 def cov_rows(text):
     """A coverage table's rows: report-filename key -> the range cell verbatim.
@@ -1085,6 +1243,23 @@ def cov_rows(text):
     `git log`. So a row is any `| key | range |` line; the header and the
     `| --- | --- |` separator are dropped by shape rather than by position,
     since neither carries a range and a table may be written without either.
+
+    The COLUMN IS PINNED BY THAT GRAMMAR, not assumed here: the range is the
+    row's SECOND cell, and every report file the round names has a row of its
+    own. That wording is new, and `cells[1]` is why. The grammar used to say
+    only "each row keyed by its report filename, with that reviewer's exact
+    range" — no column count and no order — so a table satisfying it with a
+    column in between was read wrong: on
+
+        | report | reviewer | range |
+        | p3-review-a.md | slice | ccccccc^..ccccccc |
+
+    every slice came back with the range `slice`, and the round was reported
+    for handing two reviewers one range (measured) — a run accused of the
+    exact over-fan-out this arm exists to catch. The fix is the grammar, not a
+    heuristic here: pinning the column makes that layout non-conforming and
+    the assumption a held sentence, and a table with FURTHER columns after the
+    range still reads correctly (measured, passing).
 
     The range cell is kept VERBATIM (bar surrounding whitespace and backticks),
     never parsed into endpoints. Two reviewers over one cluster is a
@@ -1225,6 +1400,88 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
             where = f"{relpath(f)}:{lineno(pos)}"
             if kind == "RVJ" and (nslice, nint) != (0, 1):
                 viol += 1; bad(f"{where}: RVJ must be 0 slice + 1 integration, declares {nslice}+{nint}")
+            # THE TWO ARITHMETIC ARMS. Both are shape, which is what this
+            # section's own heading limits it to: `N`, `s` and `i` are all on
+            # the line, so each of these is a sum a reader can do from the
+            # line alone and neither reaches for the diff.
+            #
+            # `s == ceil(N/5)` FOR AN UNWAVED `N=` ROUND. The field row in
+            # `SKILL.md` says that regime — and only that regime — makes the
+            # fan-out "re-derivable from the line", and the fan-out table
+            # states the same rule independently. It was nonetheless the one
+            # regime nothing checked, and this repo's own conforming fixture
+            # violated it: `N=9 → 3 slice + 1 integration`, where `ceil(9/5)`
+            # is 2, passed both gates (measured). A rule two documents state
+            # and no arm holds is the class of defect this gate exists for.
+            #
+            # SCOPED BY THE REGIME KEYS THE PARSER READS, and the scope is
+            # three separate exclusions, not one:
+            #   - `M=` rounds are excluded by `key`. `M` sizes nothing; an
+            #     `M=` round is sized by its fix diff's clusters and declares
+            #     that count as `C`, which the arm below reads instead.
+            #   - a WAVED `N=` phase is excluded by the `waved` marker, which
+            #     the declaration carries for exactly this reason: it takes one
+            #     slice per wave or per adjacent pair of small waves, which may
+            #     be more or fewer than `ceil(N/5)`, and the wave count is not
+            #     on the line. Not a courtesy exclusion — `references/run-state.md`
+            #     carries a conforming `N=12 waved → 2 slice + 1 integration`
+            #     worked example, where `ceil(12/5)` is 3, so a version of this
+            #     arm that ignored the marker would fail the documentation.
+            #   - `RVJ` is excluded by `kind`, and this one is NOT free. An
+            #     `RVJ` declares `0 slice + 1 integration` with its `N` the task
+            #     count across the reviewed unit, so its key is `N` and it
+            #     carries no `waved` marker: run without the `kind` test, the
+            #     arm reports every worked `RVJ` record in the skill —
+            #     `N=17 → 0 slice + 1 integration` — for declaring 0 where
+            #     `ceil(17/5)` is 4 (measured, in each file that writes one).
+            #     The `RVJ` shape arm above is what holds that form instead.
+            #
+            # `i` FOLLOWS `s`: 1 above one slice, 0 at one slice. Stated in
+            # `SKILL.md`'s field row and in `references/run-state.md`'s
+            # matching bullet, and encoded again in the fan-out table, whose
+            # one-slice row reads "0 (one slice sees all)" and whose every
+            # other row gives 1. `s == 0` is left alone: that is the `RVJ`
+            # form, which the arm above owns entirely.
+            # Mutants: "run tracker's unwaved round departs from ceil(N/5)",
+            #          "run tracker's multi-slice round drops its integration reviewer",
+            #          "worked one-slice round adds an integration reviewer".
+            ntasks = int(d.group("n"))
+            if (kind == "RV" and d.group("key") == "N"
+                    and d.group("waved") is None):
+                want_s = -(-ntasks // 5)
+                if nslice != want_s:
+                    viol += 1
+                    bad(f"{where}: unwaved `N={ntasks}` round declares "
+                        f"{nslice} slice reviewers, but `ceil(N/5)` is "
+                        f"{want_s}. The unwaved `N=` regime is the one the "
+                        "grammar says is re-derivable from the line — that is "
+                        "what `N` is on the line for — so this is the one "
+                        "sizing error a reader of the tracker alone can "
+                        "prove. REMEDY: dispatch `ceil(N/5)` slice reviewers, "
+                        "or, if the phase ran waves and was sized per wave, "
+                        "write `waved` after `N` — the marker is what says "
+                        "which regime sized the round")
+            if nslice > 1 and nint != 1:
+                viol += 1
+                bad(f"{where}: declares {nslice} slice reviewers and "
+                    f"{nint} integration reviewers — `i` is 1 whenever `s` is "
+                    "above 1. Above one slice, nobody has seen the whole diff: "
+                    "each slice reviewer sees only its own range, so the "
+                    "cross-slice defect — a contract introduced in one slice "
+                    "and consumed in another — is what no slice can see and "
+                    "the integration reviewer exists to hunt. REMEDY: declare "
+                    "and dispatch exactly one integration reviewer over the "
+                    "union of the slices")
+            elif nslice == 1 and nint != 0:
+                viol += 1
+                bad(f"{where}: declares 1 slice reviewer and {nint} "
+                    "integration reviewers — at one slice `i` is 0, because "
+                    "the one slice already sees the whole diff. A second "
+                    "reviewer over that same diff is the duplication the "
+                    "fan-out rule forbids, not a safety margin, and the "
+                    "fan-out tables write no such row. REMEDY: declare "
+                    "`1 slice + 0 integration`, or split the range into the "
+                    "slices it really has")
             # AN `M=` RE-REVIEW ROUND CARRIES ITS CLUSTER COUNT, `C=<n>`, AND
             # `s` MUST EQUAL IT. The re-review fan-out is one reviewer per file
             # cluster in the fix diff (`references/fix-loop.md`, *Re-review
@@ -1453,9 +1710,10 @@ if not nseen:
         "skill's prose, or delete this arm along with the last one")
 if seen and nseen and not viol:
     ok(f"{seen} closed review rounds, {nseen} of them `M=0 → no round`: "
-       "reviewer counts, RVJ shape, `M=` cluster counts and coverage all "
-       "conform, and every no-round record names its closure routes and "
-       "carries no reviewer evidence")
+       "reviewer counts, RVJ shape, unwaved `ceil(N/5)` sizing, the "
+       "integration reviewer above one slice, `M=` cluster counts and "
+       "coverage all conform, and every no-round record names its closure "
+       "routes and carries no reviewer evidence")
 
 # ---- the same linter, over a REAL run's tracker ----
 # The arm above scans `pdir` only — the skill's own worked examples — so no
@@ -1488,7 +1746,9 @@ if seen and nseen and not viol:
 # WHAT THIS MODE ESTABLISHES, exactly, and what it does not:
 #   IT ESTABLISHES — for every closed `RV`/`RVJ` round in `<dir>/progress.md`:
 #     the declared `<s> slice + <i> integration` count equals the number of
-#     report files the same round lists (brace sets expanded); an `RVJ` round
+#     report files the same round lists (brace sets expanded); an unwaved `N=`
+#     round's slice count equals `ceil(N/5)`; the integration count is 1
+#     wherever the slice count is above 1 and 0 where it is 1; an `RVJ` round
 #     declares `0 slice + 1 integration`; an `M=` round declares a `C=<n>`
 #     cluster count and its slice count equals it; the round names a `coverage`
 #     file; every report file it names, and the coverage file it names, exist in
@@ -1497,18 +1757,20 @@ if seen and nseen and not viol:
 #     own in it, and no two of those rows carry the same range; and an
 #     `M=0 → no round` record carries its closure routes and no reviewer
 #     evidence. Plus: the tracker is readable, and at least one round is closed.
-#   IT DOES NOT ESTABLISH that the fan-out was SIZED correctly, and the two
-#     halves of that differ. The OVER-WIDE half is now caught where it leaves a
-#     trace: two reviewers handed the same range are two rows this mode
-#     compares, and it reports them. The COUNT itself is still not derivable
-#     from the tracker — the rule is "one reviewer per file cluster in the fix
-#     diff", whose input is the diff, and `C` is a number written by whoever
-#     chose `s`, so a round declaring `M=7 C=1 → 1 slice + 0 integration` over
-#     a seven-cluster diff is internally consistent and passes here (measured),
-#     and so does an over-wide round whose reviewers were handed genuinely
-#     distinct ranges, since nothing in the tracker says what the clusters
-#     were. Any prose saying more than that is a claim this mode cannot hold
-#     up.
+#   IT DOES NOT ESTABLISH that the fan-out was SIZED correctly OUTSIDE THE
+#     UNWAVED `N=` REGIME — inside it the size IS derivable from the line, and
+#     the arm above derives it. Elsewhere the two halves of the question
+#     differ. The OVER-WIDE half is caught where it leaves a trace: two
+#     reviewers handed the same range are two rows this mode compares, and it
+#     reports them. The COUNT itself is not derivable there — a waved phase's
+#     wave count is not on the line, and a re-review's rule is "one reviewer
+#     per file cluster in the fix diff", whose input is the diff, with `C` a
+#     number written by whoever chose `s`, so a round declaring
+#     `M=7 C=1 → 1 slice + 0 integration` over a seven-cluster diff is
+#     internally consistent and passes here (measured), and so does an
+#     over-wide round whose reviewers were handed genuinely distinct ranges,
+#     since nothing in the tracker says what the clusters were. Any prose
+#     saying more than that is a claim this mode cannot hold up.
 #   IT ALSO DOES NOT establish that a named report or coverage file says
 #     anything — existence is checked, content is not, so `COVERED: <n>/<n>`
 #     is unread here — or that the round happened when it says.
@@ -1557,8 +1819,10 @@ if RUN_DIR is not None:
             # against, so this line must not be the thing that says it was.
             ok(f"{rseen} closed review rounds in the tracker"
                + (f" ({rnseen} of them `M=0 → no round`)" if rnseen else "")
-               + ", every declared report file and every declared coverage "
-                 "file present in agent-output/, and no round of two or more "
+               + ", every unwaved `N=` round sized `ceil(N/5)` with its "
+                 "integration reviewer following its slice count, every "
+                 "declared report file and every declared coverage file "
+                 "present in agent-output/, and no round of two or more "
                  "slices repeating a range across its coverage rows")
 
 # ---- every mutant this file cites by name must actually exist ----

@@ -326,16 +326,18 @@ When blocking findings exist (and the convergence rule permits another run):
    assignments cover every fix diff. Update the ledger and complete the
    Iteration-log row with the set of F-IDs still open after the re-review.
 
-   **Unless `M=0`.** `M` counts the targeted F-IDs a re-review could cover, and
-   a claim finding closed by deletion or by a pin is not one of them (*Re-review
-   fan-out*, below). An iteration whose every targeted finding closed that way
-   therefore has `M=0`, falls off the first row of the fan-out table, and **runs
-   no round**: there is no behaviour to review, and no fix diff for an
-   assignment to own. `M=0` licenses skipping this step and nothing else does —
-   one behavioural fix in the same iteration puts `M` back above zero and the
-   round is owed in full, over every fix diff including the claim closures'
-   neighbours. The ledger update and the Iteration-log row still happen; only
-   the fan-out is skipped.
+   **Unless `M=0`.** `M` does not size the fan-out — the fix diff does
+   (*Re-review fan-out*, below) — but it still decides **whether a round happens
+   at all**. `M` counts the targeted F-IDs a re-review could cover, and a claim
+   finding closed by deletion or by a pin is not one of them. An iteration whose
+   every targeted finding closed that way therefore has `M=0` and **runs no
+   round**: there is no behaviour to review, and no fix diff for an assignment to
+   own, so there is nothing for the fan-out to be sized over. `M=0` licenses
+   skipping this step and nothing else does — one behavioural fix in the same
+   iteration puts `M` back above zero and the round is owed in full, sized from
+   that iteration's fix diff and covering every fix commit in it, the claim
+   closures' neighbours included. The ledger update and the Iteration-log row
+   still happen; only the fan-out is skipped.
 
    **A round correctly not run is recorded, not omitted.** An absent round and a
    skipped review read identically on the `RV` line, which is the failure that
@@ -369,29 +371,38 @@ When blocking findings exist (and the convergence rule permits another run):
 
    Only when `RV` is already `[x]` from a completed step 2 does a re-review
    reopen it to `[~]` and reclose it with the round appended in the full
-   per-round grammar — `→ round 2: M=9 → 3 slice + 1 integration · reports
-   p3-rr2-{a,b,c,int}.md · coverage p3-rr2-coverage.md → F-012 closed, F-014
-   raised` — so every round has a declared number its file count is checked
-   against, not only the first. `M` is the targeted F-ID count and the fan-out
-   is `ceil(M/3)`. Whoever ran the round writes it, at whatever depth.
+   per-round grammar — `→ round 2: M=9 → 1 slice + 0 integration · reports
+   p3-rr2-a.md · coverage p3-rr2-coverage.md → F-012 closed, F-014 raised` — so
+   every round has a declared number its file count is checked against, not only
+   the first. `M` records the targeted F-ID count for the convergence check; the
+   fan-out comes from the fix diff's clusters. Whoever ran the round writes it,
+   at whatever depth.
 4. Repeat until no Critical/Major/bug findings remain (green test suite
    included), subject to the convergence rule and the caps below.
 
 ## Re-review fan-out (fix-mode returns)
 
 The Stage 4 rule `ceil(N/5)` is defined over **tasks**. A fix-mode run produces
-fix commits, not tasks, so re-reviews get their own math. Let `M` = the number
-of blocking F-IDs this fix-mode run targeted:
+fix commits, not tasks, so re-reviews get their own rule — and it is a rule about
+**diff surface**, not about how many findings were named:
 
-| Targeted F-IDs (M) | Slice reviewers | Integration reviewer | Total |
-|--------------------|-----------------|----------------------|-------|
-| 1–3                | 1               | 0 (one slice sees all) | 1   |
-| 4–6                | 2               | 1                    | 3     |
-| 7–9                | 3               | 1                    | 4     |
-| 10+                | `ceil(M/3)`     | 1                    | —     |
+| Fix diff | Slice reviewers | Integration reviewer |
+|----------|-----------------|----------------------|
+| One commit, or one file cluster | 1 | 0 (the one slice sees all) |
+| Two or more disjoint file clusters | 1 per cluster | 1 |
 
-- **~3 F-IDs per reviewer, not 5.** Each one has to be verified against the
-  specific code it names, which is denser work than reading a task's diff.
+**Findings are not diff surface.** `M` counts findings; a round of six comment
+corrections in one file is one small diff, and three reviewers over it re-read
+the same hunks and duplicate each other's findings. `M` is still **recorded** on
+the round, because the convergence check compares ID sets, and `M=0` is still
+what licenses a round that runs no reviewers at all (step 3, above); it just no
+longer sizes the fan-out.
+
+- **A file cluster** is the set of fix commits touching files that a single
+  reviewer has to hold together to judge any of them — the same
+  producer/consumer test the integration reviewer applies. When in doubt, one
+  reviewer: two reviewers over one cluster duplicate each other, while one
+  reviewer over two clusters at least sees each fix in its own context.
 - **Slice boundaries are the fix commits' ranges**, taken from the ledger's
   recorded fix hashes — the same range discipline as Stage 4 slices.
 - **Assignments MUST cover every fix diff.** Union the assigned ranges and
@@ -402,9 +413,9 @@ of blocking F-IDs this fix-mode run targeted:
   closure condition, and this is how you satisfy it.
 - **A claim finding closed by deletion or by a pin is not counted in `M`, and
   its fix commit is not in that union.** It opens no re-review round at all
-  (*Finding-closure ledger*, above), so counting it would size a round nobody
-  needs and demand an owner for a diff with no behaviour in it. Every other
-  commit the fix-mode run produced still needs one.
+  (*Finding-closure ledger*, above), so counting it would make a round look owed
+  that nobody needs, and would demand an owner for a diff with no behaviour in
+  it. Every other commit the fix-mode run produced still needs one.
 - The integration reviewer's scope is the union of all fix commits, hunting
   interactions between fixes and regressions the fixes introduced elsewhere.
 - Re-reviews also re-run the test suite; failures are bug findings as always,
@@ -484,8 +495,11 @@ however complete, authorizes nothing.
   and both live in `findings.md` — incremented in the file **before** each
   dispatch, read from the file before each cap check, never carried in context.
   Reset the iteration counter by opening a new phase row.
-- **Re-reviews use the re-review fan-out (`ceil(M/3)` over targeted F-IDs), not
-  `ceil(N/5)`**, and their assigned ranges must union to cover every fix commit.
+- **Re-reviews are sized from the fix diff** — one reviewer per file cluster,
+  integration above one — **not** from task count or finding count, and their
+  assigned ranges must union to cover every fix commit a reviewer can own. A
+  claim closure's commit is the one that has none: "`M` and the fix-diff
+  coverage union both exclude it" (*Finding-closure ledger*, above).
 - Ambiguity and convergence stops never count toward either cap.
 - Never resolve a requirements or user-visible-behavior ambiguity by
   precedent, defaults, reversibility, or decision logs — ask the user.

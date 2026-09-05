@@ -55,7 +55,7 @@ split across two reviewers — plus an integration reviewer whenever there is mo
 than one slice. The slices must cover every commit on the phase branch — including
 any the orchestrator wrote inline, which have no task line and so are covered
 by nothing unless a slice is widened to reach them. Fix rounds get their own
-math — `ceil(M/3)` over the findings the fix targeted — and the assigned ranges
+math — one reviewer per file cluster in the fix diff — and the assigned ranges
 must cover every fix commit, because a clean round from reviewers who never
 looked at a fix closes nothing.
 

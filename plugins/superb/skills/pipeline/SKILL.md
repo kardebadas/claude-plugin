@@ -213,13 +213,15 @@ someone who was not there, all paths relative to `agent-output/`:
 are read against the round they sit in, never against the whole line:
 
 ```markdown
-      → round 2: M=9 → 3 slice + 1 integration · reports p3-rr2-{a,b,c,int}.md
+      → round 2: M=9 → 1 slice + 0 integration · reports p3-rr2-a.md
         · coverage p3-rr2-coverage.md → F-012 closed, F-014 raised
 ```
 
-`M` is the count of targeted F-IDs and the fan-out is `ceil(M/3)` (not
-`ceil(N/5)` — fix diffs are not task-shaped), with coverage over the fix commits.
-Whoever ran the round writes it, at whatever recursion depth.
+`M` records the count of targeted F-IDs for the convergence check. The fan-out is
+**one reviewer per file cluster in the fix diff**, integration only above one
+reviewer — not `ceil(N/5)`, since fix diffs are not task-shaped, and not a count
+over the findings, since findings are not diff surface — with coverage over the
+fix commits. Whoever ran the round writes it, at whatever recursion depth.
 
 **`M=0 → no round` is the one round that closes without reviewers.** A fix
 iteration whose every targeted finding was a claim finding closed by deletion or
@@ -765,14 +767,17 @@ believes.
 ### Re-review fan-out (different math)
 
 `ceil(N/5)` is defined over **tasks**. Fix-mode returns produce fix commits, not
-tasks, so a re-review uses `M` = the number of blocking F-IDs that run targeted:
-**`ceil(M/3)` slice reviewers** (~3 findings each, since every one must be
-verified against the code it names), plus an integration reviewer once there is
-more than one slice. Slice boundaries are the fix commits' ranges, and **the
-assigned ranges must union to cover every fix commit** — a clean round from
-reviewers who never looked at a fix closes nothing. A claim finding closed by
-deletion or by a pin is outside both counts: not in `M`, and its commit not in
-the union, since it opens no round. Table in `references/fix-loop.md`.
+tasks, so a re-review is sized from the **fix diff**: **one slice reviewer per
+file cluster**, plus an integration reviewer once there is more than one. `M`,
+the count of blocking F-IDs that run targeted, is still recorded on the round for
+the convergence check, and `M=0` still licenses a round with no reviewers in it —
+but `M` does not size the fan-out, because six comment corrections in one file
+are one small diff and three reviewers over it duplicate each other. Slice
+boundaries are the fix commits' ranges, and **the assigned ranges must union to
+cover every fix commit** — a clean round from reviewers who never looked at a fix
+closes nothing. A claim finding closed by deletion or by a pin is outside both
+counts: not in `M`, and its commit not in the union, since it opens no round.
+Table in `references/fix-loop.md`.
 
 ### Joint integration review after a split (Rule 3)
 
@@ -884,7 +889,7 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
 | "4a and 4b each passed review, the phase is covered" | Each reviewer saw half a designed unit. Run the joint integration review over the combined diff. |
 | "This is iteration 2, I'm well under the cap of 5" | Unless you read that from `findings.md`, you are guessing after a compaction that may have eaten iterations 1–4. Read the row. |
 | "I'll record the iteration once I see how the fix went" | Then a crash mid-fix loses it and the cap resets. Increment in the file before dispatching. |
-| "The fix was small, one reviewer over the whole thing is fine" | `ceil(M/3)` over targeted F-IDs, and the ranges must cover every fix commit. "Small" is not a fan-out. |
+| "The fix was small, one reviewer over the whole thing is fine" | One reviewer per file cluster in the fix diff, and the ranges must cover every fix commit a reviewer can own — a claim closure's is the only one the union excludes. "Small" is a judgement about clusters, not a licence to skip coverage. |
 | "The re-review came back clean, the findings are closed" | Only if its ranges actually covered the fix diffs. Union the ranges and check before closing anything. |
 | "I'll note the design decision in the spec doc and move on" | Nothing under `docs/superpowers/` is committed. If it matters, it goes in the Stage 5 hand-off too. |
 | "`resume` obviously means the most recent directory" | Recency is a guess about someone's unfinished work. More than one candidate → show each Current State and ask. |
@@ -1018,8 +1023,10 @@ memory — decide what happens next.**
   reviewers each saw half the designed unit.
 - **Keeping the iteration/depth counters in context** — a compaction resets them
   to zero and both caps silently stop capping. They live in `findings.md`.
-- **Sizing a re-review with `ceil(N/5)`** — fix diffs aren't task-shaped; use
-  `ceil(M/3)` over the targeted F-IDs, with ranges covering every fix commit.
+- **Sizing a re-review off task count or off finding count** — fix diffs aren't
+  task-shaped and findings aren't diff surface; one reviewer per file cluster,
+  with ranges covering every fix commit a reviewer can own — every one but a
+  claim closure's, which the coverage union excludes.
 - **Compacting before the flush** — the Run State Law is only true once the
   files actually hold everything; GATE 2's flush is what makes it true.
 - **Assuming a local spec is a durable record** — nothing under

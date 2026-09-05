@@ -96,7 +96,25 @@ run_mutant "CI stops running the gate"             "sed -i 's|./tools/check-plug
 run_mutant "RV example loses a report file"        "sed -i 's|p3-review-{a,b,int}.md|p3-review-{a,b}.md|' plugins/superb/skills/pipeline/references/run-state.md"
 run_mutant "RVJ example declares slice reviewers"  "sed -i 's|N=17 → 0 slice + 1 integration · reports j-56-int.md|N=17 → 4 slice + 1 integration · reports j-56-{a,b,c,d,int}.md|' plugins/superb/skills/pipeline/references/run-state.md"
 run_mutant "RV example loses its coverage file"    "sed -i 's| · coverage p3-coverage.md||' plugins/superb/skills/pipeline/references/run-state.md"
-run_mutant "re-review round loses report files"    "sed -i 's|p3-rr2-{a,b,c,int}.md|p3-rr2-{a,int}.md|' plugins/superb/skills/pipeline/SKILL.md"
+# Retargeted when the re-review fan-out stopped being sized off the finding
+# count: the worked round went from `3 slice + 1 integration` over four report
+# files to `1 slice + 0 integration` over one, so the old sed on
+# `p3-rr2-{a,b,c,int}.md` now matches nothing. A sed on a string the docs no
+# longer contain is a silent no-op, the harness reports SURVIVED, and a mutant
+# that changes nothing proves nothing — two mutants here have already had to be
+# retargeted for exactly that. So this one over-declares the reviewer count
+# instead of shrinking the file list, and it ASSERTS both ends: the example is
+# present exactly once before, and the replacement landed. Rot refuses loudly
+# with its message printed instead of passing as a no-op.
+# The arrow is built with \u2192 rather than written literally, like the
+# no-round mutant below, so this line survives any editor that re-encodes it.
+run_mutant "re-review round over-declares reviewers" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md'); s=p.read_text()
+a='M=9 \u2192 1 slice + 0 integration'
+assert s.count(a)==1, 'mutant is a no-op: the re-review round example is absent, reworded, or duplicated'
+out=s.replace(a, 'M=9 \u2192 3 slice + 1 integration')
+assert out!=s, 'mutant is a no-op: the over-declaration did not apply'
+p.write_text(out)\""
 run_mutant "every worked RV example deleted"       "sed -i '/· reports/d' plugins/superb/skills/pipeline/*.md plugins/superb/skills/pipeline/*/*.md"
 
 # --- the skill-invocation arm must itself stay honest ---

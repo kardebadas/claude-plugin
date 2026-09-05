@@ -305,6 +305,79 @@ out=(nl+nl).join(keep)
 assert key not in flat(out), 'mutant is a no-op: the form survives the paragraph deletion'
 assert 'not counted in '+bt+'M'+bt in out, 'mutant is a no-op: it removed the M-exclusion bullet too, so a kill would not be attributable to the no-round form'
 p.write_text(out)\""
+# The SAME deletion against the two OTHER files that define the `RV` grammar and
+# now carry the form verbatim. Held separately for the reason the re-tag
+# predicate's copy is: deleting every no-round paragraph from SKILL.md, and
+# separately from references/run-state.md, left BOTH gates green — an unheld
+# second and third copy of a rule that is then one edit from gone — the same
+# shape the re-tag predicate's copy in templates/findings.md was held for.
+#
+# Each asserts the form is present before, that some paragraph went, and that
+# the form is gone after, so a full reword refuses loudly instead of passing as
+# a no-op. Attribution is by reading the AUTHORITY, which these two never touch:
+# if fix-loop.md had lost the form as well then the tree was already broken and
+# a kill here would not be attributable to the copy the mutant names.
+run_mutant "no-round RV form deleted from SKILL.md" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+q=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+s=p.read_text(); nl=chr(10)
+flat=lambda x: ' '.join(x.split()).lower()
+key='m=0 \u2192 no round'
+assert key in flat(s), 'mutant is a no-op: SKILL.md no longer carries the no-round RV form'
+paras=s.split(nl+nl)
+keep=[x for x in paras if key not in flat(x)]
+assert len(keep)<len(paras), 'mutant is a no-op: no SKILL.md paragraph carries the form'
+out=(nl+nl).join(keep)
+assert key not in flat(out), 'mutant is a no-op: the form survives the paragraph deletion'
+assert key in flat(q.read_text()), 'mutant is a no-op: the authority lost the form too, so a kill would not be attributable to the SKILL.md copy'
+p.write_text(out)\""
+run_mutant "no-round RV form deleted from run-state.md" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/references/run-state.md')
+q=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+s=p.read_text(); nl=chr(10)
+flat=lambda x: ' '.join(x.split()).lower()
+key='m=0 \u2192 no round'
+assert key in flat(s), 'mutant is a no-op: run-state.md no longer carries the no-round RV form'
+paras=s.split(nl+nl)
+keep=[x for x in paras if key not in flat(x)]
+assert len(keep)<len(paras), 'mutant is a no-op: no run-state.md paragraph carries the form'
+out=(nl+nl).join(keep)
+assert key not in flat(out), 'mutant is a no-op: the form survives the paragraph deletion'
+assert key in flat(q.read_text()), 'mutant is a no-op: the authority lost the form too, so a kill would not be attributable to the run-state.md copy'
+p.write_text(out)\""
+
+# --- the no-round record is the one round that closes with no reviewer evidence ---
+# It had no gate coverage at all, and both contradictions below PASSED when
+# injected: a record declaring the form while ALSO listing `reports` and
+# `coverage`, and one naming no closure route — which the prose itself calls "a
+# skipped review wearing this form". Those two injections are kept here.
+#
+# Both work on fix-loop.md's worked round, and both assert their anchor is
+# present exactly once before and that the replacement landed, so a reflow or a
+# reword refuses loudly rather than passing as a silent no-op. Both also assert
+# the DECLARATION survives the mutation: without that, a kill could come from
+# the CLAIM_EFFECT arm missing a phrase rather than from the no-round arm
+# rejecting a contradictory record, and the mutant would prove the wrong thing.
+run_mutant "no-round round declares a reports field" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+s=p.read_text(); mid=chr(183)
+a=' '+mid+' closures: F-018 deleted,'
+assert s.count(a)==1, 'mutant is a no-op: the no-round worked round is absent, reworded or duplicated'
+out=s.replace(a, ' '+mid+' reports p3-rr3-a.md '+mid+' coverage p3-rr3-coverage.md'+a)
+assert out!=s, 'mutant is a no-op: the reviewer fields were not inserted'
+assert 'M=0 \u2192 no round' in out, 'mutant is a no-op: the declaration itself went, so a kill would not be attributable to the reviewer fields'
+p.write_text(out)\""
+run_mutant "no-round round names no closure route" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+s=p.read_text(); bt=chr(96)
+a='closures: F-018 deleted,'
+b='F-019 pinned by '+bt+'tests/test_x.py::test_claim'+bt
+assert s.count(a)==1 and s.count(b)==1, 'mutant is a no-op: the worked round no longer names its two routes in the form this strips'
+out=s.replace(a, 'closures: F-018,').replace(b, 'F-019')
+assert out!=s, 'mutant is a no-op: the routes were not stripped'
+assert 'M=0 \u2192 no round' in out, 'mutant is a no-op: the declaration itself went, so a kill would not be attributable to the missing routes'
+assert '\u2192 no findings' in out, 'mutant is a no-op: the outcome slot went too, so a kill would not be attributable to the missing routes'
+p.write_text(out)\""
 
 # check-plugin.py cites its mutants BY NAME, and nothing kept those names true
 # until the citation check was added. The real-world failure is a rename in this

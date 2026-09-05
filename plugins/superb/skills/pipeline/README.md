@@ -56,8 +56,8 @@ than one slice. The slices must cover every commit on the phase branch — inclu
 any the orchestrator wrote inline, which have no task line and so are covered
 by nothing unless a slice is widened to reach them. Fix rounds get their own
 math — one reviewer per file cluster in the fix diff — and the assigned ranges
-must cover every fix commit, because a clean round from reviewers who never
-looked at a fix closes nothing.
+must cover every fix commit a reviewer can own, because a clean round from
+reviewers who never looked at a fix closes nothing.
 
 **A findings ledger with stable IDs.** Every blocking finding gets an `F-NNN`
 that is never reused or renumbered. A rediscovered finding keeps its ID, which

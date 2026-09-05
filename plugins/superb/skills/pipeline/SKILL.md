@@ -205,7 +205,7 @@ someone who was not there, all paths relative to `agent-output/`:
 
 | Field | What it must satisfy |
 | --- | --- |
-| `N=<tasks> → <s> slice + <i> integration` | `N` is the phase's task count, so the fan-out is re-derivable at closure instead of trusted from the step that gets skipped. Which number `s` must match depends on the regime, and the line says which: an **unwaved** phase takes `s = ceil(N/5)`; a **waved** phase takes one slice per wave or per adjacent pair of small waves (write `waved` after `N`), which may be more or fewer than `ceil(N/5)` and never splits a wave across two reviewers; an **`RVJ`** is always `0 slice + 1 integration`, its `N` informational. `i` is 1 whenever `s > 1`. |
+| `N=<tasks> → <s> slice + <i> integration` | Which number `s` must match depends on the regime, and the declaration's own key says which. An **unwaved** `N=` phase takes `s = ceil(N/5)`, and there `N` makes the fan-out re-derivable from the line at closure instead of trusted from the step that gets skipped. The other regimes are **not** re-derivable from the line, and say so rather than borrowing that guarantee: a **waved** phase takes one slice per wave or per adjacent pair of small waves (write `waved` after `N`), which may be more or fewer than `ceil(N/5)` and never splits a wave across two reviewers, and the wave count is not on the line; an **`M=`** re-review takes one slice per file cluster in the fix diff, and the cluster count is not on the line either, so its `s` is checkable only against that round's own `coverage` table — `M` is recorded for the convergence check and sizes nothing; an **`RVJ`** is always `0 slice + 1 integration`, its `N` informational. `i` is 1 whenever `s > 1`. |
 | `coverage <file>` | One file holding **the slice assignment table — each row keyed by its report filename, with that reviewer's exact range — above the `git log --oneline PB..PH`**, and ending with the verdict line `COVERED: <n>/<n> commits`. All three: a bare log is the input to a coverage judgement rather than the judgement, and a table with a gap in it sits above the log just as happily as one without. Anything short of `<n>/<n>` does not close the line. |
 | `→ <F-IDs>` or `→ no findings` | What the round produced. |
 
@@ -223,20 +223,23 @@ reviewer — not `ceil(N/5)`, since fix diffs are not task-shaped, and not a cou
 over the findings, since findings are not diff surface — with coverage over the
 fix commits. Whoever ran the round writes it, at whatever recursion depth.
 
-**`M=0 → no round` is the one round that closes without reviewers.** A fix
-iteration whose every targeted finding was a claim finding closed by deletion or
-by a pin leaves nothing for a reviewer to cover, so it runs no fan-out
+**`M=0 → no round` is the one round that closes without reviewers.** `M` is the
+count of blocking F-IDs the fix-mode run targeted, less every one closed by a
+route that produces nothing a reviewer could report on — the claim deleted, the
+claim pinned, or user-ruled false positive, and no other route. A fix iteration
+whose every targeted F-ID left by one of those three runs no fan-out
 (`references/fix-loop.md`, fix loop step 3) — and it still writes its round,
 because an absent round and a skipped one are the same absence here:
 
 ```markdown
-      → round 4: M=0 → no round · claim closures: F-021 deleted → no findings
+      → round 4: M=0 → no round · closures: F-021 deleted → no findings
 ```
 
 `no round` stands where the reviewer counts would, and `M=0` is the only
 declaration that licenses it. In place of `reports` and `coverage` the round
-carries each F-ID it closed and that F-ID's route — `deleted`, or `pinned by
-<test>` naming the test — which must match its `Closed by` cell in the ledger.
+carries each F-ID it closed and that F-ID's route — `deleted`, `pinned by
+<test>` naming the test, or `user-ruled false positive` — which must match its
+`Closed by` cell in the ledger.
 One behavioural fix in the same iteration makes `M > 0`, and then the full
 fan-out is owed.
 
@@ -774,9 +777,11 @@ the convergence check, and `M=0` still licenses a round with no reviewers in it 
 but `M` does not size the fan-out, because six comment corrections in one file
 are one small diff and three reviewers over it duplicate each other. Slice
 boundaries are the fix commits' ranges, and **the assigned ranges must union to
-cover every fix commit** — a clean round from reviewers who never looked at a fix
-closes nothing. A claim finding closed by deletion or by a pin is outside both
-counts: not in `M`, and its commit not in the union, since it opens no round.
+cover every fix commit a reviewer can own** — a clean round from reviewers who
+never looked at a fix closes nothing. A claim finding closed by deletion or by a
+pin is out of `M` either way, since it opens no round; the union takes the two
+routes differently — a **deletion**'s commit is out of it too, a **pin**'s stays
+in, because a pin commits a test and executable code gets an owner.
 Table in `references/fix-loop.md`.
 
 ### Joint integration review after a split (Rule 3)
@@ -889,7 +894,7 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
 | "4a and 4b each passed review, the phase is covered" | Each reviewer saw half a designed unit. Run the joint integration review over the combined diff. |
 | "This is iteration 2, I'm well under the cap of 5" | Unless you read that from `findings.md`, you are guessing after a compaction that may have eaten iterations 1–4. Read the row. |
 | "I'll record the iteration once I see how the fix went" | Then a crash mid-fix loses it and the cap resets. Increment in the file before dispatching. |
-| "The fix was small, one reviewer over the whole thing is fine" | One reviewer per file cluster in the fix diff, and the ranges must cover every fix commit a reviewer can own — a claim closure's is the only one the union excludes. "Small" is a judgement about clusters, not a licence to skip coverage. |
+| "The fix was small, one reviewer over the whole thing is fine" | One reviewer per file cluster in the fix diff, and the ranges must cover every fix commit a reviewer can own — a claim **deletion**'s is the only one the union excludes, and a claim **pin**'s is in it like any other. "Small" is a judgement about clusters, not a licence to skip coverage. |
 | "The re-review came back clean, the findings are closed" | Only if its ranges actually covered the fix diffs. Union the ranges and check before closing anything. |
 | "I'll note the design decision in the spec doc and move on" | Nothing under `docs/superpowers/` is committed. If it matters, it goes in the Stage 5 hand-off too. |
 | "`resume` obviously means the most recent directory" | Recency is a guess about someone's unfinished work. More than one candidate → show each Current State and ask. |
@@ -955,7 +960,8 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
   F-IDs.
 - You are about to state an iteration number or recursion depth you did not
   just read out of `findings.md`.
-- You are sizing a re-review fan-out off task count instead of targeted F-IDs.
+- You are sizing a re-review fan-out off task count or off the targeted F-ID
+  count instead of off the fix diff's file clusters.
 - You are closing a **behavioural** finding without having checked that a
   re-review range actually covered its fix. (A claim finding closed by deletion
   or by a pin is not this: it opens no round, so there is no range to check.)
@@ -1026,7 +1032,8 @@ memory — decide what happens next.**
 - **Sizing a re-review off task count or off finding count** — fix diffs aren't
   task-shaped and findings aren't diff surface; one reviewer per file cluster,
   with ranges covering every fix commit a reviewer can own — every one but a
-  claim closure's, which the coverage union excludes.
+  claim **deletion**'s, which the coverage union excludes; a claim **pin**'s
+  commits a test, so the union keeps it.
 - **Compacting before the flush** — the Run State Law is only true once the
   files actually hold everything; GATE 2's flush is what makes it true.
 - **Assuming a local spec is a durable record** — nothing under

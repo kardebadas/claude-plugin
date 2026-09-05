@@ -408,52 +408,73 @@ for n in skill_names:
                         "verbatim, which is what makes drift between the two texts "
                         "detectable")
             # The closure rule ends in a CROSS-REFERENCE: a deletion-or-pin
-            # closure is outside `M` and outside the fix-diff coverage union,
-            # "so `M` and the fix-diff coverage union both exclude it". Two
-            # other structures are what make that true — the exclusion bullet in
-            # *Re-review fan-out*, and the `M=0 → no round` condition on the fix
-            # loop's step 3 — and CLAIM_RULE above reaches neither. Deleting
+            # closure is outside `M`, and a deletion's commit is outside the
+            # fix-diff coverage union as well. Two other structures are what
+            # make that true — the exclusion bullet in *Re-review fan-out*, and
+            # the `M=0 → no round` condition on the fix loop's step 3 — and
+            # CLAIM_RULE above reaches neither. Deleting
             # only the bullet left a green gate, a dangling cross-reference, and
             # the fan-out back to its unqualified "Assignments MUST cover every
             # fix diff": the exact contradiction the closure rule was written to
             # remove, reinstated in one edit.
             #
-            # ONE file, unlike CLAIM_RULE's two. Both consequences live in
-            # structures only `references/fix-loop.md` has — the fan-out table's
-            # bullets and the numbered fix loop. `templates/findings.md` states
-            # the rule and says the closure "opens no re-review round"; it never
-            # describes a fan-out, so there is nothing there for these phrases
-            # to be true of.
+            # PER-PHRASE FILE SETS, because the three phrases do not live in the
+            # same places. The two union/`M` phrases live in structures only
+            # `references/fix-loop.md` has — the fan-out table's bullets and the
+            # numbered fix loop — so they are held there alone;
+            # `templates/findings.md` states the rule and says the closure
+            # "opens no re-review round" but never describes a fan-out, so
+            # there is nothing there for them to be true of. The
+            # `M=0 → no round` form is different: `SKILL.md` and
+            # `references/run-state.md` both define the `RV` grammar and both
+            # now carry the phrase verbatim, and deleting the paragraph from
+            # either one left this gate green. An unheld second copy is the
+            # weakness each of this arm's neighbours was extended to close, so
+            # all three files hold that phrase — and the phrase must stay
+            # byte-identical across them, which is the whole point of holding a
+            # phrase rather than a meaning.
             #
             # Unconditional, NOT gated on the cross-reference still being
             # present. Gating it would let one edit that removes the
             # cross-reference and the bullet together pass green — the same hole
             # by two deletions instead of one.
             # Mutants: "M-exclusion bullet deleted from fix-loop.md",
-            #          "no-round RV form deleted from fix-loop.md".
+            #          "no-round RV form deleted from fix-loop.md",
+            #          "no-round RV form deleted from SKILL.md",
+            #          "no-round RV form deleted from run-state.md".
+            AUTH = ("references/fix-loop.md",)
             CLAIM_EFFECT = (
-                ("the `M`-exclusion bullet", "not counted in `m`"),
-                ("the coverage-union exclusion", "its fix commit is not in that union"),
-                ("the `M=0 → no round` form", "m=0 → no round"),
+                ("the `M`-exclusion bullet", "not counted in `m`", AUTH),
+                ("the coverage-union exclusion",
+                 "fix commit is not in that union", AUTH),
+                ("the `M=0 → no round` form", "m=0 → no round",
+                 ("references/fix-loop.md", "SKILL.md",
+                  "references/run-state.md")),
             )
-            at, ae = read(sdir / n / "references/fix-loop.md")
-            if ae is None:
-                aflat = " ".join(at.split()).lower()
-                lost = [lbl for lbl, q in CLAIM_EFFECT if q not in aflat]
-                if lost:
-                    bad(f"{n}/references/fix-loop.md carries the claim-finding "
-                        "closure rule but not its consequences — missing "
-                        + ", ".join(lost) + ". The rule says a deletion-or-pin "
-                        "closure opens no re-review round, \"so `M` and the "
-                        "fix-diff coverage union both exclude it\"; without the "
-                        "*Re-review fan-out* exclusion bullet that union is back "
-                        "to \"Assignments MUST cover every fix diff\", and "
-                        "without the `M=0 → no round` condition step 3 still "
-                        "mandates a round over a diff the rule just excluded. "
-                        "REMEDY: restore, in fix-loop.md, the fan-out bullet (a "
-                        "claim finding closed by deletion or by a pin is not "
-                        "counted in `M`, and its fix commit is not in that union) "
-                        "and step 3's `M=0 → no round` condition with its RV form")
+            for lbl, q, rels in CLAIM_EFFECT:
+                for rel in rels:
+                    at, ae = read(sdir / n / rel)
+                    if ae:
+                        bad(f"{n}/{rel} must carry {lbl}, but that file cannot "
+                            f"be read: {ae}")
+                        continue
+                    if q not in " ".join(at.split()).lower():
+                        bad(f"{n}/{rel} is missing {lbl} ({q!r} absent). The "
+                            "rule says a deletion-or-pin closure opens no "
+                            "re-review round, so `M` excludes it and the "
+                            "fix-diff coverage union excludes a deletion's "
+                            "commit; without the *Re-review fan-out* exclusion "
+                            "bullet that union is back to \"Assignments MUST "
+                            "cover every fix diff\", and without the "
+                            "`M=0 → no round` condition step 3 still mandates a "
+                            "round over a diff the rule just excluded. That form "
+                            "is held in all three files that define the `RV` "
+                            "grammar, because a rule with one unheld copy is one "
+                            "edit from gone on a green build. REMEDY: restore "
+                            f"the phrase in {rel} verbatim — the two "
+                            "`M`/union phrases belong to fix-loop.md's fan-out "
+                            "bullet and the `M=0 → no round` form to step 3 and "
+                            "to each file's `RV` grammar")
     for f in sorted((sdir / n).rglob("*.md")):
         t, e = read(f)
         if e: continue
@@ -466,7 +487,8 @@ if len(FAIL) == _inv_before:
     ok("no indexed-placeholder dispatch, invocations namespaced, no unhandled "
        "fourth severity tier, re-tag predicate present where cited, "
        "claim-finding closure rule present in both texts that ship it, its "
-       "`M`-exclusion and `M=0 → no round` consequences present in the authority")
+       "`M`/union exclusions present in the authority and its `M=0 → no round` "
+       "form present in all three files that define the `RV` grammar")
 
 print("== agents ==")
 adir = ROOT/"plugins/superb/agents"
@@ -526,16 +548,41 @@ else: ok("no absolute home paths, private project names, or foreign ticket prefi
 # next record so one example cannot borrow its neighbour's evidence.
 # Deliberately NOT checked: the declared slice count against ceil(N/5), since a
 # waved phase legitimately departs from it.
+#
+# The `M=0 → no round` declaration gets its OWN arm below, because it is the one
+# round form that closes with zero reviewer evidence: no `reports`, no
+# `coverage`, nothing a later reader can re-run. It carried no gate coverage at
+# all, and two contradictory records passed — one declaring `M=0 → no round`
+# while also listing `reports` and `coverage`, and one naming no closure route,
+# which the prose itself calls "a skipped review wearing this form". What
+# replaces the missing evidence is the routes, so that is what is checked: no
+# reviewer fields, no reviewer counts, at least one F-ID with a NAMED route, and
+# the outcome slot. The route set is `deleted`, `pinned by <test>` and
+# `user-ruled false positive` — the three the prose enumerates, and the arm has
+# to match the grammar the prose teaches or it would reject the skill's own
+# worked example.
+#
+# The record is cut at the first ``` fence, not just at the 400-char window the
+# `N=`/`M=` arm uses: both worked instances sit inside a fenced block, and the
+# prose that follows one discusses `reports` and `coverage` by name — read as
+# part of the record it would report a contradiction that is not there. A record
+# outside a fence keeps the window, which can only over-read prose and so can
+# only be conservative about the positive checks.
+# Mutants: "no-round round declares a reports field",
+#          "no-round round names no closure route".
 print("\n== pipeline review-line examples ==")
 start = re.compile(r"(?:-\s*)?\[x\]\s*(RVJ|RV)\b|(?:->|→)\s*(round)\s+\d+\s*:")
 decl  = re.compile(r"(?:N|M)=\d+\s*(?:waved\s+)?(?:->|→)\s*(\d+)\s*slice\s*\+\s*(\d+)\s*integration")
 rpt   = re.compile(r"reports\s+(.+?)(?=\s*[·|]|\s+coverage\b|\s*$)")
 cov   = re.compile(r"coverage\s+\S+\.md")
+nor   = re.compile(r"\bM=0\s*(?:->|→)\s*no\s+round\b")
+route = re.compile(r"\bF-\d+\s*,?\s+(deleted|pinned by \S|user-ruled false positive)")
+outc  = re.compile(r"(?:->|→)\s*(?:no findings\b|F-\d+)")
 def nfiles(spec):
     m = re.search(r"\{([^}]*)\}", spec)
     src = m.group(1) if m else spec
     return len([x for x in src.split(",") if x.strip()])
-seen = viol = 0
+seen = nseen = viol = 0
 pdir = ROOT / "plugins" / "superb" / "skills" / "pipeline"
 for f in sorted(pdir.rglob("*.md")):
     t, e = read(f)
@@ -554,6 +601,35 @@ for f in sorted(pdir.rglob("*.md")):
     for idx, (pos, kind) in enumerate(marks):
         end = marks[idx + 1][0] if idx + 1 < len(marks) else len(flat)
         rec = flat[pos:min(end, pos + 400)]
+        if nor.search(rec):
+            nseen += 1
+            body = rec.split("```")[0] if "```" in rec else rec
+            where = f"{f.relative_to(ROOT)}:{lineno(pos)}"
+            probs = []
+            if rpt.search(body):
+                probs.append("lists a `reports` field")
+            if cov.search(body):
+                probs.append("lists a `coverage` field")
+            if decl.search(body):
+                probs.append("declares reviewer counts as well as `no round`")
+            if not route.search(body):
+                probs.append("names no closure route — every F-ID needs "
+                             "`deleted`, `pinned by <test>` or `user-ruled "
+                             "false positive` after it")
+            if not outc.search(body):
+                probs.append("has no outcome slot (`→ no findings` or F-IDs)")
+            if probs:
+                viol += 1
+                bad(f"{where}: `M=0 → no round` round " + "; ".join(probs)
+                    + ". This is the only round form that closes with no "
+                    "reviewer evidence, so the named closure routes are all "
+                    "the evidence there is: a `no round` whose routes are "
+                    "unnamed is a skipped review wearing this form, and one "
+                    "carrying `reports` or `coverage` is claiming reviewers a "
+                    "round of nobody never had. REMEDY: write it as "
+                    "`→ round <n>: M=0 → no round · closures: F-018 deleted, "
+                    "F-019 pinned by `<test>` → no findings`")
+            continue
         d = decl.search(rec)
         if not d: continue          # e.g. the WAIVED form, which carries no counts
         seen += 1
@@ -568,7 +644,22 @@ for f in sorted(pdir.rglob("*.md")):
         if not cov.search(rec):
             viol += 1; bad(f"{where}: closed review round with no coverage file")
 if not seen: bad("no closed RV/RVJ examples found — the grammar lost its worked instances")
-elif not viol: ok(f"{seen} closed review rounds: reviewer counts, RVJ shape and coverage all conform")
+# Counted and reported SEPARATELY from `seen`, and required non-zero, for the
+# reason the mutant-citation arm below requires its own list non-empty: an arm
+# whose subject can vanish from the docs is an arm that silently starts checking
+# nothing, and the count in the pass line is what makes that visible on a green
+# build instead of at the next review.
+if not nseen:
+    bad("no `M=0 → no round` worked example found in the pipeline skill — the "
+        "one round form that closes with zero reviewer evidence has lost the "
+        "instances this arm reads, so the arm now checks nothing on a green "
+        "build. REMEDY: keep at least one worked `M=0 → no round` round in the "
+        "skill's prose, or delete this arm along with the last one")
+if seen and nseen and not viol:
+    ok(f"{seen} closed review rounds, {nseen} of them `M=0 → no round`: "
+       "reviewer counts, RVJ shape and coverage all conform, and every "
+       "no-round record names its closure routes and carries no reviewer "
+       "evidence")
 
 # ---- every mutant this file cites by name must actually exist ----
 # The arms above cite their proofs by NAME: a `Mutant`/`Mutants` comment marker
@@ -591,6 +682,14 @@ elif not viol: ok(f"{seen} closed review rounds: reviewer counts, RVJ shape and 
 # literal. Escapes are stripped from BOTH sides before comparing; without that
 # step exactly one name — "skill dispatches on a doubled-backslash $0" —
 # false-positives on every run and the check is worthless.
+#
+# The strip matches BASH's rule, not a superset of it. Inside a double-quoted
+# word bash honours a backslash before exactly `$`, a backtick, `"`, `\` and a
+# newline; before anything else the backslash stays in the string. Stripping one
+# before ANY character therefore validated citations no reader can grep for: a
+# name written `\q` in the harness IS `\q` at runtime, and a comment citing `q`
+# would have matched it. A newline cannot occur here — a `run_mutant` name is
+# matched within one line — so the class is those four characters.
 # Mutants: "cited mutant renamed out from under its citation".
 print("\n== mutant citations ==")
 gt, ge = read(ROOT / "tools/check-plugin.py")
@@ -609,7 +708,7 @@ else:
             buf += " " + gl[j].lstrip()[1:].strip(); j += 1
         cited += re.findall(r'"([^"]*)"', buf)
         i = max(j, i + 1)
-    unesc = lambda s: re.sub(r"\\(.)", r"\1", s)
+    unesc = lambda s: re.sub(r'\\([$`"\\])', r"\1", s)
     have = {unesc(m.group(1)) for m in re.finditer(r'run_mutant\s+"((?:[^"\\]|\\.)*)"', ht)}
     dangling = [c for c in cited if unesc(c) not in have]
     if not cited:

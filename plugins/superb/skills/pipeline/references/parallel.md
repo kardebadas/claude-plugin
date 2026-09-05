@@ -34,6 +34,13 @@ phase `deps:`, not task deps. A task with no `Depends on:` line, or a `Files:`
 block with a glob, a directory, or "various" in it, is **incomplete** — return
 the doc to its expansion agent with the task number. Never fill it in yourself.
 
+`Files:` names paths, and paths are the one code fact a plan is required to
+state: the wave computation is a set-disjointness test over exactly those paths,
+so a derivation cannot stand in for them. Everything else about a task's code is
+named by symbol, or by the command that finds it — Rule 5b — which is also why
+the glob, the directory and "various" fail above: each is a derivation where the
+computation needs the set itself.
+
 ## Computing waves (Stage 3a, before GATE 2)
 
 For each phase:

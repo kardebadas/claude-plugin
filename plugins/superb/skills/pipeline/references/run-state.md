@@ -8,11 +8,13 @@ is a cache of these files, never the other way round.
   progress.md        # the tracker — phases, tasks, Current State
   register.md        # Assumptions Register
   findings.md        # blocking ledger (F-IDs), iteration history, deferred Minors
+  kit.md             # the run's shared verification apparatus (written at GATE 2)
   agent-output/      # one file per dispatch; long subagent output lands here
 ```
 
-Templates for the three files ship with the skill in `templates/`. They are
-**read-only** — copy, never edit in place.
+`templates/` ships a template for each of these files. They are **read-only** —
+copy, never edit in place. `kit.md` alone is filled in later, at GATE 2 from the
+approved plan, because it cannot name a run's gates before the plan does.
 
 Nothing under `docs/superpowers/` is ever `git add`ed — run state, specs and
 plans are deliberately local-only. **So the guard-rail counters belong on disk
@@ -29,8 +31,9 @@ Stage 5 hand-off, not a run-directory file.
    directory), or abort. Show them the tracker's Current State block so the
    choice is informed. Silent resume and silent overwrite are both forbidden —
    an unfinished run is exactly the state the Iron Law protects.
-3. Otherwise create it, copy the three templates in, strip their comments, and
-   state the full directory path in your first message to the user.
+3. Otherwise create it, copy the templates in — all but `kit.md`, which GATE 2
+   writes — strip their comments, and state the full directory path in your
+   first message to the user.
 
 Fix-mode recursions **inherit** the enclosing run's directory. They never create
 one.
@@ -229,6 +232,25 @@ answering an Ambiguity question, preparing a user-facing summary) — and then i
 reads the file, not a remembered version of it. Reviewers' full reports in
 particular never enter orchestrator context wholesale; the consolidated finding
 list in `findings.md` is what the run reasons over.
+
+**Every dispatch prompt carries three things besides that return shape, and not
+one of them is the agent's to infer.** First, **Rule 5b — derive, don't
+restate** (`SKILL.md`): the brief names symbols and the commands that regenerate
+facts, and never a count, a line number, a signature or a file list; an agent
+handed a stated code fact **refuses the brief and says which fact**, and that
+refusal is correct behaviour costing one round trip, where acting on a stale
+fact costs the task. Second, **`kit.md`, cited by path** — the agent reads the
+suite, coverage and build-gate commands, the baseline discipline, the mutation
+harness and the worktree rule out of that one file, because a dispatch that
+describes a harness inline is how a run comes to rebuild the same apparatus in
+every task, and a dispatch that omits the worktree rule is how two agents come
+to mutate the same file in the main tree at once and leave a third chasing the
+phantom failure. Third, **the ticket/issue key**, wherever the repo requires one
+in a commit subject: the prompt states it, the implementer puts it in the
+subject, and it is not theirs to infer from a branch name — it is answered at
+Stage 1 and recorded once in `kit.md`'s *Project specifics*, and a `COMMIT:`
+hash whose subject is missing the key is a task that has to be redone rather
+than a bookkeeping lapse.
 
 ## Findings: stable IDs
 

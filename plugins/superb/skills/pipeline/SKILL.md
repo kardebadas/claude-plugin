@@ -22,7 +22,7 @@ reviewer fan-out math, and the fix loop.
 `references/run-state.md` (file formats, task-line grammar, cold-start resume,
 dispatch contract), `references/fix-loop.md` (Stage 4's loop and guard rails)
 and `references/parallel.md` (Rule 6: dependency annotations, waves, lanes,
-worktrees and merges, and the Brain-Agent mode). `templates/` holds the three run-state file templates.
+worktrees and merges, and the Brain-Agent mode). `templates/` holds the run-state file templates.
 
 ## Invocation
 
@@ -124,12 +124,13 @@ discarded — see *Compacting at GATE 2*.
   progress.md        # the tracker — phases, tasks, Current State
   register.md        # Assumptions Register
   findings.md        # blocking ledger (F-IDs), iteration history, deferred Minors
+  kit.md             # the run's shared verification apparatus (written at GATE 2)
   agent-output/      # one file per dispatch; long subagent output lands here
 ```
 
 **Formats, task-line grammar, the resume procedure and the dispatch contract
 are in `references/run-state.md`. Read it at Stage 1 step 0.** Templates for
-the three files ship in `templates/` and are **read-only** — copy them, never
+the templates ship in `templates/` and are **read-only** — copy them, never
 edit them.
 
 - **Run state NEVER goes in the skill directory.** A skill directory is shared
@@ -374,6 +375,36 @@ never enter orchestrator context wholesale; the consolidated list in
 `findings.md` is what the run reasons over. Contract in
 `references/run-state.md`.
 
+### Rule 5b — Derive, don't restate
+
+A brief, a plan or a comment states the **source** of a code fact — the symbol
+it lives on, or the command that regenerates it — and never a count, a line
+number, a signature or a file list. No method or field named as already
+existing, no type, no "the four reachable states".
+
+The reason is mechanical: a restated fact is correct at the moment it is written
+and at no moment after. The orchestrator writes briefs from a tree that moves
+under them, so a restated fact is wrong at a rate the run cannot absorb — and
+because the agent receiving it treats the brief as authority, the error is only
+caught when that agent happens to look. In testing every such error *was*
+caught, by the agent, after it had already shaped the work.
+
+- **Writing a brief:** name the symbol, not the file and line it currently sits
+  at. Give the command that finds the call sites, not the number of them you
+  counted.
+- **Receiving a brief:** a brief that states a code fact is **refused** — send
+  it back rather than reconciling it. You cannot tell a stale fact from a
+  current one without deriving it, and if you are deriving it the brief's copy
+  was worthless.
+- **Writing a comment:** anchor to a symbol or delete the claim. A comment that
+  asserts a re-derivable fact is a **claim finding** waiting to happen — see the
+  closure rule in `references/fix-loop.md`.
+
+This rule binds this skill's own prose. Where these documents once counted their
+own templates, they name `templates/` instead: the count was true right up to
+the commit that added a file to that directory, which is the same failure one
+level down.
+
 ### Rule 6 — Dependency waves: parallel where the plan proves it is safe
 
 Sequential-by-default is the fallback, not the design. At Stage 3 every task is
@@ -468,15 +499,27 @@ GATE 1.** Never merge these into one message, never present a design before
 the questions are answered, never run the pressure-test after the gate.
 
 0. Read `references/run-state.md`. Create the run directory at
-   `<PROJECT_DIR>/docs/superpowers/runs/YYYY-MM-DD-<topic>/`, copy in the three
+   `<PROJECT_DIR>/docs/superpowers/runs/YYYY-MM-DD-<topic>/`, copy in the
    templates, seed `progress.md` with Stages 1–5 as phases (all `[ ]`, Current
    State = Stage 1), state the full directory path in your first message to the
-   user, then read the tracker back. **If the directory already exists, stop
-   and ask** — resume, fresh run, or abort — showing the user its Current State.
+   user, then read the tracker back. `kit.md` is the exception: it cannot be
+   filled in before the plan names the gates, so GATE 2 writes it and this step
+   does not. **If the directory already exists, stop and ask** — resume, fresh
+   run, or abort — showing the user its Current State.
 1. Invoke `superpowers:brainstorming` for the interactive Q&A.
 2. Run **as many question rounds as it takes** until you can state every
    requirement with zero open Assumptions Register entries. Each new answer
    that reveals new unknowns spawns another round. More rounds = correct.
+   - **The repo's commit and verification conventions go in the first round** —
+     the ticket/issue key required in a commit subject (and this run's value
+     for it), any coverage floor on changed lines, and any pre-push gate. A
+     **written** repo rule is the one kind of unknown `register.md`'s *Decided
+     without asking* table lets you settle alone, but only once you have
+     **found** it, and inference is not finding. Every task in the run commits,
+     so a wrong answer here is wrong in every commit. Seed them as register
+     entries, cite the rule that answers each, and record the answers in
+     `kit.md`'s *Project specifics* at GATE 2. A run that discovers its commit
+     convention at Stage 5 cannot apply it without rewriting history.
 3. **Intercept** before brainstorming auto-transitions to writing-plans — this
    skill owns that transition.
 4. Dispatch **≥2 agents in parallel** to independently pressure-test / expand
@@ -559,12 +602,20 @@ the whole of Stage 4, not across the handful of turns GATE 1 has left.
 2. `progress.md`'s Current State names the first unstarted line, every task line
    carries its wave and its deps, every phase carries its `RV` line, and every
    split and lane join carries its `RVJ`.
-3. **Every decision made in conversation and never written down gets written
+3. **`kit.md` is written** — the suite, coverage and build-gate commands the
+   approved plan names, the baseline discipline, the mutation harness, the
+   worktree rule, and the repo conventions Stage 1's question rounds asked
+   for. It is
+   **written once, here, from the approved plan**, because every dispatch after
+   this point cites it by path instead of deriving the apparatus again; a run in
+   which every task re-derives one harness is the cost this file exists to
+   delete. Commands only, never their output (Rule 5b).
+4. **Every decision made in conversation and never written down gets written
    now** — into the spec if it changed the design, into a phase's plan if it
    changed that phase's approach, into the register's Closed table verbatim if
    it was an answer. This is the step, not a formality: skip it and "we
    discussed it" quietly becomes "nobody knows".
-4. If step 3 changed the design or a phase's approach, the plan in front of the
+5. If step 4 changed the design or a phase's approach, the plan in front of the
    user is wrong. Correct it, re-present the gate, and let the offer ride with
    the **corrected** gate message — never over an unapproved change.
 
@@ -876,6 +927,8 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
 | "Reply 'approved'/'go' to accept all defaults" | Bulk replies close zero register entries. Each assumption needs its own answer. |
 | "I'll list my assumptions so the user can veto by exception" | An assumption the user didn't explicitly confirm is still an assumption. Ask it as a question instead. |
 | "Codebase precedent is the strongest non-user disambiguator" | Precedent tells you what exists, not what the user wants. Precedent may inform your suggested option — inside a question. |
+| "I'll put the line numbers in the brief so the agent finds it faster" | A line number is correct when you write it and at no moment after. Name the symbol, or the command that finds it. |
+| "The brief says 12 call sites; close enough to act on" | The last brief that stated a call-site count stated the wrong one, and the agent reading it found that out. A stated code fact is refused, not reconciled. |
 | "I'll pick the cheapest-to-reverse option and log it" | A logged assumption is still an assumption. The decision log is not a consent mechanism. |
 | "Stopping would violate the skill's autonomy contract" | The Ambiguity guard IS part of the contract. Guessing violates it; asking honors it. |
 | "The user said don't stop / is unavailable; the review fan-out will catch it" | Reviewers check code against the plan; they cannot read the user's mind. Wait for the user. |
@@ -959,6 +1012,9 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
 - You are checking a task `[x]` and have no hash to put next to it.
 - You are about to hold a full diff or review report in your own context
   instead of a `DETAIL:` path.
+- You are putting a line number, a file list, a signature or a count into a
+  brief, a plan or a comment instead of naming the symbol, or the command that
+  derives it.
 - You are deciding whether two findings are "the same" instead of comparing
   F-IDs.
 - You are about to state an iteration number or recursion depth you did not

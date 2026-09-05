@@ -9,7 +9,7 @@ An entry is closed **only** by an explicit user answer to **that entry**. Bulk
 replies ("approved", "go", "looks good") close nothing. No gate may be
 presented while the Open table has any row.
 
-- **Open count:** 0
+- **Open count:** <the number of rows in the Open table below — read it there>
 - **Last updated:** <timestamp>
 
 ## Operating mode
@@ -24,7 +24,8 @@ only if the user declaring message is pasted verbatim below with its date
 
 | ID | Entry | Why it is not mine to decide | Opened at |
 | -- | ----- | ---------------------------- | --------- |
-| A1 | <the unknown, stated as the question it will become> | <why no default is legitimate> | <stage/phase> |
+| A1 | Does this repo require a ticket/issue key in every commit subject, and if so which one for this run? | A commit convention is a written repo rule this skill cannot infer, and every task in the run commits. Getting it wrong is not fixable without rewriting history. | Stage 1 |
+| A2 | <the unknown, stated as the question it will become> | <why no default is legitimate> | <stage/phase> |
 
 ## Closed
 

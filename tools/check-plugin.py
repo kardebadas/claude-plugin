@@ -538,6 +538,18 @@ for n in skill_names:
         # (a filename) ends it early, so the arm under-matches rather than
         # inventing a gloss out of two adjacent sentences.
         #
+        # THE ANCHOR LOOKS ONE WAY, AND THE SUMMARY LINE SAYS SO. Both
+        # lookaheads scan FORWARD from `` `M` ``, so what the arm establishes is
+        # "no exclusion-less gloss that names `M` ahead of the count and the
+        # F-IDs" — a gloss putting either of those first ("the count of
+        # targeted F-IDs is `M`") is outside it. The summary line used to claim
+        # "no exclusion-less gloss of it anywhere", which is more than any
+        # anchored pattern can establish; that claim is deleted rather than
+        # rewritten, and the wording now states what the anchor reaches.
+        # WIDENING THE PATTERN IS NOT THE FIX: anchoring on `` `M` `` is what
+        # makes this arm stronger than a literal, and a symmetric version would
+        # have to guess a left boundary in prose that has none.
+        #
         # UNIQUENESS IS THE OTHER HALF, and it fires on `> 1`, never on `!= 1`.
         # Absence is `CLAIM_EFFECT`'s to report, with its own file and remedy;
         # were this arm to fail on absence as well, the definition-blur mutant
@@ -568,9 +580,14 @@ for n in skill_names:
                         "leaves no ownable commit, and a gloss that drops the "
                         "exclusion reads `M=1` on a deletion-only iteration — a "
                         "round mandated over an empty diff, which no fan-out "
-                        "row sizes. REMEDY: delete the gloss and cross-"
-                        "reference fix-loop.md's step 3, or state `leaves no "
-                        "ownable commit` with the count")
+                        "row sizes. REMEDY: either the sentence stops "
+                        "matching MGLOSS above — deleted, or cross-referenced "
+                        "to fix-loop.md's step 3, or paraphrased out of that "
+                        "shape the way the namespace arm below lets a sentence "
+                        "about the unprefixed form paraphrase — or it carries "
+                        "`leaves no ownable commit` with the count. The "
+                        "pattern is the predicate; the edits are not a closed "
+                        "list")
             if len(homes) > 1:
                 bad(f"{n} defines `M` in {len(homes)} places ("
                     + ", ".join(sorted(homes)) + ") — SKILL.md says it is "
@@ -578,6 +595,143 @@ for n in skill_names:
                     "of a closed route list is a copy that can drift into being "
                     "a shorter one. REMEDY: keep the definition in "
                     "fix-loop.md's step 3 and cross-reference it elsewhere")
+        # WHAT A DISPATCH BRIEF MUST CARRY, held by phrase in the file that
+        # states it. The skill's dispatch contract now carries three
+        # requirements, and each was one edit from gone before this arm:
+        #
+        #  - DERIVE, DON'T RESTATE (Rule 5b). A brief may state the SOURCE of a
+        #    code fact and not the fact. The measurement behind it: in one run
+        #    about ten orchestrator briefs stated a code fact that was wrong —
+        #    a function placed in the wrong file, helpers unreachable from the
+        #    named test class, a call-site count off by two, a return type read
+        #    as an argument — and every one was caught by the agent RECEIVING
+        #    the brief, never by the orchestrator writing it. A restated fact is
+        #    correct when written and at no moment after, so the rule is held on
+        #    both ends: the prohibition (what a brief may not state) and the
+        #    receiving agent's duty to refuse rather than reconcile.
+        #  - CITE `kit.md` BY PATH. Without it each task derives the same
+        #    apparatus again, and a dispatch that omits the worktree rule is how
+        #    two agents come to mutate the same file in the main tree at once.
+        #    Held at both ends too, because the citation and the file's writing
+        #    point are separately deletable and either alone leaves the other
+        #    useless: a citation to a file GATE 2 no longer writes is a dangling
+        #    pointer, and a file nothing cites is a file nobody reads.
+        #  - THE TICKET/ISSUE KEY. Held at both ends for the same reason: Stage
+        #    1 asking it and the dispatch prompt stating it are separate edits,
+        #    and an answer that never reaches the implementer is not carried.
+        #
+        # PER-PHRASE FILE SETS, like `CLAIM_EFFECT` above and for the same
+        # reason: these phrases do not live in the same places. Rule 5b's
+        # prohibition is held in BOTH `SKILL.md`, where the Run State Law states
+        # the rule, and `references/run-state.md`, where the dispatch contract
+        # makes it an instruction — held the way the `M=0 → no round` entry is
+        # held in every file that defines the `RV` grammar, on the same argument
+        # that an unheld second copy is one edit from gone on a green build. The other phrases have one home
+        # each and are held only there; asserting them elsewhere would be
+        # asserting a copy that does not exist.
+        #
+        # NO PHRASE IS DUPLICATED WITHIN ITS FILE. The arm reads flattened text
+        # and a second occurrence would satisfy it from the wrong place, which
+        # also turns the phrase's mutant into a silent no-op. Every phrase held
+        # in `references/run-state.md` sits in the SAME paragraph there, so
+        # their mutants are surgical per phrase and each asserts its siblings
+        # survived — a paragraph deletion would fire several arms and be
+        # attributable to none, the defect the `M`-exclusion bullet's mutants
+        # were split to fix.
+        # Mutants: "Rule 5b's prohibition blurred in SKILL.md",
+        #          "Rule 5b's prohibition blurred in run-state.md",
+        #          "the brief-refusal duty blurred in run-state.md",
+        #          "the kit.md citation blurred in run-state.md",
+        #          "kit.md's GATE 2 writing point blurred in SKILL.md",
+        #          "the ticket-key question blurred in SKILL.md",
+        #          "the ticket key's dispatch field blurred in run-state.md".
+        if n == "pipeline":
+            LAW, CONTRACT = ("SKILL.md",), ("references/run-state.md",)
+            DISPATCH_CONTRACT = (
+                ("Rule 5b's prohibition",
+                 "never a count, a line number, a signature or a file list",
+                 LAW + CONTRACT,
+                 "Lose it and a brief may state the code facts that were wrong "
+                 "in every brief measured to have stated one."),
+                ("the receiving agent's duty to refuse",
+                 "refuses the brief and says which fact", CONTRACT,
+                 "Lose it and a stated code fact becomes something the agent "
+                 "reconciles, which is trusting it with extra steps."),
+                ("the `kit.md` citation", "`kit.md`, cited by path", CONTRACT,
+                 "Lose it and every task derives the harness again, and two of "
+                 "them mutate the same file in the main tree."),
+                ("`kit.md`'s writing point",
+                 "written once, here, from the approved plan", LAW,
+                 "Lose it and the file the dispatch contract cites by path is "
+                 "never written, leaving that citation dangling."),
+                ("the ticket/issue key as a Stage 1 question",
+                 "the ticket/issue key required in a commit subject", LAW,
+                 "Lose it and the key is discovered at Stage 5, after every "
+                 "task in the run has committed without it."),
+                ("the ticket/issue key as a dispatch field",
+                 "the prompt states it, the implementer puts it in the subject",
+                 CONTRACT,
+                 "Lose it and the answer Stage 1 obtained never reaches the "
+                 "agent that has to type it."),
+            )
+            for lbl, q, rels, why in DISPATCH_CONTRACT:
+                for rel in rels:
+                    dt, de = read(sdir / n / rel)
+                    if de:
+                        bad(f"{n}/{rel} must carry {lbl}, but that file cannot "
+                            f"be read: {de}")
+                        continue
+                    if q not in " ".join(dt.split()).lower():
+                        bad(f"{n}/{rel} is missing {lbl} ({q!r} absent). {why} "
+                            "It is required verbatim, because a rule with one "
+                            "unheld copy is one edit from gone on a green "
+                            f"build. REMEDY: restore the phrase in {rel}, where "
+                            "that file states its half of the dispatch "
+                            "contract")
+        # RULE 5b BINDS THIS SKILL'S OWN PROSE, AND THE TEMPLATE COUNTS ARE
+        # WHERE IT WAS ALREADY BROKEN. Sentences in `SKILL.md` and
+        # `references/run-state.md` counted the skill's own run-state file
+        # templates. Each was true when written and false the moment
+        # `templates/kit.md` landed — the rule's own arrival is what falsified
+        # them — and nothing would have said so: no arm reads that directory's
+        # cardinality, so the counts would have stayed, wrong, on a green build.
+        # They now name the directory instead, and this arm is what keeps a
+        # count from coming back.
+        #
+        # WINDOW-BOUNDED AND FORWARD-ANCHORED, so the summary line claims only
+        # what it reaches: a count STANDING AHEAD OF the word, within one
+        # sentence (`[^.;]`) and 45 characters. Every sentence it was written
+        # against sat well inside that, including those whose count quantified
+        # "files" with the directory named later in the same clause. A count trailing the word ("templates, of which there are
+        # three") is outside it, and widening to catch that would mean guessing
+        # a left boundary in prose that has none.
+        #
+        # IT FIRES ON A DIGIT USED AS AN ORDINAL NEAR THE WORD TOO ("Stage 1
+        # step 0 with the other templates" tripped it while this arm was being
+        # written). That is the conservative direction for a self-referential
+        # lint — the remedy is one reword and the gate says which sentence — and
+        # dropping `\d+` to avoid it would let "the 3 templates" through, which
+        # is the defect itself in digits.
+        # Mutants: "template count reintroduced into SKILL.md".
+        if n == "pipeline":
+            TCOUNT = re.compile(
+                r"\b(?:both|one|two|three|four|five|six|seven|eight|nine|ten"
+                r"|\d+)\b[^.;]{0,45}?\btemplates?\b", re.I)
+            for cf in sorted((sdir / n).rglob("*.md")):
+                cft, cfe = read(cf)
+                if cfe:
+                    continue
+                cfrel = cf.relative_to(sdir / n).as_posix()
+                for g in TCOUNT.finditer(" ".join(cft.split())):
+                    bad(f"{n}/{cfrel} states a count of the skill's own "
+                        f"templates: {g.group(0)[:100]!r}. Rule 5b binds this "
+                        "skill's own prose, and a count of that directory is "
+                        "true until the commit that adds a file to it — which "
+                        "is what happened to the sentences this arm replaced. "
+                        "REMEDY: name `templates/` instead of counting it. If "
+                        "the number is an ordinal that only happens to sit "
+                        "near the word, reword the sentence — this arm reads a "
+                        "45-character window and does not know the difference")
     for f in sorted((sdir / n).rglob("*.md")):
         t, e = read(f)
         if e: continue
@@ -592,8 +746,11 @@ if len(FAIL) == _inv_before:
        "claim-finding closure rule present in both texts that ship it, its "
        "`M`/union exclusions plus `M`'s own definition and closed route list "
        "present in the authority, its `M=0 → no round` "
-       "form present in all three files that define the `RV` grammar, and `M` "
-       "defined in one place with no exclusion-less gloss of it anywhere")
+       "form present in all three files that define the `RV` grammar, `M` "
+       "defined in one place with no exclusion-less gloss that names `M` ahead "
+       "of the count and the F-IDs it glosses, the dispatch contract's three "
+       "requirements each held in the file that states it, and no count of the "
+       "skill's own templates standing ahead of the word")
 
 print("== agents ==")
 adir = ROOT/"plugins/superb/agents"

@@ -544,6 +544,188 @@ assert 'closures: F-018 deleted,' in out, 'mutant is a no-op: the legal route we
 assert '→ no findings' in out, 'mutant is a no-op: the outcome slot went too'
 p.write_text(out)\""
 
+# --- the dispatch contract's three requirements must each stay held ---
+# Rule 5b (derive, don't restate), the `kit.md` citation and the ticket/issue
+# key are one contract in `references/run-state.md`, and each has a second end
+# in `SKILL.md` — the Law that states Rule 5b, the GATE 2 step that writes
+# `kit.md`, the Stage 1 round that asks the key. Every one of those was
+# deletable on a green build before the DISPATCH_CONTRACT arm.
+#
+# ONE SURGICAL MUTANT PER (PHRASE, FILE). Every phrase held in
+# `references/run-state.md` sits in the SAME paragraph there, so a paragraph
+# deletion fires several arms at once and is attributable to none — the defect that split the
+# `M`-exclusion bullet's mutants in two. Each mutant below blurs its own phrase
+# and asserts that every sibling phrase, in this file and in the other, came
+# through untouched, so the kill belongs to the arm whose name it bears.
+#
+# Every phrase is matched with `\s+` between its words, never as a literal: the
+# gate reads them out of FLATTENED text, so any of them may sit across a line
+# break in the source — several do — and a literal match would be a silent
+# no-op rather than a mutation. Each asserts its anchor was present exactly
+# once before and that the blur landed. Backticks are built with chr(96): a
+# literal one inside these double-quoted shell arguments would be command
+# substitution, and no assertion message may contain an apostrophe, which would
+# close the single-quoted Python string it sits in.
+run_mutant "Rule 5b's prohibition blurred in SKILL.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+o=pathlib.Path('plugins/superb/skills/pipeline/references/run-state.md')
+s=p.read_text(); bt=chr(96); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+F1='never a count, a line number, a signature or a file list'
+F2='refuses the brief and says which fact'
+F3=bt+'kit.md'+bt+', cited by path'
+F4='the prompt states it, the implementer puts it in the subject'
+F5='written once, here, from the approved plan'
+F6='the ticket/issue key required in a commit subject'
+a=re.compile(ws.join(['never', 'a', 'count,', 'a', 'line', 'number,', 'a', 'signature', 'or', 'a', 'file', 'list']))
+assert len(a.findall(s))==1, 'mutant is a no-op: the Rule 5b prohibition is absent, reworded or duplicated in SKILL.md'
+out=a.sub('and states its source instead', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert F5 in flat(out), 'mutant is a no-op: [' + F5 + '] went too in the same file, so a kill would not be attributable to the phrase this mutant names'
+assert F6 in flat(out), 'mutant is a no-op: [' + F6 + '] went too in the same file, so a kill would not be attributable to the phrase this mutant names'
+assert F1 in flat(o.read_text()), 'mutant is a no-op: [' + F1 + '] went too in the other file, so a kill would not be attributable to the phrase this mutant names'
+p.write_text(out)\""
+run_mutant "Rule 5b's prohibition blurred in run-state.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/references/run-state.md')
+o=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+s=p.read_text(); bt=chr(96); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+F1='never a count, a line number, a signature or a file list'
+F2='refuses the brief and says which fact'
+F3=bt+'kit.md'+bt+', cited by path'
+F4='the prompt states it, the implementer puts it in the subject'
+F5='written once, here, from the approved plan'
+F6='the ticket/issue key required in a commit subject'
+a=re.compile(ws.join(['never', 'a', 'count,', 'a', 'line', 'number,', 'a', 'signature', 'or', 'a', 'file', 'list']))
+assert len(a.findall(s))==1, 'mutant is a no-op: the dispatch contract no longer carries the prohibition exactly once'
+out=a.sub('and states its source instead', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert F2 in flat(out), 'mutant is a no-op: [' + F2 + '] went too in the same file, so a kill would not be attributable to the phrase this mutant names'
+assert F3 in flat(out), 'mutant is a no-op: [' + F3 + '] went too in the same file, so a kill would not be attributable to the phrase this mutant names'
+assert F4 in flat(out), 'mutant is a no-op: [' + F4 + '] went too in the same file, so a kill would not be attributable to the phrase this mutant names'
+assert F1 in flat(o.read_text()), 'mutant is a no-op: [' + F1 + '] went too in the other file, so a kill would not be attributable to the phrase this mutant names'
+p.write_text(out)\""
+run_mutant "the brief-refusal duty blurred in run-state.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/references/run-state.md')
+o=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+s=p.read_text(); bt=chr(96); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+F1='never a count, a line number, a signature or a file list'
+F2='refuses the brief and says which fact'
+F3=bt+'kit.md'+bt+', cited by path'
+F4='the prompt states it, the implementer puts it in the subject'
+F5='written once, here, from the approved plan'
+F6='the ticket/issue key required in a commit subject'
+a=re.compile(ws.join(['refuses', 'the', 'brief', 'and', 'says', 'which', 'fact']))
+assert len(a.findall(s))==1, 'mutant is a no-op: the refusal duty is absent, reworded or duplicated'
+out=a.sub('takes the brief as it stands', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert F1 in flat(out), 'mutant is a no-op: [' + F1 + '] went too in the same file, so a kill would not be attributable to the phrase this mutant names'
+assert F3 in flat(out), 'mutant is a no-op: [' + F3 + '] went too in the same file, so a kill would not be attributable to the phrase this mutant names'
+assert F4 in flat(out), 'mutant is a no-op: [' + F4 + '] went too in the same file, so a kill would not be attributable to the phrase this mutant names'
+assert F1 in flat(o.read_text()), 'mutant is a no-op: [' + F1 + '] went too in the other file, so a kill would not be attributable to the phrase this mutant names'
+p.write_text(out)\""
+run_mutant "the kit.md citation blurred in run-state.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/references/run-state.md')
+o=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+s=p.read_text(); bt=chr(96); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+F1='never a count, a line number, a signature or a file list'
+F2='refuses the brief and says which fact'
+F3=bt+'kit.md'+bt+', cited by path'
+F4='the prompt states it, the implementer puts it in the subject'
+F5='written once, here, from the approved plan'
+F6='the ticket/issue key required in a commit subject'
+a=re.compile(ws.join(['cited', 'by', 'path']))
+assert len(a.findall(s))==1, 'mutant is a no-op: the kit citation is absent, reworded or duplicated'
+out=a.sub('described in the prompt', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert F1 in flat(out), 'mutant is a no-op: [' + F1 + '] went too in the same file, so a kill would not be attributable to the phrase this mutant names'
+assert F2 in flat(out), 'mutant is a no-op: [' + F2 + '] went too in the same file, so a kill would not be attributable to the phrase this mutant names'
+assert F4 in flat(out), 'mutant is a no-op: [' + F4 + '] went too in the same file, so a kill would not be attributable to the phrase this mutant names'
+assert F5 in flat(o.read_text()), 'mutant is a no-op: [' + F5 + '] went too in the other file, so a kill would not be attributable to the phrase this mutant names'
+p.write_text(out)\""
+run_mutant "kit.md's GATE 2 writing point blurred in SKILL.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+o=pathlib.Path('plugins/superb/skills/pipeline/references/run-state.md')
+s=p.read_text(); bt=chr(96); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+F1='never a count, a line number, a signature or a file list'
+F2='refuses the brief and says which fact'
+F3=bt+'kit.md'+bt+', cited by path'
+F4='the prompt states it, the implementer puts it in the subject'
+F5='written once, here, from the approved plan'
+F6='the ticket/issue key required in a commit subject'
+a=re.compile(ws.join(['written', 'once,', 'here,', 'from', 'the', 'approved', 'plan']))
+assert len(a.findall(s))==1, 'mutant is a no-op: the GATE 2 writing point is absent, reworded or duplicated'
+out=a.sub('put together whenever a task first needs it', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert F1 in flat(out), 'mutant is a no-op: [' + F1 + '] went too in the same file, so a kill would not be attributable to the phrase this mutant names'
+assert F6 in flat(out), 'mutant is a no-op: [' + F6 + '] went too in the same file, so a kill would not be attributable to the phrase this mutant names'
+assert F3 in flat(o.read_text()), 'mutant is a no-op: [' + F3 + '] went too in the other file, so a kill would not be attributable to the phrase this mutant names'
+p.write_text(out)\""
+run_mutant "the ticket-key question blurred in SKILL.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+o=pathlib.Path('plugins/superb/skills/pipeline/references/run-state.md')
+s=p.read_text(); bt=chr(96); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+F1='never a count, a line number, a signature or a file list'
+F2='refuses the brief and says which fact'
+F3=bt+'kit.md'+bt+', cited by path'
+F4='the prompt states it, the implementer puts it in the subject'
+F5='written once, here, from the approved plan'
+F6='the ticket/issue key required in a commit subject'
+a=re.compile(ws.join(['the', 'ticket/issue', 'key', 'required', 'in', 'a', 'commit', 'subject']))
+assert len(a.findall(s))==1, 'mutant is a no-op: the Stage 1 ticket-key question is absent, reworded or duplicated'
+out=a.sub('the conventions of the repo', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert F1 in flat(out), 'mutant is a no-op: [' + F1 + '] went too in the same file, so a kill would not be attributable to the phrase this mutant names'
+assert F5 in flat(out), 'mutant is a no-op: [' + F5 + '] went too in the same file, so a kill would not be attributable to the phrase this mutant names'
+assert F4 in flat(o.read_text()), 'mutant is a no-op: [' + F4 + '] went too in the other file, so a kill would not be attributable to the phrase this mutant names'
+p.write_text(out)\""
+run_mutant "the ticket key's dispatch field blurred in run-state.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/references/run-state.md')
+o=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+s=p.read_text(); bt=chr(96); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+F1='never a count, a line number, a signature or a file list'
+F2='refuses the brief and says which fact'
+F3=bt+'kit.md'+bt+', cited by path'
+F4='the prompt states it, the implementer puts it in the subject'
+F5='written once, here, from the approved plan'
+F6='the ticket/issue key required in a commit subject'
+a=re.compile(ws.join(['the', 'prompt', 'states', 'it,', 'the', 'implementer', 'puts', 'it', 'in', 'the', 'subject']))
+assert len(a.findall(s))==1, 'mutant is a no-op: the dispatch field is absent, reworded or duplicated'
+out=a.sub('the implementer works it out', s)
+assert out!=s, 'mutant is a no-op: the phrase was not blurred'
+assert F1 in flat(out), 'mutant is a no-op: [' + F1 + '] went too in the same file, so a kill would not be attributable to the phrase this mutant names'
+assert F2 in flat(out), 'mutant is a no-op: [' + F2 + '] went too in the same file, so a kill would not be attributable to the phrase this mutant names'
+assert F3 in flat(out), 'mutant is a no-op: [' + F3 + '] went too in the same file, so a kill would not be attributable to the phrase this mutant names'
+assert F6 in flat(o.read_text()), 'mutant is a no-op: [' + F6 + '] went too in the other file, so a kill would not be attributable to the phrase this mutant names'
+p.write_text(out)\""
+
+# --- and the skill may not count its own templates again ---
+# The counts this arm replaced were true when written and false the moment
+# `templates/kit.md` landed. Nothing read that directory's cardinality, so they
+# would have stayed wrong on a green build. This mutant puts one back, in the
+# exact sentence that carried it. It asserts the count is NOT already present
+# (or the tree was broken before the mutation), that the insertion landed, and
+# that the dispatch-contract phrases in the same file are untouched, so the kill
+# belongs to the template-count arm and cannot be borrowed from a neighbour.
+run_mutant "template count reintroduced into SKILL.md" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+s=p.read_text(); bt=chr(96)
+flat=lambda x: ' '.join(x.split()).lower()
+a=bt+'templates/'+bt+' holds the run-state file templates.'
+g=bt+'templates/'+bt+' holds the three run-state file templates.'
+assert s.count(a)==1, 'mutant is a no-op: the sentence that named the directory is absent, reworded or duplicated'
+assert g not in s, 'mutant is a no-op: the count is already there, so the tree was broken before the mutation'
+out=s.replace(a, g)
+assert g in out, 'mutant is a no-op: the count was not reintroduced'
+assert 'never a count, a line number, a signature or a file list' in flat(out), 'mutant is a no-op: the Rule 5b prohibition went too, so a kill would not be attributable to the template count'
+assert 'written once, here, from the approved plan' in flat(out), 'mutant is a no-op: the GATE 2 writing point went too, so a kill would not be attributable to the template count'
+p.write_text(out)\""
+
 # check-plugin.py cites its mutants BY NAME, and nothing kept those names true
 # until the citation check was added. The real-world failure is a rename in this
 # file, so that is what this mutant does: it renames a cited mutant and leaves

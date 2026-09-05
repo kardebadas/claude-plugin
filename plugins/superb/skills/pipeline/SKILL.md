@@ -210,6 +210,20 @@ someone who was not there, all paths relative to `agent-output/`:
 | `coverage <file>` | One file holding **the slice assignment table — each row keyed by its report filename, with that reviewer's exact range — above the `git log --oneline PB..PH`**, and ending with the verdict line `COVERED: <n>/<n> commits`. All three: a bare log is the input to a coverage judgement rather than the judgement, and a table with a gap in it sits above the log just as happily as one without. Anything short of `<n>/<n>` does not close the line. |
 | `→ <F-IDs>` or `→ no findings` | What the round produced. |
 
+**The line's shape is machine-checkable, and only its shape.** The superb
+plugin's own repository ships a linter for this grammar: from a checkout of
+that repo, `./tools/check-plugin.sh --run <run-directory>` reads the tracker's
+closed `RV`/`RVJ` rounds and names any whose declared count and listed report
+files disagree, whose `RVJ` is not `0 slice + 1 integration`, whose `coverage`
+field is absent, whose named report files are not in `agent-output/`, or whose
+`M=0 → no round` record carries reviewer evidence. It is not in a project's own
+tree unless that project is the plugin, so it is a check a run can use, not a
+gate every run passes. **It cannot check that the fan-out was sized right, and
+no version of it will**: outside the unwaved `N=` regime the size is not
+derivable from the line — neither the wave count nor the cluster count is on
+it — so a reader of the tracker alone can only establish that what a round
+declares and what it lists agree.
+
 **Every field is per round, and re-review rounds append their own.** The counts
 are read against the round they sit in, never against the whole line:
 
@@ -515,7 +529,13 @@ the questions are answered, never run the pressure-test after the gate.
      for it), any coverage floor on changed lines, and any pre-push gate. A
      **written** repo rule is the one kind of unknown `register.md`'s *Decided
      without asking* table lets you settle alone, but only once you have
-     **found** it, and inference is not finding. Every task in the run commits,
+     **found** it, and inference is not finding. **The seeded key entry asks two
+     things and its halves go to different tables:** whether this repo demands a
+     key at all is answered by the written rule, so that half belongs in *Decided
+     without asking* with the rule cited the moment you find it — and in *Open*
+     only while you cannot; which key this run uses is answered by nobody but the
+     user, so that half stays *Open* and blocks GATE 1 until they say it. Every
+     task in the run commits,
      so a wrong answer here is wrong in every commit. Seed them as register
      entries, cite the rule that answers each, and record the answers in
      `kit.md`'s *Project specifics* at GATE 2. A run that discovers its commit

@@ -20,8 +20,12 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 # `--run <dir>` points the review-line linter at a real run's `progress.md` as
 # well as the skill's worked examples. Anything else is rejected rather than
 # ignored: a silently-swallowed typo (`--rn`, `-run`) runs the DEFAULT mode and
-# reports PASS, which reads as "the run directory conforms".
-# Mutants: "wrapper passes an unrecognised argument".
+# reports PASS, which reads as "the run directory conforms". A `--run` with no
+# operand is refused the same way, and the usage line it prints is asserted by
+# name: neutralise the guard and `_argv[1]` raises `IndexError`, which is also
+# a red build, so only the MESSAGE separates the two.
+# Mutants: "wrapper passes an unrecognised argument",
+#          "wrapper passes --run with no operand".
 RUN_DIR = None
 _argv = sys.argv[1:]
 if _argv and _argv[0] == "--run":
@@ -448,7 +452,7 @@ for n in skill_names:
             # now carry the phrase verbatim, and deleting the paragraph from
             # either one left this gate green. An unheld second copy is the
             # weakness each of this arm's neighbours was extended to close, so
-            # all three files hold that phrase — and the phrase must stay
+            # every one of those files holds that phrase — and it must stay
             # byte-identical across them, which is the whole point of holding a
             # phrase rather than a meaning.
             #
@@ -457,15 +461,15 @@ for n in skill_names:
             # cross-reference and the bullet together pass green — the same hole
             # by two deletions instead of one.
             # `M`'s DEFINITION is held here too, and separately from the
-            # condition. The three entries above hold the CONSEQUENCE
-            # (`m=0 → no round`, the exclusions) in up to three files, but
+            # condition. The entries above hold the CONSEQUENCE
+            # (`m=0 → no round`, the exclusions) in the files that state it, but
             # nothing held the sentence `M` is *stated in terms of*: deleting
             # the whole `**Unless `M=0`.**` paragraph — the definition and its
             # closed route list together — left `check-plugin: PASS` and every
             # mutant killed, because the phrase the no-round arm reads occurs in
             # that file only inside a worked-example fence. A condition whose
             # subject is undefined is the same hole one level up from the one
-            # those three entries closed.
+            # those entries closed.
             #
             # Two phrases, not one, because the paragraph makes two separable
             # claims and each has its own failure mode. The DEFINITION can be
@@ -613,8 +617,8 @@ for n in skill_names:
                     "a shorter one. REMEDY: keep the definition in "
                     "fix-loop.md's step 3 and cross-reference it elsewhere")
         # WHAT A DISPATCH BRIEF MUST CARRY, held by phrase in the file that
-        # states it. The skill's dispatch contract now carries three
-        # requirements, and each was one edit from gone before this arm:
+        # states it. Each requirement the skill's dispatch contract carries
+        # was one edit from gone before this arm:
         #
         #  - DERIVE, DON'T RESTATE (Rule 5b). A brief may state the SOURCE of a
         #    code fact and not the fact. The measurement behind it: in one run
@@ -763,10 +767,10 @@ if len(FAIL) == _inv_before:
        "claim-finding closure rule present in both texts that ship it, its "
        "`M`/union exclusions plus `M`'s own definition and closed route list "
        "present in the authority, its `M=0 → no round` "
-       "form present in all three files that define the `RV` grammar, `M` "
+       "form present in every file that defines the `RV` grammar, `M` "
        "defined in one place with no exclusion-less gloss that names `M` ahead "
-       "of the count and the F-IDs it glosses, the dispatch contract's three "
-       "requirements each held in the file that states it, and no count of the "
+       "of the count and the F-IDs it glosses, every requirement of the "
+       "dispatch contract held in the file that states it, and no count of the "
        "skill's own templates standing ahead of the word")
 
 print("== agents ==")
@@ -795,7 +799,23 @@ else:
             elif not p.stat().st_mode & 0o111: bad(f"checks.yml runs {r} which is not executable")
         for must in ("tools/check-plugin.sh", "tools/check-plugin-mutants.sh"):
             if not any(must in r for r in refs): bad(f"checks.yml does not run {must}")
-        if not FAIL: ok(f"checks.yml runs {len(refs)} scripts, all present and executable")
+        # `--run` IS A SECOND MODE, AND `refs` CANNOT SEE IT: the pattern above
+        # stops at the first space, so a workflow that runs the gate with no
+        # arguments and one that also lints a run directory are identical to it.
+        # For the whole life of the mode CI ran only the first, which left every
+        # run-mode arm exercised by nothing but the mutant harness's own
+        # baseline — where a break surfaces as "the clean copy does not pass"
+        # and stops the harness, not as itself. Held on the raw text.
+        # Mutants: "CI stops running the gate in run mode".
+        if "check-plugin.sh --run " not in t:
+            bad("checks.yml never runs ./tools/check-plugin.sh with `--run` — "
+                "the run mode's arms are then exercised by no CI step, and a "
+                "break in them reaches you as a mutant-harness abort instead "
+                "of as the failure it is. REMEDY: keep a "
+                "`./tools/check-plugin.sh --run tools/fixtures/run-ok` step "
+                "beside the bare one")
+        if not FAIL: ok(f"checks.yml runs {len(refs)} scripts, all present and "
+                        "executable, and lints a run directory with `--run`")
 
 print("== no personal leakage ==")
 # Foreign project conventions leak the same way absolute home paths do: a build
@@ -885,19 +905,25 @@ def expand_braces(spec):
     pre, post = spec[:m.start()], spec[m.end():]
     return [f"{pre}{x.strip()}{post}" for x in m.group(1).split(",") if x.strip()]
 
-def rel(p):
+def relpath(p):
     """Repo-relative when the path is in the repo, absolute when it is not.
 
     A run directory is a caller's argument and need not sit under ROOT, so
     `relative_to` cannot be assumed — it raises, and a traceback is not a
     finding.
+
+    NOT named `rel`: `rel` is bound as a loop and assignment variable at
+    several module-scope sites above, and a helper of that name works only
+    while every one of those bindings precedes the `def`. Hoisting the helper —
+    the ordinary tidying edit — rebinds it to a `str`, and the next call raises
+    `TypeError: 'str' object is not callable`.
     """
     try:
         return p.relative_to(ROOT)
     except ValueError:
         return p
 
-def lint_review_lines(paths, agent_output=None):
+def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
     """Lint every closed RV/RVJ round found in `paths`.
 
     paths: iterable of .md files to scan.
@@ -905,6 +931,29 @@ def lint_review_lines(paths, agent_output=None):
         in. Available for a real run only — the skill's worked examples name
         illustrative files that were never written, so passing it there would
         fail the documentation for being documentation.
+    bullet_bounded: how a record ENDS, and it differs by input.
+
+        A tracker is a bullet list: a round is one `- [x] RV` bullet plus its
+        wrapped continuation lines, and the next `- [` bullet is where it
+        stops. So the run path ends the record THERE — no byte count.
+
+        The worked examples are prose and fenced snippets with no such
+        boundary, so they keep a 400-character window. That window was
+        calibrated on those terse examples and is WRONG for a tracker: a real
+        round record carries prose, and a `coverage` field sitting past 400
+        flattened characters of its own start was reported as missing —
+        measured, on a conforming file that passed once the prose was removed.
+        Dropping the window for the examples too is not the fix: it lets the
+        re-review round at SKILL.md:217 swallow the `M=0 → no round`
+        paragraph that follows it and fires the no-round arm on both files
+        that carry one (measured).
+
+        The bounded form ends the LAST record at end-of-file, since there is
+        no following bullet. That is the false-PASS direction — trailing prose
+        could satisfy a field a malformed final round omitted — and it is the
+        cheap one to accept: the alternative boundaries (a `#` heading, a
+        fence) are line-shapes a tracker writes inside round records too, and
+        each would re-open the false-FAIL this argument closes.
     Returns (closed_rounds, no_round_records, violations).
     """
     seen = nseen = viol = 0
@@ -924,11 +973,17 @@ def lint_review_lines(paths, agent_output=None):
         marks = [(m.start(), (m.group(1) or m.group(2))) for m in start.finditer(flat)]
         for idx, (pos, kind) in enumerate(marks):
             end = marks[idx + 1][0] if idx + 1 < len(marks) else len(flat)
-            rec = flat[pos:min(end, pos + 400)]
+            if bullet_bounded:
+                nxt = flat.find("- [", pos + 1)
+                if nxt != -1 and nxt < end:
+                    end = nxt
+            else:
+                end = min(end, pos + 400)
+            rec = flat[pos:end]
             if nor.search(rec):
                 nseen += 1
                 body = rec.split("```")[0] if "```" in rec else rec
-                where = f"{rel(f)}:{lineno(pos)}"
+                where = f"{relpath(f)}:{lineno(pos)}"
                 probs = []
                 if rpt.search(body):
                     probs.append("lists a `reports` field")
@@ -964,7 +1019,7 @@ def lint_review_lines(paths, agent_output=None):
             if not d: continue          # e.g. the WAIVED form, which carries no counts
             seen += 1
             want = int(d.group(1)) + int(d.group(2))
-            where = f"{rel(f)}:{lineno(pos)}"
+            where = f"{relpath(f)}:{lineno(pos)}"
             if kind == "RVJ" and (int(d.group(1)), int(d.group(2))) != (0, 1):
                 viol += 1; bad(f"{where}: RVJ must be 0 slice + 1 integration, declares {d.group(1)}+{d.group(2)}")
             r = rpt.search(rec)
@@ -1023,33 +1078,65 @@ if seen and nseen and not viol:
 #
 # Both "does not exist" branches report a NAMED failure rather than raising:
 # `bad()` is the gate's only way to say something, and a traceback exits before
-# the remaining sections ever run.
+# the remaining sections ever run. So does the UNREADABLE branch: a
+# `chmod 000 progress.md` used to reach `lint_review_lines`'s `if e: continue`,
+# come back with no records, and be reported as "no closed RV/RVJ round —
+# nothing in this run has been reviewed yet". The verdict was right and the
+# reason was invented: the file exists and may hold closed rounds. The read is
+# done here, once, and the error named.
+#
+# WHAT THIS MODE ESTABLISHES, exactly, and what it does not:
+#   IT ESTABLISHES — for every closed `RV`/`RVJ` round in `<dir>/progress.md`:
+#     the declared `<s> slice + <i> integration` count equals the number of
+#     report files the same round lists (brace sets expanded); an `RVJ` round
+#     declares `0 slice + 1 integration`; the round names a `coverage` file;
+#     every report file it names exists in `<dir>/agent-output/`; and an
+#     `M=0 → no round` record carries its closure routes and no reviewer
+#     evidence. Plus: the tracker is readable, and at least one round is
+#     closed.
+#   IT DOES NOT ESTABLISH that the fan-out was SIZED correctly. That is not a
+#     limitation to be lifted later — it is not derivable from the line at all.
+#     The rule is "one reviewer per file cluster in the fix diff", whose input
+#     is the diff; the tracker records what was declared and what was listed,
+#     and a round declaring `1 slice + 0 integration` over a seven-cluster
+#     diff is internally consistent and passes here (measured). Any prose
+#     saying otherwise is a claim this mode cannot hold up.
+#   IT ALSO DOES NOT establish that a named report file says anything, that
+#     coverage reached `<n>/<n>`, or that the round happened when it says.
 # Mutants: "run tracker over-declares reviewers",
 #          "run tracker cites a report file that is not in agent-output",
 #          "run tracker round loses its coverage field",
+#          "long run-tracker round loses its coverage field",
 #          "run tracker loses one brace-expanded report file",
 #          "run tracker has no closed review round",
 #          "run directory has no progress.md",
 #          "run directory has no agent-output".
 if RUN_DIR is not None:
-    print(f"\n== run tracker: {rel(RUN_DIR)} ==")
+    print(f"\n== run tracker: {relpath(RUN_DIR)} ==")
     tracker = RUN_DIR / "progress.md"
     if not tracker.exists():
-        bad(f"{rel(tracker)} does not exist — `--run` was pointed at "
+        bad(f"{relpath(tracker)} does not exist — `--run` was pointed at "
             "something that is not a pipeline run directory, so nothing was "
             "checked. REMEDY: pass the run directory that holds the run's "
             "`progress.md`")
+    elif (terr := read(tracker)[1]):
+        bad(f"{relpath(tracker)} cannot be read: {terr} — the "
+            "tracker exists and may hold closed rounds, so nothing here is a "
+            "statement about whether this run has been reviewed, and in "
+            "particular not that it has not been. REMEDY: make the file "
+            "readable and run again")
     else:
         ao = RUN_DIR / "agent-output"
         if not ao.is_dir():
-            bad(f"{rel(ao)} does not exist — a closed review round has "
+            bad(f"{relpath(ao)} does not exist — a closed review round has "
                 "nowhere to have written its reports, so every report file "
                 "this tracker names is unverifiable. REMEDY: keep the run's "
                 "`agent-output/` beside its `progress.md`")
             ao = None
-        rseen, rnseen, rviol = lint_review_lines([tracker], agent_output=ao)
+        rseen, rnseen, rviol = lint_review_lines(
+            [tracker], agent_output=ao, bullet_bounded=True)
         if not rseen:
-            bad(f"{rel(tracker)}: no closed RV/RVJ round — nothing in this run "
+            bad(f"{relpath(tracker)}: no closed RV/RVJ round — nothing in this run "
                 "has been reviewed yet, so a PASS here would report a review "
                 "that has not happened")
         elif not rviol and ao is not None:

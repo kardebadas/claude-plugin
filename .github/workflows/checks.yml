@@ -12,6 +12,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: ./tools/check-plugin.sh
+      # `--run` is a second mode with arms of its own, and the no-argument
+      # invocation above never enters it. Before this line the only thing that
+      # ever ran it was the mutant harness's own baseline, so a break in the
+      # mode would have surfaced as a harness abort rather than as itself.
+      - run: ./tools/check-plugin.sh --run tools/fixtures/run-ok
       - run: ./tools/check-plugin-mutants.sh
 
   craft-brief:

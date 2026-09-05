@@ -103,6 +103,21 @@ run_mutant "non-UTF8 byte in a checked file"       "printf '\\xff\\xfe' >> plugi
 run_mutant "skills directory deleted"              "rm -rf plugins/superb/skills"
 run_mutant "CI workflow deleted"                   "rm -f .github/workflows/checks.yml"
 run_mutant "CI stops running the gate"             "sed -i 's|./tools/check-plugin.sh|./tools/nothing.sh|' .github/workflows/checks.yml"
+# The run mode is a SEPARATE CI step, and deleting it is invisible to the arm
+# that lists `./tools/` scripts — both invocations name the same script. So this
+# deletes only that step and leaves the bare one: `refs` is unchanged, both
+# required scripts are still run, and the only arm that can fire is the one
+# reading the raw text for `--run`. Guarded at both ends.
+run_mutant "CI stops running the gate in run mode" '
+f=.github/workflows/checks.yml
+if [ "$(grep -cF -- "check-plugin.sh --run " "$f")" != 1 ]; then
+  echo "mutant is a no-op: checks.yml no longer runs the gate in run mode exactly once, so there is no step to delete"
+else
+  sed -i "/check-plugin.sh --run /d" "$f"
+  grep -qF -- "check-plugin.sh --run " "$f" && echo "mutant is a no-op: the run-mode step was not deleted"
+  grep -qF -- "./tools/check-plugin.sh" "$f" || echo "mutant is a no-op: it took the bare invocation too, so a kill could come from the script-list arm instead"
+  grep -qF -- "./tools/check-plugin-mutants.sh" "$f" || echo "mutant is a no-op: it took the harness step too, so a kill could come from the script-list arm instead"
+fi'
 
 # --- the pipeline review-line linter must itself stay honest ---
 run_mutant "RV example loses a report file"        "sed -i 's|p3-review-{a,b,int}.md|p3-review-{a,b}.md|' plugins/superb/skills/pipeline/references/run-state.md"
@@ -167,6 +182,43 @@ else
   sed -i "s|check-plugin.py\" \"|check-plugin.py\" --rn tools/fixtures/run-ok \"|" "$f"
   grep -qF -- "--rn tools/fixtures/run-ok" "$f" || echo "mutant is a no-op: the bad argument was not injected"
 fi'
+# `--run` with NO OPERAND must print the usage line, not index past the end of
+# the argument list. Neutralise `if len(_argv) < 2` and `_argv[1]` raises
+# `IndexError` — also a non-zero exit, so exit status alone cannot tell the
+# named usage message from a traceback. Measured: with the guard deleted, this
+# harness's own no-argument invocation exits 0 and the mutant reports SURVIVED,
+# so the guard is not "killed either way" — it is not held at all unless the
+# message is what is asserted.
+# So this one asserts the MESSAGE, on the `cited predicate file unreadable`
+# precedent: inject an operandless `--run` into the copy's wrapper, grep the
+# captured output for the exact usage line, and if it is absent put the wrapper
+# back — leaving a clean copy that PASSES, so the harness reports SURVIVED with
+# its reason printed instead of passing on a traceback. Measured both ways:
+# guard present -> killed; guard deleted -> SURVIVED.
+# Output is captured before grepping rather than piped into it, since under
+# `set -o pipefail` a failing left-hand side would mask a matching grep.
+# The held copy lives under `$WORK`, so the EXIT trap reclaims it on interrupt.
+run_mutant "wrapper passes --run with no operand" '
+f=tools/check-plugin.sh; a="check-plugin.py\" \""
+k="$WORK/held-wrapper.sh"
+if ! grep -qF "$a" "$f"; then
+  echo "mutant is a no-op: the wrapper no longer invokes check-plugin.py with an argument list, so an operandless --run cannot be injected"
+else
+  cp "$f" "$k"
+  sed -i "s|check-plugin.py\" \"|check-plugin.py\" --run \"|" "$f"
+  if ! grep -qF -- "--run \"" "$f"; then
+    echo "mutant is a no-op: the operandless --run was not injected"
+    cp "$k" "$f"; rm -f "$k"
+  else
+    o="$(./tools/check-plugin.sh 2>&1)"
+    if printf "%s\n" "$o" | grep -qF "usage: check-plugin.py [--run <run-directory>]"; then
+      rm -f "$k"
+    else
+      echo "mutant is a no-op: an operandless --run did not print the usage line, so the wrapper was restored and this mutant reports SURVIVED instead of passing on a traceback or a silent default-mode run"
+      cp "$k" "$f"; rm -f "$k"
+    fi
+  fi
+fi'
 # Anchored on the ASCII half of the declaration, not on the arrow: the arrow is
 # a multi-byte character an editor can re-encode, and a sed that matches
 # nothing is a mutant that proves nothing. Both ends asserted.
@@ -206,6 +258,45 @@ else
   grep -qF "notes p1-coverage.md" "$f" || echo "mutant is a no-op: the coverage field was not renamed"
   grep -qF "reports p1-review-a.md" "$f" || echo "mutant is a no-op: it took the reports field too, so a kill could come from the reviewer-count arm instead"
 fi'
+# THE RECORD BOUNDARY, and the one mutation that can see it. A run record used
+# to end at 400 flattened characters — a window calibrated on the skill's terse
+# worked examples — so a conforming round whose `coverage` field sat past that
+# was reported as missing one. The fixture's Phase 3 is such a round (its
+# fields sit at offsets 665 and 700), and the harness's own baseline `--run`
+# check is what holds the window's removal: put a byte cap back and the clean
+# copy stops passing, which aborts this run with that named message before any
+# mutant is attempted.
+#
+# What the cap's replacement adds beyond "no cap" is the END: the record stops
+# at the next `- [` bullet. Only text BETWEEN a round and the next bullet can
+# distinguish the two, so the fixture puts some there on purpose — Phase 3's
+# closing `T4` names a coverage file in its own subject. This mutant renames
+# the coverage field on the ROUND, leaving `T4`'s intact: bounded at the
+# bullet, the round has no coverage of its own and the gate says so; unbounded,
+# it borrows `T4`'s and passes. Measured: with the boundary -> killed; with the
+# boundary branch removed -> SURVIVED.
+#
+# Line-addressed and asserted at both ends, because the literal
+# `coverage p3-coverage.md` appears TWICE in the fixture and renaming the wrong
+# one proves nothing: the round's line is identified by its `reports` field,
+# the rename is verified to have landed on it, and `T4`'s copy is verified to
+# have survived — without which the kill would be the ordinary coverage arm
+# firing rather than the boundary.
+run_mutant "long run-tracker round loses its coverage field" '
+enable_run || exit 0
+'"$J"' "import pathlib
+p=pathlib.Path(\"tools/fixtures/run-ok/progress.md\")
+L=p.read_text().split(chr(10))
+key=\"reports p3-review-{a,b,c,int}.md\"
+i=[n for n,x in enumerate(L) if key in x]
+assert len(i)==1, \"mutant is a no-op: the long round no longer names its brace-expanded report set exactly once\"
+assert \"coverage p3-coverage.md\" in L[i[0]], \"mutant is a no-op: the long round no longer carries a coverage field on that line\"
+L[i[0]]=L[i[0]].replace(\"coverage p3-coverage.md\", \"notes p3-coverage.md\")
+out=chr(10).join(L)
+assert \"notes p3-coverage.md\" in out, \"mutant is a no-op: the coverage field was not renamed\"
+assert key in out, \"mutant is a no-op: it took the reports field too, so a kill could come from the reviewer-count arm instead\"
+assert \"coverage p3-coverage.md\" in out, \"mutant is a no-op: the T4 bullet that carries the borrowable coverage field went too, so a kill would not be attributable to the record boundary\"
+p.write_text(out)"'
 # `p2-review-{a,b,int}.md` is one written name and three files. Deleting ONE
 # member proves the existence check expands the brace set instead of testing
 # the literal string — which the conforming fixture already proves it must,
@@ -225,8 +316,8 @@ fi'
 run_mutant "run tracker has no closed review round" '
 enable_run || exit 0
 f=tools/fixtures/run-ok/progress.md
-if [ "$(grep -c "\[x\] RV" "$f")" != 2 ]; then
-  echo "mutant is a no-op: the fixture no longer holds exactly two closed RV records"
+if [ "$(grep -c "\[x\] RV" "$f")" != 3 ]; then
+  echo "mutant is a no-op: the fixture no longer holds exactly three closed RV records"
 else
   sed -i "/\[x\] RV/d" "$f"
   grep -q "\[x\] RV" "$f" && echo "mutant is a no-op: the closed records were not removed"

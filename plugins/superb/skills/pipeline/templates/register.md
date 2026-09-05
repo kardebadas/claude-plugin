@@ -9,7 +9,6 @@ An entry is closed **only** by an explicit user answer to **that entry**. Bulk
 replies ("approved", "go", "looks good") close nothing. No gate may be
 presented while the Open table has any row.
 
-- **Open count:** <the number of rows in the Open table below — read it there>
 - **Last updated:** <timestamp>
 
 ## Operating mode
@@ -24,7 +23,8 @@ only if the user declaring message is pasted verbatim below with its date
 
 | ID | Entry | Why it is not mine to decide | Opened at |
 | -- | ----- | ---------------------------- | --------- |
-| A1 | Does this repo require a ticket/issue key in every commit subject, and if so which one for this run? | A commit convention is a written repo rule this skill cannot infer, and every task in the run commits. Getting it wrong is not fixable without rewriting history. | Stage 1 |
+| A1 | Which ticket/issue key does every commit in this run carry? | No repo rule names the key for a particular run — only the user does, and every task in the run commits. Getting it wrong is not fixable without rewriting history. | Stage 1 |
+| A1b | Does this repo require a key in a commit subject at all? | Open ONLY while the written rule has not been found. Find it and this row moves to *Decided without asking* with the rule cited; find that there is none and it closes there the same way. | Stage 1 |
 | A2 | <the unknown, stated as the question it will become> | <why no default is legitimate> | <stage/phase> |
 
 ## Closed
@@ -40,4 +40,5 @@ Anything else belongs in Open.
 
 | Item | Call | The written rule or spec line that decided it |
 | ---- | ---- | -------------------------------------------- |
+| A1b — does a commit subject need a key? | <yes / no> | <the rule, cited — while this cell is empty the row belongs in Open> |
 | <item> | <call> | <citation> |

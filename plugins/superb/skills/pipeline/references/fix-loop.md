@@ -384,7 +384,7 @@ When blocking findings exist (and the convergence rule permits another run):
    commit is owed an owner — the round runs, and it is written like any other:
 
    ```markdown
-         → round 4: M=1 → 1 slice + 0 integration · reports p3-rr4-a.md
+         → round 4: M=1 C=1 → 1 slice + 0 integration · reports p3-rr4-a.md
            · coverage p3-rr4-coverage.md → no findings
    ```
 
@@ -409,7 +409,7 @@ When blocking findings exist (and the convergence rule permits another run):
 
    Only when `RV` is already `[x]` from a completed step 2 does a re-review
    reopen it to `[~]` and reclose it with the round appended in the full
-   per-round grammar — `→ round 2: M=9 → 1 slice + 0 integration · reports
+   per-round grammar — `→ round 2: M=9 C=1 → 1 slice + 0 integration · reports
    p3-rr2-a.md · coverage p3-rr2-coverage.md → F-012 closed, F-014 raised` — so
    every round has a declared number its file count is checked against, not only
    the first. The fan-out comes from the fix diff's clusters. Whoever ran the
@@ -436,6 +436,18 @@ ownable behind (step 3, above) — so an iteration with no ownable commit is an
 iteration with `M=0`, and it has no row here at all, not even the first row,
 because its round was never owed.
 
+**The cluster count rides the round as `C=<n>`**, written beside `M`:
+`M=<m> C=<c> → <s> slice + <i> integration`, where `c` is the number of file
+clusters you counted in the ownable fix diff and **`s` must equal it**. What
+that buys is an auditable statement: a later reader can compare `C` against the
+ledger's recorded fix hashes and disagree with it, and an arithmetic slip
+between the count and the fan-out — three clusters counted, four reviewers
+dispatched — is a red gate rather than a thing nobody can see. What it does
+**not** buy is a check on the count itself: `C` is written by whoever chose
+`s`, so a round that put three reviewers on one cluster writes `C=3` and reads
+as consistent. What catches that is the round's own `coverage` table, where two
+reviewers over one cluster show up as two rows carrying the same range.
+
 **Findings are not diff surface.** `M` counts findings; a round of six comment
 corrections in one file is one small diff, and three reviewers over it re-read
 the same hunks and duplicate each other's findings. `M` is still **recorded** on
@@ -448,7 +460,11 @@ all (step 3, above); it just no longer sizes the fan-out.
   reviewer: two reviewers over one cluster duplicate each other, while one
   reviewer over two clusters at least sees each fix in its own context.
 - **Slice boundaries are the fix commits' ranges**, taken from the ledger's
-  recorded fix hashes — the same range discipline as Stage 4 slices.
+  recorded fix hashes — the same range discipline as Stage 4 slices. **No two
+  slices carry the same range.** Two rows of the coverage table with the same
+  range are two reviewers over one cluster — the duplication the bullet above
+  rules out — and the integration reviewer's range is the union of the slices,
+  so it is not equal to any one of them either.
 - **Assignments MUST cover every fix diff.** Union the assigned ranges and
   compare against the full set of commits the fix-mode run produced; if any
   commit is unassigned, extend a slice to include it. A fix that strayed outside

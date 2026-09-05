@@ -11,6 +11,17 @@ second one checkable — while Phase 3 is a long record whose `reports` and
 start, which is what a real tracker's prose does and what the byte-capped
 reader this fixture replaced reported as a missing coverage file.
 
+Each round's coverage table carries **one row per report file, and no two
+rows the same range** — which is what the over-fan-out arm reads, so a fixture
+whose slices all shared a range (this one's did, until it was corrected) would
+leave that arm unexercised on the happy path while demonstrating the very
+duplication the fan-out rule forbids. Phase 3's three slices are T3's commit
+plus the two follow-up fixes its `scope` note names, and Phase 2's second range
+is an orchestrator-authored commit with no task line of its own — the commits
+the skill says are covered like any other and are covered by nothing until a
+slice is widened to reach them. Both phases declare more tasks (`N=8`, `N=9`)
+than their abbreviated bullet lists show; a fixture is not a run.
+
 Phase 3's closing `T4` bullet is not decoration either. It names a coverage
 file in its own subject, so it is the witness that a record ends at the next
 `- [` bullet: read on to the next round instead and the RV record above it
@@ -28,18 +39,24 @@ real tracker does. Read this file as a linter input, not as a model of a run.
 It establishes, for every closed `RV`/`RVJ` round in the tracker: the
 declared `<s> slice + <i> integration` count equals the number of report
 files that round lists, with brace sets expanded; an `RVJ` round declares
-`0 slice + 1 integration`; the round names a `coverage` file; every report
-file it names, and the coverage file it names, exist in `agent-output/`; and
+`0 slice + 1 integration`; an `M=` re-review round declares a `C=<n>` cluster
+count and `s` equals it; the round names a `coverage` file; every report
+file it names, and the coverage file it names, exist in `agent-output/`; on a
+round declaring two or more slices, every report file it names has its own row
+in that coverage table and no two of those rows carry the same range; and
 an `M=0 → no round` record carries its closure routes and no reviewer
 evidence. It also establishes that
 the tracker is readable and that at least one round is closed.
 
-It does not establish that the fan-out was **sized** correctly, and that is
-not a gap to be closed later — the size is not derivable from the line. The
-rule is one reviewer per file cluster in the fix diff, whose input is the
-diff; the line records only what was declared and what was listed, so a round
-declaring one reviewer over a seven-cluster diff is internally consistent and
-passes here. Nor does it establish that a named report or coverage file says
+It does not establish that the fan-out was **sized** correctly. It now
+catches one half of that — an over-wide fan-out whose duplication is visible in
+the recorded ranges, two reviewers handed the same range — but the other half
+is not derivable from the tracker at all. The rule is one reviewer per file
+cluster in the fix diff, whose input is the diff; `C=<n>` puts the cluster
+count on the line, and the arm compares it against `s`, but `C` is written by
+whoever chose `s`, so a round declaring one reviewer over a seven-cluster diff
+writes `C=1` and passes here (measured), and one that over-fanned out onto
+genuinely distinct ranges writes the matching `C` and passes too. Nor does it establish that a named report or coverage file says
 anything — their existence is checked, their contents are not, so
 `COVERED: <n>/<n>` goes unread — or that a round happened when it claims to.
 

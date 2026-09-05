@@ -206,29 +206,35 @@ someone who was not there, all paths relative to `agent-output/`:
 
 | Field | What it must satisfy |
 | --- | --- |
-| `N=<tasks> → <s> slice + <i> integration` | Which number `s` must match depends on the regime, and the declaration's own key says which. An **unwaved** `N=` phase takes `s = ceil(N/5)`, and there `N` makes the fan-out re-derivable from the line at closure instead of trusted from the step that gets skipped. The other regimes are **not** re-derivable from the line, and say so rather than borrowing that guarantee: a **waved** phase takes one slice per wave or per adjacent pair of small waves (write `waved` after `N`), which may be more or fewer than `ceil(N/5)` and never splits a wave across two reviewers, and the wave count is not on the line; an **`M=`** re-review takes one slice per file cluster in the fix diff, and the cluster count is not on the line either, so its `s` is checkable only against that round's own `coverage` table — `M` sizes nothing; an **`RVJ`** is always `0 slice + 1 integration`, its `N` informational. `i` is 1 whenever `s > 1`. |
-| `coverage <file>` | One file holding **the slice assignment table — each row keyed by its report filename, with that reviewer's exact range — above the `git log --oneline PB..PH`**, and ending with the verdict line `COVERED: <n>/<n> commits`. All three: a bare log is the input to a coverage judgement rather than the judgement, and a table with a gap in it sits above the log just as happily as one without. Anything short of `<n>/<n>` does not close the line. |
+| `N=<tasks> → <s> slice + <i> integration` | Which number `s` must match depends on the regime, and the declaration's own key says which. An **unwaved** `N=` phase takes `s = ceil(N/5)`, and there `N` makes the fan-out re-derivable from the line at closure instead of trusted from the step that gets skipped. The other regimes are **not** re-derivable from the line, and say so rather than borrowing that guarantee: a **waved** phase takes one slice per wave or per adjacent pair of small waves (write `waved` after `N`), which may be more or fewer than `ceil(N/5)` and never splits a wave across two reviewers, and the wave count is not on the line; an **`M=`** re-review takes one slice per file cluster in the fix diff and writes that cluster count on the line as `C=<n>`, which `s` must equal — a declaration, not a derivation, so it makes the sizing auditable and an arithmetic slip between the two numbers red, without establishing the count itself; what a round's fan-out is checkable against is its own `coverage` table, where two reviewers over one cluster show up as two rows carrying the same range — `M` sizes nothing; an **`RVJ`** is always `0 slice + 1 integration`, its `N` informational. `i` is 1 whenever `s > 1`. |
+| `coverage <file>` | One file holding **the slice assignment table — each row keyed by its report filename, with that reviewer's exact range — above the `git log --oneline PB..PH`**, and ending with the verdict line `COVERED: <n>/<n> commits`. All three: a bare log is the input to a coverage judgement rather than the judgement, and a table with a gap in it sits above the log just as happily as one without. Anything short of `<n>/<n>` does not close the line. **No two rows carry the same range**: two reviewers over one range read the same diff, and the integration reviewer's row is the union of the slices, so it equals no single slice's. |
 | `→ <F-IDs>` or `→ no findings` | What the round produced. |
 
 **The line's shape is machine-checkable, and only its shape.** The superb
 plugin's own repository ships a linter for this grammar: from a checkout of
 that repo, `./tools/check-plugin.sh --run <run-directory>` reads the tracker's
 closed `RV`/`RVJ` rounds and names any whose declared count and listed report
-files disagree, whose `RVJ` is not `0 slice + 1 integration`, whose `coverage`
+files disagree, whose `RVJ` is not `0 slice + 1 integration`, whose `M=`
+declares no `C=<n>` or a `C` its slice count contradicts, whose `coverage`
 field is absent, whose named report or coverage files are not in
-`agent-output/`, or whose `M=0 → no round` record carries reviewer evidence. It
+`agent-output/`, whose coverage table (on a round of two or more slices) leaves
+a named report without a row or gives two reviewers the same range, or whose
+`M=0 → no round` record carries reviewer evidence. It
 is not in a project's own tree unless that project is the plugin, so it is a
-check a run can use, not a gate every run passes. **It cannot check that the
-fan-out was sized right, and no version of it will**: outside the unwaved `N=`
-regime the size is not derivable from the line — neither the wave count nor
-the cluster count is on it — so a reader of the tracker alone can only
-establish that what a round declares and what it lists agree.
+check a run can use, not a gate every run passes — Stage 5 is what runs it, and
+says in the hand-off what came back. **It still cannot check that the fan-out
+was sized right**, and half of that will never be checkable from the tracker:
+the duplication half is caught, since two reviewers handed one range are two
+rows the linter can compare, but the count itself is not derivable from the
+line — the wave count is not on it, and `C` is on it as a declaration by
+whoever chose `s`, so one reviewer over a seven-cluster diff writes `C=1` and
+passes.
 
 **Every field is per round, and re-review rounds append their own.** The counts
 are read against the round they sit in, never against the whole line:
 
 ```markdown
-      → round 2: M=9 → 1 slice + 0 integration · reports p3-rr2-a.md
+      → round 2: M=9 C=1 → 1 slice + 0 integration · reports p3-rr2-a.md
         · coverage p3-rr2-coverage.md → F-012 closed, F-014 raised
 ```
 
@@ -795,6 +801,17 @@ reconciliation first). An open `RV` means that phase was implemented and never
 reviewed: go run its fan-out before anything else, however many phases back it
 sits. Confirm `findings.md` has no open blocking IDs and `register.md` no open
 entries.
+
+**Then run the `RV`-grammar linter over this run's own directory**, before the
+hand-off: from a checkout of the superb plugin's own repository,
+`./tools/check-plugin.sh --run <run-directory>`. It reads the same tracker you
+have just checked by hand, and it catches the kinds of thing a hand check slides
+over — a count that was never added up, a report or coverage file named but
+never written, a coverage table that handed two reviewers the same range.
+The linter lives in that repository and does **not** ship with the plugin, so a
+run in any other project may have no checkout to run it from; that is why the
+result goes in the hand-off either way rather than being a gate.
+
 Invoke `superpowers:finishing-a-development-branch`. Because everything under
 `docs/superpowers/` is local-only, **the hand-off is the run's only durable
 output besides the commits**, and MUST include:
@@ -804,7 +821,13 @@ output besides the commits**, and MUST include:
 - **every phase whose `RV` closed as `WAIVED by user`**, with the quoted
   instruction — the run's only durable record that code shipped unreviewed;
 - a **summary of the approved design and the decisions the register closed**,
-  written so it still makes sense to someone who never had the local spec.
+  written so it still makes sense to someone who never had the local spec;
+- the **`RV`-grammar linter's result over this run's own directory** — its
+  `check-plugin: PASS`/`FAIL` output quoted, and every `FAIL` line with it. When
+  no checkout of the plugin's own repository was available to run it from, say
+  precisely that instead: **the linter was unavailable, so the tracker's review
+  lines went unchecked**. Do not drop the item — an absent line reads as a
+  check that passed, which is the one thing it must never read as.
 
 Anything that matters and appears only in a run-directory file is one lost
 machine away from gone. Put it in the hand-off.
@@ -855,8 +878,12 @@ tasks, so a re-review is sized from the **fix diff**: **one slice reviewer per
 file cluster**, plus an integration reviewer once there is more than one. `M` is
 still recorded on the round, and `M=0` still licenses a round with no reviewers
 in it — but `M` does not size the fan-out, because six comment corrections in one
-file are one small diff and three reviewers over it duplicate each other. Slice
-boundaries are the fix commits' ranges, and **the assigned ranges must union to
+file are one small diff and three reviewers over it duplicate each other. **The
+cluster count is recorded on the round as `C=<n>` and `s` must equal it** — what
+declaring it establishes, and what it does not, is stated with the rule in
+`references/fix-loop.md`. Slice
+boundaries are the fix commits' ranges, **no two slices carry the same range**,
+and **the assigned ranges must union to
 cover every fix commit a reviewer can own** — a clean round from reviewers who
 never looked at a fix closes nothing.
 
@@ -1070,6 +1097,9 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
   none are the exception in `references/fix-loop.md`'s *Invariants*.
 - You are writing a `Next action` that names the **next phase** while this
   phase's `RV` is still open.
+- You are writing the Stage 5 hand-off and it carries nothing about the
+  `RV`-grammar linter — neither its output nor the statement that no checkout
+  was at hand to run it from.
 - You are at Stage 5 and any phase's `RV` is not `[x]`, or `findings.md` is
   thin against the run's size. Check the `RV` lines phase by phase rather than
   the ledger as a whole: one Minor from one reviewed phase makes a ledger look

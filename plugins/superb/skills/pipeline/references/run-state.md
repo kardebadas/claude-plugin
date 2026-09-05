@@ -83,8 +83,11 @@ four fields, all paths relative to `agent-output/`:
   is re-derivable at closure rather than trusted from the step most likely to
   have been skipped. An **unwaved** phase takes `s = ceil(N/5)`; a **waved** one
   takes a slice per wave or adjacent wave-pair (write `waved` after `N`), which
-  may be more or fewer; an **`RVJ`** is always `0 slice + 1 integration` with `N`
-  informational. `i` is 1 whenever `s > 1`.
+  may be more or fewer; an **`M=`** re-review writes its cluster count on the
+  line as `C=<n>` — `M=9 C=3 → 3 slice + 1 integration` — and `s` must equal
+  `C` (the cluster rule, and what declaring `C` does and does not establish, is
+  in `fix-loop.md`'s *Re-review fan-out*); an **`RVJ`** is always
+  `0 slice + 1 integration` with `N` informational. `i` is 1 whenever `s > 1`.
 - `reports <files>` — **exactly `s + i` files, one per reviewer**, each the
   `DETAIL:` path that reviewer returned. A review dispatch always requires its
   report file, clean or not — the "omit `DETAIL:` if nothing is longer" licence
@@ -94,7 +97,10 @@ four fields, all paths relative to `agent-output/`:
   filename**, above the `git log --oneline PB..PH`, ending `COVERED: <n>/<n>
   commits`. Record slices individually: one union range reads as complete even
   when two slices leave a gap between them, and that gap is the defect being
-  hunted. Derive `PB` with `git merge-base`, never `<first-task-hash>^`.
+  hunted. **No two rows carry the same range** — two reviewers over one range
+  read the same diff, and the integration reviewer's row is the union of the
+  slices, so it is not equal to any one of them either. Derive `PB` with
+  `git merge-base`, never `<first-task-hash>^`.
 - `→ <F-IDs>` or `→ no findings`.
 
 Every field is **per round**; re-review rounds append their own `M=… → …`,

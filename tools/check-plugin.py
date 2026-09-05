@@ -587,6 +587,67 @@ for n in skill_names:
                             "with one unheld copy is one edit from gone on a "
                             f"green build. REMEDY: restore the phrase in {rel} "
                             "verbatim, where the authority states that rule")
+            # STAGE 5 RUNS THE `--run` LINTER, AND SAYS SO IN THE HAND-OFF.
+            # `--run` was invoked from nowhere but CI, against this repo's own
+            # fixture: no run pointed it at its own tracker, so the mode was
+            # documentation. Stage 5 is where it belongs — the run's one
+            # independent pass over lines whose author had the motive to skip
+            # them — and the duty is now stated there.
+            #
+            # THE RULE MAKES ABSENCE VISIBLE RATHER THAN SILENT, which is what
+            # the second phrase holds. `tools/` is a sibling of `plugins/`, so
+            # the linter does not ship with the plugin and a run in any other
+            # project may have no checkout to run it from. A bare command in
+            # the skill would be a dangling citation — the `tools/build.sh`
+            # class of leak. So Stage 5 either quotes the output or states that
+            # the linter was unavailable and the tracker went unchecked, and an
+            # omitted item is neither.
+            #
+            # TWO PHRASES, ONE PER HALF, so a kill names which half went. The
+            # duty phrase has two homes in `SKILL.md` (the Stage 5 body and the
+            # hand-off list) and the arm reads flattened text, so a mutation
+            # that leaves one standing is a no-op — the same shape as the
+            # sizing rule's two homes.
+            #
+            # SCOPED TO `SKILL.md` because that is the only file carrying
+            # this duty — not because a second copy would be safe. Other files
+            # do place their own obligations on the Stage 5 hand-off
+            # (`templates/findings.md` and `references/fix-loop.md` both require
+            # the deferred-Minors table there), so a second copy of this one is
+            # possible in principle, and a copy written later needs its own
+            # entry the way every second copy in this arm's neighbours does.
+            # The linter paragraph in *The `RV` line* deliberately does not
+            # repeat the duty phrase — if it did, blurring Stage 5's two copies
+            # would leave this arm green.
+            # Mutants: "Stage 5's linter duty blurred in SKILL.md",
+            #          "Stage 5's linter-unavailable duty blurred in SKILL.md".
+            STAGE5_LINT = (
+                ("the duty to run the linter over the run's own tracker",
+                 "over this run's own directory",
+                 "Lose it and `--run` is invoked from CI over this repo's own "
+                 "fixture and from nowhere else, which is the state that made "
+                 "the mode documentation."),
+                ("the statement that stands in for the linter's absence",
+                 "the linter was unavailable, so the tracker's review lines "
+                 "went unchecked",
+                 "Lose it and a hand-off with no linter line is "
+                 "indistinguishable from one whose linter passed — and the "
+                 "linter is a sibling of `plugins/`, so absence is the common "
+                 "case, not the odd one."),
+            )
+            st, se = read(sdir / n / "SKILL.md")
+            if se:
+                bad(f"{n}/SKILL.md must carry Stage 5's linter duty, but that "
+                    f"file cannot be read: {se}")
+            else:
+                sflat = " ".join(st.split()).lower()
+                for lbl, q, why in STAGE5_LINT:
+                    if q not in sflat:
+                        bad(f"{n}/SKILL.md is missing {lbl} ({q!r} absent). "
+                            f"{why} REMEDY: restore the wording in Stage 5 — "
+                            "the phrase is required verbatim, since a duty "
+                            "held by no phrase is one edit from gone on a "
+                            "green build")
         # `M` HAS ONE DEFINITION, AND NOTHING SHORTER MAY STATE IT.
         # `SKILL.md`'s `M=0` paragraph asserts that `M` "is defined **once**",
         # in `references/fix-loop.md`, fix loop step 3, and warns that a second
@@ -989,7 +1050,8 @@ else: ok("no absolute home paths, private project names, or foreign ticket prefi
 #          "no-round round names a pinned route".
 print("\n== pipeline review-line examples ==")
 start = re.compile(r"(?:-\s*)?\[x\]\s*(RVJ|RV)\b|(?:->|→)\s*(round)\s+\d+\s*:")
-decl  = re.compile(r"(?:N|M)=\d+\s*(?:waved\s+)?(?:->|→)\s*(\d+)\s*slice\s*\+\s*(\d+)\s*integration")
+decl  = re.compile(r"(?P<key>N|M)=\d+\s*(?:waved\s+)?(?:C=(?P<C>\d+)\s*)?"
+                   r"(?:->|→)\s*(?P<s>\d+)\s*slice\s*\+\s*(?P<i>\d+)\s*integration")
 rpt   = re.compile(r"reports\s+(.+?)(?=\s*[·|]|\s+coverage\b|\s*$)")
 cov   = re.compile(r"coverage\s+\S+\.md")
 nor   = re.compile(r"\bM=0\s*(?:->|→)\s*no\s+round\b")
@@ -1014,6 +1076,36 @@ def expand_braces(spec):
         return [x for x in re.split(r"[,\s]+", spec) if x.endswith(".md")]
     pre, post = spec[:m.start()], spec[m.end():]
     return [f"{pre}{x.strip()}{post}" for x in m.group(1).split(",") if x.strip()]
+
+def cov_rows(text):
+    """A coverage table's rows: report-filename key -> the range cell verbatim.
+
+    The grammar (`SKILL.md`, the `coverage <file>` field) is a table "each row
+    keyed by its report filename, with that reviewer's exact range" above the
+    `git log`. So a row is any `| key | range |` line; the header and the
+    `| --- | --- |` separator are dropped by shape rather than by position,
+    since neither carries a range and a table may be written without either.
+
+    The range cell is kept VERBATIM (bar surrounding whitespace and backticks),
+    never parsed into endpoints. Two reviewers over one cluster is a
+    byte-equality question, and comparing whole cells means a slice written as
+    two ranges, or with a comment after it, still compares as what it is. The
+    first row wins a repeated key, which only ever loses information about a
+    table that already contradicts itself.
+    """
+    out = {}
+    for ln in text.split("\n"):
+        ln = ln.strip()
+        if not ln.startswith("|"):
+            continue
+        cells = [x.strip().strip("`").strip() for x in ln.strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        k, v = cells[0], cells[1]
+        if not k or not v or set(v) <= set("-: "):
+            continue
+        out.setdefault(k, v)
+    return out
 
 def relpath(p):
     """Repo-relative when the path is in the repo, absolute when it is not.
@@ -1128,10 +1220,60 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
             d = decl.search(rec)
             if not d: continue          # e.g. the WAIVED form, which carries no counts
             seen += 1
-            want = int(d.group(1)) + int(d.group(2))
+            nslice, nint = int(d.group("s")), int(d.group("i"))
+            want = nslice + nint
             where = f"{relpath(f)}:{lineno(pos)}"
-            if kind == "RVJ" and (int(d.group(1)), int(d.group(2))) != (0, 1):
-                viol += 1; bad(f"{where}: RVJ must be 0 slice + 1 integration, declares {d.group(1)}+{d.group(2)}")
+            if kind == "RVJ" and (nslice, nint) != (0, 1):
+                viol += 1; bad(f"{where}: RVJ must be 0 slice + 1 integration, declares {nslice}+{nint}")
+            # AN `M=` RE-REVIEW ROUND CARRIES ITS CLUSTER COUNT, `C=<n>`, AND
+            # `s` MUST EQUAL IT. The re-review fan-out is one reviewer per file
+            # cluster in the fix diff (`references/fix-loop.md`, *Re-review
+            # fan-out*), and until `C` was written on the round the count that
+            # sizes it appeared nowhere: `s` had nothing on the line to be
+            # checked against, and a reader of the tracker could not even say
+            # which number the orchestrator claimed to have counted.
+            #
+            # WHAT THIS ARM IS FOR, exactly, and what it must not be read as.
+            # It makes the cluster count an AUDITABLE STATEMENT — a later
+            # reader can compare `C` against the ledger's fix hashes and
+            # disagree with it — and it catches an ARITHMETIC SLIP between the
+            # count and the fan-out, a round that counted three clusters and
+            # dispatched four reviewers. It does NOT close the over-fan-out
+            # hole, and no version of it can: `C` is written by whoever chose
+            # `s`, so a round that put three reviewers on one cluster writes
+            # `C=3` and is internally consistent. That hole is closed, for the
+            # duplication half of it, by the coverage-table arm below, which
+            # reads recorded ranges rather than a self-declared count.
+            #
+            # Scoped to `M=` rounds because `C` is defined over a fix diff's
+            # clusters. An `N=` phase is sized over tasks (`ceil(N/5)`, or one
+            # slice per wave) and has no cluster count to declare, so
+            # requiring one there would reject every conforming phase round.
+            # `M=0 → no round` never reaches here: the no-round arm above
+            # `continue`s before the declaration is read.
+            # Mutants: "re-review round loses its cluster count",
+            #          "re-review round's cluster count disagrees with its slice count".
+            if d.group("key") == "M":
+                if d.group("C") is None:
+                    viol += 1
+                    bad(f"{where}: `M=` re-review round declares no `C=<n>` "
+                        "cluster count. The re-review fan-out is one reviewer "
+                        "per file cluster in the fix diff, so without `C` the "
+                        "number that sizes the round is on no line any reader "
+                        "can check `s` against, and the sizing is not even a "
+                        "statement someone could disagree with. REMEDY: write "
+                        "it beside `M` — `M=9 C=3 → 3 slice + 1 integration` — "
+                        "with `C` the cluster count you counted in the ownable "
+                        "fix diff")
+                elif int(d.group("C")) != nslice:
+                    viol += 1
+                    bad(f"{where}: round counts {d.group('C')} file clusters "
+                        f"but declares {nslice} slice reviewers — the "
+                        "re-review fan-out is one reviewer per file cluster, "
+                        "so these two numbers are the same number written "
+                        "twice. REMEDY: correct whichever is wrong; if the "
+                        "fan-out really did depart from the cluster count, it "
+                        "was not sized by this rule")
             r = rpt.search(rec)
             got = nfiles(r.group(1)) if r else 0
             if got != want:
@@ -1170,6 +1312,129 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
                             "inside some slice, so a name with nothing behind "
                             "it is a coverage judgement no later reader can "
                             "re-open")
+                    # TWO SLICE REVIEWERS OVER ONE RANGE, WHICH IS THE
+                    # OVER-FAN-OUT THE SKILL FORBIDS IN PROSE AND NOTHING
+                    # CHECKED. The prohibition has two homes:
+                    # `references/fix-loop.md`'s *Re-review fan-out* — "two
+                    # reviewers over one cluster duplicate each other" — and
+                    # the wave rule in that file's dispatch step, where
+                    # "splitting a wave's members across two reviewers is
+                    # forbidden". Both gates nonetheless passed the fixture
+                    # that broke it: this repo's own worked-conforming run
+                    # declared three slice reviewers plus an integration
+                    # reviewer over one commit, all four rows carrying one
+                    # byte-identical range. The waste was not merely
+                    # undetected in theory; it was encoded in the example the
+                    # gate reads as conformance.
+                    #
+                    # THE RANGES ARE RECORDED DATA, which is why the check
+                    # belongs here rather than on the declaration. `C=<n>`
+                    # above makes the cluster count auditable, but it is
+                    # self-declared: an orchestrator that over-fanned out
+                    # writes `C=3` and passes. The coverage table's ranges are
+                    # what the reviewers were actually handed, and two rows
+                    # carrying the same range prove two reviewers read one
+                    # diff whatever any count says.
+                    #
+                    # THE INTEGRATION ROW IS NOT EXCLUDED, and that is a
+                    # decision, not an oversight. The instinct is to exclude
+                    # it because its scope is the UNION of the slices — but a
+                    # union of two or more slices recorded individually (the
+                    # `coverage` field's own rule: "Record slices
+                    # individually", since one union range reads as complete
+                    # across a gap) is not byte-equal to any one of them, so
+                    # excluding it cannot change the verdict on a conforming
+                    # round. Including it buys one thing more: an integration
+                    # reviewer handed a slice's exact range is an integration
+                    # reviewer who structurally cannot do the job the grammar
+                    # gives it — look for what single slices cannot see — and
+                    # that round bought two reads of one diff instead.
+                    # Measured both ways: the corrected fixture, whose
+                    # integration row spans its three distinct slices, passes;
+                    # renaming that report off the `-int` convention leaves it
+                    # passing, because no arm here reads the name.
+                    #
+                    # SCOPED TO `s >= 2`. At `s == 1` there is one slice and
+                    # nothing to be distinct from, and the fan-out tables give
+                    # a one-slice round no integration reviewer ("the one
+                    # slice sees all"), so a lone `1 slice + 1 integration`
+                    # round — a form no table writes — would be the only thing
+                    # the wider scope could catch, at the price of firing on
+                    # it for a reason the grammar never states.
+                    #
+                    # NOT identified by name, position or count: the arm asks
+                    # only whether two rows a round's own `reports` field names
+                    # carry the same range. A naming convention (`-int.md`) is
+                    # the weakest of the candidate identifications — it is
+                    # unpinned by any grammar, so a run that names its reports
+                    # anything else would be misread — and the row order and
+                    # the `<i>` count are conventions too. Needing none of them
+                    # is what makes this robust.
+                    #
+                    # The row LOOKUP is checked as well, and reported
+                    # separately: a report with no row of its own has no
+                    # recorded range, and reading distinctness over the rows
+                    # that happen to be there would call that table conforming
+                    # for being incomplete.
+                    # Mutants: "run tracker's coverage table repeats a slice range",
+                    #          "run tracker's coverage table loses a slice's row",
+                    #          "run tracker's integration range collapses onto a slice's",
+                    #          "run tracker's coverage file is unreadable".
+                    elif nslice >= 2 and r:
+                        ctext, cerr = read(agent_output / cnm)
+                        if cerr:
+                            viol += 1
+                            bad(f"{where}: coverage file {cnm!r} exists but "
+                                f"cannot be read: {cerr} — the round's slice "
+                                "ranges are in that file and nowhere else, so "
+                                "nothing here is a statement about whether "
+                                "two of its reviewers were handed the same "
+                                "diff, and in particular not that they were "
+                                "not. REMEDY: make the file readable and run "
+                                "again")
+                        else:
+                            rows = cov_rows(ctext)
+                            byrng, norow = {}, []
+                            for nm in expand_braces(r.group(1)):
+                                rng = rows.get(nm)
+                                if rng is None:
+                                    hit = [v for k, v in rows.items() if nm in k]
+                                    rng = hit[0] if hit else None
+                                if rng is None:
+                                    norow.append(nm)
+                                else:
+                                    byrng.setdefault(rng, []).append(nm)
+                            if norow:
+                                viol += 1
+                                bad(f"{where}: coverage file {cnm!r} has no "
+                                    "row for " + ", ".join(map(repr, norow))
+                                    + ", which this round names as a report — "
+                                    "the table is keyed by report filename "
+                                    "precisely so each reviewer's range is on "
+                                    "the record, and a reviewer with no row "
+                                    "has no range a later reader can check "
+                                    "against any other. REMEDY: give every "
+                                    "report file its own row, with the exact "
+                                    "range that reviewer was assigned")
+                            dups = {k: v for k, v in byrng.items() if len(v) > 1}
+                            if dups:
+                                viol += 1
+                                bad(f"{where}: coverage file {cnm!r} gives the "
+                                    "same range to more than one reviewer: "
+                                    + "; ".join(f"{', '.join(v)} all on {k!r}"
+                                               for k, v in sorted(dups.items()))
+                                    + ". Two reviewers over one range read the "
+                                    "same diff and duplicate each other's "
+                                    "findings, which is what the fan-out rule "
+                                    "forbids — one reviewer per file cluster, "
+                                    "and when in doubt one reviewer — and the "
+                                    "integration reviewer's range is the union "
+                                    "of the slices, so it is not equal to any "
+                                    "one of them either. REMEDY: give each "
+                                    "reviewer its own range, or dispatch fewer "
+                                    "reviewers; a round whose clusters really "
+                                    "were one cluster is a `1 slice + 0 "
+                                    "integration` round")
     return seen, nseen, viol
 
 pdir = ROOT / "plugins" / "superb" / "skills" / "pipeline"
@@ -1188,20 +1453,22 @@ if not nseen:
         "skill's prose, or delete this arm along with the last one")
 if seen and nseen and not viol:
     ok(f"{seen} closed review rounds, {nseen} of them `M=0 → no round`: "
-       "reviewer counts, RVJ shape and coverage all conform, and every "
-       "no-round record names its closure routes and carries no reviewer "
-       "evidence")
+       "reviewer counts, RVJ shape, `M=` cluster counts and coverage all "
+       "conform, and every no-round record names its closure routes and "
+       "carries no reviewer evidence")
 
 # ---- the same linter, over a REAL run's tracker ----
 # The arm above scans `pdir` only — the skill's own worked examples — so no
 # invocation of this gate has ever read a run's own tracker. `--run <dir>`
 # does, over `<dir>/progress.md`, with the same rules.
 #
-# A real run also supports the one check the examples cannot: the named report
-# files either exist in `agent-output/` or they do not. The examples' filenames
-# are illustrative and were never written, so `agent_output` is passed HERE and
-# nowhere else — passing it above would fail the documentation for being
-# documentation.
+# A real run also supports the checks the examples cannot, and both are about
+# files: the named report and coverage files either exist in `agent-output/` or
+# they do not, and a coverage file that exists can be READ, which is what lets
+# the arm compare the ranges a round handed its reviewers. The examples'
+# filenames are illustrative and were never written, so `agent_output` is
+# passed HERE and nowhere else — passing it above would fail the documentation
+# for being documentation.
 #
 # `nseen` is deliberately NOT required non-zero here. `M=0 → no round` is a
 # legitimate but optional round form; a run that never produced one is not
@@ -1222,21 +1489,31 @@ if seen and nseen and not viol:
 #   IT ESTABLISHES — for every closed `RV`/`RVJ` round in `<dir>/progress.md`:
 #     the declared `<s> slice + <i> integration` count equals the number of
 #     report files the same round lists (brace sets expanded); an `RVJ` round
-#     declares `0 slice + 1 integration`; the round names a `coverage` file;
-#     every report file it names, and the coverage file it names, exist in
-#     `<dir>/agent-output/`; and an `M=0 → no round` record carries its closure
-#     routes and no reviewer evidence. Plus: the tracker is readable, and at
-#     least one round is closed.
-#   IT DOES NOT ESTABLISH that the fan-out was SIZED correctly. That is not a
-#     limitation to be lifted later — it is not derivable from the line at all.
-#     The rule is "one reviewer per file cluster in the fix diff", whose input
-#     is the diff; the tracker records what was declared and what was listed,
-#     and a round declaring `1 slice + 0 integration` over a seven-cluster
-#     diff is internally consistent and passes here (measured). Any prose
-#     saying otherwise is a claim this mode cannot hold up.
+#     declares `0 slice + 1 integration`; an `M=` round declares a `C=<n>`
+#     cluster count and its slice count equals it; the round names a `coverage`
+#     file; every report file it names, and the coverage file it names, exist in
+#     `<dir>/agent-output/`; on a round declaring two or more slices, that
+#     coverage file is readable, every report the round names has a row of its
+#     own in it, and no two of those rows carry the same range; and an
+#     `M=0 → no round` record carries its closure routes and no reviewer
+#     evidence. Plus: the tracker is readable, and at least one round is closed.
+#   IT DOES NOT ESTABLISH that the fan-out was SIZED correctly, and the two
+#     halves of that differ. The OVER-WIDE half is now caught where it leaves a
+#     trace: two reviewers handed the same range are two rows this mode
+#     compares, and it reports them. The COUNT itself is still not derivable
+#     from the tracker — the rule is "one reviewer per file cluster in the fix
+#     diff", whose input is the diff, and `C` is a number written by whoever
+#     chose `s`, so a round declaring `M=7 C=1 → 1 slice + 0 integration` over
+#     a seven-cluster diff is internally consistent and passes here (measured),
+#     and so does an over-wide round whose reviewers were handed genuinely
+#     distinct ranges, since nothing in the tracker says what the clusters
+#     were. Any prose saying more than that is a claim this mode cannot hold
+#     up.
 #   IT ALSO DOES NOT establish that a named report or coverage file says
 #     anything — existence is checked, content is not, so `COVERED: <n>/<n>`
 #     is unread here — or that the round happened when it says.
+# The coverage-table arm's own mutants are cited at that arm, with the argument
+# for including the integration row; they are run-mode mutants like these.
 # Mutants: "run tracker over-declares reviewers",
 #          "run tracker cites a report file that is not in agent-output",
 #          "run tracker cites a coverage file that is not in agent-output",
@@ -1281,7 +1558,8 @@ if RUN_DIR is not None:
             ok(f"{rseen} closed review rounds in the tracker"
                + (f" ({rnseen} of them `M=0 → no round`)" if rnseen else "")
                + ", every declared report file and every declared coverage "
-                 "file present in agent-output/")
+                 "file present in agent-output/, and no round of two or more "
+                 "slices repeating a range across its coverage rows")
 
 # ---- every mutant this file cites by name must actually exist ----
 # The arms above cite their proofs by NAME: a `Mutant`/`Mutants` comment marker

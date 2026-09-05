@@ -135,14 +135,49 @@ run_mutant "RV example loses its coverage file"    "sed -i 's| · coverage p3-co
 # with its message printed instead of passing as a no-op.
 # The arrow is built with \u2192 rather than written literally, like the
 # no-round mutant below, so this line survives any editor that re-encodes it.
+# `C` MOVES WITH `s`. The round now declares its cluster count, and an
+# over-declaration that left `C=1` standing against `3 slice` would be killed by
+# the cluster-count arm as well — a kill this mutant's name does not claim. So
+# the replacement writes `C=3`, keeping the two numbers consistent, and the only
+# arm that can fire is the one comparing the declared count against the one
+# report file the round lists.
 run_mutant "re-review round over-declares reviewers" "$J \"import pathlib
 p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md'); s=p.read_text()
-a='M=9 \u2192 1 slice + 0 integration'
+a='M=9 C=1 \u2192 1 slice + 0 integration'
 assert s.count(a)==1, 'mutant is a no-op: the re-review round example is absent, reworded, or duplicated'
-out=s.replace(a, 'M=9 \u2192 3 slice + 1 integration')
+out=s.replace(a, 'M=9 C=3 \u2192 3 slice + 1 integration')
 assert out!=s, 'mutant is a no-op: the over-declaration did not apply'
 p.write_text(out)\""
 run_mutant "every worked RV example deleted"       "sed -i '/· reports/d' plugins/superb/skills/pipeline/*.md plugins/superb/skills/pipeline/*/*.md"
+# --- an `M=` round declares its cluster count, and `s` equals it ---
+# `C=<n>` is the cluster count the re-review fan-out is sized by, written on the
+# round beside `M`. TWO MUTANTS, because the arm makes two separable statements
+# and each has its own failure mode: the field can be ABSENT, leaving `s` with
+# nothing on the line to be checked against, or PRESENT AND CONTRADICTED, which
+# is the arithmetic slip — three clusters counted, four reviewers dispatched.
+# Holding them apart is what makes each kill attributable.
+#
+# Neither mutant touches the `reports` field or the counts the reviewer-count
+# arm reads, and both assert as much, so a kill cannot be borrowed from it.
+# What NEITHER can prove, because no gate can: that `C` is the right number.
+# `C` is written by whoever chose `s`; the over-fan-out this branch's own
+# fixture encoded is caught by the coverage-table arm, over recorded ranges,
+# and not here.
+run_mutant "re-review round loses its cluster count" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md'); s=p.read_text()
+a='M=9 C=1 \u2192 1 slice + 0 integration'
+assert s.count(a)==1, 'mutant is a no-op: the re-review round example no longer declares M=9 C=1 over one slice exactly once'
+out=s.replace(a, 'M=9 \u2192 1 slice + 0 integration')
+assert 'M=9 C=' not in out, 'mutant is a no-op: the cluster count was not removed'
+assert '1 slice + 0 integration \u00b7 reports p3-rr2-a.md' in out, 'mutant is a no-op: it took the declared counts or the reports field too, so a kill could come from the reviewer-count arm instead'
+p.write_text(out)\""
+run_mutant "re-review round's cluster count disagrees with its slice count" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md'); s=p.read_text()
+a='M=9 C=1 \u2192 1 slice + 0 integration'
+assert s.count(a)==1, 'mutant is a no-op: the re-review round example no longer declares M=9 C=1 over one slice exactly once'
+out=s.replace(a, 'M=9 C=2 \u2192 1 slice + 0 integration')
+assert 'M=9 C=2 \u2192 1 slice + 0 integration \u00b7 reports p3-rr2-a.md' in out, 'mutant is a no-op: the disagreement did not apply, or it moved the slice count with it'
+p.write_text(out)\""
 
 # --- the linter must also be able to fail over a REAL run directory ---
 # `--run <dir>` lints `<dir>/progress.md` with the same rules plus one the
@@ -364,6 +399,96 @@ else
   [ ! -e "$d" ] || echo "mutant is a no-op: agent-output/ was not removed"
 fi'
 
+# --- THE COVERAGE TABLE'S RANGES: the over-wide fan-out the prose forbids ---
+# The skill forbids two reviewers over one cluster in two places, and until now
+# both gates passed a fixture that did it: Phase 3 declared three slice
+# reviewers plus an integration reviewer over one commit, all four coverage rows
+# carrying one byte-identical range. The four mutants below hold the arm that
+# reads those ranges.
+#
+# All four work on Phase 3, whose round declares `3 slice + 1 integration` —
+# the arm is scoped to `s >= 2`, so Phase 1's single-slice round cannot
+# exercise it. NONE of them touches the tracker's `reports` field or its
+# declared counts: three edit only the coverage file, and the fourth asserts
+# that the round still names the report whose row it removed and that the
+# report file itself is still there. So no kill here can be borrowed from the
+# reviewer-count, report-existence or coverage-existence arms.
+run_mutant "run tracker's coverage table repeats a slice range" '
+enable_run || exit 0
+'"$J"' "import pathlib
+p=pathlib.Path(\"tools/fixtures/run-ok/agent-output/p3-coverage.md\")
+s=p.read_text()
+a=\"| p3-review-a.md | ccccccc^..ccccccc |\"
+b=\"| p3-review-b.md | c0c0c0c^..c0c0c0c |\"
+assert s.count(a)==1 and s.count(b)==1, \"mutant is a no-op: the two slice rows are no longer written as the fixture wrote them\"
+out=s.replace(b, \"| p3-review-b.md | ccccccc^..ccccccc |\")
+assert out.count(\"ccccccc^..ccccccc |\")==2, \"mutant is a no-op: the duplicate range did not land\"
+assert \"| p3-review-int.md | ccccccc^..c1c1c1c |\" in out, \"mutant is a no-op: it took the integration row too, so a kill would not be attributable to two SLICE reviewers sharing a range\"
+p.write_text(out)"'
+# The row LOOKUP, not the comparison: the report is still named on the round and
+# its file is still in agent-output/, so neither existence arm can fire. What
+# goes is the row that would have carried its range — and a table read as
+# conforming for being incomplete is how a duplicate hides.
+run_mutant "run tracker's coverage table loses a slice's row" '
+enable_run || exit 0
+'"$J"' "import pathlib
+p=pathlib.Path(\"tools/fixtures/run-ok/agent-output/p3-coverage.md\")
+t=pathlib.Path(\"tools/fixtures/run-ok/progress.md\")
+s=p.read_text(); nl=chr(10)
+row=\"| p3-review-c.md | c1c1c1c^..c1c1c1c |\"
+assert s.count(row)==1, \"mutant is a no-op: the third slice no longer has the row the fixture gave it\"
+out=nl.join([x for x in s.split(nl) if x.strip()!=row])
+assert \"p3-review-c.md\" not in out, \"mutant is a no-op: the row was not removed\"
+assert \"p3-review-{a,b,c,int}.md\" in t.read_text(), \"mutant is a no-op: the round no longer names that report, so its missing row is not a missing row\"
+assert pathlib.Path(\"tools/fixtures/run-ok/agent-output/p3-review-c.md\").exists(), \"mutant is a no-op: the report file went too, so a kill could come from the report-existence arm instead\"
+p.write_text(out)"'
+# THE DECISION NOT TO EXCLUDE THE INTEGRATION ROW, held. Its range is the union
+# of the slices, so on a conforming round it is distinct from each of them and
+# excluding it would change nothing; collapse it onto a slice and the round
+# bought two reads of one diff and no integration review at all. An arm that
+# excluded the row by name, by position or by the `<i>` count would pass this.
+run_mutant "run tracker's integration range collapses onto a slice's" '
+enable_run || exit 0
+'"$J"' "import pathlib
+p=pathlib.Path(\"tools/fixtures/run-ok/agent-output/p3-coverage.md\")
+s=p.read_text()
+a=\"| p3-review-int.md | ccccccc^..c1c1c1c |\"
+assert s.count(a)==1, \"mutant is a no-op: the integration row no longer spans the slices the way the fixture wrote it\"
+out=s.replace(a, \"| p3-review-int.md | ccccccc^..ccccccc |\")
+assert out.count(\"ccccccc^..ccccccc |\")==2, \"mutant is a no-op: the collapse did not land\"
+assert \"| p3-review-b.md | c0c0c0c^..c0c0c0c |\" in out and \"| p3-review-c.md | c1c1c1c^..c1c1c1c |\" in out, \"mutant is a no-op: a slice row went too, so a kill could come from the slice-distinctness reading instead\"
+p.write_text(out)"'
+# An UNREADABLE coverage file must report itself as unreadable, and this mutant
+# asserts the MESSAGE rather than the verdict, on the `cited predicate file
+# unreadable` precedent. Exit status alone cannot hold this branch: delete it
+# and an unreadable file reaches the row lookup with no rows, which reports
+# every named report as missing its row — a red build for a reason the gate
+# invented, on a file that may hold a perfectly good table. So the mutation
+# greps the output for the named reason and, when it is absent, puts the file
+# back — leaving a clean copy that PASSES, so the harness reports SURVIVED with
+# its reason printed. The file still EXISTS throughout, so the
+# coverage-existence arm cannot be what fires.
+# The held copy lives under `$WORK`, so the EXIT trap reclaims it on interrupt.
+run_mutant "run tracker's coverage file is unreadable" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/agent-output/p3-coverage.md
+k="$WORK/held-p3-coverage.md"
+if [ ! -f "$f" ]; then
+  echo "mutant is a no-op: the fixture has no p3-coverage.md to corrupt"
+elif ! grep -qF "coverage p3-coverage.md" tools/fixtures/run-ok/progress.md; then
+  echo "mutant is a no-op: no round names that coverage file, so nothing reads it"
+else
+  cp "$f" "$k"
+  printf "\xff\xfe" >> "$f"
+  o="$(./tools/check-plugin.sh 2>&1)"
+  if printf "%s\n" "$o" | grep -qF "exists but cannot be read"; then
+    rm -f "$k"
+  else
+    echo "mutant is a no-op: the gate did not name the unreadable coverage file and its reason — most likely it reported the rows as missing instead, which is a reason it invented — so the file was restored and this mutant reports SURVIVED"
+    cp "$k" "$f"; rm -f "$k"
+  fi
+fi'
+
 # --- the skill-invocation arm must itself stay honest ---
 run_mutant "skill dispatches on \$0 again"         "sed -i 's|Dispatch on the argument below|Dispatch on the argument (\`\$0\`)|' plugins/superb/skills/pipeline/SKILL.md"
 # A doubled backslash escapes NOTHING — both backslashes stay and $0 still expands.
@@ -476,41 +601,54 @@ fi'
 # in neither text is deletable on a green build — which is the failure the rule
 # is itself about, so it does not get to be the one rule nothing holds.
 #
-# Paragraph-scoped and whitespace-normalised, so no line-break position is
-# pinned: the mutation deletes every blank-line-delimited paragraph whose
-# flattened text names the term.
+# ONE PHRASE, NOT THE PARAGRAPH IT SITS IN. These two used to delete every
+# blank-line-delimited paragraph naming the term, and that was ILLUSORY
+# COVERAGE. Measured at `326ccdc`: with the CLAIM_RULE arm neutralised and
+# nothing else changed, BOTH were still killed — the fix-loop.md one by the
+# re-tag predicate arm and by two CLAIM_EFFECT entries whose phrases live in
+# the same paragraphs, the findings.md one by the re-tag predicate arm. A
+# mutant whose kill does not depend on the arm it is cited under proves that
+# arm is present, not that it is load-bearing.
 #
-# What the two asserts actually check, precisely: that at least one paragraph
-# was removed, and that the flattened term is absent from the result. That kills
-# the case this mutant exists for — a COMPLETE reword, after which no paragraph
-# matches and the first assert fires loudly. It does NOT catch a partial reword:
-# a line-based edit that misses a wrapped occurrence leaves the flattened term
-# matching somewhere, so some paragraph is still deleted, the term is still gone
-# afterwards, both asserts pass — and the paragraph deleted may not be the rule.
-# That case mutates something other than intended and prints nothing. It is
-# harmless only while the gate arm is live, since a rule the arm no longer finds
-# fails the gate whichever paragraph went; the arm is the guarantee here, and
-# these asserts only close the silent-no-op door on a full reword.
-run_mutant "claim-finding closure rule deleted from fix-loop.md" "$J \"import pathlib
+# So each blurs exactly one held phrase — `a rewrite is not a closure`, the
+# non-closure half of the rule — and asserts that every OTHER CLAIM_RULE phrase
+# survives in the same file, so the reported absence is the phrase this mutant
+# named. Matched with `\s+` between words rather than as a literal: the gate
+# reads the phrase out of FLATTENED text, so it may sit across a line break in
+# the source, and a literal match would have been a silent no-op.
+#
+# Attribution is by the OTHER FILE too: the phrase is asserted to survive
+# there, so a kill cannot be borrowed from the sibling entry. Measured both
+# ways, per file: arm present -> killed; CLAIM_RULE neutralised -> PASS, i.e.
+# SURVIVED.
+run_mutant "claim-finding closure rule deleted from fix-loop.md" "$J \"import pathlib,re
 p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
-s=p.read_text(); nl=chr(10); key='claim finding'
-paras=s.split(nl+nl)
-keep=[x for x in paras if key not in ' '.join(x.split()).lower()]
-assert len(keep)<len(paras), 'mutant is a no-op: fix-loop.md no longer names a claim finding'
-out=(nl+nl).join(keep)
-assert key not in ' '.join(out.split()).lower(), 'mutant is a no-op: the term survives the paragraph deletion'
+o=pathlib.Path('plugins/superb/skills/pipeline/templates/findings.md')
+s=p.read_text(); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join(['rewrite', 'is', 'not', 'a', 'closure']), re.I)
+assert len(a.findall(s))==1, 'mutant is a no-op: fix-loop.md states the non-closure in other words, or more than once'
+out=a.sub('rewrite closes it like any other route', s)
+assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
+for q in ('claim finding', 'deleting the claim', 'pinning it with a test', 'opens no re-review round'):
+    assert q in flat(out), 'mutant is a no-op: '+q+' went too, so a kill would not be attributable to the non-closure phrase'
+assert len(a.findall(o.read_text()))==1, 'mutant is a no-op: the sibling text lost the phrase too, so a kill would not be attributable to this copy'
 p.write_text(out)\""
 # The same deletion against the copy. Held separately: the authority and the copy
 # are edited independently, so a kill on one says nothing about the other — and
 # the copy is the one the template says gets copied into the run directory.
-run_mutant "claim-finding closure rule deleted from findings.md" "$J \"import pathlib
+run_mutant "claim-finding closure rule deleted from findings.md" "$J \"import pathlib,re
 p=pathlib.Path('plugins/superb/skills/pipeline/templates/findings.md')
-s=p.read_text(); nl=chr(10); key='claim finding'
-paras=s.split(nl+nl)
-keep=[x for x in paras if key not in ' '.join(x.split()).lower()]
-assert len(keep)<len(paras), 'mutant is a no-op: findings.md no longer names a claim finding'
-out=(nl+nl).join(keep)
-assert key not in ' '.join(out.split()).lower(), 'mutant is a no-op: the term survives the paragraph deletion'
+o=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+s=p.read_text(); ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join(['rewrite', 'is', 'not', 'a', 'closure']), re.I)
+assert len(a.findall(s))==1, 'mutant is a no-op: findings.md states the non-closure in other words, or more than once'
+out=a.sub('rewrite closes it like any other route', s)
+assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
+for q in ('claim finding', 'deleting the claim', 'pinning it with a test', 'opens no re-review round'):
+    assert q in flat(out), 'mutant is a no-op: '+q+' went too, so a kill would not be attributable to the non-closure phrase'
+assert len(a.findall(o.read_text()))==1, 'mutant is a no-op: the sibling text lost the phrase too, so a kill would not be attributable to this copy'
 p.write_text(out)\""
 
 # The closure rule's consequences, held in the authority only: the `M`-exclusion
@@ -1070,6 +1208,43 @@ else
     [ -f "$d/$o" ] || echo "mutant is a no-op: $o went too, so a kill would not be attributable to kit.md"
   done
 fi'
+
+# --- Stage 5 runs the `--run` linter, and says in the hand-off what came back ---
+# `--run` used to be invoked from CI over this repo's own fixture and nowhere
+# else: no run pointed it at its own tracker, so the mode was documentation.
+# Stage 5 now runs it, and the rule has two halves the arm holds separately —
+# the DUTY (run it over the run's own directory) and the ABSENCE STATEMENT (say
+# so when there is no checkout to run it from, because `tools/` is a sibling of
+# `plugins/` and the linter does not ship with the plugin). One mutant per half,
+# so a kill names which half went.
+#
+# The duty phrase has TWO HOMES in SKILL.md — the Stage 5 body and the hand-off
+# list — and the arm reads flattened text, so a mutation leaving one standing is
+# a no-op that would report `killed` for no reason. Both blurs use `\s+` between
+# words for the same reason, and build the apostrophe with chr(39): a literal
+# one would close the python string this shell argument carries.
+# Each asserts the OTHER half survives, so neither kill can be borrowed.
+run_mutant "Stage 5's linter duty blurred in SKILL.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+s=p.read_text(); ws=chr(92)+'s+'; ap=chr(39)
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join(['over', 'this', 'run'+ap+'s', 'own', 'directory']), re.I)
+assert len(a.findall(s))>=2, 'mutant is a no-op: Stage 5 no longer states the duty in these words in both its homes'
+out=a.sub('somewhere sensible', s)
+assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
+assert 'the linter was unavailable, so the tracker'+ap+'s review lines went unchecked' in flat(out), 'mutant is a no-op: the absence statement went too, so a kill would not be attributable to the duty'
+assert 'check-plugin.sh --run' in out, 'mutant is a no-op: the command went too, so a kill would not be attributable to the duty phrase'
+p.write_text(out)\""
+run_mutant "Stage 5's linter-unavailable duty blurred in SKILL.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+s=p.read_text(); ws=chr(92)+'s+'; ap=chr(39)
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join(['the', 'linter', 'was', 'unavailable,', 'so', 'the', 'tracker'+ap+'s', 'review', 'lines', 'went', 'unchecked']), re.I)
+assert len(a.findall(s))==1, 'mutant is a no-op: Stage 5 no longer states the absence statement in these words exactly once'
+out=a.sub('the run did what it could', s)
+assert len(a.findall(out))==0, 'mutant is a no-op: the absence statement was not blurred'
+assert flat(out).count('over this run'+ap+'s own directory')>=2, 'mutant is a no-op: the duty phrase went too, so a kill would not be attributable to the absence statement'
+p.write_text(out)\""
 
 # check-plugin.py cites its mutants BY NAME, and nothing kept those names true
 # until the citation check was added. The real-world failure is a rename in this

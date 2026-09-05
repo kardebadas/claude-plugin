@@ -99,14 +99,15 @@ Every field is **per round**; re-review rounds append their own `M=… → …`,
 
 The one round that carries neither `reports` nor `coverage` is **`M=0 → no
 round`**, written when a fix iteration's every targeted F-ID was closed by a
-route that produces nothing a reviewer could report on — the claim deleted, the
-claim pinned, or user-ruled false positive — so no reviewer was ever owed a fix
-diff (`fix-loop.md`, fix loop step 3). `no round` stands where the reviewer
-counts would, `M=0` is the only declaration that licenses it, and it closes on
-the F-IDs plus each one's route — `deleted`, `pinned by <test>`, or
-`user-ruled false positive` — matching those rows' `Closed by` cells. It is
-**recorded, never omitted**: a round nobody had to run and a round somebody
-skipped are otherwise the same absence on this line.
+route that leaves no ownable commit — the claim deleted, or user-ruled false
+positive — so no reviewer was ever owed a fix diff (`fix-loop.md`, fix loop step
+3, which holds the closed list). `no round` stands where the reviewer counts
+would, `M=0` is the only declaration that licenses it, and it closes on the
+F-IDs plus each one's route — `deleted` or `user-ruled false positive` —
+matching those rows' `Closed by` cells. **A pin is not a route this form can
+carry**: it commits a test, so it stays in `M` and that commit is owed a
+reviewer. It is **recorded, never omitted**: a round nobody had to run and a
+round somebody skipped are otherwise the same absence on this line.
 
 The `[ ]` form carries none of it — at GATE 2 no task has a hash and the slice
 count is not yet knowable. Both are filled in at dispatch.

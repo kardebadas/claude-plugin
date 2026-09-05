@@ -223,13 +223,13 @@ reviewer — not `ceil(N/5)`, since fix diffs are not task-shaped, and not a cou
 over the findings, since findings are not diff surface — with coverage over the
 fix commits. Whoever ran the round writes it, at whatever recursion depth.
 
-**`M=0 → no round` is the one round that closes without reviewers.** `M` is the
-count of blocking F-IDs the fix-mode run targeted, less every one closed by a
-route that produces nothing a reviewer could report on — the claim deleted, the
-claim pinned, or user-ruled false positive, and no other route. A fix iteration
-whose every targeted F-ID left by one of those three runs no fan-out
-(`references/fix-loop.md`, fix loop step 3) — and it still writes its round,
-because an absent round and a skipped one are the same absence here:
+**`M=0 → no round` is the one round that closes without reviewers.** `M` — the
+targeted-F-ID count, less every one closed by a route that leaves no ownable
+commit — is defined **once**, with the closed list of those routes, in
+`references/fix-loop.md`, fix loop step 3. Read it there; a second copy of a
+closed list here is a copy that can drift into being a shorter one. A fix
+iteration whose `M` comes out zero runs no fan-out — and it still writes its
+round, because an absent round and a skipped one are the same absence here:
 
 ```markdown
       → round 4: M=0 → no round · closures: F-021 deleted → no findings
@@ -237,11 +237,12 @@ because an absent round and a skipped one are the same absence here:
 
 `no round` stands where the reviewer counts would, and `M=0` is the only
 declaration that licenses it. In place of `reports` and `coverage` the round
-carries each F-ID it closed and that F-ID's route — `deleted`, `pinned by
-<test>` naming the test, or `user-ruled false positive` — which must match its
-`Closed by` cell in the ledger.
-One behavioural fix in the same iteration makes `M > 0`, and then the full
-fan-out is owed.
+carries each F-ID it closed and that F-ID's route — `deleted` or `user-ruled
+false positive`, and no third — which must match its `Closed by` cell in the
+ledger. `pinned by <test>` cannot appear here: a pin commits a test, so it stays
+in `M` and its commit is owed a reviewer.
+One behavioural fix, or one pin, in the same iteration makes `M > 0`, and then
+the full fan-out is owed.
 
 The one other closure: `[x] RV — WAIVED by user: "<their words>"`, which needs
 those words verbatim in `register.md`, applies only to the phases the user named
@@ -771,18 +772,20 @@ believes.
 
 `ceil(N/5)` is defined over **tasks**. Fix-mode returns produce fix commits, not
 tasks, so a re-review is sized from the **fix diff**: **one slice reviewer per
-file cluster**, plus an integration reviewer once there is more than one. `M`,
-the count of blocking F-IDs that run targeted, is still recorded on the round for
-the convergence check, and `M=0` still licenses a round with no reviewers in it —
-but `M` does not size the fan-out, because six comment corrections in one file
-are one small diff and three reviewers over it duplicate each other. Slice
+file cluster**, plus an integration reviewer once there is more than one. `M` is
+still recorded on the round, and `M=0` still licenses a round with no reviewers
+in it — but `M` does not size the fan-out, because six comment corrections in one
+file are one small diff and three reviewers over it duplicate each other. Slice
 boundaries are the fix commits' ranges, and **the assigned ranges must union to
 cover every fix commit a reviewer can own** — a clean round from reviewers who
-never looked at a fix closes nothing. A claim finding closed by deletion or by a
-pin is out of `M` either way, since it opens no round; the union takes the two
-routes differently — a **deletion**'s commit is out of it too, a **pin**'s stays
-in, because a pin commits a test and executable code gets an owner.
-Table in `references/fix-loop.md`.
+never looked at a fix closes nothing.
+
+**What `M` is, and which closure routes come out of it, is stated once** — in
+`references/fix-loop.md`, fix loop step 3 — and deliberately not restated here.
+This is the section a reader consults to decide whether a round runs, which is
+exactly why it must not carry a second gloss of a closed list: a gloss that loses
+one route mandates a round over an empty diff, or excuses a commit that needed an
+owner. Table in `references/fix-loop.md`.
 
 ### Joint integration review after a split (Rule 3)
 
@@ -889,7 +892,7 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
 | "The register/ledger is in my context, writing it to a file is duplication" | Your context is one compaction from empty. A rule with no file behind it is unenforceable. |
 | "These two findings are basically the same one from last round" | That's the interpretive call the ID system exists to remove. Look up the F-ID. |
 | "The comment was wrong, I corrected it — finding closed" | A corrected assertion is still unexecuted, and nothing keeps it true as the code under it changes. A claim finding closes by deleting the claim or pinning it with a test. Nothing else. |
-| "I'll re-review the fix to the docblock to be safe" | There is no behaviour to re-review. A claim finding closed by deletion or a pin opens no round; one closed by a rewrite is not closed. |
+| "I'll re-review the fix to the docblock to be safe" | There is no behaviour to re-review. A deletion opens no round at all; a pin opens one over the test it commits, never over the claim; a rewrite is not a closure. |
 | "I'll read the full review report so I don't miss anything" | Full reports in orchestrator context are the bloat that causes drift. Consolidate to `findings.md`; read details on demand. |
 | "4a and 4b each passed review, the phase is covered" | Each reviewer saw half a designed unit. Run the joint integration review over the combined diff. |
 | "This is iteration 2, I'm well under the cap of 5" | Unless you read that from `findings.md`, you are guessing after a compaction that may have eaten iterations 1–4. Read the row. |
@@ -964,7 +967,8 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
   count instead of off the fix diff's file clusters.
 - You are closing a **behavioural** finding without having checked that a
   re-review range actually covered its fix. (A claim finding closed by deletion
-  or by a pin is not this: it opens no round, so there is no range to check.)
+  is not this: it opens no round, so there is no range to check. A pin does open
+  one, but over the test it commits — the claim is closed by the pin itself.)
 - You are between GATE 2 and Stage 5, about to end your turn, and the message
   you are sending contains no guard-rail question. **Keep going instead.**
 - Your message ends with a phase summary, "let me know if…", or "shall I
@@ -1072,8 +1076,9 @@ memory — decide what happens next.**
   ranges never looked at the fix diff closes nothing; failing to be
   rediscovered is not a closure. The ledger's route for a behavioural finding
   is fix-diff-touched **plus** a covering re-review; a claim finding takes a
-  different route (deleted or pinned, and no round at all), so the lesson is
-  what a clean round cannot buy you, not that this is the only way to close.
+  different route (deleted, or pinned with a test whose commit is the only thing
+  a round then owns), so the lesson is what a clean round cannot buy you, not
+  that this is the only way to close.
 - **Advancing with a red test suite** — failing tests are bug findings even
   when no reviewer reported them.
 - **Blocking on Minor findings** — only Critical/Major/bug gate advancement;

@@ -65,10 +65,12 @@ source, in a gate's own comments or in this run's reports — closes
 **deleting the claim** or by **pinning it with a test** that fails when the
 claim stops being true. **A rewrite is not a closure**: the corrected sentence
 is still unexecuted, so nothing keeps it true as the code under it changes,
-which is how a fix round raises its own successor. Such a closure **opens no
-re-review round**. Its `Sev` comes from the re-tag predicate above — `Minor`
-unless a branch there applies, and **a mandated requirement the phase did not
-implement** is the branch a false "that work is done" claim usually reaches.
+which is how a fix round raises its own successor. **Deleting the claim opens no
+re-review round**; a **pin** does open one — over the test it commits, never
+over the claim, because a test is a commit a reviewer can own. Its `Sev` comes
+from the re-tag predicate above — `Minor` unless a branch there applies, and **a
+mandated requirement the phase did not implement** is the branch a false "that
+work is done" claim usually reaches.
 
 ## Counters — the caps are enforced from HERE, not from memory
 

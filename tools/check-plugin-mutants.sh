@@ -346,6 +346,59 @@ assert key not in flat(out), 'mutant is a no-op: the form survives the paragraph
 assert key in flat(q.read_text()), 'mutant is a no-op: the authority lost the form too, so a kill would not be attributable to the run-state.md copy'
 p.write_text(out)\""
 
+# `M`'s DEFINITION, one level up from the condition the four mutants above
+# hold. `CLAIM_EFFECT` held `m=0 → no round` in three files and the two
+# exclusions in the authority, but nothing held the sentence that says what `M`
+# IS: deleting the whole `**Unless `M=0`.**` paragraph — the definition and its
+# closed exclusion-route list together — left `check-plugin: PASS` and every
+# mutant killed, because the only place the no-round arm's phrase occurs in that
+# file is a worked-example fence. A condition with an undefined subject is the
+# same hole those three closed, moved up a level.
+#
+# Two mutants because the paragraph carries two separable claims. This first one
+# reproduces the proven hole exactly — the whole paragraph goes — and so proves
+# the paragraph is held at all; both new phrases live in it, so this kill says
+# "the definition paragraph is held", not which half. Attribution against the
+# OLDER arms is what it does assert: the `M`-exclusion bullet and the no-round
+# form both survive, so the kill cannot be borrowed from any of the three
+# entries that were already there. Which half is held is what the next mutant
+# pins.
+run_mutant "M's definition paragraph deleted from fix-loop.md" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+s=p.read_text(); nl=chr(10); bt=chr(96)
+flat=lambda x: ' '.join(x.split()).lower()
+key='the number of blocking f-ids this fix-mode run targeted'
+assert key in flat(s), 'mutant is a no-op: fix-loop.md no longer states what M is'
+paras=s.split(nl+nl)
+keep=[x for x in paras if key not in flat(x)]
+assert len(keep)<len(paras), 'mutant is a no-op: no paragraph carries the definition'
+out=(nl+nl).join(keep)
+assert key not in flat(out), 'mutant is a no-op: the definition survives the paragraph deletion'
+assert 'not counted in '+bt+'M'+bt in out, 'mutant is a no-op: it removed the M-exclusion bullet too, so a kill would not be attributable to the definition paragraph'
+assert 'm=0 → no round' in flat(out), 'mutant is a no-op: it removed the no-round form too, so a kill would not be attributable to the definition paragraph'
+p.write_text(out)\""
+# The other half, and the one that reproduces a defect that actually shipped:
+# the exclusion-route list SHORTENED rather than deleted. `SKILL.md`'s
+# *Re-review fan-out* glossed `M` with two of the three dispositions and lost
+# `user-ruled false positive`, which makes a false-positive-only iteration
+# `M=1` with a round owed over an empty diff. Here the same loss is injected
+# into the authority.
+#
+# Surgical, so attribution is exact: the definition phrase is asserted to
+# survive, so the kill comes from the route-list entry and not from the mutant
+# above. Also asserts the anchor was there once and that the shortening landed,
+# so a reword refuses loudly instead of passing as a no-op.
+run_mutant "M's exclusion-route list loses a route" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+s=p.read_text()
+flat=lambda x: ' '.join(x.split()).lower()
+a='is a deletion or a user-ruled false positive'
+assert s.count(a)==1, 'mutant is a no-op: the closed exclusion-route list is absent, reworded or duplicated'
+out=s.replace(a, 'is a deletion')
+assert out!=s, 'mutant is a no-op: the route was not dropped'
+assert 'the number of blocking f-ids this fix-mode run targeted' in flat(out), 'mutant is a no-op: the definition went too, so a kill would not be attributable to the route list'
+p.write_text(out)\""
+
 # --- the no-round record is the one round that closes with no reviewer evidence ---
 # It had no gate coverage at all, and both contradictions below PASSED when
 # injected: a record declaring the form while ALSO listing `reports` and
@@ -371,12 +424,35 @@ run_mutant "no-round round names no closure route" "$J \"import pathlib
 p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
 s=p.read_text(); bt=chr(96)
 a='closures: F-018 deleted,'
-b='F-019 pinned by '+bt+'tests/test_x.py::test_claim'+bt
+b='F-019 user-ruled false positive'
 assert s.count(a)==1 and s.count(b)==1, 'mutant is a no-op: the worked round no longer names its two routes in the form this strips'
 out=s.replace(a, 'closures: F-018,').replace(b, 'F-019')
 assert out!=s, 'mutant is a no-op: the routes were not stripped'
 assert 'M=0 \u2192 no round' in out, 'mutant is a no-op: the declaration itself went, so a kill would not be attributable to the missing routes'
 assert '\u2192 no findings' in out, 'mutant is a no-op: the outcome slot went too, so a kill would not be attributable to the missing routes'
+p.write_text(out)\""
+
+# A pin is NOT a no-round route: it commits a test, so it stays in `M`, and an
+# iteration that produced one is owed a round over that commit. Before the rule
+# was stated this way a pin could be named inside an `M=0 → no round` record and
+# the gate agreed, which is how a test commit could close a claim with no
+# reviewer ever reading it. This injects exactly that record.
+#
+# It keeps the record's OTHER route (`F-018 deleted`) intact on purpose: with a
+# legal route still present the "names no closure route" branch cannot fire, so
+# a kill here is attributable to the pinned-route rejection and to nothing else.
+# Asserts its anchor is present exactly once before, that the swap landed, and
+# that the declaration and the outcome slot both survive.
+run_mutant "no-round round names a pinned route" "$J \"import pathlib
+p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+s=p.read_text(); bt=chr(96)
+a='F-019 user-ruled false positive'
+assert s.count(a)==1, 'mutant is a no-op: the worked no-round round no longer names a user-ruled false positive route'
+out=s.replace(a, 'F-019 pinned by '+bt+'tests/test_x.py::test_claim'+bt)
+assert out!=s, 'mutant is a no-op: the pinned route was not injected'
+assert 'M=0 → no round' in out, 'mutant is a no-op: the declaration itself went, so a kill would not be attributable to the pinned route'
+assert 'closures: F-018 deleted,' in out, 'mutant is a no-op: the legal route went too, so a kill could come from the missing-route branch instead'
+assert '→ no findings' in out, 'mutant is a no-op: the outcome slot went too'
 p.write_text(out)\""
 
 # check-plugin.py cites its mutants BY NAME, and nothing kept those names true

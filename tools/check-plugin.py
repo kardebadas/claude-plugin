@@ -257,7 +257,7 @@ for n in skill_names:
         # mis-gate. EXPIRY: revisit the moment another skill acquires one — a
         # findings ledger, a blocking list, or a phase-advancement condition —
         # because from then on `n == "pipeline"` is a hole, not a scope.
-        # Left blanket it red-builds on
+        # Left blanket, it red-builds on
         # `**Important:**` — the commonest markdown emphasis convention there is
         # — and hands an editor of craft, bug-fix, bug-investigate or setup an
         # order to document a seam their skill does not have, with no remedy

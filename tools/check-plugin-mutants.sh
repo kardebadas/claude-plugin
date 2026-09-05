@@ -143,12 +143,16 @@ p.write_text(s.replace(a, 'an incoming '+tick+'Important'+tick+' is honoured as 
 # inside a wrapped sentence — the most volatile property of prose — and two of
 # four tested re-wraps tripped that anchor and nothing else. Deleting the range
 # without the trim still kills.
+# Anchor 2 tests `endswith('visible.')`, not equality, so the reflow that absorbs
+# a one-word last line upward — what any fill-paragraph does — moves the
+# terminator without tripping the anchor. Exactly one line ends there under
+# either form, so the deletion range is identical; rot still refuses loudly.
 run_mutant "cited re-tag predicate deleted from fix-loop.md" "$J \"import pathlib
 p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
 L=p.read_text().split(chr(10)); tick=chr(96)
 head='So **an incoming '+tick+'Important'+tick+' is'
 a=[i for i,x in enumerate(L) if 're-tagged** by consequence' in x]
-b=[i for i,x in enumerate(L) if x.strip()=='visible.']
+b=[i for i,x in enumerate(L) if x.strip().endswith('visible.')]
 assert len(a)==1, 'mutant is a no-op: the re-tag predicate has been reworded'
 assert len(b)==1 and b[0]>a[0], 'mutant is a no-op: the predicate no longer ends at visible.'
 i=a[0]
@@ -186,9 +190,11 @@ p.write_text((nl+nl).join(paras))\""
 # check-plugin.sh's output is captured before grepping rather than piped into it:
 # under `set -o pipefail` a failing left-hand side would mask a matching grep and
 # revert a mutation that had in fact been caught.
+# The held copy lives under `$WORK`, not in a bare `$(mktemp)`, so the EXIT trap
+# reclaims it on interrupt like everything else this harness creates.
 run_mutant "cited predicate file unreadable" '
 f=plugins/superb/skills/pipeline/references/fix-loop.md
-k="$(mktemp)"
+k="$WORK/held-fix-loop.md"
 cp "$f" "$k"
 rm -f "$f"
 o="$(./tools/check-plugin.sh 2>&1)"

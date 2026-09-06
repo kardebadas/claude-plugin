@@ -55,9 +55,9 @@ split across two reviewers — plus an integration reviewer whenever there is mo
 than one slice. The slices must cover every commit on the phase branch — including
 any the orchestrator wrote inline, which have no task line and so are covered
 by nothing unless a slice is widened to reach them. Fix rounds get their own
-math — `ceil(M/3)` over the findings the fix targeted — and the assigned ranges
-must cover every fix commit, because a clean round from reviewers who never
-looked at a fix closes nothing.
+math — one reviewer per file cluster in the fix diff — and the assigned ranges
+must cover every fix commit a reviewer can own, because a clean round from
+reviewers who never looked at a fix closes nothing.
 
 **A findings ledger with stable IDs.** Every blocking finding gets an `F-NNN`
 that is never reused or renumbered. A rediscovered finding keeps its ID, which
@@ -80,13 +80,13 @@ run after the merge. Tasks that share a file or a dependency still run in order.
 
 | Command | What it does |
 | ------- | ------------ |
-| `/pipeline` | Full run, starting at the brainstorm |
-| `/pipeline resume` | Re-enter an interrupted run; never starts a new one |
-| `/pipeline status` | Read-only report — no writes, no dispatches, no fixes |
+| `/superb:pipeline` | Full run, starting at the brainstorm |
+| `/superb:pipeline resume` | Re-enter an interrupted run; never starts a new one |
+| `/superb:pipeline status` | Read-only report — no writes, no dispatches, no fixes |
 
 Referred to by name — in a prompt, or by another skill — it is
 `superb:pipeline`. The `superb:` prefix is the plugin name and only matters for
-disambiguation; typing `/pipeline` is enough when nothing else claims it.
+disambiguation; dropping it also works when nothing else claims the name.
 
 ## Requires
 

@@ -22,18 +22,31 @@ reviewer fan-out math, and the fix loop.
 `references/run-state.md` (file formats, task-line grammar, cold-start resume,
 dispatch contract), `references/fix-loop.md` (Stage 4's loop and guard rails)
 and `references/parallel.md` (Rule 6: dependency annotations, waves, lanes,
-worktrees and merges, and the Brain-Agent mode). `templates/` holds the three run-state file templates.
+worktrees and merges, and the Brain-Agent mode). `templates/` holds the run-state file templates.
 
 ## Invocation
 
-Dispatch on the argument (`$0`) before doing anything else:
+Dispatch on the argument below, before doing anything else. An empty argument
+means Full mode. Ignore any whitespace around the argument.
+
+`$ARGUMENTS`
+
+That is the whole argument string. **Never key this table on an indexed
+placeholder.** `\$0` is the first positional argument and it does get substituted —
+but an indexed placeholder with no argument at its position is left in the prompt
+verbatim, so a bare invocation renders a stray literal `\$0` into exactly the arm
+this table calls "no argument". `\$ARGUMENTS` expands to the whole argument string
+as typed, so it has no such hole. Every mention of a placeholder in this file that
+is *not* the dispatch target above is backslash-escaped for that reason: an
+unescaped one would be substituted too, and would rewrite the very text that
+documents it.
 
 | Invocation | Behavior |
 |------------|----------|
-| `/pipeline` (no argument) | **Full mode** — current behavior: start at Stage 1, step 0. |
-| `/pipeline resume` | Run the **Resume Protocol** in `references/run-state.md`. **Never start a new run in this mode** — if no run directory exists, say so and stop. |
-| `/pipeline status` | **Strictly read-only report** (below). No writes, no dispatches, no fixes. |
-| `/pipeline <anything else>` | **Ask the user what they meant.** Never guess a verb. `fix-mode` in particular is internal-only — set exclusively by this skill's own fix loop, never a user argument; if the user passes it, refuse and explain that. |
+| `/superb:pipeline` (empty `\$ARGUMENTS`) | **Full mode** — start at Stage 1, step 0. |
+| `/superb:pipeline resume` | Run the **Resume Protocol** in `references/run-state.md`. **Never start a new run in this mode** — if no run directory exists, say so and stop. |
+| `/superb:pipeline status` | **Strictly read-only report** (below). No writes, no dispatches, no fixes. |
+| `/superb:pipeline <anything else>` | **Ask the user what they meant.** Never guess a verb. `fix-mode` in particular is internal-only — set exclusively by this skill's own fix loop, never a user argument; if the user passes it, refuse and explain that. |
 
 **`status`:** locate the run directory (same candidate logic as the Resume
 Protocol — if more than one qualifies, ask which); read `progress.md`,
@@ -111,12 +124,13 @@ discarded — see *Compacting at GATE 2*.
   progress.md        # the tracker — phases, tasks, Current State
   register.md        # Assumptions Register
   findings.md        # blocking ledger (F-IDs), iteration history, deferred Minors
+  kit.md             # the run's shared verification apparatus (written at GATE 2)
   agent-output/      # one file per dispatch; long subagent output lands here
 ```
 
 **Formats, task-line grammar, the resume procedure and the dispatch contract
 are in `references/run-state.md`. Read it at Stage 1 step 0.** Templates for
-the three files ship in `templates/` and are **read-only** — copy them, never
+the templates ship in `templates/` and are **read-only** — copy them, never
 edit them.
 
 - **Run state NEVER goes in the skill directory.** A skill directory is shared
@@ -192,21 +206,91 @@ someone who was not there, all paths relative to `agent-output/`:
 
 | Field | What it must satisfy |
 | --- | --- |
-| `N=<tasks> → <s> slice + <i> integration` | `N` is the phase's task count, so the fan-out is re-derivable at closure instead of trusted from the step that gets skipped. Which number `s` must match depends on the regime, and the line says which: an **unwaved** phase takes `s = ceil(N/5)`; a **waved** phase takes one slice per wave or per adjacent pair of small waves (write `waved` after `N`), which may be more or fewer than `ceil(N/5)` and never splits a wave across two reviewers; an **`RVJ`** is always `0 slice + 1 integration`, its `N` informational. `i` is 1 whenever `s > 1`. |
-| `coverage <file>` | One file holding **the slice assignment table — each row keyed by its report filename, with that reviewer's exact range — above the `git log --oneline PB..PH`**, and ending with the verdict line `COVERED: <n>/<n> commits`. All three: a bare log is the input to a coverage judgement rather than the judgement, and a table with a gap in it sits above the log just as happily as one without. Anything short of `<n>/<n>` does not close the line. |
+| `N=<tasks> → <s> slice + <i> integration` | Which number `s` must match depends on the regime, and the declaration's own key says which — the regimes are the table below. Whichever one sized it, **`i` is 1 whenever `s > 1`**, and 0 when `s` is 1, because one slice already sees the whole diff. |
+| `coverage <file>` | One file holding **the slice assignment table above the `git log --oneline PB..PH`**, and ending with the verdict line `COVERED: <n>/<n> commits`. All three: a bare log is the input to a coverage judgement rather than the judgement, and a table with a gap in it sits above the log just as happily as one without. Anything short of `<n>/<n>` does not close the line. The table's own shape is fixed, below the regimes. |
 | `→ <F-IDs>` or `→ no findings` | What the round produced. |
+
+**Which regime sized the round — and whether the line proves it.** Only the
+unwaved `N=` row is re-derivable from the line; the others say so rather than
+borrowing that guarantee.
+
+| Key on the line | `s` is | Re-derivable from the line? |
+| --- | --- | --- |
+| `N=<n>`, no marker | `ceil(N/5)` | **Yes.** That is what `N` is on the line for: the fan-out is re-derivable at closure instead of trusted from the step that gets skipped. |
+| `N=<n> waved` | one slice per wave, or per adjacent pair of small waves, never splitting a wave across two reviewers — which may be more or fewer than `ceil(N/5)` | **No** — the wave count is not on the line. Write `waved` after `N`; without the marker the line claims the row above. |
+| `M=<m> C=<c>` | `c`, the file clusters in the fix diff | **As a declaration only.** `C` makes the sizing auditable and an arithmetic slip between the two numbers red, without establishing the count itself. `M` sizes nothing. |
+| `RVJ` | always `0 slice + 1 integration`, its `N` informational | **Yes**, from the form. |
+
+What a re-review round's fan-out *is* checkable against is its own `coverage`
+table, where two reviewers over one cluster show up as two rows carrying the
+same range.
+
+**The coverage table's shape is fixed**, because the round's own arithmetic is
+read off it and a later reader re-runs it: every row is **keyed by its report
+filename, with that reviewer's exact range in the row's second cell, and every
+report file the round names has a row of its own** — a reviewer with no row
+has no recorded range for anyone to check any other against. And **no two rows
+carry the same range**: two reviewers over one range read the same diff, and
+the integration reviewer's row is the union of the slices, so it equals no
+single slice's.
+
+**The line's shape is machine-checkable, and only its shape.** The superb
+plugin's own repository ships a linter for this grammar: from a checkout of
+that repo, `./tools/check-plugin.sh --run <run-directory>` reads the tracker's
+closed `RV`/`RVJ` rounds and names any whose declared count and listed report
+files disagree, whose unwaved `N=` slice count is not `ceil(N/5)`, whose
+integration count does not follow its slice count, whose `RVJ` is not
+`0 slice + 1 integration`, whose `M=` declares no `C=<n>` or a `C` its slice
+count contradicts, whose `coverage` field is absent, whose named report or
+coverage files are not in `agent-output/`, whose coverage table (on a round of
+two or more slices) leaves a named report without a row or gives two reviewers
+the same range, or whose `M=0 → no round` record carries reviewer evidence.
+It is not in a project's own tree unless that project is the plugin, so it is
+a check a run can use, not a gate every run passes — Stage 5 is what runs it,
+and says in the hand-off what came back.
+
+**Outside the unwaved `N=` regime it still cannot check that the fan-out was
+sized right**, and half of that will never be checkable from the tracker: the
+duplication half is caught, since two reviewers handed one range are two rows
+the linter can compare, but the count itself is not derivable from the line
+there — the wave count is not on it, and `C` is on it as a declaration by
+whoever chose `s`, so one reviewer over a seven-cluster diff writes `C=1` and
+passes.
 
 **Every field is per round, and re-review rounds append their own.** The counts
 are read against the round they sit in, never against the whole line:
 
 ```markdown
-      → round 2: M=9 → 3 slice + 1 integration · reports p3-rr2-{a,b,c,int}.md
+      → round 2: M=9 C=1 → 1 slice + 0 integration · reports p3-rr2-a.md
         · coverage p3-rr2-coverage.md → F-012 closed, F-014 raised
 ```
 
-`M` is the count of targeted F-IDs and the fan-out is `ceil(M/3)` (not
-`ceil(N/5)` — fix diffs are not task-shaped), with coverage over the fix commits.
-Whoever ran the round writes it, at whatever recursion depth.
+The fan-out is **one reviewer per file cluster in the fix diff**, integration
+only above one reviewer — not `ceil(N/5)`, since fix diffs are not task-shaped,
+and not a count over the findings, since findings are not diff surface — with
+coverage over the fix commits. Whoever ran the round writes it, at whatever
+recursion depth.
+
+**`M=0 → no round` is the one round that closes without reviewers.** `M` — the
+targeted-F-ID count, less every one closed by a route that leaves no ownable
+commit — is defined **once**, with the closed list of those routes, in
+`references/fix-loop.md`, fix loop step 3. Read it there; a second copy of a
+closed list here is a copy that can drift into being a shorter one. A fix
+iteration whose `M` comes out zero runs no fan-out — and it still writes its
+round, because an absent round and a skipped one are the same absence here:
+
+```markdown
+      → round 4: M=0 → no round · closures: F-021 deleted → no findings
+```
+
+`no round` stands where the reviewer counts would, and `M=0` is the only
+declaration that licenses it. In place of `reports` and `coverage` the round
+carries each F-ID it closed and that F-ID's route, taken from the closed list
+in `references/fix-loop.md`, fix loop step 3, and matching that F-ID's
+`Closed by` cell in the ledger. `pinned by <test>` cannot appear here: a pin
+commits a test, so it stays in `M` and its commit is owed a reviewer.
+One behavioural fix, or one pin, in the same iteration makes `M > 0`, and then
+the full fan-out is owed.
 
 The one other closure: `[x] RV — WAIVED by user: "<their words>"`, which needs
 those words verbatim in `register.md`, applies only to the phases the user named
@@ -338,6 +422,42 @@ never enter orchestrator context wholesale; the consolidated list in
 `findings.md` is what the run reasons over. Contract in
 `references/run-state.md`.
 
+### Rule 5b — Derive, don't restate
+
+A brief, a plan or a comment states the **source** of a code fact — the symbol
+it lives on, or the command that regenerates it — and never a count, a line
+number, a signature or a file list. No method or field named as already
+existing, no type, no "the four reachable states".
+
+**A task's `Files:` block is the exception, at both ends** (Rule 6): writing it
+into a plan — and into a task brief cut from one — is required, and receiving it
+is not grounds for the refusal below. `references/parallel.md` says why no
+derivation can stand in for those paths. Nothing else about a task's code
+travels with a brief.
+
+The reason is mechanical: a restated fact is correct at the moment it is written
+and at no moment after. The orchestrator writes briefs from a tree that moves
+under them, so a restated fact is wrong at a rate the run cannot absorb — and
+because the agent receiving it treats the brief as authority, the error is only
+caught when that agent happens to look. In testing every such error *was*
+caught, by the agent, after it had already shaped the work.
+
+- **Writing a brief:** name the symbol, not the file and line it currently sits
+  at. Give the command that finds the call sites, not the number of them you
+  counted.
+- **Receiving a brief:** a brief that states a code fact is **refused** — send
+  it back rather than reconciling it. You cannot tell a stale fact from a
+  current one without deriving it, and if you are deriving it the brief's copy
+  was worthless.
+- **Writing a comment:** anchor to a symbol or delete the claim. A comment that
+  asserts a re-derivable fact is a **claim finding** waiting to happen — see the
+  closure rule in `references/fix-loop.md`.
+
+This rule binds this skill's own prose. Where these documents once counted their
+own templates, they name `templates/` instead: the count was true right up to
+the commit that added a file to that directory, which is the same failure one
+level down.
+
 ### Rule 6 — Dependency waves: parallel where the plan proves it is safe
 
 Sequential-by-default is the fallback, not the design. At Stage 3 every task is
@@ -432,15 +552,33 @@ GATE 1.** Never merge these into one message, never present a design before
 the questions are answered, never run the pressure-test after the gate.
 
 0. Read `references/run-state.md`. Create the run directory at
-   `<PROJECT_DIR>/docs/superpowers/runs/YYYY-MM-DD-<topic>/`, copy in the three
+   `<PROJECT_DIR>/docs/superpowers/runs/YYYY-MM-DD-<topic>/`, copy in the
    templates, seed `progress.md` with Stages 1–5 as phases (all `[ ]`, Current
    State = Stage 1), state the full directory path in your first message to the
-   user, then read the tracker back. **If the directory already exists, stop
-   and ask** — resume, fresh run, or abort — showing the user its Current State.
+   user, then read the tracker back. `kit.md` is the exception: it cannot be
+   filled in before the plan names the gates, so GATE 2 writes it and this step
+   does not. **If the directory already exists, stop and ask** — resume, fresh
+   run, or abort — showing the user its Current State.
 1. Invoke `superpowers:brainstorming` for the interactive Q&A.
 2. Run **as many question rounds as it takes** until you can state every
    requirement with zero open Assumptions Register entries. Each new answer
    that reveals new unknowns spawns another round. More rounds = correct.
+   - **The repo's commit and verification conventions go in the first round** —
+     the ticket/issue key required in a commit subject (and this run's value
+     for it), any coverage floor on changed lines, and any pre-push gate. A
+     **written** repo rule is the one kind of unknown `register.md`'s *Decided
+     without asking* table lets you settle alone, but only once you have
+     **found** it, and inference is not finding. **The seeded key entry asks two
+     things and its halves go to different tables:** whether this repo demands a
+     key at all is answered by the written rule, so that half belongs in *Decided
+     without asking* with the rule cited the moment you find it — and in *Open*
+     only while you cannot; which key this run uses is answered by nobody but the
+     user, so that half stays *Open* and blocks GATE 1 until they say it. Every
+     task in the run commits,
+     so a wrong answer here is wrong in every commit. Seed them as register
+     entries, cite the rule that answers each, and record the answers in
+     `kit.md`'s *Project specifics* at GATE 2. A run that discovers its commit
+     convention at Stage 5 cannot apply it without rewriting history.
 3. **Intercept** before brainstorming auto-transitions to writing-plans — this
    skill owns that transition.
 4. Dispatch **≥2 agents in parallel** to independently pressure-test / expand
@@ -523,12 +661,20 @@ the whole of Stage 4, not across the handful of turns GATE 1 has left.
 2. `progress.md`'s Current State names the first unstarted line, every task line
    carries its wave and its deps, every phase carries its `RV` line, and every
    split and lane join carries its `RVJ`.
-3. **Every decision made in conversation and never written down gets written
+3. **`kit.md` is written** — the suite, coverage and build-gate commands the
+   approved plan names, the baseline discipline, the mutation harness, the
+   worktree rule, and the repo conventions Stage 1's question rounds asked
+   for. It is
+   **written once, here, from the approved plan**, because every dispatch after
+   this point cites it by path instead of deriving the apparatus again; a run in
+   which every task re-derives one harness is the cost this file exists to
+   delete. Commands only, never their output (Rule 5b).
+4. **Every decision made in conversation and never written down gets written
    now** — into the spec if it changed the design, into a phase's plan if it
    changed that phase's approach, into the register's Closed table verbatim if
    it was an answer. This is the step, not a formality: skip it and "we
    discussed it" quietly becomes "nobody knows".
-4. If step 3 changed the design or a phase's approach, the plan in front of the
+5. If step 4 changed the design or a phase's approach, the plan in front of the
    user is wrong. Correct it, re-present the gate, and let the offer ride with
    the **corrected** gate message — never over an unapproved change.
 
@@ -563,8 +709,10 @@ For each phase — in dependency order, independent phases concurrently as lanes
    phase branch, including any you wrote inline yourself. Run the test suite —
    failing tests are bug findings.
    Consolidate + dedup into `findings.md`, **assigning each new finding a
-   stable `F-NNN` ID** (Critical / Major (= `/review` "Warning") / Minor;
-   severity ties resolve upward; a rediscovered finding keeps its old ID), then
+   stable `F-NNN` ID**. **Three tiers only** — Critical / Major (= `/review`
+   "Warning") / Minor; ties within them resolve upward; a rediscovered finding
+   keeps its old ID; **an incoming `Important` is re-tagged** to Major or Minor
+   by the predicate in `references/fix-loop.md` and never carried as a tier. Then
    close `RV` `[x]` with those F-IDs — or `no findings` — and the
    `agent-output/` paths.
 3. **Fix loop**: if any Critical/Major/bug → recurse `pipeline` in
@@ -670,13 +818,35 @@ that every phase's `RV` — and every `RVJ` — is `[x]`**. Do not take the tick
 trust: this is the run's one independent pass over lines whose author had the
 motive to skip them, so **stat the `reports` paths and count them against the
 `<s> + <i>` on each line, per round, and check each coverage file ends
-`COVERED: <n>/<n>`.** A line that fails that is an unreviewed phase wearing a
+`COVERED: <n>/<n>`.** A round that carries no reviewer evidence at all does
+not fail that count — the round forms that owe none are the exception named in
+`references/fix-loop.md`'s *Invariants*, and each is read against its own
+closure fields. A line that fails what it owes is an unreviewed phase wearing a
 green tick — treat it as `[ ]`. Any `[ ]` or `[~]` is unfinished work,
 not a bookkeeping lapse — go finish it (a `[~]` goes through Rule 4
 reconciliation first). An open `RV` means that phase was implemented and never
 reviewed: go run its fan-out before anything else, however many phases back it
 sits. Confirm `findings.md` has no open blocking IDs and `register.md` no open
 entries.
+
+**Then run the `RV`-grammar linter over this run's own directory**, before the
+hand-off: from a checkout of the superb plugin's own repository,
+`./tools/check-plugin.sh --run <run-directory>`. It reads the same tracker you
+have just checked by hand, and it catches the kinds of thing a hand check slides
+over — a count that was never added up, a report or coverage file named but
+never written, a coverage table that handed two reviewers the same range.
+The linter lives in that repository and does **not** ship with the plugin, so a
+run in any other project may have no checkout to run it from; that is why the
+result goes in the hand-off either way rather than being a gate.
+
+**What a `FAIL` means for the pass you have just done.** Reporting it is not
+the whole of it: a **`FAIL` on any check the by-hand pass also owes is that
+pass failing**, so treat that line as `[ ]` and go run its fan-out, exactly as
+if you had caught it by hand. The linter's checks are a superset of the count
+you did above, so without that rule one defect reopens `RV` when a human finds
+it and ships as a hand-off line when the linter finds it. Every other `FAIL`
+is reported in the hand-off, which the sentence above already requires.
+
 Invoke `superpowers:finishing-a-development-branch`. Because everything under
 `docs/superpowers/` is local-only, **the hand-off is the run's only durable
 output besides the commits**, and MUST include:
@@ -686,7 +856,13 @@ output besides the commits**, and MUST include:
 - **every phase whose `RV` closed as `WAIVED by user`**, with the quoted
   instruction — the run's only durable record that code shipped unreviewed;
 - a **summary of the approved design and the decisions the register closed**,
-  written so it still makes sense to someone who never had the local spec.
+  written so it still makes sense to someone who never had the local spec;
+- the **`RV`-grammar linter's result over this run's own directory** — its
+  `check-plugin: PASS`/`FAIL` output quoted, and every `FAIL` line with it. When
+  no checkout of the plugin's own repository was available to run it from, say
+  precisely that instead: **the linter was unavailable, so the tracker's review
+  lines went unchecked**. Do not drop the item — an absent line reads as a
+  check that passed, which is the one thing it must never read as.
 
 Anything that matters and appears only in a run-directory file is one lost
 machine away from gone. Put it in the hand-off.
@@ -732,14 +908,25 @@ believes.
 
 ### Re-review fan-out (different math)
 
-`ceil(N/5)` is defined over **tasks**. Fix-mode returns produce fix commits, not
-tasks, so a re-review uses `M` = the number of blocking F-IDs that run targeted:
-**`ceil(M/3)` slice reviewers** (~3 findings each, since every one must be
-verified against the code it names), plus an integration reviewer once there is
-more than one slice. Slice boundaries are the fix commits' ranges, and **the
-assigned ranges must union to cover every fix commit** — a clean round from
-reviewers who never looked at a fix closes nothing. Table in
-`references/fix-loop.md`.
+`ceil(N/5)` is defined over **tasks**. Fix-mode returns produce fix commits,
+not tasks, so a re-review is sized from the **fix diff**: **one slice reviewer
+per file cluster**, plus an integration reviewer once there is more than one.
+`M` is still recorded on the round, and `M=0` still licenses a round with no
+reviewers in it — but `M` does not size the fan-out, because six comment
+corrections in one file are one small diff and three reviewers over it
+duplicate each other. **The cluster count is recorded on the round as `C=<n>`
+and `s` must equal it** — what declaring it establishes, and what it does not,
+is stated with the rule in `references/fix-loop.md`. Slice boundaries are the
+fix commits' ranges, **no two slices carry the same range**, and **the assigned
+ranges must union to cover every fix commit a reviewer can own** — a clean
+round from reviewers who never looked at a fix closes nothing.
+
+**What `M` is, and which closure routes come out of it, is stated once** — in
+`references/fix-loop.md`, fix loop step 3 — and deliberately not restated here.
+This is the section a reader consults to decide whether a round runs, which is
+exactly why it must not carry a second gloss of a closed list: a gloss that loses
+one route mandates a round over an empty diff, or excuses a commit that needed an
+owner. Table in `references/fix-loop.md`.
 
 ### Joint integration review after a split (Rule 3)
 
@@ -830,6 +1017,8 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
 | "Reply 'approved'/'go' to accept all defaults" | Bulk replies close zero register entries. Each assumption needs its own answer. |
 | "I'll list my assumptions so the user can veto by exception" | An assumption the user didn't explicitly confirm is still an assumption. Ask it as a question instead. |
 | "Codebase precedent is the strongest non-user disambiguator" | Precedent tells you what exists, not what the user wants. Precedent may inform your suggested option — inside a question. |
+| "I'll put the line numbers in the brief so the agent finds it faster" | A line number is correct when you write it and at no moment after. Name the symbol, or the command that finds it. |
+| "The brief says 12 call sites; close enough to act on" | The last brief that stated a call-site count stated the wrong one, and the agent reading it found that out. A stated code fact is refused, not reconciled. |
 | "I'll pick the cheapest-to-reverse option and log it" | A logged assumption is still an assumption. The decision log is not a consent mechanism. |
 | "Stopping would violate the skill's autonomy contract" | The Ambiguity guard IS part of the contract. Guessing violates it; asking honors it. |
 | "The user said don't stop / is unavailable; the review fan-out will catch it" | Reviewers check code against the plan; they cannot read the user's mind. Wait for the user. |
@@ -845,11 +1034,13 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
 | "This `[~]` looks done, I'll tick it and move on" | Rule 4: verify against git and the tests. Looks-done is exactly how half-applied work gets built on. |
 | "The register/ledger is in my context, writing it to a file is duplication" | Your context is one compaction from empty. A rule with no file behind it is unenforceable. |
 | "These two findings are basically the same one from last round" | That's the interpretive call the ID system exists to remove. Look up the F-ID. |
+| "The comment was wrong, I corrected it — finding closed" | A corrected assertion is still unexecuted, and nothing keeps it true as the code under it changes. A claim finding closes by deleting the claim or pinning it with a test. Nothing else. |
+| "I'll re-review the fix to the docblock to be safe" | There is no behaviour to re-review. A deletion opens no round at all; a pin opens one over the test it commits, never over the claim; a rewrite is not a closure. |
 | "I'll read the full review report so I don't miss anything" | Full reports in orchestrator context are the bloat that causes drift. Consolidate to `findings.md`; read details on demand. |
 | "4a and 4b each passed review, the phase is covered" | Each reviewer saw half a designed unit. Run the joint integration review over the combined diff. |
 | "This is iteration 2, I'm well under the cap of 5" | Unless you read that from `findings.md`, you are guessing after a compaction that may have eaten iterations 1–4. Read the row. |
 | "I'll record the iteration once I see how the fix went" | Then a crash mid-fix loses it and the cap resets. Increment in the file before dispatching. |
-| "The fix was small, one reviewer over the whole thing is fine" | `ceil(M/3)` over targeted F-IDs, and the ranges must cover every fix commit. "Small" is not a fan-out. |
+| "The fix was small, one reviewer over the whole thing is fine" | One reviewer per file cluster in the fix diff, and the ranges must cover every fix commit a reviewer can own — a claim **deletion**'s is the only one the union excludes, and a claim **pin**'s is in it like any other. "Small" is a judgement about clusters, not a licence to skip coverage. |
 | "The re-review came back clean, the findings are closed" | Only if its ranges actually covered the fix diffs. Union the ranges and check before closing anything. |
 | "I'll note the design decision in the spec doc and move on" | Nothing under `docs/superpowers/` is committed. If it matters, it goes in the Stage 5 hand-off too. |
 | "`resume` obviously means the most recent directory" | Recency is a guess about someone's unfinished work. More than one candidate → show each Current State and ask. |
@@ -911,13 +1102,19 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
 - You are checking a task `[x]` and have no hash to put next to it.
 - You are about to hold a full diff or review report in your own context
   instead of a `DETAIL:` path.
+- You are putting a line number, a file list, a signature or a count into a
+  brief, a plan or a comment instead of naming the symbol, or the command that
+  derives it.
 - You are deciding whether two findings are "the same" instead of comparing
   F-IDs.
 - You are about to state an iteration number or recursion depth you did not
   just read out of `findings.md`.
-- You are sizing a re-review fan-out off task count instead of targeted F-IDs.
-- You are closing a finding without having checked that a re-review range
-  actually covered its fix.
+- You are sizing a re-review fan-out off task count or off the targeted F-ID
+  count instead of off the fix diff's file clusters.
+- You are closing a **behavioural** finding without having checked that a
+  re-review range actually covered its fix. (A claim finding closed by deletion
+  is not this: it opens no round, so there is no range to check. A pin does open
+  one, but over the test it commits — the claim is closed by the pin itself.)
 - You are between GATE 2 and Stage 5, about to end your turn, and the message
   you are sending contains no guard-rail question. **Keep going instead.**
 - Your message ends with a phase summary, "let me know if…", or "shall I
@@ -930,9 +1127,13 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
   `RVJ`) is `[ ]` or `[~]`** — that phase was implemented and never reviewed.
 - You are closing an `RV`/`RVJ` round with fewer `reports` files than the
   reviewers that round declares, or a coverage file that does not end
-  `COVERED: <n>/<n>`.
+  `COVERED: <n>/<n>` — on a round that owes those fields. The forms that owe
+  none are the exception in `references/fix-loop.md`'s *Invariants*.
 - You are writing a `Next action` that names the **next phase** while this
   phase's `RV` is still open.
+- You are writing the Stage 5 hand-off and it carries nothing about the
+  `RV`-grammar linter — neither its output nor the statement that no checkout
+  was at hand to run it from.
 - You are at Stage 5 and any phase's `RV` is not `[x]`, or `findings.md` is
   thin against the run's size. Check the `RV` lines phase by phase rather than
   the ledger as a whole: one Minor from one reviewed phase makes a ledger look
@@ -973,14 +1174,20 @@ memory — decide what happens next.**
   erases them, and "a finding stays open until closed" becomes unenforceable.
 - **Minting a new F-ID for a rediscovered finding** — it keeps its original ID,
   or the convergence rule can never fire.
+- **Closing a claim finding by rewriting the sentence** — the rewrite is the
+  next round's finding. Delete the claim, or pin it with a test; a rewrite
+  closes nothing, and the fix loop it starts has no fixed point.
 - **Pulling full review reports or diffs into orchestrator context** — hold the
   `DETAIL:` path; read it only when a decision needs it.
 - **Advancing past a split without the joint integration review** — per-sibling
   reviewers each saw half the designed unit.
 - **Keeping the iteration/depth counters in context** — a compaction resets them
   to zero and both caps silently stop capping. They live in `findings.md`.
-- **Sizing a re-review with `ceil(N/5)`** — fix diffs aren't task-shaped; use
-  `ceil(M/3)` over the targeted F-IDs, with ranges covering every fix commit.
+- **Sizing a re-review off task count or off finding count** — fix diffs aren't
+  task-shaped and findings aren't diff surface; one reviewer per file cluster,
+  with ranges covering every fix commit a reviewer can own — every one but a
+  claim **deletion**'s, which the coverage union excludes; a claim **pin**'s
+  commits a test, so the union keeps it.
 - **Compacting before the flush** — the Run State Law is only true once the
   files actually hold everything; GATE 2's flush is what makes it true.
 - **Assuming a local spec is a durable record** — nothing under
@@ -1015,9 +1222,13 @@ memory — decide what happens next.**
 - **Looping forever** — honor both caps; surface to the user at the cap.
 - **Burning iterations on a non-converging finding** — the convergence rule
   stops at the first evidenced wasted iteration; don't ride it to the cap.
-- **Trusting a clean re-review that never covered the fix** — findings close
-  via the ledger (fix diff touched the named code + covering re-review), not
-  by failing to be rediscovered.
+- **Trusting a clean re-review that never covered the fix** — a round whose
+  ranges never looked at the fix diff closes nothing; failing to be
+  rediscovered is not a closure. The ledger's route for a behavioural finding
+  is fix-diff-touched **plus** a covering re-review; a claim finding takes a
+  different route (deleted, or pinned with a test whose commit is the only thing
+  a round then owns), so the lesson is what a clean round cannot buy you, not
+  that this is the only way to close.
 - **Advancing with a red test suite** — failing tests are bug findings even
   when no reviewer reported them.
 - **Blocking on Minor findings** — only Critical/Major/bug gate advancement;

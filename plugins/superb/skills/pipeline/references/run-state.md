@@ -8,11 +8,13 @@ is a cache of these files, never the other way round.
   progress.md        # the tracker — phases, tasks, Current State
   register.md        # Assumptions Register
   findings.md        # blocking ledger (F-IDs), iteration history, deferred Minors
+  kit.md             # the run's shared verification apparatus (written at GATE 2)
   agent-output/      # one file per dispatch; long subagent output lands here
 ```
 
-Templates for the three files ship with the skill in `templates/`. They are
-**read-only** — copy, never edit in place.
+`templates/` ships a template for each of these files. They are **read-only** —
+copy, never edit in place. `kit.md` alone is filled in later, at GATE 2 from the
+approved plan, because it cannot name a run's gates before the plan does.
 
 Nothing under `docs/superpowers/` is ever `git add`ed — run state, specs and
 plans are deliberately local-only. **So the guard-rail counters belong on disk
@@ -29,8 +31,9 @@ Stage 5 hand-off, not a run-directory file.
    directory), or abort. Show them the tracker's Current State block so the
    choice is informed. Silent resume and silent overwrite are both forbidden —
    an unfinished run is exactly the state the Iron Law protects.
-3. Otherwise create it, copy the three templates in, strip their comments, and
-   state the full directory path in your first message to the user.
+3. Otherwise create it, copy the templates in — all but `kit.md`, which GATE 2
+   writes — strip their comments, and state the full directory path in your
+   first message to the user.
 
 Fix-mode recursions **inherit** the enclosing run's directory. They never create
 one.
@@ -80,22 +83,42 @@ four fields, all paths relative to `agent-output/`:
   is re-derivable at closure rather than trusted from the step most likely to
   have been skipped. An **unwaved** phase takes `s = ceil(N/5)`; a **waved** one
   takes a slice per wave or adjacent wave-pair (write `waved` after `N`), which
-  may be more or fewer; an **`RVJ`** is always `0 slice + 1 integration` with `N`
-  informational. `i` is 1 whenever `s > 1`.
+  may be more or fewer; an **`M=`** re-review **writes its cluster count on the
+  line as `C=<n>` and `s` must equal it** — `M=9 C=3 → 3 slice + 1 integration`
+  (the cluster rule, and what declaring `C` does and does not establish, is in
+  `fix-loop.md`'s *Re-review fan-out*); an **`RVJ`** is always
+  `0 slice + 1 integration` with `N` informational. `i` is 1 whenever `s > 1`.
 - `reports <files>` — **exactly `s + i` files, one per reviewer**, each the
   `DETAIL:` path that reviewer returned. A review dispatch always requires its
   report file, clean or not — the "omit `DETAIL:` if nothing is longer" licence
   below does not reach reviewers, or a clean phase could never close. The
   coverage file is never counted here.
-- `coverage <file>` — the slice assignment table, **each row keyed by its report
-  filename**, above the `git log --oneline PB..PH`, ending `COVERED: <n>/<n>
-  commits`. Record slices individually: one union range reads as complete even
+- `coverage <file>` — the slice assignment table above the
+  `git log --oneline PB..PH`, ending `COVERED: <n>/<n> commits`. Every row is
+  **keyed by its report filename, with that reviewer's exact range in the row's
+  second cell, and every report file the round names has a row of its own** — a
+  reviewer with no row has no recorded range for anyone to check any other
+  against. Record slices individually: one union range reads as complete even
   when two slices leave a gap between them, and that gap is the defect being
-  hunted. Derive `PB` with `git merge-base`, never `<first-task-hash>^`.
+  hunted. **No two rows carry the same range** — two reviewers over one range
+  read the same diff, and the integration reviewer's row is the union of the
+  slices, so it is not equal to any one of them either. Derive `PB` with
+  `git merge-base`, never `<first-task-hash>^`.
 - `→ <F-IDs>` or `→ no findings`.
 
 Every field is **per round**; re-review rounds append their own `M=… → …`,
 `reports` and `coverage`, and the counts are read against their own round.
+
+The one round that carries neither `reports` nor `coverage` is **`M=0 → no
+round`**, written when a fix iteration's every targeted F-ID was closed by a
+route that leaves no ownable commit, so no reviewer was ever owed a fix diff
+(`fix-loop.md`, fix loop step 3, which holds the closed list of those routes).
+`no round` stands where the reviewer counts would, `M=0` is the only
+declaration that licenses it, and it closes on the F-IDs plus each one's route,
+matching those rows' `Closed by` cells. **A pin is not a route this form can
+carry**: it commits a test, so it stays in `M` and that commit is owed a
+reviewer. It is **recorded, never omitted**: a round nobody had to run and a
+round somebody skipped are otherwise the same absence on this line.
 
 The `[ ]` form carries none of it — at GATE 2 no task has a hash and the slice
 count is not yet knowable. Both are filled in at dispatch.
@@ -137,7 +160,7 @@ action** — before dispatching, before reading a plan doc, before writing code.
 **A `[~]` task is never assumed done because it looks done, and never assumed
 untouched because you don't remember it.** Verify against the code.
 
-## Resume Protocol (`/pipeline resume`)
+## Resume Protocol (`/superb:pipeline resume`)
 
 The user-invoked path back into an interrupted run. It wraps the cold-start
 protocol above with candidate selection and a reporting step. **This mode never
@@ -217,6 +240,26 @@ answering an Ambiguity question, preparing a user-facing summary) — and then i
 reads the file, not a remembered version of it. Reviewers' full reports in
 particular never enter orchestrator context wholesale; the consolidated finding
 list in `findings.md` is what the run reasons over.
+
+**Every dispatch prompt carries three things besides that return shape, and not
+one of them is the agent's to infer.** First, **Rule 5b — derive, don't
+restate** (`SKILL.md`): the brief names symbols and the commands that regenerate
+facts, and never a count, a line number, a signature or a file list — the
+task's own `Files:` block being the one exception that rule names; an agent
+handed a stated code fact **refuses the brief and says which fact**, and that
+refusal is correct behaviour costing one round trip, where acting on a stale
+fact costs the task. Second, **`kit.md`, cited by path** — the agent reads the
+suite, coverage and build-gate commands, the baseline discipline, the mutation
+harness and the worktree rule out of that one file, because a dispatch that
+describes a harness inline is how a run comes to rebuild the same apparatus in
+every task, and a dispatch that omits the worktree rule is how two agents come
+to mutate the same file in the main tree at once and leave a third chasing the
+phantom failure. Third, **the ticket/issue key**, wherever the repo requires one
+in a commit subject: the prompt states it, the implementer puts it in the
+subject, and it is not theirs to infer from a branch name — it is answered at
+Stage 1 and recorded once in `kit.md`'s *Project specifics*, and a `COMMIT:`
+hash whose subject is missing the key is a task that has to be redone rather
+than a bookkeeping lapse.
 
 ## Findings: stable IDs
 

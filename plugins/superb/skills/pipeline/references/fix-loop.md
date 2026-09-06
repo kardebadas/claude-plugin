@@ -72,9 +72,35 @@ phase autonomously.
      them — add them to the consolidated list with the failure output as
      evidence.
    - Consolidate findings from all reviewers **into `findings.md`**, dedup, and
-     tag each by severity: **Critical**, **Major** (maps to `/review`
-     "Warning"), **Minor**. When duplicate reports disagree on severity, **the
-     highest severity wins**. **Assign every new finding the next free `F-NNN`
+     tag each by severity. **There are exactly three tiers: Critical, Major
+     (= `/review`'s "Warning"), Minor.** A reviewer that reports in another
+     vocabulary is re-tagged here, never carried: `subagent-driven-development`'s
+     task reviewer emits **Important**, whose contract is "fix everything before
+     this task completes" — right for one task's diff, wrong for a phase, and it
+     is not in this skill's blocking list. So **an incoming `Important` is
+     re-tagged** by consequence: it becomes **Major** if it names a measured
+     behavioural defect, **a requirement the plan, spec or brief mandated that
+     the phase did not implement**, a failing or vacuous test, a broken build
+     gate, a security/PHI/data-loss reachability, or a fragility whose failure
+     mode is **reachable in the code as written** (an unhandled empty or null
+     case, an ordering or race dependency) — and **Minor** otherwise. Minor is
+     the total catch-all, and two things land there deliberately:
+     maintainability damage, and fragility that is only hypothetical ("this
+     could break under load" with nothing shown that reaches it). A missed
+     requirement is **not** deferrable — "the plan mandated X and the phase does
+     not do X" is the phase not being done, and no other check in this skill
+     catches it, so demoting it to Minor would let a spec gap ride out the run
+     as a deferred note. Record the re-tag in the ledger row so the call is
+     visible.
+     **These branches are the severity decider, not only a re-tag rule.** The
+     predicate is stated over an incoming `Important` because that is the
+     vocabulary it was written to convert, but it decides severity wherever
+     this skill has to set a tier itself — a **claim finding** below is one such
+     place, whatever tier it arrived under — and it decides it on these same
+     branches' own terms. The tier a finding arrived under is not evidence of
+     which branch it reaches.
+     When duplicate reports disagree within the three tiers, **the highest
+     wins**. **Assign every new finding the next free `F-NNN`
      ID**; a rediscovered finding keeps the ID it already has. Reviewers return
      ≤10 lines plus a `DETAIL:` path — read a full report only while
      consolidating, and never carry it forward in context.
@@ -90,9 +116,12 @@ phase autonomously.
 4. **Close out and advance.** In this order, no reordering:
    0. Confirm this phase's **`RV` — and, for a split's last sibling, its
       `RVJ` — is `[x]`** with every round's report files present and counted and
-      each coverage file ending `COVERED: <n>/<n>`. If the line is `[ ]`, or is
-      `[x]` but fails that count, **set it back to `[ ]`** — an unbacked closure
-      is not a partial review — and go to step 2.
+      each coverage file ending `COVERED: <n>/<n>` — for every round that owes
+      those fields at all; the round forms that owe none are the exception the
+      *Invariants* below name, and a round on one of them is read against its
+      own closure fields instead. If the line is `[ ]`, or is `[x]` but fails
+      that count on a round that owes it, **set it back to `[ ]`** — an unbacked
+      closure is not a partial review — and go to step 2.
    1. Write `progress.md`: every task in this phase `[x]` **with its commit
       hash**, Current State set to the **next unchecked line** — a joining
       phase's `RVJ` sits above its first task — timestamp refreshed.
@@ -168,9 +197,48 @@ renumbered. A ledger entry is **closed** only by one of:
   round from reviewers who never looked at the fix closes nothing.
 - **User-ruled false positive**: the user (not you) declared it not a bug.
 
+**A claim finding closes differently, and the difference is a termination
+argument.** A *claim finding* is one whose defect is an assertion rather than a
+behaviour: a comment, a docblock, a commit message or a run report that states a
+count, a `file:line` citation, a sole-writer or sole-caller claim, or "X is what
+protects Y". **Neither enforcement code nor a run's own records is exempt.** A
+comment in a gate, a linter or a test harness is prose the same way — "it is
+rationale, not model-facing text" is exactly the carve-out that lets a rule's own
+enforcement keep the claims the rule exists to remove — and a run's own records,
+its reports and its ledger rows, are prose the same way. Such a finding closes by
+exactly one of:
+
+- **Deleting the claim.** Always available, always terminating.
+- **Pinning it with a test** that fails when the claim stops being true, or
+  re-anchoring it to a symbol that moves with the code.
+
+**A rewrite is not a closure.** A corrected assertion is still an unexecuted
+assertion: nothing keeps it true as the code under it changes, so the fix round
+raises its own successor and the loop has no fixed point. The two routes then
+part company on what they leave behind, and both `M` and the fix-diff **coverage
+union** follow the diff rather than the finding. **Deleting the claim opens no
+re-review round**: the commit only removes a sentence, so there is nothing in it
+to report resolved or regressed, its commit stays out of the union (the
+*Re-review fan-out* bullet below), and `M` drops it. **A pin does open one.** A
+pin commits a test, and "a failing or vacuous test" is one of the branches the
+re-tag predicate above rates Major — a rating nothing can act on if no reviewer
+reads the test — so a pin's commit is in the union *and* stays in `M`, which is
+what puts a reviewer on it even when the pin is the iteration's only work. The round it opens is over that
+test, never over the claim: the claim is closed by the pin itself, and what a
+reviewer can still find there is a new finding with its own F-ID. A claim finding
+whose fix rewrote the prose is **not closed**: send it back for a deletion or a
+pin.
+
+Severity is decided by the re-tag predicate above, not by this rule: a claim
+finding is **Minor** unless one of that predicate's branches applies to it on
+its own terms. The branch such a finding usually reaches is **a requirement the
+plan, spec or brief mandated that the phase did not implement** — a claim that
+another task's work is already done is how that requirement comes to be skipped
+— and there it is **Major**, not a cosmetic note.
+
 Every open ID carries forward into the next consolidation **by construction** —
 the ledger is read, not remembered. A finding that silently disappears from
-review output stays `open` in the file until closed by one of the two paths
+review output stays `open` in the file until closed by one of the routes
 above.
 
 ## Convergence rule (checked before every fix-mode dispatch)
@@ -270,6 +338,56 @@ When blocking findings exist (and the convergence rule permits another run):
    assignments cover every fix diff. Update the ledger and complete the
    Iteration-log row with the set of F-IDs still open after the re-review.
 
+   **Unless `M=0`.** `M` does not size the fan-out — the fix diff does
+   (*Re-review fan-out*, below) — but it still decides **whether a round happens
+   at all**. `M` is **the number of blocking F-IDs this fix-mode run targeted**,
+   less every one the ledger closed by a route that leaves no ownable commit.
+   A targeted F-ID is excluded exactly when its closure route
+   is a deletion or a user-ruled false positive, and the list is closed. Both
+   entries earn their place the same way — neither leaves a commit a reviewer
+   could be assigned, and a round owed over an empty diff is a round no fan-out
+   can size. **A pin is not on that list**: it commits a test, and a test is an
+   ownable commit, so a pin stays in `M` for the same reason a
+   fixed-and-verified closure does. An iteration whose every targeted F-ID left
+   by one of those two routes therefore has `M=0` and **runs no round**; a
+   **pin-only iteration has `M=1`**, one ownable commit, and takes the first row
+   of the table below. `M=0` licenses skipping this step and
+   nothing else does — one behavioural fix, or one pin, in the same iteration
+   puts `M` above zero and the round is owed in full, sized from that
+   iteration's fix diff and covering every fix commit a reviewer can own in
+   it. The ledger update and the Iteration-log row still happen; only the
+   fan-out is skipped.
+
+   **A round correctly not run is recorded, not omitted.** An absent round and a
+   skipped review read identically on the `RV` line, which is the failure that
+   line exists to catch, so the iteration writes itself in the same per-round
+   grammar with `no round` where the reviewer counts would go:
+
+   ```markdown
+         → round 3: M=0 → no round · closures: F-018 deleted,
+           F-019 user-ruled false positive → no findings
+   ```
+
+   The ordinal is the round that iteration owed, so the sequence has no gap a
+   reader has to interpret. `M=0` is the only declaration that licenses `no
+   round`, and the round closes on the F-IDs plus each one's route — `deleted`
+   or `user-ruled false positive`, and no third — each of which must match that
+   F-ID's `Closed by` cell in the ledger. `pinned by <test>` is not a route this
+   form can carry: a pin keeps its F-ID in `M`, so an iteration that produced one
+   is not an `M=0` iteration. There is no `reports` field and no `coverage`
+   field, because there were no reviewers to file either; those two fields are
+   what a round of nobody can carry in their place. A `no round` whose routes
+   are unnamed, or that names an F-ID the ledger closed some other way, is a
+   skipped review wearing this form.
+
+   A pin in the iteration takes it off this form entirely, because the pin's
+   commit is owed an owner — the round runs, and it is written like any other:
+
+   ```markdown
+         → round 4: M=1 C=1 → 1 slice + 0 integration · reports p3-rr4-a.md
+           · coverage p3-rr4-coverage.md → no findings
+   ```
+
    **What this does to the `RV` line depends on whether the fan-out has run.**
    A fix loop can be entered from step 1 — a wave's build gates failing is a bug
    finding before any reviewer exists (`parallel.md`). In that case `RV` is
@@ -280,39 +398,91 @@ When blocking findings exist (and the convergence rule permits another run):
    (`<phase> pre-RV`), never the phase's review budget: gates failing three
    times during implementation must not leave the real review two iterations.
 
+   **A pre-`RV` round is recorded in `findings.md`, and nowhere else** — its
+   `<phase> pre-RV` Counters row, plus the Iteration-log row step 1 above
+   opens for it. That is where "recorded, not
+   omitted" is satisfied for such a round, including one that ran no reviewers
+   at all: while the `RV` line stays `[ ]` it has no closed form for a round to
+   be appended to, and the per-round grammar above is a grammar for closed
+   rounds. Its closure routes are read where every route is, from each F-ID's
+   `Closed by` cell in the ledger.
+
    Only when `RV` is already `[x]` from a completed step 2 does a re-review
    reopen it to `[~]` and reclose it with the round appended in the full
-   per-round grammar — `→ round 2: M=9 → 3 slice + 1 integration · reports
-   p3-rr2-{a,b,c,int}.md · coverage p3-rr2-coverage.md → F-012 closed, F-014
-   raised` — so every round has a declared number its file count is checked
-   against, not only the first. `M` is the targeted F-ID count and the fan-out
-   is `ceil(M/3)`. Whoever ran the round writes it, at whatever depth.
+   per-round grammar — `→ round 2: M=9 C=1 → 1 slice + 0 integration · reports
+   p3-rr2-a.md · coverage p3-rr2-coverage.md → F-012 closed, F-014 raised` — so
+   every round has a declared number its file count is checked against, not only
+   the first. The fan-out comes from the fix diff's clusters. Whoever ran the
+   round writes it, at whatever depth.
 4. Repeat until no Critical/Major/bug findings remain (green test suite
    included), subject to the convergence rule and the caps below.
 
 ## Re-review fan-out (fix-mode returns)
 
 The Stage 4 rule `ceil(N/5)` is defined over **tasks**. A fix-mode run produces
-fix commits, not tasks, so re-reviews get their own math. Let `M` = the number
-of blocking F-IDs this fix-mode run targeted:
+fix commits, not tasks, so re-reviews get their own rule — and it is a rule about
+**diff surface**, not about how many findings were named:
 
-| Targeted F-IDs (M) | Slice reviewers | Integration reviewer | Total |
-|--------------------|-----------------|----------------------|-------|
-| 1–3                | 1               | 0 (one slice sees all) | 1   |
-| 4–6                | 2               | 1                    | 3     |
-| 7–9                | 3               | 1                    | 4     |
-| 10+                | `ceil(M/3)`     | 1                    | —     |
+| Ownable fix diff | Slice reviewers | Integration reviewer |
+|------------------|-----------------|----------------------|
+| One commit, or one file cluster | 1 | 0 (the one slice sees all) |
+| Two or more disjoint file clusters | one reviewer per file cluster | 1 |
 
-- **~3 F-IDs per reviewer, not 5.** Each one has to be verified against the
-  specific code it names, which is denser work than reading a task's diff.
+**Ownable** is the qualifier the rows are keyed on: an ownable commit is one a
+reviewer can be assigned, which is every commit the fix-mode run produced except
+a claim **deletion**'s (the bullet below). `M` is counted over that same
+predicate — a targeted F-ID is out of `M` exactly when its closure left nothing
+ownable behind (step 3, above) — so an iteration with no ownable commit is an
+iteration with `M=0`, and it has no row here at all, not even the first row,
+because its round was never owed.
+
+**The cluster count rides the round as `C=<n>`**, written beside `M`:
+`M=<m> C=<c> → <s> slice + <i> integration`, where `c` is the number of file
+clusters you counted in the ownable fix diff and **`s` must equal it**. What
+that buys is an auditable statement: a later reader can compare `C` against the
+ledger's recorded fix hashes and disagree with it, and an arithmetic slip
+between the count and the fan-out — three clusters counted, four reviewers
+dispatched — is a red gate rather than a thing nobody can see. What it does
+**not** buy is a check on the count itself: `C` is written by whoever chose
+`s`, so a round that put three reviewers on one cluster writes `C=3` and reads
+as consistent. What catches that is the round's own `coverage` table, where two
+reviewers over one cluster show up as two rows carrying the same range.
+
+**Findings are not diff surface.** `M` counts findings; a round of six comment
+corrections in one file is one small diff, and three reviewers over it re-read
+the same hunks and duplicate each other's findings. `M` is still **recorded** on
+the round, and `M=0` is still what licenses a round that runs no reviewers at
+all (step 3, above); it just no longer sizes the fan-out.
+
+- **A file cluster** is the set of fix commits touching files that a single
+  reviewer has to hold together to judge any of them — the same
+  producer/consumer test the integration reviewer applies. When in doubt, one
+  reviewer: two reviewers over one cluster duplicate each other, while one
+  reviewer over two clusters at least sees each fix in its own context.
 - **Slice boundaries are the fix commits' ranges**, taken from the ledger's
-  recorded fix hashes — the same range discipline as Stage 4 slices.
+  recorded fix hashes — the same range discipline as Stage 4 slices. **No two
+  slices carry the same range.** Two rows of the coverage table with the same
+  range are two reviewers over one cluster — the duplication the bullet above
+  rules out — and the integration reviewer's range is the union of the slices,
+  so it is not equal to any one of them either.
 - **Assignments MUST cover every fix diff.** Union the assigned ranges and
   compare against the full set of commits the fix-mode run produced; if any
   commit is unassigned, extend a slice to include it. A fix that strayed outside
   the files its findings named still needs an owner. **A clean round from
   reviewers who never looked at a fix closes nothing** — that is the ledger's
   closure condition, and this is how you satisfy it.
+- **A claim finding closed by deletion is not counted in `M`.** Deleting the
+  claim opens no re-review round (*Finding-closure ledger*, above), so counting
+  it would make a round look owed that nobody needs — and the coverage union
+  takes the same view of its commit: a **deletion**'s fix commit is not in that
+  union, since it demands an owner for a diff that only removes a sentence. **A
+  pin is counted, and its commit is in the union** — a pin commits a test, and
+  "a failing or vacuous test" is one of the re-tag predicate's Major branches,
+  which no reviewer is in a position to apply to a test nobody was assigned. A
+  pin-only iteration is a first-row iteration rather than no row at all. A
+  **user-ruled false positive** is out of `M` as well, and leaves no commit for
+  the union to take a view on.
+  Every other commit the fix-mode run produced needs an owner too.
 - The integration reviewer's scope is the union of all fix commits, hunting
   interactions between fixes and regressions the fixes introduced elsewhere.
 - Re-reviews also re-run the test suite; failures are bug findings as always,
@@ -364,8 +534,13 @@ however complete, authorizes nothing.
   Slice ranges, resume verification and fix-diff checks all read those hashes.
 - **Every `[x]` `RV`/`RVJ` round carries its evidence** — one `agent-output/`
   file per reviewer, counted against the reviewers *that round* declares, plus a
-  coverage file ending `COVERED: <n>/<n>`, and the F-IDs or `no findings` — or
-  the quoted user waiver. A phase is never advanced, and Stage 5
+  coverage file ending `COVERED: <n>/<n>`, and the F-IDs or `no findings`.
+  **The round forms that carry no reviewer evidence are the whole of the
+  exception**: the quoted user waiver, and a round the fix loop's step 3
+  licensed to run no reviewers at all (`M=0`), which closes on its named
+  closure routes in their place. Every other `[x]` that fails that count is an
+  unbacked closure, and a site that checks one reads the exception from here
+  rather than restating it. A phase is never advanced, and Stage 5
   never entered, with an `RV`/`RVJ` still open: that state means implemented and
   unreviewed, and no other check in this file detects it, because they all read
   a ledger that an unrun review leaves empty.
@@ -392,16 +567,25 @@ however complete, authorizes nothing.
   and both live in `findings.md` — incremented in the file **before** each
   dispatch, read from the file before each cap check, never carried in context.
   Reset the iteration counter by opening a new phase row.
-- **Re-reviews use the re-review fan-out (`ceil(M/3)` over targeted F-IDs), not
-  `ceil(N/5)`**, and their assigned ranges must union to cover every fix commit.
+- **Re-reviews are sized from the fix diff** — one reviewer per file cluster,
+  integration above one — **not** from task count or finding count, and their
+  assigned ranges must union to cover every fix commit a reviewer can own. A
+  claim **deletion**'s commit is the one that has no owner; a claim **pin**'s is
+  in the union like any other, because a pin commits a test
+  (*Finding-closure ledger*, above).
 - Ambiguity and convergence stops never count toward either cap.
 - Never resolve a requirements or user-visible-behavior ambiguity by
   precedent, defaults, reversibility, or decision logs — ask the user.
 - Never dispatch fix-mode on a spec that already failed unchanged — the
   convergence rule stop comes first.
-- A blocking finding is closed only via the finding-closure ledger (fixed and
-  verified, or user-ruled false positive) — never by a review round that
-  didn't cover its fix.
+- A blocking finding is closed only via one of the finding-closure ledger's
+  routes — fixed and verified, user-ruled false positive, or, for a claim
+  finding, the claim deleted or pinned with a test. Which route forbids what
+  differs: a **fixed-and-verified** closure is never granted by a review round
+  that didn't cover its fix, while a **deletion** opens no round for any review
+  to cover and is not made suspect by that, and a **pin** closes on the test it
+  commits rather than on a round's report — though that test's commit is still
+  owed a reviewer.
 - Never advance a phase with an open Critical/Major/bug ledger entry.
 - Never advance a phase with failing tests or a broken build on its changes.
 - Never advance a phase with an unanswered ambiguity question.

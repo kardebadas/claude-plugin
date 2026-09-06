@@ -25,14 +25,21 @@ Sub-plan, every task (the `writing-plans` task block, plus one line):
 
     **Depends on:** T1
     **Files:**
-    - Modify: extension/src/core/chunk_store.h
-    - Modify: extension/src/core/chunk_store.cpp
-    - Test:   extension/tests/core/chunk_store_test.cpp
+    - Modify: src/core/chunk_store.h
+    - Modify: src/core/chunk_store.cpp
+    - Test:   tests/core/chunk_store_test.cpp
 
 `Depends on:` lists task IDs in the same phase, or `none`. Cross-phase needs are
 phase `deps:`, not task deps. A task with no `Depends on:` line, or a `Files:`
 block with a glob, a directory, or "various" in it, is **incomplete** — return
 the doc to its expansion agent with the task number. Never fill it in yourself.
+
+`Files:` names paths, and paths are the one code fact a plan is required to
+state: the wave computation is a set-disjointness test over exactly those paths,
+so a derivation cannot stand in for them. Everything else about a task's code is
+named by symbol, or by the command that finds it — Rule 5b — which is also why
+the glob, the directory and "various" fail above: each is a derivation where the
+computation needs the set itself.
 
 ## Computing waves (Stage 3a, before GATE 2)
 
@@ -101,10 +108,13 @@ Let the phase branch be `P` (checked out in the phase worktree) and the wave be
      that task back to `[ ]`, drop its branch and worktree, re-dispatch it
      **alone** on the merged head after the rest of the wave lands, and add a
      Minor finding to `findings.md` naming the wrong annotation.
-7. Run the project's build gates on `P` after the last merge (this repo:
-   `tools/build.sh`, plus `tools/build-physics.sh linux` when
-   `extension/src/physics/` changed). A failure is a bug finding with an F-ID
-   and goes through the fix loop before the next wave.
+7. Run **the project's build gates** on `P` after the last merge — the gates the
+   approved plan names, or the ones the repo's own `AGENTS.md` / `CLAUDE.md`
+   declares. This skill does not know what they are and must not guess: a gate
+   invented here fails a repo that never had it, and a gate omitted here lets a
+   broken wave merge. If the plan named none, that is an Ambiguity-guard stop,
+   not a licence to skip the step. A failure is a bug finding with an F-ID and
+   goes through the fix loop before the next wave.
 8. Mark each member `[x]` with **its own head hash** (the commit on its branch,
    preserved by the merge — never the merge commit). Update Current State to
    the next wave. Save. Re-read.

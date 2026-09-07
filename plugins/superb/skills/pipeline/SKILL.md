@@ -10,8 +10,15 @@ argument-hint: "[resume|status]"
 
 `pipeline` drives a feature from idea to a finished branch by **composing
 existing superpowers skills** — it never reimplements brainstorming, planning,
-implementation, or review. It calls those skills and manages the seams between
-them, plus an autonomous per-phase implement → review → recursive-fix loop.
+or review. It calls those skills and manages the seams between them, plus an
+autonomous per-phase implement → review → recursive-fix loop.
+
+**The one exception is implementation dispatch**, which this skill owns
+(`references/implement.md`). Every available implementation skill accepts a
+task only against a per-task review it dispatches itself, which is a second
+acceptance gate for work this skill accepts at the **phase** — so composing one
+reviewed every phase twice. Owning the dispatch is what makes the invariant
+mechanical: completing a task dispatches no reviewer.
 
 **Core principle: compose, don't reimplement.** Every stage delegates to the
 canonical skill for that job. This skill's only original logic is the
@@ -20,9 +27,12 @@ reviewer fan-out math, and the fix loop.
 
 **Reference files** — read at the stage that needs them:
 `references/run-state.md` (file formats, task-line grammar, cold-start resume,
-dispatch contract), `references/fix-loop.md` (Stage 4's loop and guard rails)
-and `references/parallel.md` (Rule 6: dependency annotations, waves, lanes,
-worktrees and merges, and the Brain-Agent mode). `templates/` holds the run-state file templates.
+dispatch contract), `references/implement.md` (Stage 4's IMPLEMENT state: how a
+phase's tasks are dispatched, waved and merged, and why completing one
+dispatches no reviewer), `references/fix-loop.md` (Stage 4's loop and guard
+rails) and `references/parallel.md` (Rule 6: dependency annotations, waves,
+lanes, worktrees and merges, and the Brain-Agent mode). `templates/` holds the
+run-state file templates.
 
 ## Invocation
 

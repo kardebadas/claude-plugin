@@ -112,7 +112,10 @@ phase autonomously.
      line*). Fewer report files than declared reviewers does not close it.
 3. **DECIDE**:
    - Any **Critical, Major, or bug** finding → go to **Fix loop**.
-   - **Minor-only or none** → phase passes; **advance** to the next phase.
+   - **Minor-only or none** → the phase passes **once its `RV` is `[x]` and the
+     close-out write in step 4 has landed**; then advance. Findings alone never
+     license the advance — an empty ledger is what an unreviewed phase looks
+     like too, which is the whole reason `RV` is a tracker line.
    - **If this phase is the last sibling of a Rule 3 split**, the joint
      integration review (below) runs before advancing past the split.
 4. **PASS — close out and advance.** In this order, no reordering:

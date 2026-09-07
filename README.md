@@ -142,9 +142,11 @@ dependency between them run as concurrent lanes.
 
 After that it runs on its own: implement, review, fix, next phase — stopping
 only for a genuine unknown, a blocked subagent, or the finished branch. Every
-task is reviewed by an agent that did not write it, and anything touching a
-security or data-integrity boundary gets a second reviewer whose only job is to
-prove it wrong.
+**phase** is reviewed as a unit by agents that did not write it, over exact
+commit ranges that together cover the whole phase diff, and no phase advances
+until its review and any fix rounds have closed. Completing a task dispatches
+no reviewer: implementation runs to the end of the phase, and review is the
+phase boundary.
 
 The run's state lives on disk, so a compaction or a crash resumes from the
 tracker rather than from memory.
@@ -204,13 +206,17 @@ only the seams between them:
 |-------|------------------|
 | 1 — brainstorm | `superpowers:brainstorming` |
 | 2, 3 — master plan, per-phase expansion | `superpowers:writing-plans` |
-| 4 — the autonomous implement/review/fix loop | `superpowers:subagent-driven-development` |
+| 4 — the autonomous per-phase implement/review/fix loop | pipeline's own `references/implement.md` and `references/fix-loop.md` |
 | 5 — finish | `superpowers:finishing-a-development-branch` |
 
 **`bug-fix` composes superpowers too, and ships its own agent.** It needs
 `superpowers:writing-plans` to plan the fix, `superpowers:systematic-debugging`
 for the no-subagent investigation path, and
-`superpowers:subagent-driven-development` for fixes larger than three files.
+`superpowers:subagent-driven-development` for fixes larger than three files —
+that skill is `bug-fix`'s dependency, not `pipeline`'s. At `bug-fix`'s task
+scope its per-task review contract is the right one; `pipeline` accepts work at
+the phase, so it dispatches implementation itself
+(`skills/pipeline/references/implement.md`).
 The investigator itself is bundled — `plugins/superb/agents/bug-investigator.md`
 — so there is nothing extra to install for it.
 

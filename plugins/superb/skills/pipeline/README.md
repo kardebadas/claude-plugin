@@ -94,10 +94,17 @@ disambiguation; dropping it also works when nothing else claims the name.
 ## Requires
 
 The [superpowers](https://github.com/obra/superpowers) plugin. This skill calls
-`superpowers:brainstorming`, `superpowers:writing-plans`,
-`superpowers:subagent-driven-development` and
+`superpowers:brainstorming`, `superpowers:writing-plans` and
 `superpowers:finishing-a-development-branch`, and it expects a `/review` skill
 in the repo it is run against.
+
+It does **not** call `superpowers:subagent-driven-development`. That skill has
+no implementation-only mode — an implementer returning `DONE` dispatches a
+reviewer for that task, and a task completes only at zero open findings at any
+severity through an uncapped fix/re-review loop — and it is phase-unaware.
+Stage 4's IMPLEMENT state is `references/implement.md` instead, so completing a
+task dispatches no reviewer and the phase's `RV` fan-out is the only code
+review in the loop.
 
 ## Run state lives in the project, never in the plugin
 

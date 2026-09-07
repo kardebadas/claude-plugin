@@ -3115,3 +3115,28 @@ says what changed and why.
   and there are now three, so it guarded itself out and survived. Relaxed to
   "at least one"; it still deletes every run-mode step, which is what the
   at-least-one arm reads.
+
+### Tasks 10 and 11
+
+- **Task 10's Step 1 was already done** by Task 3's Step 6b, as the corrected
+  plan said it would be. Verified rather than repeated.
+- **Task 11 added a dependency clarification the plan did not ask for.** The
+  root `README.md` and `skills/pipeline/README.md` both listed
+  `superpowers:subagent-driven-development` as a requirement. `bug-fix` still
+  needs it, so the dependency stays declared — but both files now say whose it
+  is, and pipeline's README says explicitly that it does **not** call it and
+  why. Left implicit, the next reader would have restored the delegation as a
+  missing dependency.
+- **The final sweep found one real defect**, the one the plan predicted:
+  `fix-loop.md`'s `- **Minor-only or none** → phase passes; **advance**` read
+  standalone as a findings-only advance predicate. It now names the gate — `RV`
+  `[x]` and the close-out write landed — with the reason: an empty ledger is
+  what an unreviewed phase looks like too.
+- **The two wave gates were left alone deliberately.** `parallel.md`'s "every
+  task of the previous wave is `[x]`" and `SKILL.md`'s "Wave `k` dispatches only
+  when every task of wave `k-1` is `[x]` and merged" are *intra-phase* gates;
+  gating a wave on commits rather than on a review is the design, not a
+  violation of it. The plan says not to "fix" them and they were not.
+- **`docs/` is not shipped**, so this plan and its execution log are not part of
+  the plugin surface the sweep polices; the sweep excludes
+  `plugins/superb/skills/craft/` for the same reason it always did.

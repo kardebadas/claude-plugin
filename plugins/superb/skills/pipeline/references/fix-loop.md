@@ -22,7 +22,7 @@ phase autonomously.
    Around **each individual task**: mark it `[~]` with a
    timestamp (and its worktree branch) and save *before* dispatching; when it
    lands, mark it `[x]` with its commit hash, update the Current State block
-   (phase, next action, `date` timestamp), save, then **re-read the file** to
+   (that lane's `**Lane <id>:**` line, `date` timestamp), save, then **re-read the file** to
    pick up the next open line or wave — and after a phase's last task that is
    the phase's `RV`, never the next phase. Never carry task state in your head
    across two tasks. (Rule 2.) Independent phases run as concurrent **lanes**,
@@ -198,7 +198,9 @@ the line with the round recorded. Stage 5 does not proceed while one is open.
 The ledger is a **file** in the run directory, not a mental list — format in
 `../templates/findings.md`. Every blocking (Critical/Major/bug) finding has a
 stable `F-NNN` ID, assigned at first consolidation and never reused or
-renumbered. A ledger entry is **closed** only by one of:
+renumbered. A ledger entry is **closed** only by one of (and a finding **withdrawn**
+during consolidation is not closed at all — it is removed, narrowly, before any
+fix commit for it exists; see fix loop step 3):
 
 - **Fixed and verified**: the fix diff touched the code the finding names,
   AND a re-review whose slice assignment covered that fix diff reports it
@@ -227,10 +229,11 @@ exactly one of:
 assertion: nothing keeps it true as the code under it changes, so the fix round
 raises its own successor and the loop has no fixed point. The two routes then
 part company on what they leave behind, and both `M` and the fix-diff **coverage
-union** follow the diff rather than the finding. **Deleting the claim opens no
-re-review round**: the commit only removes a sentence, so there is nothing in it
-to report resolved or regressed, its commit stays out of the union (the
-*Re-review fan-out* bullet below), and `M` drops it. **A pin does open one.** A
+union** follow the diff rather than the finding. **Deleting the claim opens a re-review round like
+any other fix**: removing a sentence is a repository change, the commit is one a
+reviewer can be assigned, so it stays in `M`, its commit is in the union (the
+*Re-review fan-out* bullet below), and it takes fix plan → fix → focused
+re-review → closure. **A pin does too.** A
 pin commits a test, and "a failing or vacuous test" is one of the branches the
 re-tag predicate above rates Major — a rating nothing can act on if no reviewer
 reads the test — so a pin's commit is in the union *and* stays in `M`, which is
@@ -379,8 +382,8 @@ When blocking findings exist (and the convergence rule permits another run):
    Iteration-log row with the set of F-IDs still open after the re-review.
 
    **Unless `M=0`.** `M=0` is not "a round that edited code and needs no plan":
-   it is a round with **no ownable fix commit at all**, every targeted F-ID
-   having closed by deletion or a user-ruled false positive. A round that edited
+   it is a round with **no repository change at all**, every targeted F-ID
+   having closed by a user-ruled false positive or a withdrawal. A round that edited
    code has an ownable commit, so its `M` is at least 1 and it owes both a fix
    plan and a reviewer. If you are about to write `M=0` over a diff, the diff is
    the proof that you should not. `M` does not size the fan-out — the fix diff does
@@ -437,9 +440,12 @@ When blocking findings exist (and the convergence rule permits another run):
 
    The ordinal is the round that iteration owed, so the sequence has no gap a
    reader has to interpret. `M=0` is the only declaration that licenses `no
-   round`, and the round closes on the F-IDs plus each one's route — `deleted`
-   or `user-ruled false positive`, and no third — each of which must match that
-   F-ID's `Closed by` cell in the ledger. `pinned by <test>` is not a route this
+   round`, and the round closes on the F-IDs plus each one's route — `user-ruled
+   false positive` or `withdrawn → <reason>`, and no third — each of which must
+   match that F-ID's `Closed by` cell in the ledger. **Every F-ID needs its own
+   route**: one legal closure does not license the rest of the list.
+   `deleted` is not a route this form can carry, for the same reason a pin is
+   not: it leaves a commit. `pinned by <test>` is not a route this
    form can carry: a pin keeps its F-ID in `M`, so an iteration that produced one
    is not an `M=0` iteration. There is no `reports` field and no `coverage`
    field, because there were no reviewers to file either; those two fields are
@@ -634,8 +640,9 @@ however complete, authorizes nothing.
   it.** Phase close-out and next-phase start are one motion in one turn.
 - **All run state lives under
   `<PROJECT_DIR>/docs/superpowers/runs/YYYY-MM-DD-<topic>/`** — never in the
-  skill directory, and never `git add`ed: the run directory is ignored by the
-  root `.gitignore`, because it is ephemeral execution state. Curated permanent
+  skill directory, and never `git add`ed, because it is ephemeral execution
+  state. This repository's root `.gitignore` carries `docs/superpowers/runs/*/`;
+  elsewhere the rule is yours to keep. Curated permanent
   specs, plans and loose `runs/*.md` records are a deliberate exception.
 - Where a run-state file and your recollection disagree, **the file is right**.
 - No phase carries more than 12 tasks; an oversized phase was split at Stage 3,
@@ -650,10 +657,10 @@ however complete, authorizes nothing.
   and an integration reviewer above one cluster only at a declared boundary
   (*Re-review fan-out* below is the authority for the number) — **not** from
   task count or finding count, and their
-  assigned ranges must union to cover every fix commit a reviewer can own. A
-  claim **deletion**'s commit is the one that has no owner; a claim **pin**'s is
-  in the union like any other, because a pin commits a test
-  (*Finding-closure ledger*, above).
+  assigned ranges must union to cover **every fix commit the run produced**. A
+  claim **deletion**'s commit is in that union like any other, because deleting
+  a claim changes the repository; so is a claim **pin**'s, because a pin commits
+  a test (*Finding-closure ledger*, above).
 - Ambiguity and convergence stops never count toward either cap.
 - Never resolve a requirements or user-visible-behavior ambiguity by
   precedent, defaults, reversibility, or decision logs — ask the user.
@@ -661,12 +668,15 @@ however complete, authorizes nothing.
   convergence rule stop comes first.
 - A blocking finding is closed only via one of the finding-closure ledger's
   routes — fixed and verified, user-ruled false positive, or, for a claim
-  finding, the claim deleted or pinned with a test. Which route forbids what
+  finding, the claim deleted or pinned with a test. A finding **withdrawn**
+  during consolidation is removed rather than closed, and only before any fix
+  commit for it exists. Which route forbids what
   differs: a **fixed-and-verified** closure is never granted by a review round
-  that didn't cover its fix, while a **deletion** opens no round for any review
-  to cover and is not made suspect by that, and a **pin** closes on the test it
-  commits rather than on a round's report — though that test's commit is still
-  owed a reviewer.
+  that didn't cover its fix; a **deletion** is a repository change and closes
+  like any other fix, through a round that covered its commit; a **pin** closes
+  on the test it commits rather than on a round's report — though that test's
+  commit is still owed a reviewer; and a **withdrawal** leaves nothing
+  committed, so no round covers it and it is not made suspect by that.
 - Never advance a phase with an open Critical/Major/bug ledger entry.
 - Never advance a phase with failing tests or a broken build on its changes.
 - Never advance a phase with an unanswered ambiguity question.

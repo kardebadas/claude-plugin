@@ -9,6 +9,8 @@ Keep the Current State block at the very top at all times.
 ## Current State
 - **Lane A:** <phase id FIRST, then an em dash and that lane's next unchecked
   line — task, RV, or RVJ>
+- **Lane B:** <the second branch, if this run forked; delete this line for a
+  sequential run, which has exactly one lane>
 - **Last updated:** <timestamp>
 - **Run directory:** <PROJECT_DIR>/docs/superpowers/runs/YYYY-MM-DD-<topic>/
 
@@ -43,7 +45,14 @@ Current State grammar:
                                   finding, and is not a contributor to an
                                   unresolved join
     waiting at join Phase <id>  — this lane's own branch has passed and the
-                                  join it feeds has not opened yet
+                                  join it feeds has not opened yet. It stays
+                                  this while the other contributors finish AND
+                                  while the leading RVJ runs -- the whole
+                                  window up to CLOSE(leading RVJ). Only the
+                                  SURVIVING lane leaves it earlier, to name
+                                  `Phase <join> — RVJ` once every contributor
+                                  has passed, because running that gate is the
+                                  surviving lane's job.
   There is no **Phase:** field and no **Next action:** field. One grammar, no
   mode switch.
   An ACTIVE lane -- one owning unfinished work, or waiting at an unresolved
@@ -65,6 +74,10 @@ Phase headings:
             retire when the leading RVJ closes, and a retired id is never reused
   A clean leading RVJ lets the joining phase START. It never marks it PASS --
   the phase still owes IMPLEMENT -> RV -> CLOSE(RV) -> PASS on its own tasks.
+  A Rule 3 split is a fork with no joining phase after it: its siblings take
+  their own lanes, its TRAILING RVJ reviews them as a unit, and those lanes end
+  at `done` when their work is finished rather than being retired by a join.
+  Retirement belongs to a lane join, which has a joining phase to collapse onto.
 
 Task states:
   [ ] not started

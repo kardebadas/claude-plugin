@@ -157,8 +157,10 @@ edit them.
 - **Never `git add` a pipeline runtime directory — anything under
   `docs/superpowers/runs/*/`.** `progress.md`, `register.md`, `kit.md`,
   `findings.md`, fix plans, `agent-output/`, review reports: that is **ephemeral
-  execution state**, it belongs on disk for the run and for a resume, and the
-  root `.gitignore` enforces it. **Curated permanent documentation may be
+  execution state**, it belongs on disk for the run and for a resume. This
+  repository's root `.gitignore` carries `docs/superpowers/runs/*/` and a gate
+  holds it there; in a project without that line the rule is yours to keep, and
+  adding the line is the first thing to do. **Curated permanent documentation may be
   deliberately committed** — `docs/superpowers/specs/*.md`,
   `docs/superpowers/plans/*.md`, and loose `docs/superpowers/runs/*.md`
   records — when someone decides it is repository documentation. *May* is the
@@ -200,7 +202,8 @@ both.
 ```
 
 Every task line carries its **wave** (`W<n>`) and its **deps** (Rule 6); every
-phase heading carries the phases it depends on. Tasks in the same wave may be
+phase heading carries the phases it depends on (`· deps:`) and the lane that
+executes it (`· lane:`). Tasks in the same wave may be
 `[~]` at the same time — one of two sanctioned cases of more than one `[~]`
 line (the other is concurrent lanes, each of which may hold its own `[~]` task
 or `RV`), and each still gets its own write before its own dispatch.
@@ -275,12 +278,11 @@ It is not in a project's own tree unless that project is the plugin, so it is
 a check a run can use, not a gate every run passes — Stage 5 is what runs it,
 and says in the hand-off what came back.
 
-**Outside the `N=` regime it still cannot check that the fan-out was
+**On an `M=` re-review round it still cannot check that the fan-out was
 sized right**, and half of that will never be checkable from the tracker: the
 duplication half is caught, since two reviewers handed one range are two rows
 the linter can compare, but the count itself is not derivable from the line
-there — the wave count is not on it, and `C` is on it as a declaration by
-whoever chose `s`, so one reviewer over a seven-cluster diff writes `C=1` and
+there — `C` is on it as a declaration by whoever chose `s`, so one reviewer over a seven-cluster diff writes `C=1` and
 passes.
 
 **Every field is per round, and re-review rounds append their own.** The counts
@@ -388,7 +390,9 @@ ordinary — an `M= C=` fix round sized from the fix diff — and it hangs under
 
 The **Current State** block stays at the very top so re-orienting costs one
 read and nothing else. Never move it below the phase lists, never split it,
-never let it point at a line that isn't the first unfinished one. Timestamps
+never let a lane point at a line that isn't the first unfinished one of its own
+phases — or, when that lane has none, at one of the two phase-less forms `done`
+and `waiting at join Phase <id>` (`templates/progress.md`). Timestamps
 come from a real clock (`date`), never from your sense of elapsed time.
 
 **A lane line names the next unchecked line of that lane's phase, and an open
@@ -426,7 +430,7 @@ Around **each individual task**, in this order:
 1. **Before the work starts:** mark the task `[~]` with a timestamp. Save.
 2. Do the task.
 3. On completion: mark it `[x]` with the commit hash.
-4. Update the Current State block (phase, next action, timestamp).
+4. Update the Current State block (this lane's `**Lane <id>:**` line, timestamp).
 5. Save.
 6. **Re-read the file** and take the next unstarted line from it — which, after
    a phase's last task, is that phase's `RV` (then any `RVJ`), not the next
@@ -715,7 +719,8 @@ approves.
 open entries. Last routine gate — **and the last gate is a stop, not the end of
 the work** (see *Gates are stops; stages are work*). On approval, rewrite
 `progress.md`'s phase lists from the approved plan (every phase with its
-`deps:`, every task with its `W<n>` and `deps`, **every phase closed by its own
+`deps:` **and its `· lane:`** — allocated here, once, and never recomputed —
+every task with its `W<n>` and `deps`, **every phase closed by its own
 `RV` line**, all `[ ]`, sub-phases kept adjacent so a split's siblings are
 visibly one unit) and set Current State to the first wave of every lane's first
 phase before Stage 4 starts.
@@ -747,9 +752,10 @@ the whole of Stage 4, not across the handful of turns GATE 1 has left.
 **Flush first, in this order. Then offer.**
 
 1. `register.md` has no open entries and `findings.md` no open blocking IDs.
-2. `progress.md`'s Current State names the first unstarted line, every task line
-   carries its wave and its deps, every phase carries its `RV` line, and every
-   split and lane join carries its `RVJ`.
+2. `progress.md`'s Current State carries one `**Lane <id>:**` line per active
+   lane, every phase heading carries its `· deps:` **and its `· lane:`**, every
+   task line carries its wave and its deps, every phase carries its `RV` line,
+   and every split and lane join carries its `RVJ`.
 3. **`kit.md` is written** — the suite, coverage and build-gate commands the
    approved plan names, the baseline discipline, the mutation harness, the
    worktree rule, and the repo conventions Stage 1's question rounds asked
@@ -853,7 +859,10 @@ Fix agents run the tests covering their change. They do not review their own
 fixes as a substitute for `RE_REVIEW`.
 
 **RE_REVIEW.**
-Reopen `RV` to `[~]` and append this round. Size it from the **fix diff** — one
+Reopen the **`review_gate`** — the `RV` or `RVJ` that raised these findings, and
+never a different one — to `[~]` and append this round **under that gate's own
+line**. An `RVJ`'s round belongs to the `RVJ`; filing it under a joining phase's
+`RV` spends that phase's review budget on a join it never covered. Size it from the **fix diff** — one
 slice per file cluster, recorded as `C=<n>` — never from the finding count. The
 re-review reads: whether the blocking findings were actually resolved, the fix
 diff, regressions the fixes introduced, interactions between fixes, and whether
@@ -1221,12 +1230,12 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
 | "The register/ledger is in my context, writing it to a file is duplication" | Your context is one compaction from empty. A rule with no file behind it is unenforceable. |
 | "These two findings are basically the same one from last round" | That's the interpretive call the ID system exists to remove. Look up the F-ID. |
 | "The comment was wrong, I corrected it — finding closed" | A corrected assertion is still unexecuted, and nothing keeps it true as the code under it changes. A claim finding closes by deleting the claim or pinning it with a test. Nothing else. |
-| "I'll re-review the fix to the docblock to be safe" | There is no behaviour to re-review. A deletion opens no round at all; a pin opens one over the test it commits, never over the claim; a rewrite is not a closure. |
+| "I'll re-review the fix to the docblock to be safe" | Do. A deletion is a repository change, so its commit is owed a fix plan and a focused re-review like any other; a pin opens one over the test it commits, never over the claim; a rewrite is not a closure. Only a **withdrawal** and a **user-ruled false positive** leave nothing to review. |
 | "I'll read the full review report so I don't miss anything" | Full reports in orchestrator context are the bloat that causes drift. Consolidate to `findings.md`; read details on demand. |
 | "4a and 4b each passed review, the phase is covered" | Each reviewer saw half a designed unit. Run the joint integration review over the combined diff. |
 | "This is iteration 2, I'm well under the cap of 5" | Unless you read that from `findings.md`, you are guessing after a compaction that may have eaten iterations 1–4. Read the row. |
 | "I'll record the iteration once I see how the fix went" | Then a crash mid-fix loses it and the cap resets. Increment in the file before dispatching. |
-| "The fix was small, one reviewer over the whole thing is fine" | One reviewer per file cluster in the fix diff, and the ranges must cover every fix commit a reviewer can own — a claim **deletion**'s is the only one the union excludes, and a claim **pin**'s is in it like any other. "Small" is a judgement about clusters, not a licence to skip coverage. |
+| "The fix was small, one reviewer over the whole thing is fine" | One reviewer per file cluster in the fix diff, and the ranges must cover **every fix commit the run produced** — a claim **deletion**'s is in the union like any other, because deleting a claim changes the repository, and so is a claim **pin**'s. "Small" is a judgement about clusters, not a licence to skip coverage. |
 | "The re-review came back clean, the findings are closed" | Only if its ranges actually covered the fix diffs. Union the ranges and check before closing anything. |
 | "I'll note the design decision in the spec doc and move on" | The run directory is never committed, and nothing commits the spec for you. If it matters, it goes in the Stage 5 hand-off too. |
 | "`resume` obviously means the most recent directory" | Recency is a guess about someone's unfinished work. More than one candidate → show each Current State and ask. |
@@ -1297,10 +1306,12 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
   just read out of `findings.md`.
 - You are sizing a re-review fan-out off task count or off the targeted F-ID
   count instead of off the fix diff's file clusters.
-- You are closing a **behavioural** finding without having checked that a
-  re-review range actually covered its fix. (A claim finding closed by deletion
-  is not this: it opens no round, so there is no range to check. A pin does open
-  one, but over the test it commits — the claim is closed by the pin itself.)
+- You are closing **any** finding whose fix changed the repository without
+  having checked that a re-review range actually covered that fix — a claim
+  finding closed by **deletion** included, since removing the sentence is a
+  commit a reviewer can read. (A **pin** opens a round too, but over the test it
+  commits — the claim is closed by the pin itself. Only a **withdrawal** and a
+  **user-ruled false positive** leave no range to check.)
 - You are between GATE 2 and Stage 5, about to end your turn, and the message
   you are sending contains no guard-rail question. **Keep going instead.**
 - Your message ends with a phase summary, "let me know if…", or "shall I
@@ -1376,9 +1387,9 @@ severity through an uncapped fix/re-review loop — and it is phase-unaware. Sta
   to zero and both caps silently stop capping. They live in `findings.md`.
 - **Sizing a re-review off task count or off finding count** — fix diffs aren't
   task-shaped and findings aren't diff surface; one reviewer per file cluster,
-  with ranges covering every fix commit a reviewer can own — every one but a
-  claim **deletion**'s, which the coverage union excludes; a claim **pin**'s
-  commits a test, so the union keeps it.
+  with ranges covering **every fix commit the run produced** — a claim
+  **deletion**'s included, since it changes the repository, and a claim
+  **pin**'s, which commits a test.
 - **Compacting before the flush** — the Run State Law is only true once the
   files actually hold everything; GATE 2's flush is what makes it true.
 - **Assuming a local spec is a durable record** — the run directory is never
@@ -1418,8 +1429,9 @@ severity through an uncapped fix/re-review loop — and it is phase-unaware. Sta
   ranges never looked at the fix diff closes nothing; failing to be
   rediscovered is not a closure. The ledger's route for a behavioural finding
   is fix-diff-touched **plus** a covering re-review; a claim finding takes a
-  different route (deleted, or pinned with a test whose commit is the only thing
-  a round then owns), so the lesson is what a clean round cannot buy you, not
+  different route (deleted, or pinned with a test — both of which commit
+  something a round then owns), so the lesson is what a clean round cannot buy
+  you, not
   that this is the only way to close.
 - **Advancing with a red test suite** — failing tests are bug findings even
   when no reviewer reported them.

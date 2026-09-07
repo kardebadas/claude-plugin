@@ -444,7 +444,8 @@ for n in skill_names:
                         "a false count, a stale citation, a wrong sole-writer claim "
                         "— closes by deleting the claim or by pinning it with a "
                         "test, never by rewriting the sentence, and deleting the "
-                        "claim opens no re-review round; without the rule a fix "
+                        "claim is a repository change and opens a round like any "
+                        "other fix; without the rule a fix "
                         "round keeps raising the successor of its own fix. Both texts "
                         "carry it: fix-loop.md is the authority and "
                         "templates/findings.md is the copy its own header says "
@@ -596,7 +597,7 @@ for n in skill_names:
             # row-per-report duty are now prose, which is what makes the arm's
             # assumption an assumption no longer — so the prose has to be held
             # or the arm is back to guessing.
-            # Mutants: "M-exclusion phrase blurred in fix-loop.md",
+            # Mutants: "M-inclusion phrase blurred in fix-loop.md",
             #          "coverage-union phrase blurred in fix-loop.md",
             #          "no-round RV form deleted from fix-loop.md",
             #          "no-round RV form deleted from SKILL.md",
@@ -1278,7 +1279,12 @@ else: ok("no absolute home paths, private project names, or foreign ticket prefi
 #          "run tracker fix round names no fix plan",
 #          "run tracker cites a fix plan that is not in agent-output".
 print("\n== pipeline review-line examples ==")
-start = re.compile(r"(?:-\s*)?\[x\]\s*(RVJ|RV)\b|(?:->|→)\s*(round)\s+\d+\s*:")
+# `\**` BEFORE THE ID, for the same reason `parse_tracker_phases` carries it: a
+# tracker written `- [x] **RVJ**` is still a closed gate. Without it the two
+# parsers disagree — the phase parser sees a review line and is satisfied while
+# this one sees no gate at all, so the round grammar, the sizing arm, the
+# evidence checks and the ownership arm all vanish in silence.
+start = re.compile(r"(?:-\s*)?\[x\]\s*\**\s*(RVJ|RV)\b|(?:->|→)\s*(round)\s+\d+\s*:")
 decl  = re.compile(r"(?P<key>N|M)=(?P<n>\d+)\s*(?:W=(?P<W>\d+)\s*)?(?:C=(?P<C>\d+)\s*)?"
                    r"(?:->|→)\s*(?P<s>\d+)\s*slice\s*\+\s*(?P<i>\d+)\s*integration")
 rpt   = re.compile(r"reports\s+(.+?)(?=\s*[·|]|\s+coverage\b|\s*$)")
@@ -1334,8 +1340,20 @@ def parse_closures(body):
         if g:
             ok_ids.append(m.group(0))
             spans.append((g.start(), g.end()))
+        elif re.search(r"(?:->|→)\s*$", seg[:m.start()]):
+            # THE OUTCOME SLOT IN ITS OTHER FORM. A round may end
+            # `→ no findings` (trimmed above) or `→ F-NNN, …`, and the second
+            # form is not a closures list: reading it as one reported the
+            # round's own result as a route with no route.
+            break
         else:
-            tail = seg[m.end():m.end() + 60].split(",")[0].strip(" ·|")
+            # THE ROUTE MAY BE COMMA-SEPARATED FROM ITS ID. `CLOSURE_OK`
+            # accepts `F-018, user-ruled false positive`, so splitting the tail
+            # on the first comma turned `F-018, deleted` into an empty route and
+            # threw away the specific "a deletion is a repository change"
+            # diagnosis — the one this rule exists to deliver.
+            tail = seg[m.end():m.end() + 60].lstrip(" ,")
+            tail = tail.split(",")[0].strip(" ·|")
             probs.append((m.group(0), tail[:40]))
     return ok_ids, probs
 outc  = re.compile(r"(?:->|→)\s*(?:no findings\b|F-\d+)")
@@ -1517,15 +1535,42 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
         for idx, (pos, kind) in enumerate(marks):
             end = marks[idx + 1][0] if idx + 1 < len(marks) else len(flat)
             if bullet_bounded:
-                nxt = flat.find("- [", pos + 1)
-                if nxt != -1 and nxt < end:
-                    end = nxt
+                for _b in ("- [", "## "):
+                    # AND AT THE NEXT HEADING. The last record of a phase has no
+                    # following bullet, so it used to run to end-of-file and
+                    # swallow the next `## Phase` heading and any prose after
+                    # it — which turned a trailing sentence citing an F-ID into
+                    # a bogus closure-route report.
+                    _n = flat.find(_b, pos + 1)
+                    if _n != -1 and _n < end:
+                        end = _n
             else:
                 end = min(end, pos + 400)
             rec = flat[pos:end]
             _owner = gates[owners[idx]] if owners[idx] is not None else None
             if kind in ("RV", "RVJ"):
                 _owner["fids"] = outcome_fids(rec)
+                # A CLOSED GATE WITHOUT AN OUTCOME SLOT DISABLES EVERY ARM THAT
+                # READS ITS RESULT. `outcome_fids` returns `[]` for such a
+                # record, so the gate-ownership arm silently compares nothing
+                # and then prints its affirmative — eight characters removed
+                # (` → F-101`) and the check is gone on a green build. The
+                # grammar has always required the slot; nothing enforced it
+                # outside the `M=0` form.
+                # THE WAIVER IS THE ONE EXEMPTION, as it is for the reviewer
+                # counts below: `WAIVED by user: "<their words>"` closes the
+                # line with the user's sentence in place of a review, so it has
+                # no findings to report and no outcome to write. Failing the
+                # form the skill prescribes would be the false-FAIL this
+                # repository has paid for most.
+                if not outc.search(rec) and "WAIVED by user:" not in rec:
+                    viol += 1
+                    _owner["untrusted"] = True
+                    bad(f"{relpath(f)}:{lineno(pos)}: this closed `{kind}` "
+                        "names no outcome — every round ends `→ no findings` "
+                        "or `→ F-NNN, …`, and without it nothing downstream "
+                        "can tell a clean review from one whose findings were "
+                        "never recorded. REMEDY: write the outcome slot")
             else:
                 if _owner is None and bullet_bounded:
                     # A ROUND WITH NO GATE ABOVE IT belongs to nothing. Its
@@ -2135,7 +2180,10 @@ _gi = ROOT / ".gitignore"
 _gilines = [ln.strip() for ln in
             (_gi.read_text(encoding="utf-8") if _gi.exists() else "").split("\n")
             if ln.strip() and not ln.strip().startswith("#")]
-if "docs/superpowers/runs/*/" in _gilines:
+# MATCHED BY SHAPE, not by one literal. `/docs/superpowers/runs/*/` and
+# `docs/superpowers/runs/**/` are the same rule to git, and an arm that accepts
+# only one spelling fails a repository that wrote another.
+if any(re.fullmatch(r"/?docs/superpowers/runs/\*{1,2}/", ln) for ln in _gilines):
     ok("`.gitignore` covers pipeline run directories")
 else:
     bad("`.gitignore` carries no `docs/superpowers/runs/*/` line — pipeline run "
@@ -2151,7 +2199,7 @@ else:
 # curated permanent document is an intentional exception.
 _wide = [ln for ln in _gilines
          if re.match(r"^/?docs/superpowers/?$", ln)
-         or re.match(r"^/?docs/superpowers/\*", ln)
+         or re.fullmatch(r"/?docs/superpowers/\*{1,2}/?", ln)
          or re.match(r"^/?docs/superpowers/runs/?$", ln)
          or re.match(r"^/?docs/superpowers/runs/\*$", ln)]
 if _wide:
@@ -2393,7 +2441,7 @@ def parse_phase_lanes(phases):
     reads it; the fork and join rules are both stated over that order.
     """
     idx = {ph["label"].lower(): i for i, ph in enumerate(phases)}
-    lanes, deps, multi = {}, {}, []
+    lanes, deps, multi, unres = {}, {}, [], []
     for i, ph in enumerate(phases):
         head = ph.get("heading", "")
         found = _LANEFLD.findall(head)
@@ -2403,15 +2451,26 @@ def parse_phase_lanes(phases):
             lanes[i] = found[0]
         dd, m = [], _DEPSFLD.search(head)
         if m:
-            for tok in re.findall(r"[0-9]+[0-9A-Za-z.]*", m.group(1)):
+            # NOT DIGIT-LED. `parse_tracker_phases` accepts any non-space,
+            # non-`·` token as a phase id, and `references/parallel.md` writes
+            # lane-style ids — `## Phase A2 — … · deps: A1`. A digit-anchored
+            # token regex read those as no dependency at all, which emptied the
+            # dep graph and made every fork, join, survivor and retirement check
+            # evaporate with no report.
+            for tok in re.findall(r"[0-9A-Za-z][0-9A-Za-z.]*", m.group(1)):
+                if tok.lower() in ("none", "phase"):
+                    continue
                 j = idx.get(f"phase {tok.lower()}")
-                # A DEP NAMING A PHASE THIS TRACKER LACKS is dropped here and
-                # left to the arm that owns unresolvable references. This helper
-                # returns what it could read, never a guess.
-                if j is not None:
+                if j is None:
+                    # AND AN UNRESOLVABLE DEP IS REPORTED, not dropped. A
+                    # silently discarded edge turns a real join into an
+                    # ordinary phase, and every join arm then passes over it —
+                    # a typo disabling the checks rather than failing them.
+                    unres.append((i, tok))
+                else:
                     dd.append(j)
         deps[i] = sorted(set(dd))
-    return lanes, deps, multi
+    return lanes, deps, multi, unres
 
 
 if RUN_DIR is not None:
@@ -2598,7 +2657,7 @@ if RUN_DIR is not None:
             return re.sub(r"[*`_\s]+", " ", cell or "").strip().lower()
 
         _idx = {ph["label"].lower(): i for i, ph in enumerate(_phs)}
-        _lanemap, _depmap, _lanemulti = parse_phase_lanes(_phs)
+        _lanemap, _depmap, _lanemulti, _unresdeps = parse_phase_lanes(_phs)
         _blockers = []
         for _i, _ph in enumerate(_phs):
             _why = []
@@ -2805,10 +2864,19 @@ if RUN_DIR is not None:
                       # only of hex letters (`deface`, `added`) is not read as a
                       # hash.
                       if (_cbi is not None
-                              and _norm(_cells[_ci["state"]]) == "withdrawn"):
+                              and _norm(_cells[_ci["state"]]).startswith(
+                                  "withdrawn")):
+                          # A HASH HAS A LETTER IN IT. Requiring only "a digit"
+                          # read an all-digit run as a hash, so a compact date
+                          # in `Closed by` — `ruled 20260907` — was reported as
+                          # a fix commit. Git's own abbreviations are hex, and
+                          # an abbreviation with no letter at all is
+                          # indistinguishable from a number; refusing to guess
+                          # is the honest half.
                           _h = next((x for x in re.findall(
                                         r"\b[0-9a-f]{7,40}\b", _cells[_cbi])
-                                     if re.search(r"[0-9]", x)), None)
+                                     if re.search(r"[a-f]", x)
+                                     and re.search(r"[0-9]", x)), None)
                           if _h:
                               _untrusted = True
                               bad(f"{relpath(_ledger)}: "
@@ -2867,6 +2935,15 @@ if RUN_DIR is not None:
                 "phase is executed by exactly one active lane, and this gate "
                 "reads the first, so a second field is a lane assignment "
                 "nobody validates. REMEDY: one `· lane:` per heading")
+        for _i2, _tok in _unresdeps:
+            _untrusted = True
+            bad(f"{relpath(tracker)}: {_phs[_i2]['label']}'s `· deps:` names "
+                f"{_tok!r}, which matches no `## Phase` heading in this "
+                "tracker. A dependency this gate cannot resolve is an edge it "
+                "reads as absent — and an absent edge turns a real join into "
+                "an ordinary phase, so the survivor, retirement and "
+                "join-entry checks all pass over it. REMEDY: name a phase the "
+                "tracker has")
         _nolane = [ph["label"] for _i2, ph in enumerate(_phs)
                    if _i2 not in _lanemap]
         if _phs and _nolane:
@@ -2905,7 +2982,14 @@ if RUN_DIR is not None:
         # population: every readable row, whatever its state.
         # Mutants: "run tracker RVJ round is filed under the phase RV",
         #          "run tracker RVJ closes a blocking finding with no round".
-        _gate_untrusted = _ltext is None
+        # GUARDED ON EVERY WAY THE LEDGER HALF CAN FAIL, not just an absent
+        # file. An unparseable header, an unreadable row and a width mismatch
+        # all leave `_fmap` empty while `_ltext` is a string, so keying only on
+        # `_ltext is None` printed this affirmative over a ledger read as zero
+        # rows. A gate that carries no outcome is the third way: its `fids` are
+        # empty for a reason this arm cannot see past.
+        _gate_untrusted = (_ltext is None or _untrusted
+                           or any(_g.get("untrusted") for _g in rgates))
         _owed = []
         for _g in rgates:
             _need = [x for x in _g["fids"]
@@ -2914,6 +2998,24 @@ if RUN_DIR is not None:
                      and _fmap.get(x, {}).get("state") == "closed"]
             if _need and not _g["rounds"]:
                 _owed.append((_g, _need))
+        # AND THE RECEIVING GATE, not only the source. A misfiled round was
+        # detected as an ABSENCE under the gate that raised the finding; nothing
+        # looked at where it landed. A gate whose own outcome is `no findings`
+        # has nothing to answer for, so a round appended under it is a round
+        # answering a question that gate never asked — which is what a fix round
+        # filed against the wrong line looks like from the other end.
+        for _g in rgates:
+            if _g["rounds"] and not _g["fids"] and not _g.get("untrusted"):
+                _gate_untrusted = True
+                bad(f"{_g['file']}:{_g['line']}: this `{_g['kind']}` closed "
+                    f"with no findings, yet {_g['rounds']} fix round(s) hang "
+                    "under it. A round answers the findings of the gate it is "
+                    "appended to, so a round under a clean gate is a round "
+                    "filed against the wrong line — most likely a joining "
+                    "phase's `RV` wearing an `RVJ`'s remediation, which spends "
+                    "that phase's review budget on a join it never covered. "
+                    "REMEDY: append the round under the gate that raised the "
+                    "findings")
         for _g, _need in _owed:
             _gate_untrusted = True
             bad(f"{_g['file']}:{_g['line']}: this `{_g['kind']}` named "
@@ -3043,15 +3145,42 @@ if RUN_DIR is not None:
         for _i2, _l2 in sorted(_lanemap.items()):
             _lane_phases.setdefault(_l2, []).append(_i2)
         _unfinished = {b[0]: b for b in _blockers}
+
+        # FORKS AND JOINS ARE READ OFF THE TRANSITIVE REDUCTION, never off the
+        # raw edges. A plan may spell a dependency out in full — `Phase 5 ·
+        # deps: Phase 3, Phase 4` where Phase 4 already depends on Phase 3 — and
+        # that is an ordinary linear chain, not a fork at Phase 3 and a join at
+        # Phase 5. Reading raw edges turned one redundant edge into five
+        # contradictory reports whose remedies excluded each other (measured).
+        # `deps:` says whether a phase may execute; the reduction says where the
+        # branches actually are.
+        _reach = {_i2: set() for _i2 in range(len(_phs))}
+        for _ in range(len(_phs)):
+            _changed = False
+            for _i2 in range(len(_phs)):
+                _n = set(_depmap.get(_i2, []))
+                for _d2 in _depmap.get(_i2, []):
+                    _n |= _reach[_d2]
+                if _n != _reach[_i2]:
+                    _reach[_i2] = _n
+                    _changed = True
+            if not _changed:
+                break
+        _redu = {}
+        for _i2 in range(len(_phs)):
+            _ds = _depmap.get(_i2, [])
+            _redu[_i2] = [_d2 for _d2 in _ds
+                          if not any(_d2 in _reach[_e2]
+                                     for _e2 in _ds if _e2 != _d2)]
         _succ = {}
-        for _j2, _dd2 in _depmap.items():
+        for _j2, _dd2 in _redu.items():
             for _x2 in _dd2:
                 _succ.setdefault(_x2, []).append(_j2)
 
         def _contributors(j):
-            """The lanes whose phases are direct predecessors of `j`."""
+            """The lanes whose phases are IMMEDIATE predecessors of `j`."""
             out = []
-            for _x in _depmap.get(j, []):
+            for _x in _redu.get(j, []):
                 _l = _lanemap.get(_x)
                 if _l is not None and _l not in out:
                     out.append(_l)
@@ -3059,7 +3188,7 @@ if RUN_DIR is not None:
 
         # A JOIN consumes two or more active lanes. One contributing lane is an
         # ordinary dependency, however many predecessors it has.
-        _joins = {j: _contributors(j) for j in sorted(_depmap)
+        _joins = {j: _contributors(j) for j in sorted(_redu)
                   if len(_contributors(j)) >= 2}
 
         def _leading_rvj(j):
@@ -3079,17 +3208,39 @@ if RUN_DIR is not None:
         # writes `waiting at join` as well. Once every contributor has passed it
         # stops waiting and runs the leading `RVJ` — the gate is somebody's job,
         # and it is the surviving lane's.
-        _retired, _waiting = {}, {}
+        _retired, _waiting, _early_join = {}, {}, []
         for _j2, _ls in _joins.items():
             _surv = _lanemap.get(_j2)
             _closed = any(r[1] == "x" for r in _leading_rvj(_j2))
             for _l2 in _ls:
                 if _l2 == _surv:
                     continue
-                if _closed:
+                # RETIREMENT REQUIRES THE BRANCH TO HAVE FINISHED, not merely
+                # the gate to be ticked. Keying retirement on the leading `RVJ`
+                # alone let a closed `RVJ` retire a lane whose phase was never
+                # implemented and never reviewed — and a retired lane is
+                # excluded from every advancement check, so the whole run
+                # reported PASS over it (measured). A tick that outruns the work
+                # it certifies is exactly the failure this gate exists for.
+                _unfin = [_i2 for _i2 in _lane_phases.get(_l2, [])
+                          if _i2 in _unfinished and _i2 < _j2]
+                if _closed and not _unfin:
                     _retired.setdefault(_l2, _j2)
                 else:
+                    if _closed:
+                        _early_join.append((_j2, _l2, _unfinished[_unfin[0]]))
                     _waiting.setdefault(_l2, _j2)
+        for _j2, _l2, _b in _early_join:
+            _untrusted = True
+            bad(f"{relpath(tracker)}: {_phs[_j2]['label']}'s leading `RVJ` is "
+                f"`[x]`, but contributing lane {_l2} still has {_b[1]} with "
+                f"{_b[2]}. A leading `RVJ` reviews the lanes that merged into "
+                "the joining phase, so it cannot close before every "
+                "contributing lane's last phase is `PASS` — a closed one over "
+                "unfinished work certifies a review of a diff that does not "
+                "exist yet, and it would retire that lane out of every "
+                f"advancement check. REMEDY: finish {_b[1]}, then run the "
+                "`RVJ`")
 
         # AN ACTIVE LANE owns unfinished work, or has finished its branch and is
         # still waiting at an unresolved join. Every one of them needs a line:
@@ -3107,8 +3258,19 @@ if RUN_DIR is not None:
         # other half of the allocation rule unheld, and a fork that duplicates
         # the parent's lane onto two branches makes "which branch is this" the
         # unanswerable question the lane model exists to close.
-        # Mutants: "fork gives the parent lane to the second successor",
-        #          "fork branches share one lane".
+        # Mutants: "fork first successor does not continue the lane",
+        #          "fork further branch reuses an existing lane".
+        # TWO RULES, AND BOTH ARE INDEPENDENTLY REACHABLE. An earlier version
+        # split this into four reports — first-successor, sibling collision, a
+        # further successor carrying the parent's lane, and a borrowed id — and
+        # a whole-change review proved that on a two-successor fork no mutation
+        # can reach three of them alone: a sibling collision on the parent's
+        # lane trips both the collision and the further-successor branch, and a
+        # borrowed id that is neither the parent's nor the first sibling's needs
+        # a third lane to exist at all. Branches no mutant can isolate are
+        # branches that can be deleted on a green build, so they are gone. The
+        # second rule below subsumes all three: the parent is earlier than every
+        # successor, and the first sibling is earlier than the rest.
         for _pi2, _kids in sorted(_succ.items()):
             if len(_kids) < 2:
                 continue
@@ -3124,46 +3286,28 @@ if RUN_DIR is not None:
                     "the lane; only the further branches are newly allocated. "
                     f"REMEDY: write `· lane: {_pl}` on "
                     f"{_phs[_kids[0]]['label']}")
-            _seen_kid = {}
-            for _k in _kids:
+            for _k in _kids[1:]:
                 _kl = _lanemap.get(_k)
                 if _kl is None:
                     continue
-                if _kl in _seen_kid:
-                    _untrusted = True
-                    bad(f"{relpath(tracker)}: {_phs[_pi2]['label']} forks to "
-                        f"{_phs[_seen_kid[_kl]]['label']} and "
-                        f"{_phs[_k]['label']}, and both carry "
-                        f"`· lane: {_kl}` — a fork CREATES lanes, so sibling "
-                        "branches never share one. Two active lanes never "
-                        "execute the same branch. REMEDY: allocate the next "
-                        "unused id to the later sibling")
-                _seen_kid[_kl] = _k
-            for _k in _kids[1:]:
-                _kl = _lanemap.get(_k)
-                if _kl is None or _kl == _pl:
-                    if _kl is not None and _kl == _pl:
-                        _untrusted = True
-                        bad(f"{relpath(tracker)}: {_phs[_k]['label']} is not "
-                            f"the first successor of {_phs[_pi2]['label']} in "
-                            f"approved-plan order, yet it carries the forking "
-                            f"phase's own `· lane: {_pl}`. Only the first "
-                            "branch continues the lane; every further branch "
-                            "is a NEW active lane. REMEDY: allocate the next "
-                            "unused id")
-                    continue
-                # A FRESH LANE'S FIRST PHASE IS THE BRANCH IT OPENS. If the id
-                # already appeared earlier in approved-plan order, it was not
-                # freshly allocated -- it was borrowed from another branch.
+                # A FURTHER BRANCH TAKES A FRESHLY ALLOCATED ID, so the phase
+                # opening it is the FIRST phase carrying it. Anything else means
+                # the id was borrowed — from the forking phase, from an earlier
+                # sibling, or from some other branch entirely — and two active
+                # lanes with one id makes "which branch is this" unanswerable.
                 _first = _lane_phases.get(_kl, [_k])[0]
                 if _first < _k:
                     _untrusted = True
-                    bad(f"{relpath(tracker)}: {_phs[_k]['label']} opens a new "
-                        f"branch of {_phs[_pi2]['label']} but carries "
-                        f"`· lane: {_kl}`, which {_phs[_first]['label']} "
-                        "already carries earlier in approved-plan order. A "
-                        "further branch takes a NEWLY ALLOCATED id. REMEDY: "
-                        "allocate the next unused id")
+                    _who = (f"the forking phase {_phs[_pi2]['label']}"
+                            if _first == _pi2 else
+                            f"{_phs[_first]['label']}")
+                    bad(f"{relpath(tracker)}: {_phs[_k]['label']} opens a "
+                        f"further branch of {_phs[_pi2]['label']} but carries "
+                        f"`· lane: {_kl}`, which {_who} already carries earlier "
+                        "in approved-plan order. Only the FIRST successor "
+                        "continues the forking phase's lane; every further "
+                        "branch is a NEW active lane, and sibling branches "
+                        "never share one. REMEDY: allocate the next unused id")
 
         # ---- the join survivor is the planned one ----
         # Allocation happens at GATE 2: the joining phase carries the lane of
@@ -3174,17 +3318,36 @@ if RUN_DIR is not None:
         # Mutants: "join phase takes the wrong contributors lane",
         #          "retired lane id is reused later in the run".
         for _j2 in sorted(_joins):
-            _want = _lanemap.get(_depmap[_j2][0])
+            _want = _lanemap.get(_redu[_j2][0])
             if _want and _lanemap.get(_j2) != _want:
                 _untrusted = True
                 bad(f"{relpath(tracker)}: {_phs[_j2]['label']} joins "
                     f"{len(_joins[_j2])} lanes and carries "
                     f"`· lane: {_lanemap.get(_j2)}`, but its first contributing "
                     f"predecessor in approved-plan order is "
-                    f"{_phs[_depmap[_j2][0]]['label']} on lane {_want}. The "
+                    f"{_phs[_redu[_j2][0]]['label']} on lane {_want}. The "
                     "surviving lane is decided at GATE 2 and written down; the "
                     "orchestrator must not choose one at runtime. REMEDY: "
                     f"write `· lane: {_want}` on {_phs[_j2]['label']}")
+
+        # ---- every join carries a leading `RVJ` ----
+        # STRUCTURAL, so it is checked whatever position the run is at. This
+        # used to live inside the Current State loop, which made a structural
+        # invariant conditional on a lane happening to name the joining phase:
+        # delete the `RVJ` while the run is anywhere else and the join could be
+        # entered on nobody's review, silently.
+        # Mutants: "join phase carries no leading RVJ".
+        for _j2 in sorted(_joins):
+            if not _leading_rvj(_j2):
+                _untrusted = True
+                bad(f"{relpath(tracker)}: {_phs[_j2]['label']} joins "
+                    f"{len(_joins[_j2])} lanes but carries no leading `RVJ` — "
+                    "an `RVJ` above the phase's first task, which is what "
+                    "reviews the lanes that merged here. Each contributing "
+                    "lane's own `RV` covers one lane; the defect this review "
+                    "exists to find is the one that lives between them, so "
+                    "without it the join is entered on nobody's review. "
+                    "REMEDY: add the leading `RVJ`, above the first task")
 
         # ---- a retired lane id is never reused ----
         for _lid2 in sorted(_lane_phases):
@@ -3270,6 +3433,7 @@ if RUN_DIR is not None:
                                  _lane_phases.get(_lid, [])
                                  if _i2 in _unfinished]
                     if _own_open:
+                        _untrusted = True
                         bad(f"{relpath(tracker)}: Current State says "
                             f"`**Lane {_lid}:** done`, but {_own_open[0][1]} is "
                             f"assigned to that lane and still has "
@@ -3278,6 +3442,7 @@ if RUN_DIR is not None:
                             "unresolved fix loop and no open blocking finding. "
                             "REMEDY: point the lane at its own next action")
                     elif _lid in _waiting:
+                        _untrusted = True
                         bad(f"{relpath(tracker)}: Current State says "
                             f"`**Lane {_lid}:** done`, but that lane still "
                             f"contributes to {_phs[_waiting[_lid]]['label']}, "
@@ -3404,6 +3569,7 @@ if RUN_DIR is not None:
                 # licenses that.
                 _isgate = re.search(r"(?:—|-)\s*RVJ\b", _val) is not None
                 if _openc:
+                    _untrusted = True
                     bad(f"{relpath(tracker)}: Current State's "
                         f"`**Lane {_lid}:**` names {_phs[_i]['label']}, which "
                         f"joins {len(_joins[_i])} lanes, while {_openc[0][1]} "
@@ -3412,15 +3578,9 @@ if RUN_DIR is not None:
                         "contributing lane's last phase is `PASS`. REMEDY: "
                         f"write `waiting at join {_phs[_i]['label']}` until "
                         "the contributors close")
-                elif not _lead:
+                elif _lead and not _isgate and not any(r[1] == "x"
+                                                       for r in _lead):
                     _untrusted = True
-                    bad(f"{relpath(tracker)}: {_phs[_i]['label']} joins "
-                        f"{len(_joins[_i])} lanes but carries no leading "
-                        "`RVJ` — an `RVJ` above the phase's first task, which "
-                        "is what reviews the lanes that merged here. Without "
-                        "it the join is entered on nobody's review. REMEDY: "
-                        "add the leading `RVJ`, above the first task")
-                elif not _isgate and not any(r[1] == "x" for r in _lead):
                     bad(f"{relpath(tracker)}: Current State's "
                         f"`**Lane {_lid}:**` names an implementation action in "
                         f"{_phs[_i]['label']} while its leading `RVJ` is not "
@@ -3445,6 +3605,7 @@ if RUN_DIR is not None:
                 "REMEDY: add the line")
 
         for _lid, _b in _adv:
+            _untrusted = True
             bad(f"{relpath(tracker)}: Current State's `**Lane {_lid}:**` names "
                 f"a phase later than {_b[1]}, which is assigned to that lane "
                 f"and still has {_b[2]} — a phase is complete only when its "
@@ -3459,7 +3620,7 @@ if RUN_DIR is not None:
         # comparison that did not happen.
         if _adv or _missing:
             pass
-        elif _blockers and not _lane_named and not _lane_cs:
+        elif _blockers and not _lane_named:
             bad(f"{relpath(tracker)}: {_blockers[0][1]} has "
                 f"{_blockers[0][2]}, and no lane line names a phase — so there "
                 "is nothing to compare it against and the advancement "

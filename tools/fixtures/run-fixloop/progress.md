@@ -8,7 +8,7 @@ The tracker's own "next unchecked line" rule points at Phase 3 from here, which
 is exactly the bug the ledger precedence exists to stop — every gate phrased as
 "no open blocking IDs" is vacuously true when review never ran, and every gate
 phrased as "next unchecked line" walks straight past a fix loop interrupted
-mid-round. So `Next action` names Phase 2's fix loop instead, and the no-advance
+mid-round. So `Lane A` names Phase 2's fix loop instead, and the no-advance
 arm reads the ledger to agree with it.
 
 This is the run directory that exercises the **ledger half** of that arm. It is

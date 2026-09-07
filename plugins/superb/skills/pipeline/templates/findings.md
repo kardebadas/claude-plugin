@@ -69,8 +69,27 @@ A missed requirement is Major, not deferred: nothing else in the run catches it.
 Write the re-tag in the row, so a tier nobody decided cannot end up gating a
 phase.
 
-**State** is one of `open`, `closed`, `false-positive`, `withdrawn`. Closing
-requires either:
+**State** is one of `open`, `closed`, `false-positive`, `withdrawn`.
+
+`withdrawn` is **not a closure** — it is a removal, and it is narrow. A finding
+is `withdrawn` when consolidation or reconciliation removes it because it is an
+exact **duplicate** of another stable F-ID, **malformed** or not actually a
+finding, or **superseded** by another finding that fully represents the same
+issue — **and no repository change has been made for it.** It may be marked
+`withdrawn` only *before* any fix commit for it exists, and `Closed by` records
+which reason and **never a commit hash**:
+
+```
+withdrawn → duplicate of F-NNN | withdrawn → superseded by F-NNN | withdrawn → malformed
+```
+
+It does **not** mean the orchestrator disagrees, the finding seems low value,
+ignoring it is easiest, text or code was deleted, code or tests or docs were
+changed, the finding was partly fixed, or a reviewer stopped mentioning it.
+Every one of those is a route *into* the fix loop. A deletion is a fix, not a
+withdrawal.
+
+Closing requires either:
 the fix diff touched the code the finding names **AND** a re-review whose slice
 covered that fix diff reports it resolved; or the **user** ruled it a false
 positive. A finding that merely stops appearing in review output stays `open`.

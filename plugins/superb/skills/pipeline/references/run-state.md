@@ -17,7 +17,9 @@ copy, never edit in place. `kit.md` alone is filled in later, at GATE 2 from the
 approved plan, because it cannot name a run's gates before the plan does.
 
 Nothing in the run directory — `docs/superpowers/runs/*/` — is ever `git add`ed;
-run state is deliberately local-only, and the root `.gitignore` enforces it.
+run state is deliberately local-only. This repository's root `.gitignore`
+carries `docs/superpowers/runs/*/`; in a project without that line the rule is
+yours to keep.
 Curated permanent specs, plans and loose `runs/*.md` records may be deliberately
 committed when they are repository documentation. **So the guard-rail counters
 belong on disk
@@ -62,7 +64,8 @@ one.
 `W<n>` is the task's wave and `deps` its in-phase dependencies, both copied
 from the GATE 2 plan (Rule 6, `parallel.md`). A `[~]` line in a multi-member
 wave also names the worktree branch the member runs in, so a cold start knows
-where to look for its commits. Phase headings carry `· deps: <phases>`.
+where to look for its commits. Phase headings carry `· deps: <phases>` and `· lane: <id>` — what a phase
+depends on, and which concurrent execution branch executes it.
 
 | Marker | Meaning |
 |--------|---------|
@@ -242,7 +245,8 @@ starts a new run** — if step 1 finds nothing, report that and stop.
    | every task of a phase `[x]`, its `RV` `[ ]` | `REVIEW` | **review that phase.** Not the next phase — this is the most important run there is to resume: fully implemented and entirely unreviewed |
    | every phase of this lane `[x]`, its join's leading `RVJ` `[ ]`, another contributing lane unfinished | waiting at join | **nothing for this lane.** Write `waiting at join Phase <id>` and resume the lane that is unfinished |
    | every contributing lane `PASS`, the join's leading `RVJ` `[ ]` | `RVJ` | the **surviving** lane — the one the joining phase's `· lane:` names, and no other — runs the leading `RVJ` |
-   | every task `[x]`, `RV` `[x]`, no open blocking F-ID | `PASS` | close out, then the next phase's first task |
+   | every task `[x]`, `RV` `[x]`, this phase's **trailing** `RVJ` `[ ]` | `RVJ` | run the split's joint review. **Not the next phase** — a trailing `RVJ` is an acceptance gate of its own, and `CLOSE(trailing RVJ)` is what advances the run |
+   | every task `[x]`, `RV` `[x]`, every `RVJ` on this phase `[x]`, no open blocking F-ID | `PASS` | close out, then the next phase's first task |
 
    **An open blocking F-ID outranks the tracker's next unchecked line.** A fix
    loop interrupted mid-round leaves `RV` `[x]` and every task `[x]`, so the

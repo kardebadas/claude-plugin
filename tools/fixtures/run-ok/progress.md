@@ -11,9 +11,9 @@ second one checkable — while Phase 3 is a long record whose `reports` and
 start, which is what a real tracker's prose does and what the byte-capped
 reader this fixture replaced reported as a missing coverage file.
 
-**Every round here is sized by the regime its own key names**, and the two
-arithmetic arms read that: all four phases are unwaved `N=`, so `s` is
-`ceil(N/5)` — `N=1` takes 1, `N=7` takes 2, `N=8` takes 2, `N=9` takes 2 — and
+**Every round here is sized from its own task count**, and the two arithmetic
+arms read that: all four phases are `N=`, so `s` is `ceil(N/5)` — there is no
+wave regime and no exemption — `N=1` takes 1, `N=7` takes 2, `N=8` takes 2, `N=9` takes 2 — and
 `i` is 0 at one slice, while above one slice it is 1 with a named `boundary:`
 (Phases 2 and 3) or 0 with `no integration boundary` declared (Phase 4). An earlier version of this fixture declared
 `N=9 → 3 slice + 1 integration` and both gates passed it: the one regime the
@@ -46,8 +46,8 @@ real tracker does. Read this file as a linter input, not as a model of a run.
 
 It establishes, for every closed `RV`/`RVJ` round in the tracker: the
 declared `<s> slice + <i> integration` count equals the number of report
-files that round lists, with brace sets expanded; an unwaved `N=` round's `s`
-equals `ceil(N/5)`; `i` is 0 at one slice, and above one slice is either 1 with
+files that round lists, with brace sets expanded; every `N=` round's `s`
+equals `ceil(N/5)`, whatever its wave count; `i` is 0 at one slice, and above one slice is either 1 with
 a named `boundary:` or 0 with `no integration boundary` declared; an
 `RVJ` round declares `0 slice + 1 integration`; an `M=` re-review round
 declares a `C=<n>` cluster count and `s` equals it; the round names a
@@ -58,12 +58,12 @@ those rows carry the same range; and an `M=0 → no round` record carries its
 closure routes and no reviewer evidence. It also establishes that
 the tracker is readable and that at least one round is closed.
 
-**Outside the unwaved `N=` regime** it does not establish that the fan-out was
+**On an `M=` re-review round** it does not establish that the fan-out was
 **sized** correctly. It catches one half of that — an over-wide fan-out whose
 duplication is visible in the recorded ranges, two reviewers handed the same
-range — but the other half is not derivable from the tracker there: a waved
-phase's wave count is not on the line, and the rule for a re-review round is
-one reviewer per file cluster in the fix diff, whose input is the diff;
+range — but the other half is not derivable from the tracker there: the rule for
+a re-review round is one reviewer per file cluster in the fix diff, whose input
+is the diff;
 `C=<n>` puts the cluster count on the line, and the arm compares it against
 `s`, but `C` is written by whoever chose `s`, so a round declaring one reviewer
 over a seven-cluster diff writes `C=1` and passes here (measured), and one that

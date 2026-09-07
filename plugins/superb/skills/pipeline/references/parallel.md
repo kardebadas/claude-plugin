@@ -163,9 +163,14 @@ applies.
    reviewers may use them), then delete them.
 
 Slice reviewers for a phase that contained waves take ranges over `P`'s
-first-parent history: `<wave base>^..<wave merge>` covers a whole wave, and a
-range spanning a wave merge includes the merged commits. Assign slices by
-wave boundaries, not by counting five tasks.
+first-parent history, where `<wave base>^..<wave merge>` spans a wave and a
+range crossing a wave merge includes the merged commits. **Wave boundaries are
+not slice boundaries.** The slice count is `ceil(N/5)` from the task count and
+nothing else, the slices are cut after the phase's implementation has landed,
+and a slice **may** split work that executed in one wave — implementation
+independence and review partitioning are different concerns, and letting the
+wave table set the review budget is how `N=12` in one wave bought one
+reviewer.
 
 **Then check the union covers the whole phase** — `PB..PH`, the phase branch's
 base and head, *not* the per-wave `BASE` recorded above. Wave boundaries are

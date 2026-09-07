@@ -18,19 +18,20 @@ withdrawn, because a commit is owed a fix plan and a re-review. Neither row is
 | F-001 | Critical | 2 | `src/a.py:10` | a fixture finding | closed | fix `f1f1f1f` + re-review round 2 covered it |
 | F-002 | Major | 2 | `src/b.py:20` | a fixture finding still open | open | |
 | F-003 | Major | 2 | `src/b.py:20` | a duplicate of F-002, raised by a second reviewer | withdrawn | withdrawn → duplicate of F-002 |
-| F-004 | Minor | 2 | `src/c.py:5` | a fixture non-finding | withdrawn | withdrawn → malformed |
+| F-004 | Major | 2 | `src/c.py:5` | a fixture non-finding | withdrawn | withdrawn → malformed |
 
 ## Counters
 
 | Scope | Fix-loop iteration | Cap | Deepest fix-mode depth this chain | Cap |
 | ----- | ------------------ | --- | --------------------------------- | --- |
-| Phase 2 | 1 | 5 | 1 | 2 |
+| Phase 2 | 2 | 5 | 1 | 2 |
 
 ## Iteration log (convergence rule input)
 
 | Iter | Scope | Depth | Targeted F-IDs | Open after re-review | At |
 | ---- | ----- | ----- | -------------- | -------------------- | -- |
 | 1 | Phase 2 | 1 | F-001, F-002 | F-002 | 2026-09-07 10:00 |
+| 2 | Phase 2 | 1 | F-003, F-004 | none | 2026-09-07 10:30 |
 
 ## Deferred Minor findings
 

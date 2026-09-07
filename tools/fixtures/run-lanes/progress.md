@@ -44,6 +44,6 @@ present.
 - [ ] RV — review fan-out
 
 ## Phase 4 — fixture, the join · deps: Phase 2, Phase 3 · lane: A
-- [ ] RVJ — joint integration review · lanes A+B · N=1 → 0 slice + 1 integration
+- [ ] RVJ — joint integration review · lanes A+B
 - [ ] T4 — a task · W1 · deps T2, T3
 - [ ] RV — review fan-out

@@ -2064,16 +2064,26 @@ if ! grep -qF "Phase:** 2 " "$f"; then
   echo "mutant is a no-op: the Phase field does not lead with phase 2"
 else
   python3 - "$f" <<"EOF"
-import pathlib,sys
+import pathlib,sys,re
 p=pathlib.Path(sys.argv[1]); t=p.read_text()
 assert t.count("## Current State")==1, "mutant is a no-op: Current State heading is absent or duplicated"
-t=t.replace("## Current State","A prose line mentioning - **Phase:** 2 above the block.\n\n## Current State",1)
-import re
-t=re.sub(r"^- \*\*Phase:\*\*.*$", "- **Phase:** 3 — moved on", t, count=1, flags=re.M)
-t=re.sub(r"^- \*\*Next action:\*\*.*$", "- **Next action:** RV — review fan-out", t, count=1, flags=re.M)
-p.write_text(t)
+# ORDER MATTERS, and the first version of this mutant got it wrong: inserting
+# the decoy first made the count=1 substitution below advance the DECOY, so the
+# real field stayed at phase 2 and the tracker was correct. Advance the REAL
+# field first, THEN put a decoy naming the earlier phase above the heading. The
+# decoy is a genuine line-start list item, so this pins the BLOCK ISOLATION
+# alone: read the decoy and the gate sees phase 2 and passes; read the real
+# field and it sees phase 3 over an open finding against phase 2 and fails.
+head, sep, body = t.partition("## Current State")
+assert sep, "mutant is a no-op: no Current State heading to split on"
+body2, n = re.subn(r"^- \*\*Phase:\*\*.*$", "- **Phase:** 3 — moved on", body, count=1, flags=re.M)
+assert n == 1, "mutant is a no-op: the real Phase field inside the block was not advanced"
+body2 = re.sub(r"^- \*\*Next action:\*\*.*$", "- **Next action:** RV — review fan-out", body2, count=1, flags=re.M)
+out = head + "Reminder:\n- **Phase:** 2 — fix loop, F-002 open\n\n" + sep + body2
+assert "- **Phase:** 2 — fix loop, F-002 open" in out.split("## Current State")[0], "mutant is a no-op: the decoy did not land above the heading"
+assert "- **Phase:** 3 — moved on" in out.split("## Current State")[1], "mutant is a no-op: the real field is not the advanced one"
+p.write_text(out)
 EOF
-  grep -qF "Phase:** 3 — moved on" "$f" || echo "mutant is a no-op: the real Phase field was not advanced"
   grep -qE "^\| F-002 .*\| open \|" tools/fixtures/run-fixloop/findings.md || echo "mutant is a no-op: F-002 is not open, so nothing gates Phase 2"
 fi'
 run_mutant "run tracker ledger row id is bolded" '
@@ -2095,6 +2105,41 @@ if ! grep -qE "^\| F-002 .*\| open \|" "$d/findings.md"; then
 else
   printf "# fixture\n\n## Blocking ledger\n\n| ID | Sev | Area | State |\n| -- | --- | ---- | ----- |\n| F-002 | Major | 2 | open |\n" > "$d/findings.md"
   grep -qF "| ID | Sev | Area | State |" "$d/findings.md" || echo "mutant is a no-op: the narrow renamed table was not written"
+fi'
+
+# --- round 6: the structural half, and the id grammar ---
+# These three exist because five rounds produced five ways to lose the Phase
+# field, every one of them SILENT. The arm now reports what it cannot locate, so
+# these mutants prove the loudness, not just the parse.
+run_mutant "run tracker loses its Phase field" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+f=tools/fixtures/run-fixloop/progress.md
+if [ "$(grep -c -- "^- \*\*Phase:\*\*" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture does not have exactly one Phase field"
+else
+  sed -i "/^- \*\*Phase:\*\*/d" "$f"
+  grep -q -- "^- \*\*Phase:\*\*" "$f" && echo "mutant is a no-op: a Phase field survived"
+  grep -qF "## Current State" "$f" || echo "mutant is a no-op: the Current State block went too, so a kill could come from another arm"
+fi'
+run_mutant "run tracker grows a second Current State block" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+f=tools/fixtures/run-fixloop/progress.md
+if [ "$(grep -c "^## Current State$" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture does not have exactly one Current State block"
+else
+  printf "\n## Current State\n- **Phase:** 3 — a stale appended duplicate\n- **Next action:** T4 — a task\n" >> "$f"
+  [ "$(grep -c "^## Current State$" "$f")" = 2 ] || echo "mutant is a no-op: the second block was not appended"
+fi'
+run_mutant "run tracker ledger row id is not F-<n>" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+d=tools/fixtures/run-fixloop
+if ! grep -qE "^\| F-002 .*\| open \|" "$d/findings.md"; then
+  echo "mutant is a no-op: F-002 is not the open blocking row"
+else
+  sed -i "s3| F-002 |3| N-002 |3" "$d/findings.md"
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T4|" "$d/progress.md"
+  grep -qE "^\| N-002 .*\| open \|" "$d/findings.md" || echo "mutant is a no-op: the row id was not changed"
+  grep -qF "| ID | Sev | Phase |" "$d/findings.md" || echo "mutant is a no-op: the header changed too, so a kill could come from the header arm"
 fi'
 
 echo

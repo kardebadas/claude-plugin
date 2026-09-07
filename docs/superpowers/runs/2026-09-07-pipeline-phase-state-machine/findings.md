@@ -127,11 +127,41 @@ three. The helper now writes what succeeded before reporting what did not. Same
 class as every other finding in this ledger: a green-looking result from a check
 that never ran.
 
+## Round 5 ledger (raised by the round-4 fix's own re-review)
+
+**Round 5's re-review was the first with no Critical, and the first to give a
+convergence assessment.** Its verdict: the ledger half has converged and would
+ship; the Current State field reader had not, because five rounds had produced
+five locator bugs and every one failed the **same way — silently**, falling back
+to `**Next action:**` and printing an affirmative pass. So round 6 is not a
+sixth locator heuristic. It makes the failure **loud**: a `**Phase:**` field the
+arm cannot locate is now a build failure.
+
+| ID | Sev | Area | File:line | Finding | State | Closed by |
+| -- | --- | ---- | --------- | ------- | ----- | --------- |
+| RR5-1 | Major | gate | `check-plugin.py:2499` | **A round-5 regression.** Narrowing the locator to a `-`/`*` list item made `**Phase:** 3`, `+ **Phase:** 3` and `1. **Phase:** 3` silently unreadable, so an openly advanced field gated nothing. The pre-round-5 code read all three | closed | marker optional; heading anchored; **an unlocatable field is reported** |
+| RR5-2 | Major | gate | `check-plugin.py:2407` | Row-ness required exactly `F-<digits>`, so a row keyed `N-002` or `F-002a` was dropped from the table walk **and** from the unread-row count — nothing printed. Reachable on this migration's own ledgers, which use `N-`, `NEW-` and `NEW-F` ids | closed | row-ness is "the first cell looks like a finding id"; `F-NNN` pinned in the template |
+| RR5-3 | Minor | gate | `check-plugin.py:2496` | The block split key was un-anchored, so a tracker quoting `## Current State` in prose **false-failed** | closed | anchored to a line start; verified passing |
+| RR5-4 | Minor | gate | `check-plugin.py:2496` | A duplicated `## Current State` block was unreported, leaving a stale block authoritative | closed | reported, with a mutant |
+| RR5-5 | Minor | gate | `check-plugin-mutants.sh:2060` | The decoy mutant died under either half of the NEW-F1 fix, pinning neither | closed | rewritten as a line-start item above the heading, pinning block isolation alone |
+| RR5-6 | Minor | gate | `check-plugin.py:2545` | Both fields naming a nonexistent phase drew three reports, one of them false | closed | the phaseless branch skips fields that were read |
+
+**And one more instance of the failure mode this whole ledger is about.** The
+retargeted decoy mutant SURVIVED its first run — a **mutant** bug, not a gate
+bug: it inserted the decoy before substituting, so `count=1` advanced the decoy
+and left the real field correct, and its guard passed because the decoy carried
+the string the guard grepped for. A check reporting success without having
+examined the thing it names, for the seventh distinct time on this branch (an
+empty `reviews` list, an unnormalised cell, a reflowed anchor, a stripped
+fixture target, a ugrep dash, an edit helper discarding writes, and now a
+substring guard two lines could satisfy). It now asserts **positionally** — the
+real field inside the block changed, the decoy landed above the heading.
+
 ## Counters
 
 | Scope | Fix-loop iteration | Cap | Deepest fix-mode depth this chain | Cap |
 | ----- | ------------------ | --- | --------------------------------- | --- |
-| Migration (Phase 5) | 4 | 5 | 0 | 2 |
+| Migration (Phase 5) | 5 | 5 | 0 | 2 |
 
 ## Iteration log (convergence rule input)
 
@@ -140,4 +170,5 @@ that never ran.
 | 1 | Migration | 0 | F-001..F-024 | N-001..N-010 raised | 2026-09-07 |
 | 2 | Migration | 0 | N-001..N-010 | NEW-01..NEW-07 raised | 2026-09-07 |
 | 3 | Migration | 0 | NEW-01..NEW-07 | NEW-F1..NEW-F9 raised | 2026-09-07 |
-| 4 | Migration | 0 | NEW-F1..NEW-F9 | <pending re-review> | 2026-09-07 |
+| 4 | Migration | 0 | NEW-F1..NEW-F9 | RR5-1..RR5-6 raised | 2026-09-07 |
+| 5 | Migration | 0 | RR5-1..RR5-6 | <pending re-review> | 2026-09-07 |

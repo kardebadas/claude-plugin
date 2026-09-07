@@ -2313,7 +2313,10 @@ if RUN_DIR is not None:
         #          "run tracker second blocking table gates nothing",
         #          "run tracker Current State is shadowed by a prose decoy",
         #          "run tracker ledger row id is bolded",
-        #          "run tracker four-column ledger renames its phase column".
+        #          "run tracker four-column ledger renames its phase column",
+        #          "run tracker loses its Phase field",
+        #          "run tracker grows a second Current State block",
+        #          "run tracker ledger row id is not F-<n>".
         def _norm(cell):
             """A ledger cell as the comparison wants it: markdown stripped."""
             return re.sub(r"[*`_\s]+", " ", cell or "").strip().lower()
@@ -2404,8 +2407,18 @@ if RUN_DIR is not None:
             # build failure" claim false for that shape. Row-ness is "the first
             # cell is an F-id", and width is checked against the header later,
             # where a mismatch is reported rather than used to decide.
+            # "THE FIRST CELL LOOKS LIKE A FINDING ID", not "is F- plus
+            # digits". Requiring the exact grammar dropped an off-grammar id
+            # from the table walk AND from `_seen_fid`, so an open blocking row
+            # keyed `N-002` or `F-002a` was ungated in silence — NEW-F2's
+            # failure mode on a different decoration of the same cell.
+            # Reachability is not hypothetical: this migration's own ledgers use
+            # `N-`, `NEW-` and `NEW-F` ids, and the template ships split phase
+            # ids (`3a`) that invite `F-002a`. Liberal in what counts as a row,
+            # strict in what a row must then satisfy: an off-grammar id is now
+            # read or reported, never dropped.
             _isrow = lambda ln: bool(
-                re.match(r"\|?\s*f-\d+\s*\|", _norm(ln)))
+                re.match(r"\|?\s*[a-z]{1,6}-\d+[0-9a-z.]*\s*\|", _norm(ln)))
             _seen_fid = [ln for ln in _lines if _isrow(ln)]
             if _hdr is None:
                 if _seen_fid:
@@ -2494,14 +2507,37 @@ if RUN_DIR is not None:
         # copies into its own run directory. The block is bounded by the next
         # `##` heading, and the field must be a list item on its own line,
         # which is the only form `templates/progress.md` writes.
-        _cs = ttext.split("## Current State", 1)
-        _csblock = ""
-        if len(_cs) > 1:
-            _csblock = re.split(r"^##\s", _cs[1], maxsplit=1, flags=re.M)[0]
+        # THE STRUCTURAL FIX, and the one that ends this family. Five rounds
+        # produced five ways to lose this field — searched the whole tracker,
+        # read a mentioned phase, required the literal word, required a `-`/`*`
+        # bullet — and every one of them failed the SAME way: silently. The arm
+        # fell back to `**Next action:**` and printed an affirmative pass. So
+        # the marker is optional now (any list form, or none, which is three
+        # markdown-legal shapes round 5 had made unreadable), the heading is
+        # anchored at a line start so prose quoting it cannot open a block, a
+        # duplicated block is reported, and — decisively — **a `**Phase:**`
+        # field this arm cannot locate is a FAILURE, not a fallback.** The next
+        # locator bug is then a red build instead of a quiet pass.
+        if len(re.findall(r"^##\s+Current State\s*$", ttext, re.M)) > 1:
+            bad(f"{relpath(tracker)}: two or more `## Current State` blocks, "
+                "and this gate reads the first — the run's position must live "
+                "in exactly one place, or an executor appending a fresh block "
+                "leaves the stale one authoritative. REMEDY: keep one block, "
+                "at the top, as `templates/progress.md` ships it")
+        _csm = re.search(r"^##\s+Current State\s*$(.*?)(?=^##\s|\Z)",
+                         ttext, re.M | re.S)
+        _csblock = _csm.group(1) if _csm else ""
+        _FIELDRE = r"^\s*(?:[-*+]\s+|\d+[.)]\s+)?\*\*%s:\*\*"
+        if _phs and not re.search(_FIELDRE % "Phase", _csblock, re.M):
+            bad(f"{relpath(tracker)}: no `**Phase:**` field inside a "
+                "`## Current State` block — that field is where the "
+                "advancement check reads the run's position, so it read "
+                "nothing and compared nothing. An unreadable position must not "
+                "read as a satisfied one. REMEDY: keep the Current State block "
+                "at the top, as `templates/progress.md` ships it")
 
         def _named_phase(field):
-            m = re.search(r"^\s*[-*]\s*\*\*" + field + r":\*\*\s*(.+)",
-                          _csblock, re.M)
+            m = re.search(_FIELDRE % field + r"\s*(.+)", _csblock, re.M)
             if not m:
                 return None, False, None
             # ANCHORED AT THE START, and that is the whole of the fix for a
@@ -2521,8 +2557,8 @@ if RUN_DIR is not None:
                 return None, True, None
             return _idx.get(f"phase {g.group(1)}".lower()), True, g.group(1)
 
-        _na_i, _na_id = _named_phase("Next action")[0::2]
-        _ph_i, _ph_id = _named_phase("Phase")[0::2]
+        _na_i, _na_seen, _na_id = _named_phase("Next action")
+        _ph_i, _ph_seen, _ph_id = _named_phase("Phase")
         _named = [x for x in (_na_i, _ph_i) if x is not None]
 
         # A FIELD THAT NAMES A PHASE THIS TRACKER DOES NOT HAVE is reported on
@@ -2555,7 +2591,7 @@ if RUN_DIR is not None:
                 "empty ledger is what an unreviewed phase looks like too. "
                 "REMEDY: point Current State at that phase's own next action — "
                 "its review, or its fix loop")
-        elif _blockers and not _named:
+        elif _blockers and not _named and not (_ph_seen or _na_seen):
             bad(f"{relpath(tracker)}: {_blockers[0][1]} has "
                 f"{_blockers[0][2]}, and neither Current State field names a "
                 "phase — so there is nothing to compare it against and the "

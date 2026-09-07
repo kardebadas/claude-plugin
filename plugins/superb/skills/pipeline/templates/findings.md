@@ -30,6 +30,12 @@ renamed column turns into a build failure and not a silently ungated finding.
 Keep the four names `ID`, `Sev`, `Phase` and `State`; add columns if you need
 them, and give every row the same width as the header.
 
+**IDs are `F-NNN`.** The check treats any `<letters>-<digits>` first cell as a
+row so an off-grammar id is read or reported rather than silently skipped — but
+the grammar is `F-` plus digits, and a row keyed anything else is a row whose
+findings nobody guaranteed to be gated by ID. Use `F-001`, `F-002`, and keep a
+rediscovered finding's original ID.
+
 | ID | Sev | Phase | File:line | Finding | State | Closed by |
 | -- | --- | ----- | --------- | ------- | ----- | --------- |
 | F-001 | Critical | 2 | `src/x.php:41` | <one line> | open | |

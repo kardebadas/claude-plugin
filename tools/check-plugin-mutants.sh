@@ -682,7 +682,7 @@ a=re.compile(ws.join(['rewrite', 'is', 'not', 'a', 'closure']), re.I)
 assert len(a.findall(s))==1, 'mutant is a no-op: fix-loop.md states the non-closure in other words, or more than once'
 out=a.sub('rewrite closes it like any other route', s)
 assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
-for q in ('claim finding', 'deleting the claim', 'pinning it with a test', 'opens no re-review round'):
+for q in ('claim finding', 'deleting the claim', 'pinning it with a test', 'deleting the claim is a repository change'):
     assert q in flat(out), 'mutant is a no-op: '+q+' went too, so a kill would not be attributable to the non-closure phrase'
 assert len(a.findall(o.read_text()))==1, 'mutant is a no-op: the sibling text lost the phrase too, so a kill would not be attributable to this copy'
 p.write_text(out)\""
@@ -698,7 +698,7 @@ a=re.compile(ws.join(['rewrite', 'is', 'not', 'a', 'closure']), re.I)
 assert len(a.findall(s))==1, 'mutant is a no-op: findings.md states the non-closure in other words, or more than once'
 out=a.sub('rewrite closes it like any other route', s)
 assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
-for q in ('claim finding', 'deleting the claim', 'pinning it with a test', 'opens no re-review round'):
+for q in ('claim finding', 'deleting the claim', 'pinning it with a test', 'deleting the claim is a repository change'):
     assert q in flat(out), 'mutant is a no-op: '+q+' went too, so a kill would not be attributable to the non-closure phrase'
 assert len(a.findall(o.read_text()))==1, 'mutant is a no-op: the sibling text lost the phrase too, so a kill would not be attributable to this copy'
 p.write_text(out)\""
@@ -734,12 +734,12 @@ run_mutant "M-exclusion phrase blurred in fix-loop.md" "$J \"import pathlib,re
 p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
 s=p.read_text(); bt=chr(96)
 flat=lambda x: ' '.join(x.split()).lower()
-a=re.compile('is'+chr(92)+'s+not'+chr(92)+'s+counted'+chr(92)+'s+in'+chr(92)+'s+'+bt+'M'+bt)
-u=re.compile('fix'+chr(92)+'s+commit'+chr(92)+'s+is'+chr(92)+'s+not'+chr(92)+'s+in'+chr(92)+'s+that'+chr(92)+'s+union')
-assert len(a.findall(s))==1, 'mutant is a no-op: the M-exclusion phrase is absent, reworded or duplicated'
+a=re.compile('IS'+chr(92)+'s+counted'+chr(92)+'s+in'+chr(92)+'s+'+bt+'M'+bt)
+u=re.compile('every'+chr(92)+'s+commit'+chr(92)+'s+the'+chr(92)+'s+fix-mode'+chr(92)+'s+run'+chr(92)+'s+produced')
+assert len(a.findall(s))==1, 'mutant is a no-op: the M-inclusion phrase is absent, reworded or duplicated'
 out=a.sub('sits outside the round tally', s)
 assert out!=s, 'mutant is a no-op: the phrase was not blurred'
-assert len(u.findall(out))==1, 'mutant is a no-op: the coverage-union phrase went too, so a kill would not be attributable to the M-exclusion phrase'
+assert len(u.findall(out))==1, 'mutant is a no-op: the coverage-union phrase went too, so a kill would not be attributable to the M-inclusion phrase'
 assert 'the number of blocking F-IDs this fix-mode run targeted' in out, 'mutant is a no-op: the definition went too, so a kill would not be attributable to the M-exclusion phrase'
 assert 'm=0 → no round' in flat(out), 'mutant is a no-op: the no-round form went too, so a kill would not be attributable to the M-exclusion phrase'
 p.write_text(out)\""
@@ -747,12 +747,12 @@ run_mutant "coverage-union phrase blurred in fix-loop.md" "$J \"import pathlib,r
 p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
 s=p.read_text(); bt=chr(96)
 flat=lambda x: ' '.join(x.split()).lower()
-a=re.compile('is'+chr(92)+'s+not'+chr(92)+'s+counted'+chr(92)+'s+in'+chr(92)+'s+'+bt+'M'+bt)
-u=re.compile('fix'+chr(92)+'s+commit'+chr(92)+'s+is'+chr(92)+'s+not'+chr(92)+'s+in'+chr(92)+'s+that'+chr(92)+'s+union')
+a=re.compile('IS'+chr(92)+'s+counted'+chr(92)+'s+in'+chr(92)+'s+'+bt+'M'+bt)
+u=re.compile('every'+chr(92)+'s+commit'+chr(92)+'s+the'+chr(92)+'s+fix-mode'+chr(92)+'s+run'+chr(92)+'s+produced')
 assert len(u.findall(s))==1, 'mutant is a no-op: the coverage-union phrase is absent, reworded or duplicated'
-out=u.sub('fix commit stays outside it', s)
+out=u.sub('the commits it chooses', s)
 assert out!=s, 'mutant is a no-op: the phrase was not blurred'
-assert len(a.findall(out))==1, 'mutant is a no-op: the M-exclusion phrase went too, so a kill would not be attributable to the coverage-union phrase'
+assert len(a.findall(out))==1, 'mutant is a no-op: the M-inclusion phrase went too, so a kill would not be attributable to the coverage-union phrase'
 assert 'the number of blocking F-IDs this fix-mode run targeted' in out, 'mutant is a no-op: the definition went too, so a kill would not be attributable to the coverage-union phrase'
 assert 'm=0 → no round' in flat(out), 'mutant is a no-op: the no-round form went too, so a kill would not be attributable to the coverage-union phrase'
 p.write_text(out)\""
@@ -767,7 +767,7 @@ keep=[x for x in paras if key not in flat(x)]
 assert len(keep)<len(paras), 'mutant is a no-op: no paragraph carries the form'
 out=(nl+nl).join(keep)
 assert key not in flat(out), 'mutant is a no-op: the form survives the paragraph deletion'
-assert 'not counted in '+bt+'M'+bt in out, 'mutant is a no-op: it removed the M-exclusion bullet too, so a kill would not be attributable to the no-round form'
+assert 'counted in '+bt+'M'+bt in out, 'mutant is a no-op: it removed the M-inclusion bullet too, so a kill would not be attributable to the no-round form'
 p.write_text(out)\""
 # The SAME deletion against the two OTHER files that define the `RV` grammar and
 # now carry the form verbatim. Held separately for the reason the re-tag
@@ -838,7 +838,7 @@ keep=[x for x in paras if key not in flat(x)]
 assert len(keep)<len(paras), 'mutant is a no-op: no paragraph carries the definition'
 out=(nl+nl).join(keep)
 assert key not in flat(out), 'mutant is a no-op: the definition survives the paragraph deletion'
-assert 'not counted in '+bt+'M'+bt in out, 'mutant is a no-op: it removed the M-exclusion bullet too, so a kill would not be attributable to the definition paragraph'
+assert 'counted in '+bt+'M'+bt in out, 'mutant is a no-op: it removed the M-inclusion bullet too, so a kill would not be attributable to the definition paragraph'
 assert 'm=0 → no round' in flat(out), 'mutant is a no-op: it removed the no-round form too, so a kill would not be attributable to the definition paragraph'
 p.write_text(out)\""
 # The DEFINITION half, surgically. The paragraph mutant above kills through
@@ -858,8 +858,8 @@ a='**the number of blocking F-IDs this fix-mode run targeted**'
 assert s.count(a)==1, 'mutant is a no-op: the definition is absent, reworded or duplicated'
 out=s.replace(a, '**the count this round declares**')
 assert out!=s, 'mutant is a no-op: the definition was not blurred'
-assert 'excluded exactly when its closure route is a deletion or a user-ruled false positive' in flat(out), 'mutant is a no-op: the exclusion-route list went too, so a kill would not be attributable to the definition'
-assert 'is not counted in '+bt+'M'+bt in out, 'mutant is a no-op: the M-exclusion phrase went too, so a kill would not be attributable to the definition'
+assert 'excluded exactly when its closure route **changed nothing in the repository**' in flat(out), 'mutant is a no-op: the exclusion-route list went too, so a kill would not be attributable to the definition'
+assert 'IS counted in '+bt+'M'+bt in out, 'mutant is a no-op: the M-inclusion phrase went too, so a kill would not be attributable to the definition'
 assert 'm=0 → no round' in flat(out), 'mutant is a no-op: the no-round form went too, so a kill would not be attributable to the definition'
 p.write_text(out)\""
 # The other half, and the one that reproduces a defect that actually shipped:
@@ -877,9 +877,9 @@ run_mutant "M's exclusion-route list loses a route" "$J \"import pathlib
 p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
 s=p.read_text()
 flat=lambda x: ' '.join(x.split()).lower()
-a='is a deletion or a user-ruled false positive'
+a='**changed\n   nothing in the repository**'
 assert s.count(a)==1, 'mutant is a no-op: the closed exclusion-route list is absent, reworded or duplicated'
-out=s.replace(a, 'is a deletion')
+out=s.replace(a, 'is a withdrawal')
 assert out!=s, 'mutant is a no-op: the route was not dropped'
 assert 'the number of blocking f-ids this fix-mode run targeted' in flat(out), 'mutant is a no-op: the definition went too, so a kill would not be attributable to the route list'
 p.write_text(out)\""
@@ -913,7 +913,7 @@ out=a.sub('reviewers as the round sees fit', s)
 assert out!=s, 'mutant is a no-op: the sizing phrase was not blurred'
 assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
 assert 'the number of blocking f-ids this fix-mode run targeted' in flat(out), 'mutant is a no-op: the definition went too, so a kill would not be attributable to the sizing rule'
-assert 'is not counted in '+bt+'M'+bt in out, 'mutant is a no-op: the M-exclusion phrase went too, so a kill would not be attributable to the sizing rule'
+assert 'IS counted in '+bt+'M'+bt in out, 'mutant is a no-op: the M-inclusion phrase went too, so a kill would not be attributable to the sizing rule'
 assert 'm=0 → no round' in flat(out), 'mutant is a no-op: the no-round form went too, so a kill would not be attributable to the sizing rule'
 assert len(a.findall(o.read_text()))>=1, 'mutant is a no-op: SKILL.md lost the phrase too, so a kill would not be attributable to the fix-loop.md copy'
 p.write_text(out)\""
@@ -1012,7 +1012,7 @@ p.write_text(out)\""
 run_mutant "no-round round declares a reports field" "$J \"import pathlib
 p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
 s=p.read_text(); mid=chr(183)
-a=' '+mid+' closures: F-018 deleted,'
+a=' '+mid+' closures: F-018 user-ruled false positive,'
 assert s.count(a)==1, 'mutant is a no-op: the no-round worked round is absent, reworded or duplicated'
 out=s.replace(a, ' '+mid+' reports p3-rr3-a.md '+mid+' coverage p3-rr3-coverage.md'+a)
 assert out!=s, 'mutant is a no-op: the reviewer fields were not inserted'
@@ -1021,8 +1021,8 @@ p.write_text(out)\""
 run_mutant "no-round round names no closure route" "$J \"import pathlib
 p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
 s=p.read_text(); bt=chr(96)
-a='closures: F-018 deleted,'
-b='F-019 user-ruled false positive'
+a='closures: F-018 user-ruled false positive,'
+b='F-019 withdrawn \u2192 duplicate of F-011'
 assert s.count(a)==1 and s.count(b)==1, 'mutant is a no-op: the worked round no longer names its two routes in the form this strips'
 out=s.replace(a, 'closures: F-018,').replace(b, 'F-019')
 assert out!=s, 'mutant is a no-op: the routes were not stripped'
@@ -1044,12 +1044,12 @@ p.write_text(out)\""
 run_mutant "no-round round names a pinned route" "$J \"import pathlib
 p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
 s=p.read_text(); bt=chr(96)
-a='F-019 user-ruled false positive'
-assert s.count(a)==1, 'mutant is a no-op: the worked no-round round no longer names a user-ruled false positive route'
+a='F-019 withdrawn \u2192 duplicate of F-011'
+assert s.count(a)==1, 'mutant is a no-op: the worked no-round round no longer names a withdrawal route'
 out=s.replace(a, 'F-019 pinned by '+bt+'tests/test_x.py::test_claim'+bt)
 assert out!=s, 'mutant is a no-op: the pinned route was not injected'
 assert 'M=0 → no round' in out, 'mutant is a no-op: the declaration itself went, so a kill would not be attributable to the pinned route'
-assert 'closures: F-018 deleted,' in out, 'mutant is a no-op: the legal route went too, so a kill could come from the missing-route branch instead'
+assert 'closures: F-018 user-ruled false positive,' in out, 'mutant is a no-op: the legal route went too, so a kill could come from the missing-route branch instead'
 assert '→ no findings' in out, 'mutant is a no-op: the outcome slot went too'
 p.write_text(out)\""
 
@@ -2258,6 +2258,51 @@ p.write_text(t[:m.start()] + t[m.end():])
 EOF
   grep -qF -- "→ round 2:" "$f" && echo "mutant is a no-op: the round survived"
   grep -qF -- "→ F-101" "$f" || echo "mutant is a no-op: the RVJ outcome went too, so a kill could come from another arm"
+fi'
+
+# ---- every F-ID in an M=0 record is validated independently ----
+# The old check was one `route.search(body)`: "is there at least one legal route
+# anywhere in this record". A valid FIRST closure then masked every invalid one
+# after it, which is what these three mutants target -- each leaves the first
+# closure legal and corrupts only the second.
+run_mutant "M=0 second closure is a bare withdrawn" '
+f=plugins/superb/skills/pipeline/references/fix-loop.md
+if ! grep -qF -- "F-019 withdrawn → duplicate of F-011" "$f"; then
+  echo "mutant is a no-op: the worked M=0 record is not in the expected shape"
+else
+  perl -0pi -e "s/F-019 withdrawn[^,]*duplicate of F-011/F-019 withdrawn/" "$f"
+  grep -qF -- "F-018 user-ruled false positive" "$f" || echo "mutant is a no-op: the legal first closure went too, so a kill could come from the no-route branch instead"
+  grep -qF -- "duplicate of F-011" "$f" && echo "mutant is a no-op: the reason survived"
+fi'
+
+run_mutant "M=0 second closure is a deletion" '
+f=plugins/superb/skills/pipeline/references/fix-loop.md
+if ! grep -qF -- "F-019 withdrawn → duplicate of F-011" "$f"; then
+  echo "mutant is a no-op: the worked M=0 record is not in the expected shape"
+else
+  perl -0pi -e "s/F-019 withdrawn[^,]*duplicate of F-011/F-019 deleted/" "$f"
+  grep -qF -- "F-018 user-ruled false positive" "$f" || echo "mutant is a no-op: the legal first closure went too, so a kill could come from the no-route branch instead"
+  grep -qF -- "F-019 deleted" "$f" || echo "mutant is a no-op: the deletion route was not written"
+fi'
+
+run_mutant "M=0 second closure names no route at all" '
+f=plugins/superb/skills/pipeline/references/fix-loop.md
+if ! grep -qF -- "F-019 withdrawn → duplicate of F-011" "$f"; then
+  echo "mutant is a no-op: the worked M=0 record is not in the expected shape"
+else
+  perl -0pi -e "s/F-019 withdrawn[^,]*duplicate of F-011/F-019/" "$f"
+  grep -qF -- "F-018 user-ruled false positive" "$f" || echo "mutant is a no-op: the legal first closure went too, so a kill could come from the no-route branch instead"
+  grep -qF -- "F-019 withdrawn" "$f" && echo "mutant is a no-op: the route survived"
+fi'
+
+run_mutant "run ledger withdrawn row names a fix commit" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+f=tools/fixtures/run-fixloop/findings.md
+if [ "$(grep -c -- "| withdrawn | withdrawn → duplicate of F-002 |" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the withdrawn row is not in the expected shape"
+else
+  sed -i "s#| withdrawn | withdrawn → duplicate of F-002 |#| withdrawn | fix \`9c3a1f7\` |#" "$f"
+  grep -qF -- "9c3a1f7" "$f" || echo "mutant is a no-op: the hash was not written"
 fi'
 
 echo

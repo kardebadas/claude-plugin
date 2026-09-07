@@ -422,7 +422,14 @@ for n in skill_names:
                 "deleting the claim",        # closure path
                 "pinning it with a test",    # closure path
                 "rewrite is not a closure",  # the non-closure
-                "opens no re-review round",  # a deletion's consequence
+                # A DELETION'S CONSEQUENCE, REVERSED. This phrase used to be
+                # `opens no re-review round`, which was the defect: deleting the
+                # claim is a repository change and a deletion-only commit is
+                # still a commit, so `finding → delete text → mark closed → no
+                # review` was a legal path. The rule it pins now is the
+                # opposite one, and it is pinned for the same reason — an
+                # unheld rule is one edit from gone on a green build.
+                "deleting the claim is a repository change",
             )
             for rel in ("references/fix-loop.md", "templates/findings.md"):
                 ct, ce = read(sdir / n / rel)
@@ -619,13 +626,13 @@ for n in skill_names:
             # line gets the clause belonging to the phrase that fired.
             AUTH = ("references/fix-loop.md",)
             CLAIM_EFFECT = (
-                ("the `M`-exclusion bullet", "not counted in `m`", AUTH,
-                 "Lose it and a deletion puts a round back on the books that "
-                 "nobody needs."),
-                ("the coverage-union exclusion",
-                 "fix commit is not in that union", AUTH,
-                 'Lose it and that union is back to "Assignments MUST cover '
-                 'every fix diff".'),
+                ("the `M`-inclusion bullet", "is counted in `m`", AUTH,
+                 "Lose it and a deletion is back outside `M`, closing a "
+                 "finding with a commit nobody reviews."),
+                ("the coverage-union rule",
+                 "every commit the fix-mode run produced", AUTH,
+                 'Lose it and a deletion\'s commit drops back out of the '
+                 'union it is owed a place in.'),
                 ("the `M=0 → no round` form", "m=0 → no round",
                  ("references/fix-loop.md", "SKILL.md",
                   "references/run-state.md"),
@@ -636,10 +643,15 @@ for n in skill_names:
                  AUTH,
                  "Lose it and the `M=0` condition has no subject."),
                 ("`M`'s closed exclusion-route list",
-                 "excluded exactly when its closure route is a deletion or a "
-                 "user-ruled false positive", AUTH,
-                 "Lose it and the list shortens to two dispositions with the "
-                 "definition still standing."),
+                 "excluded exactly when its closure route **changed "
+                 "nothing in the repository**", AUTH,
+                 "Lose it and the list stops being keyed on whether the "
+                 "repository changed, which is the whole of the rule."),
+                ("the narrow definition of `withdrawn`",
+                 "may be marked `withdrawn` only *before* any fix commit for",
+                 AUTH,
+                 "Lose it and `withdrawn` becomes the escape hatch — "
+                 '"the orchestrator disagrees" wearing a closure route.'),
                 ("the re-review fan-out's sizing rule",
                  "one reviewer per file cluster",
                  ("references/fix-loop.md", "SKILL.md", "README.md"),
@@ -1240,6 +1252,10 @@ else: ok("no absolute home paths, private project names, or foreign ticket prefi
 # Mutants: "no-round round declares a reports field",
 #          "no-round round names no closure route",
 #          "no-round round names a pinned route",
+#          "M=0 second closure is a bare withdrawn",
+#          "M=0 second closure is a deletion",
+#          "M=0 second closure names no route at all",
+#          "run ledger withdrawn row names a fix commit",
 #          "run tracker fix round names no fix plan",
 #          "run tracker cites a fix plan that is not in agent-output".
 print("\n== pipeline review-line examples ==")
@@ -1250,8 +1266,59 @@ rpt   = re.compile(r"reports\s+(.+?)(?=\s*[·|]|\s+coverage\b|\s*$)")
 cov   = re.compile(r"coverage\s+\S+\.md")
 nor   = re.compile(r"\bM=0\s*(?:->|→)\s*no\s+round\b")
 fixp  = re.compile(r"fixplan\s+(\S+\.md)")
-route = re.compile(r"\bF-\d+\s*,?\s+(deleted|user-ruled false positive)")
+# ROUTES ARE KEYED ON WHETHER THE REPOSITORY CHANGED, not on the route's name.
+# `deleted` used to sit beside `user-ruled false positive` on the reasoning that
+# neither leaves a commit a reviewer could be assigned — true of a false
+# positive, false of a deletion. A deletion-only commit is still a commit, so a
+# deletion takes the fix loop like any other finding and is not a closure here.
+#
+# `withdrawn` MUST STATE ITS REASON. A bare `withdrawn` is the escape hatch the
+# rule forbids: it absorbs "the orchestrator disagrees" and "the finding seems
+# low value", which are routes INTO the fix loop, not out of it.
+CLOSURE_OK = re.compile(
+    r"F-\d+\s*,?\s+(?:user-ruled false positive"
+    r"|withdrawn\s*(?:->|→)\s*"
+    r"(?:superseded by F-\d+|duplicate of F-\d+|malformed))\b", re.I)
 pinrt = re.compile(r"\bpinned by\b")
+
+
+def parse_closures(body):
+    """Every F-ID in an `M=0` record's closures list, with its route's verdict.
+
+    Returns `(ok_ids, problems)`, `problems` being `(fid, offending text)`.
+
+    EVERY F-ID IS VALIDATED INDEPENDENTLY. The old check was one
+    `route.search(body)` — "is there at least one legal route ANYWHERE in this
+    record" — so a valid first closure masked every invalid one after it:
+    `closures: F-018 user-ruled false positive, F-019 withdrawn` passed with
+    F-019 carrying the bare route the rule exists to refuse.
+
+    An F-ID INSIDE a route is not a closure of its own. `withdrawn → duplicate
+    of F-011` names F-011 as the reason, not as a second finding being closed,
+    so the span a valid closure consumed is skipped rather than re-read.
+    """
+    seg = body
+    m = re.search(r"closures?\s*:", seg, re.I)
+    if m:
+        seg = seg[m.end():]
+    # The OUTCOME SLOT is not part of the closures list. `→ no findings` ends
+    # it, and so does a bare outcome naming F-IDs — those are the round's
+    # result, not routes.
+    m = re.search(r"(?:->|→)\s*no findings\b", seg, re.I)
+    if m:
+        seg = seg[:m.start()]
+    ok_ids, probs, spans = [], [], []
+    for m in re.finditer(r"F-\d+", seg):
+        if any(a <= m.start() < b for a, b in spans):
+            continue
+        g = CLOSURE_OK.match(seg, m.start())
+        if g:
+            ok_ids.append(m.group(0))
+            spans.append((g.start(), g.end()))
+        else:
+            tail = seg[m.end():m.end() + 60].split(",")[0].strip(" ·|")
+            probs.append((m.group(0), tail[:40]))
+    return ok_ids, probs
 outc  = re.compile(r"(?:->|→)\s*(?:no findings\b|F-\d+)")
 
 
@@ -1479,10 +1546,33 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
                                  "plan and no plan to name")
                 if decl.search(body):
                     probs.append("declares reviewer counts as well as `no round`")
-                if not route.search(body):
+                _okids, _badids = parse_closures(body)
+                if not _okids and not _badids:
                     probs.append("names no closure route — every F-ID needs "
-                                 "`deleted` or `user-ruled false positive` after "
-                                 "it")
+                                 "`user-ruled false positive` or `withdrawn "
+                                 "→ <reason>` after it")
+                for _fid, _tail in _badids:
+                    if re.match(r"deleted\b", _tail, re.I):
+                        probs.append(
+                            f"closes {_fid} by `deleted`, which no `M=0` round "
+                            "can carry — deleting the claim is a repository "
+                            "change, and a deletion-only commit is still a "
+                            "commit, so it is owed a fix plan and a focused "
+                            "re-review like any other fix")
+                    elif re.match(r"withdrawn\b", _tail, re.I):
+                        probs.append(
+                            f"closes {_fid} by a bare `withdrawn` — a "
+                            "withdrawal is a duplicate, a malformed finding, or "
+                            "one superseded by another, and it must say which: "
+                            "`withdrawn → duplicate of F-NNN`, `withdrawn → "
+                            "superseded by F-NNN`, or `withdrawn → malformed`")
+                    else:
+                        probs.append(
+                            f"gives {_fid} the route {_tail!r}, which is not a "
+                            "zero-repository-change closure. Only `user-ruled "
+                            "false positive` and `withdrawn → <reason>` are: "
+                            "every other route leaves a commit, and a commit is "
+                            "owed a fix plan and a re-review")
                 if pinrt.search(body):
                     probs.append("names a `pinned by <test>` route, which no "
                                  "`M=0` round can carry — a pin commits a test, so "
@@ -1498,10 +1588,11 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
                         "the evidence there is: a `no round` whose routes are "
                         "unnamed is a skipped review wearing this form, one "
                         "carrying `reports` or `coverage` is claiming reviewers a "
-                        "round of nobody never had, and one naming a pin is not an "
-                        "`M=0` iteration at all. REMEDY: write it as "
-                        "`→ round <n>: M=0 → no round · closures: F-018 deleted, "
-                        "F-019 user-ruled false positive → no findings`")
+                        "round of nobody never had, and one naming a pin or a "
+                        "deletion is not an `M=0` iteration at all. REMEDY: "
+                        "write it as `→ round <n>: M=0 → no round · closures: "
+                        "F-018 user-ruled false positive, F-019 withdrawn → "
+                        "duplicate of F-011 → no findings`")
                 continue
             d = decl.search(rec)
             if not d:
@@ -2546,6 +2637,11 @@ if RUN_DIR is not None:
             else:
               for _hdr, _rows in _tables:
                   _ci = {k: _hdr.index(k) for k in ("id", "sev", "phase", "state")}
+                  # OPTIONAL BY DESIGN: `templates/findings.md` requires only
+                  # the four names above, so `Closed by` may be absent and the
+                  # withdrawal check below is guarded on it rather than
+                  # assuming it.
+                  _cbi = _hdr.index("closed by") if "closed by" in _hdr else None
                   for _line in _rows:
                       if not _isrow(_line):
                           # REPORTED, NOT SKIPPED. `_seen_fid` is the "rows
@@ -2586,6 +2682,37 @@ if RUN_DIR is not None:
                               "the header's column count")
                           continue
                       _lrows += 1
+                      # A WITHDRAWN FINDING HAS NO FIX COMMIT. `withdrawn` means
+                      # duplicate, malformed, or superseded, with no repository
+                      # change behind it; a hash in `Closed by` is the evidence
+                      # that a change WAS made, and a finding with a fix commit
+                      # takes the fix loop. The linter cannot count commits — it
+                      # can refuse the row that names one. Placed BEFORE the
+                      # `state != "open"` skip, because a withdrawn row is by
+                      # definition not open and a check after the skip would
+                      # never run.
+                      # A DIGIT IS REQUIRED in the token so an English word made
+                      # only of hex letters (`deface`, `added`) is not read as a
+                      # hash.
+                      if (_cbi is not None
+                              and _norm(_cells[_ci["state"]]) == "withdrawn"):
+                          _h = next((x for x in re.findall(
+                                        r"\b[0-9a-f]{7,40}\b", _cells[_cbi])
+                                     if re.search(r"[0-9]", x)), None)
+                          if _h:
+                              _untrusted = True
+                              bad(f"{relpath(_ledger)}: "
+                                  f"{_norm(_cells[_ci['id']]).upper()} is "
+                                  f"`withdrawn` while `Closed by` names {_h!r} "
+                                  "— a commit hash is evidence that the "
+                                  "repository changed for this finding, and a "
+                                  "finding with a fix commit cannot be "
+                                  "withdrawn. `withdrawn` is a duplicate, a "
+                                  "malformed finding, or one superseded by "
+                                  "another, with nothing committed. REMEDY: "
+                                  "close it through the fix loop — fix plan, "
+                                  "fix, focused re-review — or, if it really "
+                                  "was a duplicate, drop the hash")
                       _fmap[_norm(_cells[_ci["id"]]).upper()] = {
                           "sev": _norm(_cells[_ci["sev"]]),
                           "state": _norm(_cells[_ci["state"]]),

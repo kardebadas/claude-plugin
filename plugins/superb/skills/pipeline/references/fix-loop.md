@@ -387,14 +387,36 @@ When blocking findings exist (and the convergence rule permits another run):
    (*Re-review fan-out*, below) — but it still decides **whether a round happens
    at all**. `M` is **the number of blocking F-IDs this fix-mode run targeted**,
    less every one the ledger closed by a route that leaves no ownable commit.
-   A targeted F-ID is excluded exactly when its closure route
-   is a deletion or a user-ruled false positive, and the list is closed. Both
-   entries earn their place the same way — neither leaves a commit a reviewer
-   could be assigned, and a round owed over an empty diff is a round no fan-out
-   can size. **A pin is not on that list**: it commits a test, and a test is an
-   ownable commit, so a pin stays in `M` for the same reason a
-   fixed-and-verified closure does. An iteration whose every targeted F-ID left
-   by one of those two routes therefore has `M=0` and **runs no round**; a
+   A targeted F-ID is excluded exactly when its closure route **changed
+   nothing in the repository**: a **user-ruled false positive**, or a
+   **withdrawal**. The list is keyed on that predicate rather than on the
+   routes' names, and it is closed. **A deletion is not on it** — deleting the
+   claim is a repository change, and a deletion-only commit is a commit a
+   reviewer can be assigned, so a deletion stays in `M` and takes the fix loop
+   like any other finding. **A pin is not on it either**: it commits a test,
+   and a test is an ownable commit, so a pin stays in `M` for the same reason a
+   fixed-and-verified closure does.
+
+   **`withdrawn` is narrow, and defined so it cannot become an escape hatch.** A
+   finding is `withdrawn` when it is removed during consolidation or
+   reconciliation because it is an exact **duplicate** of another stable F-ID,
+   **malformed** or not actually a finding, or **superseded** by another finding
+   that fully represents the same issue — **and no repository change has been
+   made for it.** It may be marked `withdrawn` only *before* any fix commit for
+   it exists, and the route records which reason: `withdrawn → duplicate of
+   F-NNN`, `withdrawn → superseded by F-NNN`, or `withdrawn → malformed`. It
+   does **not** mean any of these, and each is a route into the fix loop rather
+   than out of it: the orchestrator disagrees with the finding; the finding
+   seems low value; ignoring it is the easiest fix; text or code was deleted;
+   code was changed; tests were changed; documentation was changed; the finding
+   was partially fixed; a reviewer stopped mentioning it. **If any
+   repository-changing commit exists for the finding, `withdrawn` is
+   forbidden.**
+
+   An iteration whose every targeted F-ID left by one of those two routes
+   therefore has `M=0` and **runs no round** — legal only when the iteration
+   produced **zero repository-changing commits**, since any commit at all means
+   `M >= 1` and a round is owed; a
    **pin-only iteration has `M=1`**, one ownable commit, and takes the first row
    of the table below. `M=0` licenses skipping this step and
    nothing else does — one behavioural fix, or one pin, in the same iteration
@@ -409,8 +431,8 @@ When blocking findings exist (and the convergence rule permits another run):
    grammar with `no round` where the reviewer counts would go:
 
    ```markdown
-         → round 3: M=0 → no round · closures: F-018 deleted,
-           F-019 user-ruled false positive → no findings
+         → round 3: M=0 → no round · closures: F-018 user-ruled false positive,
+           F-019 withdrawn → duplicate of F-011 → no findings
    ```
 
    The ordinal is the round that iteration owed, so the sequence has no gap a
@@ -470,12 +492,11 @@ fix commits, not tasks, so re-reviews get their own rule — and it is a rule ab
 | Two or more disjoint file clusters | one reviewer per file cluster | 0, or 1 at a declared boundary |
 
 **Ownable** is the qualifier the rows are keyed on: an ownable commit is one a
-reviewer can be assigned, which is every commit the fix-mode run produced except
-a claim **deletion**'s (the bullet below). `M` is counted over that same
-predicate — a targeted F-ID is out of `M` exactly when its closure left nothing
-ownable behind (step 3, above) — so an iteration with no ownable commit is an
-iteration with `M=0`, and it has no row here at all, not even the first row,
-because its round was never owed.
+reviewer can be assigned, which is **every commit the fix-mode run produced**.
+`M` is counted over that same predicate — a targeted F-ID is out of `M` exactly
+when its closure changed nothing in the repository (step 3, above) — so an
+iteration with no commit is an iteration with `M=0`, and it has no row here at
+all, not even the first row, because its round was never owed.
 
 **The cluster count rides the round as `C=<n>`**, written beside `M`:
 `M=<m> C=<c> → <s> slice + <i> integration`, where `c` is the number of file
@@ -512,17 +533,18 @@ all (step 3, above); it just no longer sizes the fan-out.
   the files its findings named still needs an owner. **A clean round from
   reviewers who never looked at a fix closes nothing** — that is the ledger's
   closure condition, and this is how you satisfy it.
-- **A claim finding closed by deletion is not counted in `M`.** Deleting the
-  claim opens no re-review round (*Finding-closure ledger*, above), so counting
-  it would make a round look owed that nobody needs — and the coverage union
-  takes the same view of its commit: a **deletion**'s fix commit is not in that
-  union, since it demands an owner for a diff that only removes a sentence. **A
-  pin is counted, and its commit is in the union** — a pin commits a test, and
-  "a failing or vacuous test" is one of the re-tag predicate's Major branches,
-  which no reviewer is in a position to apply to a test nobody was assigned. A
-  pin-only iteration is a first-row iteration rather than no row at all. A
-  **user-ruled false positive** is out of `M` as well, and leaves no commit for
-  the union to take a view on.
+- **A claim finding closed by deletion IS counted in `M`, and its commit is in
+  the union.** Deleting the claim is a repository change: the sentence is gone,
+  the file is different, and a reviewer can read the diff. So a deletion takes
+  the same path as any other fix — fix plan, deletion commit, focused
+  re-review, then close — and its commit is assigned to a slice like every
+  other. **A pin is counted too, and its commit is in the union** — a pin
+  commits a test, and "a failing or vacuous test" is one of the re-tag
+  predicate's Major branches, which no reviewer is in a position to apply to a
+  test nobody was assigned. A pin-only iteration is a first-row iteration
+  rather than no row at all. A **user-ruled false positive** is out of `M`, and
+  so is a **withdrawal**; neither leaves a commit for the union to take a view
+  on.
   Every other commit the fix-mode run produced needs an owner too.
 - The integration reviewer's scope is the union of all fix commits, hunting
   interactions between fixes and regressions the fixes introduced elsewhere.

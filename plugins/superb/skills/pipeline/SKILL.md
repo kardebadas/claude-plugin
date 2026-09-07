@@ -294,7 +294,8 @@ iteration whose `M` comes out zero runs no fan-out — and it still writes its
 round, because an absent round and a skipped one are the same absence here:
 
 ```markdown
-      → round 4: M=0 → no round · closures: F-021 deleted → no findings
+      → round 4: M=0 → no round · closures: F-021 withdrawn → malformed,
+        F-022 withdrawn → superseded by F-013 → no findings
 ```
 
 `no round` stands where the reviewer counts would, and `M=0` is the only

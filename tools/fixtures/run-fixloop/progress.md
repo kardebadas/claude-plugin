@@ -38,6 +38,8 @@ run, on a round that is not the one in `run-ok`.
       · reports p2-review-a.md · coverage p2-coverage.md → F-001, F-002
       → round 2: M=2 C=1 → 1 slice + 0 integration · fixplan p2-fixplan-r2.md
         · reports p2-rr2-a.md · coverage p2-rr2-coverage.md → F-001 closed
+      → round 3: M=0 → no round · closures: F-003 withdrawn → duplicate of F-002,
+        F-004 withdrawn → malformed → no findings
 
 ## Phase 3 — fixture, not started · deps: Phase 2
 - [ ] T4 — a task · W1 · deps T3

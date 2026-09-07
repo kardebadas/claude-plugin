@@ -182,10 +182,14 @@ phase-level syntax.
 
 ### Root cause
 
-Waves determine reviewer count in six prose sites (`SKILL.md:213-214`, `:233`,
-`:758-760`, `:1010-1013`, `fix-loop.md:44-47`, `run-state.md:85-87`), all
-phrased *"one slice per wave, or per adjacent pair of small waves … which may be
-more or fewer than `ceil(N/5)`"*.
+**An implementation scheduling construct was allowed to set the review
+budget.** Waves determine reviewer count in six prose sites
+(`SKILL.md:213-214`, `:233`, `:758-760`, `:1010-1013`, `fix-loop.md:44-47`,
+`run-state.md:85-87`), all phrased *"one slice per wave, or per adjacent pair of
+small waves … which may be more or fewer than `ceil(N/5)`"*. That conflates two
+unrelated concerns: which tasks may execute concurrently, and how the landed
+diff is partitioned for review. A coarse wave table then silently bought a
+smaller review — `N=12` in one wave took one reviewer.
 
 Worse, the `waved` marker is the **sole exemption** from the only `N=`-regime
 sizing arm (`check-plugin.py:1537-1538`), and the skill states plainly that the
@@ -195,49 +199,104 @@ fixture uses the marker; no mutant defends the rule.
 
 ### Design
 
-**Reviewer count comes from task count. Waves constrain only where slice
-boundaries may fall.**
+**Reviewer count comes from task count, and from nothing else.**
 
 ```
-s = min(ceil(N/5), W)
-slice boundaries = unions of whole adjacent waves; a wave is never split
+slice_reviewers = ceil(N / 5)
 ```
 
-`W` is the phase's wave count, written on the line. The `waved` marker is
-replaced by `W=<n>`, which makes the count re-derivable — the whole point.
+| Tasks in phase (N) | Slice reviewers |
+|---|---|
+| 1–5 | 1 |
+| 6–10 | 2 |
+| 11–12 | 3 |
+
+This is independent of the number of implementation waves:
 
 ```
-- [x] RV — review fan-out · N=8 W=8 → 2 slice + 0 integration
+N=8,  W=8  → 2        N=8,  W=1  → 2
+N=12, W=12 → 3        N=12, W=1  → 3
+```
+
+`N=12, W=1 → 1 reviewer` is forbidden. **Implementation scheduling must never
+reduce formal review coverage.**
+
+**Waves are an implementation scheduling construct.** They determine which
+tasks may execute concurrently, worktree and branch scheduling, merge ordering,
+and the implementation build gates. They do not determine reviewer count, and
+they do not constrain where a review slice may be cut.
+
+**Review slices are formed after the phase's implementation has landed.**
+Reviewers receive approximately balanced contiguous task/commit ranges covering
+the whole phase diff. A slice **may** split work that originally executed in one
+implementation wave — that is allowed, because implementation independence and
+review partitioning are different concerns. The former restriction *"a wave is
+never split across two reviewers"* is removed wherever it appears as a
+review-sizing constraint.
+
+```
+Phase: 12 tasks, 1 implementation wave
+
+Review:  Reviewer A → T1–T4   / its commit range
+         Reviewer B → T5–T8   / its commit range
+         Reviewer C → T9–T12  / its commit range
+```
+
+Unchanged coverage obligations: every phase commit falls inside at least one
+slice, orchestrator-authored glue and fixup commits are assigned to a slice like
+any other, and no two slices carry the identical range.
+
+**Tracker grammar.** `W=<n>` may remain on the line where it is useful for
+implementation or history, but it is **informational only** and never
+participates in reviewer-count arithmetic. The count must be re-derivable from
+`N` alone.
+
+```
+- [x] RV — review fan-out · N=8 → 2 slice + 0 integration
       · no integration boundary
       · reports p2-review-{a,b}.md · coverage p2-coverage.md → no findings
+
+- [x] RV — review fan-out · N=8 W=8 → 2 slice + 0 integration      (W informational)
+
+- [x] RV — review fan-out · N=12 → 3 slice + 1 integration
+      · boundary: the T4 contract consumed by T11
 ```
 
-`min` is the one documented exception, and it is a feasibility bound rather than
-a licence: three slices cannot be built from two whole waves, so `N=12 W=2`
-takes 2. Consequences, stated rather than hidden:
+The `waved` marker goes: it existed only to exempt a round from the sizing arm,
+and there is no longer an exemption to name.
 
-- **8 tasks in 8 one-task waves → `min(2, 8) = 2` reviewers**, which is the
-  required behaviour. `4` and `8` now fail arithmetic.
-- **`W=1` over a large phase forces one reviewer.** That is the correct
-  consequence of "never split a wave", and it is a signal the *plan* mis-waved
-  the phase — documented as such next to the rule, not worked around.
-- An unwaved phase omits `W` and takes `ceil(N/5)`, unchanged.
-
-Integration reviewer: unchanged. `i` is 0 at one slice; above one slice it is 1
-only at a declared `· boundary: <what>`, else 0 with `· no integration
-boundary`. More than one slice is never itself a reason.
+**Integration reviewer: unchanged.** `i` is 0 at one slice. Above one slice it
+is 1 only at a real declared cross-slice boundary — a producer/consumer contract
+crossing slices, a lane join, a Rule 3 split's integration boundary, or another
+genuine interaction no individual slice can evaluate — named on the round as
+`· boundary: <what>`; otherwise 0 with `· no integration boundary`. **More than
+one slice is not itself a reason.** So an ordinary 8-task phase is 2 slice + 0
+integration = 2 reviewers total unless a real boundary exists.
 
 ### How it is checked
 
-The `ceil` arm loses its `waved` exemption and gains `W`: for every `N=` gate
-round, `s` must equal `min(ceil(N/5), W)` (with `W` defaulting to `N` when
-absent, which makes `min` a no-op for unwaved phases). `W` must be at least 1
-and at most `N`.
+For every normal `N=` gate round, `s == ceil(N/5)` must hold. The arm loses its
+`waved` exemption and gains no `W` dependency: `W`, when present, is parsed and
+ignored for arithmetic, so a tracker cannot buy a smaller review by declaring
+fewer waves.
 
-Known limit, recorded honestly: the tracker says how many waves there were, not
-which tasks they held, so the linter verifies the *count* and not that each
-slice is a whole-wave union. The existing coverage-table arms still catch two
-reviewers sharing a range.
+Proven in both directions:
+
+```
+N=8,  W=8, 2 slices → PASS        N=8,  W=8, 4 slices → FAIL
+N=12, W=1, 3 slices → PASS        N=12, W=1, 1 slice  → FAIL
+N=8,  W=1, 2 slices → PASS
+```
+
+The integration-reviewer arms are preserved as they stand, with their existing
+cases: absent with no boundary → PASS; present with a declared real boundary →
+PASS; present merely because more than one slice exists → FAIL. Coverage-table
+verification is unchanged — every named report has its own row, and no two rows
+carry the same range.
+
+Known limit, recorded honestly: the tracker records task and slice counts, not
+which commits each slice held, so the linter verifies the count and the recorded
+ranges' distinctness rather than that the ranges are balanced.
 
 ---
 
@@ -351,8 +410,8 @@ un-fixed repo. Contractual prose gets a held-phrase pin.
 | 3 | Two concurrent lanes with different legal positions → PASS | `run-lanes` fixture |
 | 4 | Lane A points past its own unfinished phase → FAIL | mutant |
 | 5 | Lane B points past its own unfinished phase → FAIL | mutant |
-| 6 | 8 tasks / 8 waves → 2 slice reviewers → PASS | fixture + `min` arm |
-| 7 | 8 tasks / 8 waves / 4 slices → FAIL | mutant |
+| 6 | `N=8 W=8 → 2 slice` PASS; `N=8 W=1 → 2 slice` PASS; `N=12 W=1 → 3 slice` PASS | fixture + `ceil(N/5)` arm |
+| 7 | `N=8 W=8 → 4 slice` FAIL; `N=12 W=1 → 1 slice` FAIL | mutants |
 | 8 | Integration reviewer stays boundary-conditional | existing arms, unchanged |
 | 9 | Deletion fix commit requires a fix plan and a re-review | route-list arm + mutant |
 | 10 | `M=0 → no round` legal only with zero repository commits | forbidden-route arm + mutant |

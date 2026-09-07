@@ -468,8 +468,8 @@ Create `plugins/superb/skills/pipeline/references/implement.md`:
 Read at every Stage 4 implementation dispatch. This file is the whole of how
 pipeline gets code written. It replaces the previous delegation to
 `superpowers:subagent-driven-development`, which had no implementation-only
-mode: an implementer returning `DONE` there mechanically produced a task
-reviewer, and a task completed only at zero open findings at any severity
+mode: an implementer returning `DONE` there mechanically produced a reviewer
+for that task, and a task completed only at zero open findings at any severity
 through an uncapped fix/re-review loop. That is a second acceptance gate for
 work this skill accepts at the phase, and running both reviewed everything
 twice.
@@ -480,9 +480,9 @@ twice.
 COMPLETING AN IMPLEMENTATION TASK DISPATCHES NO REVIEWER.
 ```
 
-During IMPLEMENT the only transition is **task → next task**. There is no task
-reviewer, no task-level fix loop, no task-level re-review, and no adversarial
-pass. A task's report is recorded and the next task is dispatched.
+During IMPLEMENT the only transition is **task → next task**. Nothing reviews a
+task: no task-scoped reviewer, no task-level fix loop, no task-level re-review,
+and no adversarial pass. A task's report is recorded and the next task is dispatched.
 
 An implementation agent fixing its own compile error, failing test, syntax
 error or obvious mistake is **implementation**, not the fix loop. The fix loop
@@ -598,9 +598,9 @@ This does not soften the exit condition. IMPLEMENT still ends only when the work
 has landed **and** the required build and test gates are green — a red gate
 keeps the phase in IMPLEMENT rather than routing it somewhere else.
 
-Reviewing early splits the phase into pieces and re-creates per-task review by
-another name. If the phase is too big to review as a unit, that is Rule 3's
-12-task cap and a split at the *plan* level, not an early review.
+Reviewing early splits the phase into pieces and re-creates the task-scoped
+gate by another name. If the phase is too big to review as a unit, that is
+Rule 3's 12-task cap and a split at the *plan* level, not an early review.
 ````
 
 - [ ] **Step 2: Verify the reference is reachable from the skill**
@@ -817,10 +817,39 @@ the list and add a line recording why, so a future editor does not re-add it:
 ```markdown
 `superpowers:subagent-driven-development` is deliberately **not** composed here.
 It has no implementation-only mode — an implementer returning `DONE` dispatches
-a task reviewer, and a task completes only at zero open findings at any severity
+a reviewer for that task, and a task completes only at zero open findings at any
+severity
 through an uncapped fix/re-review loop — and it is phase-unaware. Stage 4's
 IMPLEMENT state is `references/implement.md` instead.
 ```
+
+- [ ] **Step 6b: Drop the banned phrase from the re-tag rule**
+
+Two files outside this task's own edits still carry `task reviewer`, and the
+sweep reads every `.md` in the skill — so they close here, or the gate stays red
+from this commit until Task 10. Only the **phrase** moves now; Task 10 still
+owns the rule's generalisation and its linter comment.
+
+- `references/fix-loop.md:77-79` — replace the attribution clause so the rule
+  stops naming a caller pipeline no longer invokes:
+
+```markdown
+     vocabulary is re-tagged here, never carried: a reviewer may emit
+     **Important**, whose usual contract is "fix everything before this unit
+     completes" — right for one task's diff, wrong for a phase, and it
+```
+
+  Keep the rest of the sentence and the predicate below it byte-identical: the
+  linter holds this text across `fix-loop.md` and `templates/findings.md`.
+
+- `templates/findings.md:35` — the mirror of the same rule. Replace
+  ```Important` is the task reviewer's vocabulary, not a tier`` with
+  ```Important` is another reviewer's vocabulary, not a tier``, leaving the rest
+  of the sentence as it stands.
+
+Both edits are the phrase only. The rule still holds, still re-tags, and still
+has its predicate — a reviewer emitting `Important` is a real thing whoever
+supplies it, which is why Task 10 keeps the rule rather than deleting it.
 
 - [ ] **Step 7: Run the sweeps to verify they pass**
 
@@ -2296,22 +2325,26 @@ first matching row is the state."
 **Interfaces:**
 - Consumes: Task 3's sweeps (the re-tag text must not re-introduce a banned phrase).
 
-- [ ] **Step 1: Generalise the re-tag rule**
+- [ ] **Step 1: Confirm the re-tag rule reads as generalised**
 
-`references/fix-loop.md:77-79` attributes the fourth tier to
-`subagent-driven-development`'s task reviewer, which pipeline no longer invokes.
-The rule still earns its place — the repo `/review` skill and any reviewer a
-project supplies may report in another vocabulary — so it is generalised, not
-deleted. Replace the attribution clause with:
+The wording moved in **Task 3, Step 6b** — it had to, because the sweep that
+task installs reads every `.md` in the skill and the old clause named a
+`task reviewer`. Confirm it landed and still carries its predicate:
 
-```markdown
-     vocabulary is re-tagged here, never carried: a reviewer may emit
-     **Important**, whose usual contract is "fix everything before this unit
-     completes" — right for one task's diff, wrong for a phase, and it
+```bash
+sed -n '74,82p' plugins/superb/skills/pipeline/references/fix-loop.md
+sed -n '33,38p' plugins/superb/skills/pipeline/templates/findings.md
+grep -rn 'task reviewer' plugins/superb/skills/pipeline/ && echo "STILL PRESENT" || echo "clean"
 ```
 
-Keep the rest of the sentence and the predicate below it byte-identical: the
-linter holds this text across `fix-loop.md` and `templates/findings.md`.
+Expected: the rule reads "a reviewer may emit **Important**, whose usual
+contract is …", the predicate below it is intact, and the grep is `clean`.
+
+The rule is **kept, not deleted**: the repo `/review` skill and any reviewer a
+project supplies may report in another vocabulary, so the seam still needs its
+re-tag. What changed is that it no longer attributes the tier to a caller
+pipeline does not invoke. This task's remaining work is the linter comment that
+explains that scope, and the fix-agent sizing rule below.
 
 - [ ] **Step 2: Update the linter's tier arm comment and keep its scope**
 

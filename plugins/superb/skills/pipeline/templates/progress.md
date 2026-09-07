@@ -48,11 +48,19 @@ RV — the review line. Every IMPLEMENTATION phase has exactly one, last among
      sitting above that phase's first task.) Stages 1-5 seeded at
      Stage 1 are scaffolding; no RV. Not a task: excluded from Rule 3's 12-cap
      and from N in ceil(N/5).
+     A fix round (M=<m>, m>=1) also names its fixplan file: the round's fix
+     plan, written before its first fix was dispatched. An M=0 -> no round
+     record carries none - no fix ran, so there was nothing to plan.
 
   [ ] RV — review fan-out
   [~] RV — review fan-out · N=8 -> 2 slice + 1 integration · started <ts>
   [x] RV — review fan-out · N=8 -> 2 slice + 1 integration
       · reports p3-review-{a,b,int}.md · coverage p3-coverage.md -> F-012, F-013
+  [x] RV — review fan-out · N=8 -> 2 slice + 1 integration
+      · reports p3-review-{a,b,int}.md · coverage p3-coverage.md -> F-012
+      -> round 2: M=1 C=1 -> 1 slice + 0 integration
+         · fixplan p3-fixplan-r2.md · reports p3-rr2-a.md
+         · coverage p3-rr2-coverage.md -> F-012 closed
   [x] RV — review fan-out · WAIVED by user: "<their exact words>"
 
 RVJ — joint integration review of a unit no single RV covers: a Rule 3 split,

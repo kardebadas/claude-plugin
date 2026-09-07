@@ -324,16 +324,32 @@ When blocking findings exist (and the convergence rule permits another run):
      whoever actually ran a review round, at whatever depth — a depth-1 run that
      re-reviews its own fixes records that round on the line itself. What is
      forbidden is closing an `RV` no phase-wide fan-out ever produced.
-   - **Standard path**: plan the round (see the fix plan below) → implement
-     the fixes per `references/implement.md` → review the fixes.
-   - **Small-round path**: allowed when the open blocking findings number
-     **≤ 3** AND every finding names the exact file and line. The round's fix
-     plan is correspondingly small — two or three rows — but it is still
-     written before any fix is dispatched; the fixes then run per
-     `references/implement.md` with the plan's rows as their briefs, and the
-     review step is unchanged. If any fix grows beyond the files the findings
-     name, or trips the Ambiguity guard, **abort this path and restart
-     this fix-mode run on the standard path**.
+   - **Every round is planned.** In this order, no reordering:
+
+     ```
+     FINDINGS → FIX PLAN → FIX IMPLEMENTATION
+     ```
+
+     1. **Write the fix plan** for this round to
+        `agent-output/p<phase>-fixplan-r<round>.md` from
+        `templates/fix-plan.md`, and name it on the round in `progress.md`. It
+        states the findings in scope, root cause where known, the files each
+        fix touches, dependencies between fixes, the tests required, what may
+        run in parallel, and how each fix is verified.
+     2. **Then dispatch the fixes**, per `references/implement.md` — one agent
+        per independent file cluster the plan names, related findings batched
+        into one agent. Five related findings take one or two agents, not five.
+        Each fix agent runs the tests covering its change and reports them.
+     3. **Then review the fixes** (re-review fan-out below).
+   - **Scale the plan, never skip it.** A round of two findings with exact
+     file:line is a plan of two rows written in a minute; it is not a
+     `writing-plans` run and it does not re-enter brainstorming or the master
+     plan. What the artifact buys is that the round's scope is fixed before the
+     first edit and checkable afterwards. The path that used to skip it — up to
+     three findings naming exact file and line — is the shape this rule exists
+     to stop: a finding, a reaction, then the next finding. If any fix grows
+     beyond the files the findings name, or trips the Ambiguity guard, **abort
+     and re-plan the round**.
    - The **Ambiguity guard applies at every depth**: a finding that can be
      fixed two materially different ways is a question, not a coin flip.
 3. After the recursive run returns, **re-review** using the re-review fan-out
@@ -387,33 +403,29 @@ When blocking findings exist (and the convergence rule permits another run):
    commit is owed an owner — the round runs, and it is written like any other:
 
    ```markdown
-         → round 4: M=1 C=1 → 1 slice + 0 integration · reports p3-rr4-a.md
+         → round 4: M=1 C=1 → 1 slice + 0 integration
+           · fixplan p3-fixplan-r4.md · reports p3-rr4-a.md
            · coverage p3-rr4-coverage.md → no findings
    ```
 
-   **What this does to the `RV` line depends on whether the fan-out has run.**
-   A fix loop can be entered from step 1 — a wave's build gates failing is a bug
-   finding before any reviewer exists (`parallel.md`). In that case `RV` is
-   still `[ ]` and **stays `[ ]`**: a re-review over fix commits is not the
-   phase review, and closing `RV` on it would tick the box with no slice
-   reviewer having seen the phase diff — the exact failure the line exists to
-   catch, wearing a green tick. Such a round also gets **its own Counters row**
-   (`<phase> pre-RV`), never the phase's review budget: gates failing three
-   times during implementation must not leave the real review two iterations.
+   **Nothing before `RV` enters this loop.** A wave's build gates failing, a
+   red test before any reviewer exists, a broken build on the phase branch —
+   these are unfinished implementation, repaired inside IMPLEMENT and re-gated
+   there (`references/implement.md`). They raise no finding, take no F-ID, need
+   no fix plan and spend no iteration budget. This loop has one entry: REVIEW,
+   or a re-review, returning blocking findings.
 
-   **A pre-`RV` round is recorded in `findings.md`, and nowhere else** — its
-   `<phase> pre-RV` Counters row, plus the Iteration-log row step 1 above
-   opens for it. That is where "recorded, not
-   omitted" is satisfied for such a round, including one that ran no reviewers
-   at all: while the `RV` line stays `[ ]` it has no closed form for a round to
-   be appended to, and the per-round grammar above is a grammar for closed
-   rounds. Its closure routes are read where every route is, from each F-ID's
-   `Closed by` cell in the ledger.
+   **A re-review never closes an unopened `RV`.** A re-review runs over fix
+   commits, not over the phase diff, so it can only append a round to an `RV`
+   the fan-out already closed. Closing `RV` on a re-review would tick the box
+   with no slice reviewer having seen the phase diff — the exact failure the
+   line exists to catch, wearing a green tick.
 
    Only when `RV` is already `[x]` from a completed step 2 does a re-review
    reopen it to `[~]` and reclose it with the round appended in the full
-   per-round grammar — `→ round 2: M=9 C=1 → 1 slice + 0 integration · reports
-   p3-rr2-a.md · coverage p3-rr2-coverage.md → F-012 closed, F-014 raised` — so
+   per-round grammar — `→ round 2: M=9 C=1 → 1 slice + 0 integration · fixplan
+   p3-fixplan-r2.md · reports p3-rr2-a.md · coverage p3-rr2-coverage.md
+   → F-012 closed, F-014 raised` — so
    every round has a declared number its file count is checked against, not only
    the first. The fan-out comes from the fix diff's clusters. Whoever ran the
    round writes it, at whatever depth.
@@ -564,8 +576,8 @@ however complete, authorizes nothing.
 - Where a run-state file and your recollection disagree, **the file is right**.
 - No phase carries more than 12 tasks; an oversized phase was split at Stage 3,
   before GATE 2 and before any implementation.
-- Counters are **per phase** (iteration) — with separate rows for an `RVJ` and
-  for any pre-`RV` fix loop, so neither spends the phase's review budget — and
+- Counters are **per phase** (iteration) — with a separate row for an `RVJ`, so
+  it does not spend the phase's review budget — and
   **per recursion chain** (depth),
   and both live in `findings.md` — incremented in the file **before** each
   dispatch, read from the file before each cap check, never carried in context.

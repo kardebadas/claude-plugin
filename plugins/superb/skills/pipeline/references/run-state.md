@@ -77,7 +77,7 @@ blank field is unverifiable and that is the whole point of recording it.
 
 **`RV`/`RVJ` are the exception in what they carry, not in whether they are
 checkable.** They produced review, not code, so instead of a hash they close on
-four fields, all paths relative to `agent-output/`:
+these fields, all paths relative to `agent-output/`:
 
 - `N=<tasks> → <s> slice + <i> integration` — `N` is on the line so the fan-out
   is re-derivable at closure rather than trusted from the step most likely to
@@ -88,6 +88,12 @@ four fields, all paths relative to `agent-output/`:
   (the cluster rule, and what declaring `C` does and does not establish, is in
   `fix-loop.md`'s *Re-review fan-out*); an **`RVJ`** is always
   `0 slice + 1 integration` with `N` informational. `i` is 1 whenever `s > 1`.
+- `fixplan <file>` — **required on any round declaring `M=<m>` with `m >= 1`**,
+  and absent from an `M=0 → no round` record, which dispatched no fix and so had
+  nothing to plan. It is the round's fix plan
+  (`templates/fix-plan.md`), written **before** the first fix was dispatched:
+  findings → fix plan → fix implementation, in that order. A round that fixed
+  something and names no plan is a round nobody can check the fixes against.
 - `reports <files>` — **exactly `s + i` files, one per reviewer**, each the
   `DETAIL:` path that reviewer returned. A review dispatch always requires its
   report file, clean or not — the "omit `DETAIL:` if nothing is longer" licence

@@ -70,6 +70,14 @@ passes too. Nor does it establish that a named report or coverage file says
 anything — their existence is checked, their contents are not, so
 `COVERED: <n>/<n>` goes unread — or that a round happened when it claims to.
 
+**Phase 3 also carries the fixture's only planned re-review round.** Its
+`round 2` declares `M=2 C=1` and names a `fixplan` file, which is what the
+fix-plan arm reads: a round that dispatched fixes must name the plan they were
+written from, and a plan named but absent reads exactly like a planned round, so
+both the field and the file are checked. `M=0 -> no round` records are exempt by
+construction — no fix ran, so there was nothing to plan — and the two such
+records elsewhere in this tree are what keep that exemption exercised.
+
 ## Current State
 - **Phase:** done (fixture)
 - **Next action:** none; this run directory is a linter fixture
@@ -98,5 +106,8 @@ anything — their existence is checked, their contents are not, so
         and which earlier round's findings this one re-reads — and it is that
         prose, not any malformation, that pushes the fields below past the
         400-character window a terse worked example never reached
-      · reports p3-review-{a,b,int}.md · coverage p3-coverage.md → no findings
+      · reports p3-review-{a,b,int}.md · coverage p3-coverage.md → F-001, F-002
+      → round 2: M=2 C=1 → 1 slice + 0 integration · fixplan p3-fixplan-r2.md
+        · reports p3-rr2-a.md · coverage p3-rr2-coverage.md
+        → F-001 closed, F-002 closed
 - [x] T4 — file coverage p3-coverage.md into the phase ledger · W1 · deps T3 — `ddddddd`

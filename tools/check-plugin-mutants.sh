@@ -169,14 +169,14 @@ a='M=9 C=1 \u2192 1 slice + 0 integration'
 assert s.count(a)==1, 'mutant is a no-op: the re-review round example no longer declares M=9 C=1 over one slice exactly once'
 out=s.replace(a, 'M=9 \u2192 1 slice + 0 integration')
 assert 'M=9 C=' not in out, 'mutant is a no-op: the cluster count was not removed'
-assert '1 slice + 0 integration \u00b7 reports p3-rr2-a.md' in out, 'mutant is a no-op: it took the declared counts or the reports field too, so a kill could come from the reviewer-count arm instead'
+assert '1 slice + 0 integration \u00b7 fixplan p3-fixplan-r2.md' in out, 'mutant is a no-op: it took the declared counts or the fixplan field too, so a kill could come from the reviewer-count or fix-plan arm instead'
 p.write_text(out)\""
 run_mutant "re-review round's cluster count disagrees with its slice count" "$J \"import pathlib
 p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md'); s=p.read_text()
 a='M=9 C=1 \u2192 1 slice + 0 integration'
 assert s.count(a)==1, 'mutant is a no-op: the re-review round example no longer declares M=9 C=1 over one slice exactly once'
 out=s.replace(a, 'M=9 C=2 \u2192 1 slice + 0 integration')
-assert 'M=9 C=2 \u2192 1 slice + 0 integration \u00b7 reports p3-rr2-a.md' in out, 'mutant is a no-op: the disagreement did not apply, or it moved the slice count with it'
+assert 'M=9 C=2 \u2192 1 slice + 0 integration \u00b7 fixplan p3-fixplan-r2.md' in out, 'mutant is a no-op: the disagreement did not apply, or it moved the slice count with it'
 p.write_text(out)\""
 
 # --- the linter must also be able to fail over a REAL run directory ---
@@ -389,7 +389,9 @@ if [ "$(grep -c "\[x\] RV" "$f")" != 3 ]; then
   echo "mutant is a no-op: the fixture no longer holds exactly three closed RV records"
 else
   sed -i "/\[x\] RV/d" "$f"
+  sed -i "/→ round /d" "$f"
   grep -q "\[x\] RV" "$f" && echo "mutant is a no-op: the closed records were not removed"
+  grep -q "→ round " "$f" && echo "mutant is a no-op: an appended round survived, and a round record is itself a closed round the linter counts"
 fi'
 # Both "missing" branches must report a NAMED failure of their own, and each
 # mutant below is what says so: neutralise either branch and its mutant is the
@@ -1284,7 +1286,7 @@ fi'
 # Nine rule statements reached this branch stated in prose and held by nothing:
 # the `C=<n>` rule in all three files that state it, the coverage table's
 # distinctness rule in both, the fix diff's slice distinctness in both, the
-# Invariant's reviewer-evidence exception, the pre-`RV` recording rule, the
+# Invariant's reviewer-evidence exception, the
 # coverage table's row grammar, and Rule 5b's one `Files:` exception at both
 # ends. Every one was removed individually and `check-plugin.sh` reported PASS.
 # Two of them are worse than unheld: the gate hard-FAILs an `M=` round with no
@@ -1423,21 +1425,6 @@ assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and t
 assert 'the number of blocking f-ids this fix-mode run targeted' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
 assert 'm=0 \u2192 no round' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
 assert 'one reviewer per file cluster' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
-assert 'a pre-'+bt+'rv'+bt+' round is recorded in '+bt+'findings.md'+bt+', and nowhere else' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
-p.write_text(out)\""
-run_mutant "the pre-RV recording rule blurred in fix-loop.md" "$J \"import pathlib,re
-p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
-s=p.read_text(); bt=chr(96); ap=chr(39); ws=chr(92)+'s+'
-flat=lambda x: ' '.join(x.split()).lower()
-a=re.compile(ws.join([re.escape(x) for x in ['A', 'pre-'+bt+'RV'+bt, 'round', 'is', 'recorded', 'in', bt+'findings.md'+bt+',', 'and', 'nowhere', 'else']]), re.I)
-assert len(a.findall(s))==1, 'mutant is a no-op: the phrase this mutant names is absent, reworded or duplicated in that file'
-out=a.sub('A round run before the review is recorded wherever it fits', s)
-assert out!=s, 'mutant is a no-op: the phrase was not blurred'
-assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
-assert 'the number of blocking f-ids this fix-mode run targeted' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
-assert 'm=0 \u2192 no round' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
-assert 'one reviewer per file cluster' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
-assert 'the round forms that carry no reviewer evidence are the whole of the exception' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
 p.write_text(out)\""
 run_mutant "the coverage-row grammar blurred in SKILL.md" "$J \"import pathlib,re
 p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
@@ -1576,11 +1563,13 @@ p.write_text(out)"'
 run_mutant "worked one-slice round adds an integration reviewer" "$J \"import pathlib
 p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
 s=p.read_text(); mid=chr(183)
-a='M=1 C=1 → 1 slice + 0 integration ' + mid + ' reports p3-rr4-a.md'
+a='M=1 C=1 → 1 slice + 0 integration'
 assert s.count(a)==1, 'mutant is a no-op: the worked pin round is absent, reworded or duplicated'
-out=s.replace(a, 'M=1 C=1 → 1 slice + 1 integration ' + mid + ' reports p3-rr4-{a,b}.md')
+out=s.replace(a, 'M=1 C=1 → 1 slice + 1 integration')
+out=out.replace(mid + ' reports p3-rr4-a.md', mid + ' reports p3-rr4-{a,b}.md')
 assert out!=s, 'mutant is a no-op: the integration reviewer was not added'
 assert 'M=1 C=1' in out, 'mutant is a no-op: the cluster count went too, so a kill could come from the cluster-count arm instead'
+assert 'reports p3-rr4-{a,b}.md' in out, 'mutant is a no-op: the report list did not grow with the reviewer count, so a kill could come from the file-count arm instead'
 p.write_text(out)\""
 
 
@@ -1649,6 +1638,32 @@ else
   sed -i "s|members land independently|members are reviewed per task|" "$f"
   grep -qF "members are reviewed per task" "$f" || echo "mutant is a no-op: the per-task review of wave members was not re-introduced"
   grep -qF "No member is reviewed before its merge" "$f" || echo "mutant is a no-op: the no-review-before-merge sentence went too"
+fi'
+
+# Fix planning precedes fixing, or the round is a sequence of reactions. Phase
+# 3's round 2 is the fixture's only planned round, so both mutants are
+# attributable: nothing else names a fixplan.
+run_mutant "run tracker fix round names no fix plan" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if ! grep -qF "fixplan p3-fixplan-r2.md" "$f"; then
+  echo "mutant is a no-op: the fixture round no longer names a fix plan"
+else
+  sed -i "s| · fixplan p3-fixplan-r2.md||" "$f"
+  grep -qF "fixplan" "$f" && echo "mutant is a no-op: a fixplan field is still on the round"
+  grep -qF "M=2 C=1" "$f" || echo "mutant is a no-op: the M= declaration went with it, so a kill could come from a sizing arm instead"
+  grep -qF "reports p3-rr2-a.md" "$f" || echo "mutant is a no-op: the reports field went too, so a kill could come from the report arm instead"
+fi'
+run_mutant "run tracker cites a fix plan that is not in agent-output" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if ! grep -qF "fixplan p3-fixplan-r2.md" "$f"; then
+  echo "mutant is a no-op: the fixture round no longer names p3-fixplan-r2.md"
+elif [ -e tools/fixtures/run-ok/agent-output/p3-fixplan-r9.md ]; then
+  echo "mutant is a no-op: p3-fixplan-r9.md exists, so the renamed plan would be found"
+else
+  sed -i "s|fixplan p3-fixplan-r2.md|fixplan p3-fixplan-r9.md|" "$f"
+  grep -qF "fixplan p3-fixplan-r9.md" "$f" || echo "mutant is a no-op: the rename did not apply"
 fi'
 
 echo

@@ -211,12 +211,13 @@ The `[ ]` form carries nothing else: at GATE 2 no task has a hash, and a waved
 phase's slice count still has latitude in it (one slice per wave, or per
 adjacent pair of small waves). Both are filled in at dispatch.
 
-**Closing it takes artifacts, not adjectives** — four fields, each checkable by
+**Closing it takes artifacts, not adjectives** — these fields, each checkable by
 someone who was not there, all paths relative to `agent-output/`:
 
 | Field | What it must satisfy |
 | --- | --- |
 | `N=<tasks> → <s> slice + <i> integration` | Which number `s` must match depends on the regime, and the declaration's own key says which — the regimes are the table below. Whichever one sized it, **`i` is 1 whenever `s > 1`**, and 0 when `s` is 1, because one slice already sees the whole diff. |
+| `fixplan <file>` | Fix rounds only: **required on a round declaring `M=<m>` with `m >= 1`**, absent from an `M=0 → no round` record. The round's fix plan (`templates/fix-plan.md`), written before the first fix was dispatched — findings → fix plan → fix implementation, in that order. A round that fixed something and names no plan is a round whose fixes nobody can check against a scope. |
 | `coverage <file>` | One file holding **the slice assignment table above the `git log --oneline PB..PH`**, and ending with the verdict line `COVERED: <n>/<n> commits`. All three: a bare log is the input to a coverage judgement rather than the judgement, and a table with a gap in it sits above the log just as happily as one without. Anything short of `<n>/<n>` does not close the line. The table's own shape is fixed, below the regimes. |
 | `→ <F-IDs>` or `→ no findings` | What the round produced. |
 
@@ -271,8 +272,9 @@ passes.
 are read against the round they sit in, never against the whole line:
 
 ```markdown
-      → round 2: M=9 C=1 → 1 slice + 0 integration · reports p3-rr2-a.md
-        · coverage p3-rr2-coverage.md → F-012 closed, F-014 raised
+      → round 2: M=9 C=1 → 1 slice + 0 integration · fixplan p3-fixplan-r2.md
+        · reports p3-rr2-a.md · coverage p3-rr2-coverage.md
+        → F-012 closed, F-014 raised
 ```
 
 The fan-out is **one reviewer per file cluster in the fix diff**, integration

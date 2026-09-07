@@ -81,19 +81,19 @@ dispatching, never after.
 | Scope | Fix-loop iteration | Cap | Deepest fix-mode depth this chain | Cap |
 | ----- | ------------------ | --- | --------------------------------- | --- |
 | Phase 2 | 2 | 5 | 1 | 2 |
-| Phase 3 pre-RV | 1 | 5 | 0 | 2 |
 | RVJ split 4a+4b | 1 | 5 | 0 | 2 |
 
-**Scope** is a phase, a phase's pre-`RV` rounds (build-gate failures fixed before
-its review ever ran), or an `RVJ` (a split or lane join). Each gets its own row
-so no review arrives at a spent budget.
+**Scope** is a phase or an `RVJ` (a split or lane join). Each gets its own row
+so no review arrives at a spent budget. A build-gate failure before the phase's
+review has run is not a scope here at all: it is unfinished implementation,
+repaired inside IMPLEMENT, and it opens no round and spends no budget.
 
 Iteration counters are **per phase** (a split's siblings share the split group's
 counter; an `RVJ` gets its **own** row, so a joint review's fix loop is not
 spending a budget three siblings already used); depth is **per recursion
 chain** — Stage 4's own run of a phase is
-depth 0, its first fix-mode recursion is depth 1. Open a new row the moment a new **scope** starts — a phase, its pre-`RV` rounds,
-or an `RVJ` — and never edit another scope's row. A backfilled review opens its
+depth 0, its first fix-mode recursion is depth 1. Open a new row the moment a new **scope** starts — a phase or an `RVJ` — and
+never edit another scope's row. A backfilled review opens its
 own `<phase> backfill` row rather than reusing the phase's spent one.
 
 ## Iteration log (convergence rule input)

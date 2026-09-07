@@ -548,18 +548,22 @@ for n in skill_names:
             # lives in the authority's *Re-review fan-out* and in `SKILL.md`'s
             # summary of it. Either can go while the other stands.
             #
-            # THE TWO CROSS-REFERENCED EXCEPTIONS are held because other
-            # sites cite them BY NAME rather than restating them. The
+            # THE ONE CROSS-REFERENCED EXCEPTION is held because other
+            # sites cite it BY NAME rather than restating it. The
             # Invariant's reviewer-evidence exception is cited as
             # `references/fix-loop.md`'s *Invariants* from that file's own
             # ledger step and from `SKILL.md` in two places — grep the marker
             # for the current set — and delete it and every one of those
             # citations dangles while the texts still read as if the rule were
-            # somewhere. The pre-`RV`
-            # recording rule is the other: it is what says a round run before
-            # any reviewer existed is recorded in `findings.md` and does NOT
-            # close the `RV` line, so losing it re-opens a green tick over a
-            # phase no slice reviewer ever read.
+            # somewhere.
+            #
+            # There were TWO. The second was the pre-`RV` round's recording
+            # rule, and it went with the pre-`RV` round itself: a build gate
+            # failing before any reviewer exists is unfinished implementation
+            # now, repaired inside IMPLEMENT, so there is no such round to
+            # record and no rule to hold. Do not restore it looking for a
+            # missing pair — `references/implement.md` states the replacement,
+            # and the sweep for a task-level review is what holds it.
             #
             # THE COVERAGE ROW GRAMMAR is held because an ARM READS IT. This
             # gate takes the report key from a row's first cell and the range
@@ -589,7 +593,6 @@ for n in skill_names:
             #          "the slice distinctness rule blurred in fix-loop.md",
             #          "the slice distinctness rule blurred in SKILL.md",
             #          "the Invariant's reviewer-evidence exception blurred in fix-loop.md",
-            #          "the pre-RV recording rule blurred in fix-loop.md",
             #          "the coverage-row grammar blurred in SKILL.md",
             #          "the coverage-row grammar blurred in run-state.md".
             # ONE CLAUSE PER ENTRY, carried on the entry. The message used to
@@ -660,11 +663,6 @@ for n in skill_names:
                  "whole of the exception", AUTH,
                  "Lose it and every site that reads the exception from here "
                  "rather than restating it cites a rule stated nowhere."),
-                ("the pre-`RV` round's recording rule",
-                 "a pre-`rv` round is recorded in `findings.md`, and nowhere "
-                 "else", AUTH,
-                 "Lose it and a fix round run before any reviewer existed can "
-                 "close the `RV` line no slice reviewer ever read."),
                 ("the coverage table's row grammar",
                  "keyed by its report filename, with that reviewer's exact "
                  "range in the row's second cell, and every report file the "
@@ -1083,9 +1081,9 @@ if len(FAIL) == _inv_before:
        "`Files:` exception included — the re-review sizing phrase present in "
        "every file that states it, the `C=<n>` rule and both distinctness "
        "rules and the coverage table's row grammar present in every file that "
-       "states them, the `RV` evidence exception and the pre-`RV` recording "
-       "rule present in the authority that the sites citing them read them "
-       "from, Stage 5's linter duty, its absence statement and what it does "
+       "states them, the `RV` evidence exception present in the authority "
+       "that the sites citing it read it from, Stage 5's linter duty, its "
+       "absence statement and what it does "
        "with a `FAIL` all held, the `M=0` "
        "licence rule present in `SKILL.md` by a phrase its worked example "
        "does not carry, a template shipped for every run-state file the "
@@ -1198,7 +1196,9 @@ else: ok("no absolute home paths, private project names, or foreign ticket prefi
 # only be conservative about the positive checks.
 # Mutants: "no-round round declares a reports field",
 #          "no-round round names no closure route",
-#          "no-round round names a pinned route".
+#          "no-round round names a pinned route",
+#          "run tracker fix round names no fix plan",
+#          "run tracker cites a fix plan that is not in agent-output".
 print("\n== pipeline review-line examples ==")
 start = re.compile(r"(?:-\s*)?\[x\]\s*(RVJ|RV)\b|(?:->|→)\s*(round)\s+\d+\s*:")
 decl  = re.compile(r"(?P<key>N|M)=(?P<n>\d+)\s*(?P<waved>waved\s+)?(?:C=(?P<C>\d+)\s*)?"
@@ -1206,6 +1206,7 @@ decl  = re.compile(r"(?P<key>N|M)=(?P<n>\d+)\s*(?P<waved>waved\s+)?(?:C=(?P<C>\d
 rpt   = re.compile(r"reports\s+(.+?)(?=\s*[·|]|\s+coverage\b|\s*$)")
 cov   = re.compile(r"coverage\s+\S+\.md")
 nor   = re.compile(r"\bM=0\s*(?:->|→)\s*no\s+round\b")
+fixp  = re.compile(r"fixplan\s+(\S+\.md)")
 route = re.compile(r"\bF-\d+\s*,?\s+(deleted|user-ruled false positive)")
 pinrt = re.compile(r"\bpinned by\b")
 outc  = re.compile(r"(?:->|→)\s*(?:no findings\b|F-\d+)")
@@ -1537,6 +1538,31 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
                 viol += 1; bad(f"{where}: declares {want} reviewers, lists {got} report files")
             if not cov.search(rec):
                 viol += 1; bad(f"{where}: closed review round with no coverage file")
+            # A ROUND THAT DISPATCHED FIXES MUST NAME THE PLAN THEY CAME FROM.
+            # `M=<m>` with m >= 1 IS that round: `M` is the count of blocking
+            # F-IDs the fix run targeted, less every one closed by a route that
+            # leaves no ownable commit, so m >= 1 means fix commits exist.
+            # Findings -> fix plan -> fix implementation was prose only, and the
+            # path for three-or-fewer findings explicitly skipped the plan,
+            # which is how a round became a sequence of unplanned single fixes.
+            # `M=0 → no round` records are excluded by the `nor` branch above,
+            # which `continue`s before reaching here: no fix ran, so there was
+            # nothing to plan.
+            if d.group("key") == "M" and int(d.group("n")) >= 1:
+                fp = fixp.search(rec)
+                if not fp:
+                    viol += 1
+                    bad(f"{where}: round declaring `M={d.group('n')}` names no "
+                        "`fixplan <file>.md` — fixes were dispatched with no "
+                        "plan on disk for anyone to check them against. "
+                        "REMEDY: write the round's fix plan to agent-output/ "
+                        "and name it on the round")
+                elif agent_output is not None and not (agent_output / fp.group(1)).exists():
+                    viol += 1
+                    bad(f"{where}: round names fix plan {fp.group(1)!r}, which "
+                        "is not in agent-output/ — a named-but-absent plan "
+                        "reads exactly like a planned round. REMEDY: write the "
+                        "file, or correct the name")
             if agent_output is not None and r:
                 for nm in expand_braces(r.group(1)):
                     if not (agent_output / nm).exists():

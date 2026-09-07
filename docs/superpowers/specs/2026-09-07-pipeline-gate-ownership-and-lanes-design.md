@@ -51,8 +51,28 @@ to the gate that produced its findings, and every rule that today says `RV`
 says `review_gate` instead:
 
 ```
-review_gate → findings → FIX_PLAN → FIX_IMPLEMENT → RE_REVIEW(review_gate) → clean → PASS(gate)
+review_gate → findings → FIX_PLAN → FIX_IMPLEMENT → RE_REVIEW(review_gate) → clean → CLOSE(review_gate)
 ```
+
+**The generic terminal operation is `CLOSE(review_gate)`, not `PASS`.** `PASS`
+is reserved for **phase acceptance** and means the phase may normally advance —
+and a leading lane-join `RVJ` does not accept the joining phase, it only gates
+entry to it. Collapsing the two would license exactly the error this issue
+exists to prevent. So closing a gate is one operation, and what it unlocks
+depends on which gate closed:
+
+```
+CLOSE(RV)              → phase PASS
+CLOSE(trailing RVJ)    → NEXT PHASE
+CLOSE(leading RVJ)     → IMPLEMENT JOINING PHASE
+```
+
+```
+A CLEAN LEADING RVJ MUST NEVER MARK THE JOINING PHASE PASS.
+```
+
+After its leading `RVJ` closes, a joining phase still owes the whole of
+`IMPLEMENT → RV → PASS` on its own tasks.
 
 - A round is appended **under its own gate's line**. An `RVJ`-owned round is
   legal; today it is undefined.
@@ -328,8 +348,34 @@ The closed list becomes **`user-ruled false positive`** and **`withdrawn`** —
 the two routes that produce no commit. `deleted` comes off it and behaves like
 any other fix: fix plan, deletion commit, focused re-review, then close.
 
+**`withdrawn` is narrow, and defined so it cannot become an escape hatch.** A
+finding is `withdrawn` when it is removed during consolidation or reconciliation
+because it is:
+
+- an exact **duplicate** of another stable F-ID;
+- **malformed**, or not actually a finding;
+- **superseded** by another finding that fully represents the same issue;
+
+**and no repository change has been made for that finding.** A finding may be
+marked `withdrawn` only *before* any fix commit for it exists. The ledger
+records the reason:
+
+```
+withdrawn → <reason> → superseded by F-NNN | duplicate of F-NNN | malformed
+```
+
+`withdrawn` does **not** mean any of these, and each is a route to the fix loop
+rather than out of it: the orchestrator disagrees with the finding; the finding
+seems low value; ignoring it is the easiest fix; text or code was deleted; code
+was changed; tests were changed; documentation was changed; the finding was
+partially fixed; a reviewer stopped mentioning it.
+
+**If any repository-changing commit exists for the finding, `withdrawn` is
+forbidden** — that finding takes `fix plan → fix implementation → re-review →
+closure` like any other.
+
 `M=0 → no round` is redefined: legal only when the iteration produced **zero
-ownable repository commits**. Any commit means `M ≥ 1` and a round is owed. A
+repository-changing commits**. Any commit means `M ≥ 1` and a round is owed. A
 deletion's commit rejoins the coverage union like every other fix commit.
 
 ### How it is checked
@@ -338,6 +384,20 @@ The linter cannot count commits, but it can refuse an `M=0` record that names a
 commit-producing route. `deleted` becomes a **forbidden** route on an `M=0`
 round, exactly as `pinned by` already is (`check-plugin.py:1421`), and the
 accepted-route regex narrows to `user-ruled false positive|withdrawn`.
+
+`withdrawn` carries two further checks, because an unqualified `withdrawn` is
+precisely the escape hatch the definition forbids:
+
+- **It must state its reason.** A `withdrawn` route on a round is accepted only
+  in the form `withdrawn → superseded by F-NNN`, `withdrawn → duplicate of
+  F-NNN`, or `withdrawn → malformed`. A bare `withdrawn` is reported.
+- **It must not name a commit.** A ledger row whose `State` is `withdrawn` while
+  its `Closed by` cell names a commit hash is reported: a finding with a fix
+  commit cannot be withdrawn, and the hash is the evidence that one exists.
+
+Neither check can count commits either, and that limit is recorded rather than
+implied: the tracker and ledger are what the gate reads, so the reachable half
+is a route naming a hash and a route naming no reason.
 
 ---
 
@@ -405,8 +465,10 @@ un-fixed repo. Contractual prose gets a held-phrase pin.
 
 | # | Test | Mechanism |
 |---|---|---|
-| 1 | Leading RVJ blocker → fix → same RVJ re-review → joining phase IMPLEMENT | `run-rvj-fix` fixture + arm |
-| 2 | Trailing RVJ blocker → fix → same RVJ re-review → next phase | fixture + arm |
+| 1 | Leading RVJ blocker → fix → same RVJ re-review → `CLOSE(RVJ)` → **IMPLEMENT joining phase, not phase PASS** | `run-rvj-fix` fixture + arm |
+| 2 | Trailing RVJ blocker → fix → same RVJ re-review → `CLOSE(RVJ)` → NEXT PHASE | fixture + arm |
+| 2a | `RV` clean → `CLOSE(RV)` → phase PASS | existing arm + fixture |
+| 2b | A clean leading RVJ over a joining phase with unchecked tasks never reads as PASS | `run-lanes` fixture + existing no-advance arm |
 | 3 | Two concurrent lanes with different legal positions → PASS | `run-lanes` fixture |
 | 4 | Lane A points past its own unfinished phase → FAIL | mutant |
 | 5 | Lane B points past its own unfinished phase → FAIL | mutant |
@@ -414,7 +476,11 @@ un-fixed repo. Contractual prose gets a held-phrase pin.
 | 7 | `N=8 W=8 → 4 slice` FAIL; `N=12 W=1 → 1 slice` FAIL | mutants |
 | 8 | Integration reviewer stays boundary-conditional | existing arms, unchanged |
 | 9 | Deletion fix commit requires a fix plan and a re-review | route-list arm + mutant |
-| 10 | `M=0 → no round` legal only with zero repository commits | forbidden-route arm + mutant |
+| 9a | `withdrawn` as a duplicate of `F-NNN`, no repository change → `M=0` may be legal | route-form arm + fixture |
+| 9b | `withdrawn` with a commit hash in `Closed by` → FAIL | ledger arm + mutant |
+| 9c | A bare `withdrawn` naming no reason → FAIL | route-form arm + mutant |
+| 9d | A deletion route on an `M=0` round → FAIL | forbidden-route arm + mutant |
+| 10 | `M=0 → no round` legal only with zero repository commits; `user-ruled false positive` with no commit → legal | forbidden-route arm + mutant |
 | 11 | No task completion dispatches a formal reviewer | existing sweep, unchanged |
 | 12 | Review cannot start before all phase tasks complete | existing arm, unchanged |
 | 13 | Failed re-review cannot advance the phase | existing arm + new gate-scoped case |

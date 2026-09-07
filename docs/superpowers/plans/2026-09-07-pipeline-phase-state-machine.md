@@ -2956,3 +2956,32 @@ says what changed and why.
   `FINDINGS → FIX PLAN → FIX IMPLEMENTATION` block and the "scale the plan,
   never skip it" paragraph, and keep the ≤3-findings case as a *small plan*
   rather than a second path.
+
+### Task 4
+
+- **The digraph's `RVJ` edge was split.** The plan gave `Stage 4b` one outgoing
+  edge labelled `findings / next phase`, which conflates two outcomes: a joint
+  review with blocking findings must enter `FIX_PLAN`, not the next phase's
+  `IMPLEMENT`. It is now two edges — `blocking findings → FIX_PLAN` and
+  `clean / next phase → IMPLEMENT`. As written it was a state-machine
+  contradiction of the kind Task 12's checklist item 3 hunts for.
+- **The Stage 4 rewrite silently disarmed an existing arm, and the mutation
+  harness is what caught it.** The plan's replacement text said "a finding
+  arriving in another vocabulary is **re-tagged** by the predicate in
+  `references/fix-loop.md`", dropping the phrase
+  ``an incoming `Important` is re-tagged`` from `SKILL.md` altogether. Two
+  consequences, neither visible on a green `check-plugin.sh`:
+  1. the fourth-severity-tier arm passed **trivially** — with no `Important`
+     mention left in the skill, an arm that requires the tier to be named only
+     alongside its re-tag rule has nothing to check;
+  2. the mutant proving that arm can fail
+     (`"fourth severity tier named without its re-tag rule"`) became a no-op,
+     which the harness reports as `SURVIVED`.
+
+  Fixed by restoring the phrase verbatim in `DECIDE` rather than by retargeting
+  the mutant: the doc is better for saying what happens to an incoming
+  `Important` at the point where consolidation happens, and the arm keeps its
+  subject. **General lesson for Tasks 5, 6 and 10, which all rewrite held
+  prose:** an arm whose subject vanishes from the docs does not fail — it starts
+  checking nothing. Only the harness sees that. Run it after every prose rewrite
+  and read the `SURVIVED` diagnostics.

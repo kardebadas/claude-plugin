@@ -20,6 +20,12 @@ PASS=0; SURV=0; SURVIVORS=()
 # into silent no-ops — and discarding that message left the operator reading
 # `SURVIVED  <name>` with no way to tell a rotted mutant from a real hole in the
 # gate. A killed mutant still prints exactly one line, as before.
+# `grep` here may be ugrep, which parses a PATTERN BEGINNING WITH `-` as an
+# option and exits with a usage error — so `grep -qF "- [x] RV ..."` reports no
+# match rather than searching, and the mutant guarding on it silently reports
+# itself a no-op (measured: "run tracker advances past a phase with an open RV"
+# survived that way). Any pattern that can start with a dash takes `--` before
+# it, or anchors with `^-` as a regex instead of a fixed string.
 run_mutant() { # name, shell applied inside the copy
   local name="$1" script="$2" dir="$WORK/m" out
   rm -rf "$dir"; mkdir -p "$dir"
@@ -1687,6 +1693,71 @@ elif [ -e tools/fixtures/run-ok/agent-output/p3-fixplan-r9.md ]; then
 else
   sed -i "s|fixplan p3-fixplan-r2.md|fixplan p3-fixplan-r9.md|" "$f"
   grep -qF "fixplan p3-fixplan-r9.md" "$f" || echo "mutant is a no-op: the rename did not apply"
+fi'
+
+# Review before the phase finished, in both shapes a real run produces: a task
+# never started, and a task dispatched and still out. Only the box character
+# changes, so the kill is attributable to the review-not-early arm and not to a
+# hash or field arm.
+run_mutant "run tracker reviews a phase with an unchecked task" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if [ "$(grep -c "^- \[x\] T2 —" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture has no single closed T2 to reopen"
+else
+  sed -i "s|^- \[x\] T2 —|- [ ] T2 —|" "$f"
+  grep -q "^- \[ \] T2 —" "$f" || echo "mutant is a no-op: T2 was not reopened"
+  grep -q "^- \[x\] RV — review fan-out · N=8" "$f" || echo "mutant is a no-op: Phase 2s round is no longer closed, so there is no started review to be early"
+fi'
+run_mutant "run tracker reviews a phase with a task still in progress" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if [ "$(grep -c "^- \[x\] T3 —" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture has no single closed T3 to reopen"
+else
+  sed -i "s|^- \[x\] T3 —|- [~] T3 —|" "$f"
+  grep -q "^- \[~\] T3 —" "$f" || echo "mutant is a no-op: T3 was not set in-progress"
+  grep -q "^- \[x\] RV — review fan-out · N=9" "$f" || echo "mutant is a no-op: Phase 3s round is no longer closed, so there is no started review to be early"
+fi'
+
+# The advancement invariant, attacked three ways. The first two make a phase
+# unfinished and leave Current State pointing past it; the third moves the
+# pointer over a phase the boxes alone cannot show as unfinished.
+run_mutant "run tracker advances past a phase with an open RV" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if ! grep -qF -- "- [x] RV — review fan-out · N=1" "$f"; then
+  echo "mutant is a no-op: Phase 1s RV is not in the expected closed form"
+else
+  sed -i "s|- \[x\] RV — review fan-out · N=1|- [ ] RV — review fan-out · N=1|" "$f"
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T3|" "$f"
+  grep -qF "Next action:** Phase 3" "$f" || echo "mutant is a no-op: Next action was not moved past Phase 1"
+  grep -qF -- "- [ ] RV — review fan-out · N=1" "$f" || echo "mutant is a no-op: Phase 1s RV was not reopened"
+fi'
+run_mutant "run tracker advances past a phase with an open blocking finding" '
+enable_run || exit 0
+d=tools/fixtures/run-ok
+if [ -e "$d/findings.md" ]; then
+  echo "mutant is a no-op: the fixture already has a findings.md, so a kill would not prove the ledger half runs"
+else
+  printf "%s\n" "| ID | Sev | Phase | File:line | Finding | State | Closed by |" \
+                "| -- | --- | ----- | --------- | ------- | ----- | --------- |" \
+                "| F-001 | Critical | 1 | src/x.php:1 | mutant | open | |" > "$d/findings.md"
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T3|" "$d/progress.md"
+  grep -qF "Next action:** Phase 3" "$d/progress.md" || echo "mutant is a no-op: Next action was not moved past Phase 1"
+  grep -qE "^\| F-001 .*\| open \|" "$d/findings.md" || echo "mutant is a no-op: the open blocking row was not written in the shape the arm reads"
+fi'
+run_mutant "run tracker next action names a later phase than its own state" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if [ "$(grep -c "^- \[x\] T2 —" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture has no single closed T2 to reopen"
+else
+  sed -i "s|^- \[x\] T2 —|- [ ] T2 —|" "$f"
+  sed -i "s|- \[x\] RV — review fan-out · N=8|- [ ] RV — review fan-out · N=8|" "$f"
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 4 T5|" "$f"
+  grep -qF "Next action:** Phase 4" "$f" || echo "mutant is a no-op: Next action was not moved"
+  grep -qF -- "- [ ] RV — review fan-out · N=8" "$f" || echo "mutant is a no-op: Phase 2s RV stayed closed, so the review-not-early arm would kill this instead"
 fi'
 
 echo

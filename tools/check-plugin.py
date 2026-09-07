@@ -1941,6 +1941,40 @@ else:
 #          "run tracker has no closed review round",
 #          "run directory has no progress.md",
 #          "run directory has no agent-output".
+def parse_tracker_phases(text):
+    """Split a tracker into phases with their task and RV/RVJ bullet states.
+
+    A phase is a `## Phase <x>` heading; its bullets are the `- [ ] T<n>` and
+    `- [ ] RV`/`RVJ` lines under it, until the next such heading. Returned in
+    FILE ORDER, because that order is what "a later phase" means to every arm
+    that reads this. Only the box character is read — the fields after it are
+    `lint_review_lines`' business, and duplicating any of that here would give
+    two parsers of one grammar.
+
+    `tasks` entries are `(state, name, lineno)`; `reviews` entries are
+    `(kind, state, lineno)`. The two shapes differ because the arms want
+    different things first: a task's state, a review's kind.
+    """
+    phases, cur = [], None
+    for n, line in enumerate(text.split("\n"), 1):
+        mh = re.match(r"##\s+(Phase\s+[^\s—·]+)", line)
+        if mh:
+            cur = {"label": mh.group(1).strip(), "line": n,
+                   "tasks": [], "reviews": []}
+            phases.append(cur)
+            continue
+        if cur is None:
+            continue
+        mb = re.match(r"\s*-\s*\[([ x~])\]\s*(RVJ|RV|T[0-9A-Za-z.]+)", line)
+        if mb:
+            st, what = mb.group(1), mb.group(2)
+            if what in ("RV", "RVJ"):
+                cur["reviews"].append((what, st, n))
+            else:
+                cur["tasks"].append((st, what, n))
+    return phases
+
+
 if RUN_DIR is not None:
     print(f"\n== run tracker: {relpath(RUN_DIR)} ==")
     tracker = RUN_DIR / "progress.md"
@@ -1949,13 +1983,14 @@ if RUN_DIR is not None:
             "something that is not a pipeline run directory, so nothing was "
             "checked. REMEDY: pass the run directory that holds the run's "
             "`progress.md`")
-    elif (terr := read(tracker)[1]):
+    elif (terr := (_tr := read(tracker))[1]):
         bad(f"{relpath(tracker)} cannot be read: {terr} — the "
             "tracker exists and may hold closed rounds, so nothing here is a "
             "statement about whether this run has been reviewed, and in "
             "particular not that it has not been. REMEDY: make the file "
             "readable and run again")
     else:
+        ttext = _tr[0]
         ao = RUN_DIR / "agent-output"
         if not ao.is_dir():
             bad(f"{relpath(ao)} does not exist — a closed review round has "
@@ -1981,6 +2016,126 @@ if RUN_DIR is not None:
                  "declared report file and every declared coverage file "
                  "present in agent-output/, and no round of two or more "
                  "slices repeating a range across its coverage rows")
+
+        # ---- review may not begin while a task in the phase is unchecked ----
+        # The failure this catches is the old per-task shape wearing the new
+        # vocabulary: reviewers dispatched over T1..T3 while T4..T8 are still
+        # out, which is per-task review at a coarser grain and re-splits the
+        # phase into pieces nobody reviewed as a unit. It is checkable from the
+        # tracker alone, because a started round and an unchecked task line
+        # cannot both be true of a phase reviewed as a whole.
+        #
+        # `[~]` COUNTS AS STARTED. That is the point of the marker: it is
+        # written before the reviewers go out, so a round that is merely
+        # dispatched — not yet closed — is already too early if a task of its
+        # own phase is open.
+        # Mutants: "run tracker reviews a phase with an unchecked task",
+        #          "run tracker reviews a phase with a task still in progress".
+        _phs = parse_tracker_phases(ttext)
+        _early = []
+        for _ph in _phs:
+            _opent = [x for x in _ph["tasks"] if x[0] != "x"]
+            _startedr = [r for r in _ph["reviews"] if r[1] in ("~", "x")]
+            if _opent and _startedr:
+                _early.append(
+                    f"{relpath(tracker)}:{_startedr[0][2]}: {_ph['label']}'s "
+                    f"{_startedr[0][0]} is `[{_startedr[0][1]}]` while "
+                    f"{len(_opent)} task line(s) in that phase are not `[x]` "
+                    f"(first at line {_opent[0][2]}, {_opent[0][1]})")
+        if _early:
+            for _e in _early:
+                bad(_e + " — a phase is reviewed as one unit once all of its "
+                    "tasks have landed; a round opened earlier reviews part of "
+                    "a phase, which is per-task review at a coarser grain. "
+                    "REMEDY: finish the phase's tasks, then open its review. "
+                    "If the round did cover everything, the unchecked task "
+                    "lines are the thing that is wrong and Rule 4 "
+                    "reconciliation is the fix")
+        elif _phs:
+            ok(f"{len(_phs)} phases, none with a review round opened while one "
+               "of its own tasks was unchecked")
+
+        # ---- Current State may not point past an unfinished phase ----
+        # This is the advancement invariant, checked. Three ways a phase is
+        # unfinished, and the tracker's own "next unchecked line" rule can only
+        # see the first:
+        #   1. a bullet in it is not `[x]` — an open task, or an open RV/RVJ;
+        #   2. a blocking finding scoped to it is still `open` in findings.md —
+        #      a fix loop interrupted mid-round leaves every box `[x]`, so the
+        #      next unchecked line points PAST the phase that owns the finding;
+        #   3. a round names a fix plan that is not on disk (arm above).
+        # The history this exists for: a real run skipped the review fan-out for
+        # seven consecutive phases because every gate read "no open blocking
+        # IDs", which is vacuously true when review never ran.
+        #
+        # findings.md is read ONLY IF PRESENT — `tools/fixtures/run-ok` has
+        # none — and the pass line then says the ledger half went unchecked. An
+        # absent ledger must not read as an empty one, which is the same
+        # mistake in miniature.
+        # Mutants: "run tracker advances past a phase with an open RV",
+        #          "run tracker advances past a phase with an open blocking finding",
+        #          "run tracker next action names a later phase than its own state".
+        _idx = {ph["label"].lower(): i for i, ph in enumerate(_phs)}
+        _blockers = []
+        for _i, _ph in enumerate(_phs):
+            _why = []
+            if any(x[0] != "x" for x in _ph["tasks"]):
+                _why.append("an open task line")
+            if any(r[1] != "x" for r in _ph["reviews"]):
+                _why.append("an open RV/RVJ line")
+            if _why:
+                _blockers.append((_i, _ph["label"], " and ".join(_why)))
+
+        _ledger, _ltext = RUN_DIR / "findings.md", None
+        if _ledger.is_file():
+            _ltext, _lerr = read(_ledger)
+            if _lerr:
+                bad(f"{relpath(_ledger)} cannot be read: {_lerr} — it may hold "
+                    "open blocking findings, so nothing here says this run has "
+                    "none. REMEDY: make the file readable and run again")
+                _ltext = None
+        if _ltext:
+            for _row in re.finditer(
+                    r"^\|\s*(F-\d+)\s*\|\s*([^|]+?)\s*\|\s*([^|]*?)\s*\|"
+                    r"[^|]*\|[^|]*\|\s*open\s*\|", _ltext, re.M):
+                _fid, _sev, _phl = (_row.group(1), _row.group(2).strip(),
+                                    _row.group(3).strip())
+                if _sev.lower() not in ("critical", "major", "bug"):
+                    continue
+                _pi = _idx.get(f"phase {_phl}".lower())
+                if _pi is not None:
+                    _blockers.append((_pi, f"Phase {_phl}",
+                                      f"open blocking finding {_fid} ({_sev})"))
+        _blockers.sort(key=lambda b: b[0])
+
+        _ns = re.search(r"\*\*Next action:\*\*\s*(.+)", ttext)
+        _named = None
+        if _ns:
+            _m = re.search(r"[Pp]hase\s+([0-9A-Za-z.]+)", _ns.group(1))
+            if _m:
+                _named = _idx.get(f"phase {_m.group(1)}".lower())
+
+        _ledger_note = ("" if _ltext else
+                        " (this run has no findings.md, so the ledger half of "
+                        "that went unchecked)")
+        if _blockers and _named is not None and _named > _blockers[0][0]:
+            bad(f"{relpath(tracker)}: Next action names a phase later than "
+                f"{_blockers[0][1]}, which still has {_blockers[0][2]} — a "
+                "phase is complete only when its tasks are `[x]`, its `RV` is "
+                "`[x]` and every blocking finding scoped to it is closed. "
+                "Advancing here is the orchestration failure this gate exists "
+                "for: implementation complete is not phase complete, and an "
+                "empty ledger is what an unreviewed phase looks like too. "
+                "REMEDY: point Next action at that phase's own next action — "
+                "its review, or its fix loop")
+        elif _named is not None:
+            ok("Next action does not point past an unfinished phase"
+               + _ledger_note)
+        elif _blockers:
+            ok(f"Next action names no phase; earliest unfinished is "
+               f"{_blockers[0][1]} ({_blockers[0][2]})" + _ledger_note)
+        else:
+            ok("no unfinished phase in the tracker" + _ledger_note)
 
 # ---- every mutant this file cites by name must actually exist ----
 # The arms above cite their proofs by NAME: a `Mutant`/`Mutants` comment marker

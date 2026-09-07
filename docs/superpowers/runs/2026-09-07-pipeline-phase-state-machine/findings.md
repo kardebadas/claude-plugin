@@ -41,14 +41,43 @@ emitted `Important`.
 | F-023 | Minor | gate | `tools/check-plugin.py` CI arm | The fixture-coverage check matches by substring, so one fixture's step can satisfy another's requirement | closed | fix `da34392` — exact step match, not substring |
 | F-024 | Minor | fixture | `tools/fixtures/*` | No run-mode fixture contains an `RVJ`, so the `RVJ` arms have no conforming run-mode input | closed | fix `da34392` — `run-open-rv` Phase 3 carries a leading `RVJ` |
 
+## Round 2 ledger (raised by the round-1 fix's own re-review)
+
+| ID | Sev | Area | File:line | Finding | State | Closed by |
+| -- | --- | ---- | --------- | ------- | ----- | --------- |
+| N-001 | Critical | gate | `check-plugin.py:2339` | `**Phase:**` required the literal word "phase" inside its value, which the template's `<number and name>` form never contains — so the field was unreadable on every conforming tracker and F-007's measured defect still passed | closed | `_named_phase` accepts the bare leading id |
+| N-002 | Critical | gate | `check-plugin.py:2240` | A leading `RVJ` satisfied F-002's "has a review line" test, so a joining phase with all tasks `[x]` and no `RV` of its own was not a blocker — F-002 and F-004 read one list and disagreed about what an `RVJ` covers | closed | the test asks for an `RV` specifically |
+| N-003 | Major | gate | `check-plugin.py:2298` | The row-width check applied the blocking header's width to every `F-` row in the file, including the narrower *Deferred Minor findings* table the template ships — so any run deferring one Minor failed the gate | closed | rows scoped to the blocking table only |
+| N-004 | Major | gate | `check-plugin.py:2352` | With `**Phase:**` unreadable, the "neither field names a phase" branch fired on a template-conforming Current State whenever any phase was unfinished — i.e. the ordinary mid-run case | closed | N-001's fix resolves it |
+| N-005 | Minor | gate | `check-plugin.py:1552` | The boundary test enumerated negations, so `not applicable` and `nothing crosses …` both passed | closed | inverted: a boundary must look like one |
+| N-006 | Minor | gate | `check-plugin.py:2344` | `_na_present`/`_ph_present` computed and never read; a Current State naming a nonexistent phase was caught only by the accident of a blocker existing | closed | reported on its own, as the ledger half already does |
+| N-007 | Minor | gate | `check-plugin.py:1926` | F-008…F-011 corrected four prose sites and pinned none, so each could rot back on a green build | closed | a held-phrase arm + 4 mutants; caught `implement.md` stating the rule in different words |
+| N-008 | Minor | gate | `check-plugin.py:2360` | The no-subject arm `bad(...)`s and then execution continued to an affirmative pass line about a file it could not parse | closed | the pass lines are guarded by `_phs` |
+| N-009 | Minor | gate | `check-plugin-mutants.sh:1928` | The Current-State mutant wrote `**Phase:** Phase 3`, a shape no template produces and the only one the broken arm could read — so it certified an arm that did nothing | closed | retargeted to the bare form |
+| N-010 | Minor | prose | `references/fix-loop.md:381` | F-016's insert was flush-left inside a 3-space list item, orphaning the block and dangling the sentence after it | closed | indentation repaired, sentence rejoined |
+
+**Round 2's own lesson, recorded because it changed how round 3 was verified.**
+Two round-1 fixes over-corrected into *failing a conforming input* (N-003,
+N-004), which is worse operationally than the hole they replaced: a missed hole
+is latent, a false failure blocks every real run. Round 1 verified only that
+wrong shapes fail. **The template is the authority on shape**, and round 3
+verified both directions — nine probes, of which one turned out to be
+mis-designed rather than the fix being broken.
+
+**And a sixth reflow casualty.** All four of N-007's pin mutants were first
+written with `grep`/`sed` over raw text; every pinned phrase wraps, so three
+SURVIVED and one NO-OP'd while the arm they were proving was correct all along.
+The arm reads flattened text; the mutants now do too.
+
 ## Counters
 
 | Scope | Fix-loop iteration | Cap | Deepest fix-mode depth this chain | Cap |
 | ----- | ------------------ | --- | --------------------------------- | --- |
-| Migration (Phase 5) | 1 | 5 | 0 | 2 |
+| Migration (Phase 5) | 2 | 5 | 0 | 2 |
 
 ## Iteration log (convergence rule input)
 
 | Iter | Scope | Depth | Targeted F-IDs | Open after re-review | At |
 | ---- | ----- | ----- | -------------- | -------------------- | -- |
-| 1 | Migration | 0 | F-001..F-024 | <pending re-review> | 2026-09-07 |
+| 1 | Migration | 0 | F-001..F-024 | N-001..N-010 raised | 2026-09-07 |
+| 2 | Migration | 0 | N-001..N-010 | <pending re-review> | 2026-09-07 |

@@ -1549,8 +1549,16 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
             # what follows the colon is not itself a negation — otherwise the
             # declaration that licenses dropping the reviewer would also
             # license keeping it, and the round would satisfy both arms at once.
+            # INVERTED, BECAUSE A NEGATION LIST CANNOT BE EXHAUSTIVE. The
+            # first version enumerated `none`, `n/a`, `no <word>` and `-`, and
+            # `boundary: not applicable` and `boundary: nothing crosses between
+            # the slices` both walked through it (measured). A boundary has to
+            # LOOK like one instead: three or more words of substantive text
+            # that does not open with a negation. A round cannot both license
+            # the integration reviewer and say there is nothing for it to see.
             elif (nslice > 1 and nint == 1
-                  and not re.search(r"boundary:\s*(?!(?:none|n/?a|no\b|-\s*$))\S",
+                  and not re.search(r"boundary:\s*(?!(?:none|no|not|nothing|"
+                                    r"n/?a|-|—)\b)\S+(?:\s+\S+){2,}",
                                     rec, re.I)):
                 viol += 1
                 bad(f"{where}: declares an integration reviewer but names no "
@@ -1873,6 +1881,45 @@ if seen and nseen and not viol:
 # Mutants: "pipeline task-brief script is missing",
 #          "pipeline task-brief script is not executable",
 #          "pipeline task-brief script loses its shebang".
+# ---- the rules the migration review corrected stay corrected ----
+# Round 1 of the whole-change review found four prose sites still carrying the
+# retired rules, and the fixes pinned none of them — so each could rot back on
+# a green build, which is the failure mode this repo answers with held phrases
+# everywhere else. Each entry is (phrase, files that must carry it); the phrase
+# is matched against FLATTENED text because prose reflows.
+# Mutants: "the conditional integration rule reverts in fix-loop.md",
+#          "the pre-RV repair rule reverts in parallel.md",
+#          "the re-review boundary rule reverts in SKILL.md".
+print("\n== migration-corrected rules stay corrected ==")
+_pinned = [
+    ("only at a declared integration boundary",
+     ["references/fix-loop.md", "SKILL.md"],
+     "the phase and re-review fan-outs both spend the integration reviewer on "
+     "a named boundary; without this phrase the file prescribes the retired "
+     "unconditional rule and a run following it writes a tracker this gate "
+     "rejects"),
+    ("raises no finding, takes no f-id",
+     ["references/parallel.md", "references/implement.md"],
+     "a build-gate failure before `RV` is unfinished implementation, not a "
+     "finding; without this phrase the wave procedure sends it into the fix "
+     "loop, which has no pre-`RV` entry any more"),
+]
+_pin_bad = False
+for _phrase, _files, _why in _pinned:
+    for _rel in _files:
+        _pf = ROOT / "plugins/superb/skills/pipeline" / _rel
+        _pt, _pe = read(_pf)
+        if _pe:
+            continue
+        if _phrase not in " ".join(_pt.split()).lower():
+            _pin_bad = True
+            bad(f"pipeline/{_rel} no longer carries \"{_phrase}\" — {_why}. "
+                "REMEDY: restore the phrase, or, if the rule genuinely changed, "
+                "change it in every file that states it and retire this pin")
+if not _pin_bad:
+    ok(f"{len(_pinned)} migration-corrected rules present in every file that "
+       "states them")
+
 print("\n== pipeline dispatch scripts ==")
 _tb = ROOT / "plugins/superb/skills/pipeline/scripts/task-brief"
 if not _tb.is_file():
@@ -1932,6 +1979,8 @@ _banned = [
      "names a task reviewer"),
     (re.compile(r"reviewed per task", re.I),
      "says wave members are reviewed per task"),
+    (re.compile(r"an implementer,\s*a reviewer", re.I),
+     "states a per-task cost model (an implementer AND a reviewer per task)"),
     (re.compile(r"(?:[Ii]mplement|dispatch)[^.\n]{0,80}?\bvia\b[^.\n]{0,40}?"
                 r"subagent-driven-development", re.I),
      "delegates implementation to subagent-driven-development"),
@@ -2237,10 +2286,20 @@ if RUN_DIR is not None:
         _blockers = []
         for _i, _ph in enumerate(_phs):
             _why = []
-            if not _ph["reviews"]:
-                _why.append("no review line at all — an implementation phase "
-                            "ends with an `RV`, and a phase with none reads "
-                            "exactly like a phase whose review closed")
+            # AN `RVJ` IS NOT THIS PHASE'S `RV`. A joining phase's `RVJ` sits
+            # above its first task and reviews the LANES that merged into it —
+            # which is exactly why the review-not-early arm exempts it. Asking
+            # only whether a phase has "any review line" let that same `RVJ`
+            # stand in for the phase's own review, so a joining phase with
+            # every task `[x]` and no `RV` was not a blocker (measured PASS).
+            # The two arms read one list and have to agree about what an `RVJ`
+            # covers: it covers the join, never this phase's tasks.
+            if not any(r[0] == "RV" for r in _ph["reviews"]):
+                _why.append("no `RV` line — an implementation phase ends with "
+                            "one, and a phase with none reads exactly like a "
+                            "phase whose review closed. An `RVJ` does not "
+                            "substitute: it reviews the unit that joined here, "
+                            "not this phase's own tasks")
             if any(x[0] != "x" for x in _ph["tasks"]):
                 _why.append("an open task line")
             if any(r[1] != "x" for r in _ph["reviews"]):
@@ -2265,13 +2324,26 @@ if RUN_DIR is not None:
             # line still claimed the invariant. Markdown bolding defeating the
             # one arm between the run and this failure is not an acceptable
             # margin.
-            _hdr = None
-            for _line in _ltext.split("\n"):
+            # AND ONLY THE BLOCKING TABLE'S ROWS ARE ITS ROWS. `findings.md`
+            # ships a SECOND `F-`-keyed table — *Deferred Minor findings*,
+            # four columns against the blocking table's seven — so applying the
+            # blocking header's width to every `F-` row in the file failed the
+            # shipped template, and with it every real run that defers a single
+            # Minor finding, which is the normal outcome of a review. The rows
+            # are collected from the header until the table ends, and a
+            # narrower table further down is simply a different table.
+            _hdr, _rows = None, []
+            _lines = _ltext.split("\n")
+            for _k, _line in enumerate(_lines):
                 _cells = [_norm(c) for c in _line.strip().strip("|").split("|")]
                 if {"id", "sev", "phase", "state"} <= set(_cells):
                     _hdr = _cells
+                    for _line2 in _lines[_k + 1:]:
+                        if not _line2.lstrip().startswith("|"):
+                            break
+                        _rows.append(_line2)
                     break
-            _seen_fid = [ln for ln in _ltext.split("\n")
+            _seen_fid = [ln for ln in _rows
                          if re.match(r"\s*\|\s*F-\d+\s*\|", ln)]
             if _hdr is None:
                 if _seen_fid:
@@ -2283,7 +2355,7 @@ if RUN_DIR is not None:
                         "header row as `templates/findings.md` ships it")
             else:
                 _ci = {k: _hdr.index(k) for k in ("id", "sev", "phase", "state")}
-                for _line in _ltext.split("\n"):
+                for _line in _rows:
                     if not re.match(r"\s*\|\s*F-\d+\s*\|", _line):
                         continue
                     _cells = [c for c in _line.strip().strip("|").split("|")]
@@ -2332,18 +2404,43 @@ if RUN_DIR is not None:
         # `**Next action:**` left two measured passes: `Phase: 3` while Phase 2
         # held an open finding, and a bare `Next action: T4 — a task` (the
         # template's own suggested form) naming no phase at all.
+        # THE TEMPLATE IS THE AUTHORITY ON SHAPE. This first required the
+        # literal word "phase" inside the field's value, which
+        # `templates/progress.md`'s `**Phase:** <number and name>` never
+        # contains — so the field the resume protocol reads FIRST was
+        # unreadable on every conforming tracker, the arm rested entirely on
+        # `**Next action:**`, and its "neither field names a phase" branch then
+        # fired on the ordinary mid-run case (`Next action: RV — review
+        # fan-out` names no phase either, and the template says it need not).
+        # An arm that fails the shape its own templates prescribe is wrong
+        # about the shape, not the tracker.
         def _named_phase(field):
             m = re.search(r"\*\*" + field + r":\*\*\s*(.+)", ttext)
             if not m:
-                return None, False
-            g = re.search(r"[Pp]hase\s+([0-9A-Za-z.]+)", m.group(1))
+                return None, False, None
+            val = m.group(1)
+            g = (re.search(r"[Pp]hase\s+([0-9A-Za-z.]+)", val)
+                 or re.match(r"\s*([0-9]+[0-9A-Za-z.]*)\b", val))
             if not g:
-                return None, True
-            return _idx.get(f"phase {g.group(1)}".lower()), True
+                return None, True, None
+            return _idx.get(f"phase {g.group(1)}".lower()), True, g.group(1)
 
-        _na_i, _na_present = _named_phase("Next action")
-        _ph_i, _ph_present = _named_phase("Phase")
+        _na_i, _na_present, _na_id = _named_phase("Next action")
+        _ph_i, _ph_present, _ph_id = _named_phase("Phase")
         _named = [x for x in (_na_i, _ph_i) if x is not None]
+
+        # A FIELD THAT NAMES A PHASE THIS TRACKER DOES NOT HAVE is reported on
+        # its own, not left to be caught by the accident of a blocker existing
+        # at a lower index. The ledger half already does exactly this for an
+        # unmatched `Phase` cell, and the two halves of this arm should agree.
+        for _fld, _id, _i2 in (("Phase", _ph_id, _ph_i),
+                               ("Next action", _na_id, _na_i)):
+            if _id is not None and _i2 is None:
+                bad(f"{relpath(tracker)}: Current State's `**{_fld}:**` names "
+                    f"phase {_id!r}, which matches no `## Phase` heading in "
+                    "this tracker — so the advancement check could not locate "
+                    "the run's own position and compared nothing. REMEDY: name "
+                    "a phase the tracker has")
 
         _ledger_note = ("" if _lrows else
                         " (this run's ledger contributed no readable blocking "
@@ -2367,8 +2464,10 @@ if RUN_DIR is not None:
         elif _named:
             ok("Current State does not point past an unfinished phase"
                + _ledger_note)
-        else:
+        elif _phs:
             ok("no unfinished phase in the tracker" + _ledger_note)
+        # and when `_phs` is empty the arm above already said so: a file this
+        # gate could not parse gets no affirmative line about its contents.
 
 # ---- every mutant this file cites by name must actually exist ----
 # The arms above cite their proofs by NAME: a `Mutant`/`Mutants` comment marker

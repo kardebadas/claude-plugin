@@ -136,8 +136,10 @@ A PHASE'S REVIEW MAY NOT BEGIN WHILE ANY TASK IN THAT PHASE IS UNCHECKED.
 **There is exactly one formal remediation state machine, and it starts after
 REVIEW.** A compile error, a failing test, a syntax error, an obvious mistake or
 a red build gate — at any point before `RV` opens — is unfinished
-implementation, repaired here and re-gated here. It is not a finding, it gets no
-F-ID, it needs no fix plan, and it spends no iteration budget. Nothing before
+implementation, repaired here and re-gated here. It **raises no finding, takes
+no F-ID, needs no fix plan and spends no iteration budget** — the same words
+`references/parallel.md` uses at the wave gate, because it is the same rule and
+a rule stated two ways is a rule half of which can be deleted. Nothing before
 `RV` is a fix loop; there is no pre-`RV` fix loop to enter.
 
 This does not soften the exit condition. IMPLEMENT still ends only when the work

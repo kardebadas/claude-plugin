@@ -1925,11 +1925,74 @@ f=tools/fixtures/run-fixloop/progress.md
 if ! grep -qF "Next action:** Phase 2 fix loop" "$f"; then
   echo "mutant is a no-op: Next action no longer names Phase 2s fix loop"
 else
-  sed -i "s|^- \*\*Phase:\*\*.*|- **Phase:** Phase 3 — moved on|" "$f"
-  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** T4 — a task|" "$f"
-  grep -qF "Phase:** Phase 3" "$f" || echo "mutant is a no-op: the Phase field was not advanced"
+  # THE BARE FORM, which is the only one `templates/progress.md` prescribes
+  # (`**Phase:** <number and name>`). The first version of this mutant wrote
+  # the doubled `**Phase:** Phase 3`, which was the only shape the arm could
+  # then read — so the kill certified an arm that did nothing on any real
+  # tracker.
+  sed -i "s|^- \*\*Phase:\*\*.*|- **Phase:** 3 — moved on|" "$f"
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** RV — review fan-out|" "$f"
+  grep -qF "Phase:** 3 — moved on" "$f" || echo "mutant is a no-op: the Phase field was not advanced in the bare form"
+  grep -q "Phase:\*\* Phase" "$f" && echo "mutant is a no-op: the Phase field kept the doubled form, which no template writes"
   grep -q "Next action:\*\* Phase" "$f" && echo "mutant is a no-op: Next action still names a phase, so this is not the Phase-only shape"
 fi'
+
+# --- the migration-corrected rules must stay corrected ---
+# WHITESPACE-FLEXIBLE, and that is not a style choice. Every phrase pinned here
+# wraps across lines in the file that carries it, and the arm reads FLATTENED
+# text — so a `grep -qF`/`sed` mutant on the raw file matches nothing, reports
+# itself a no-op and proves the pin unwatched. All four of these were written
+# that way first and all four failed (measured: three SURVIVED, one NO-OP).
+run_mutant "the conditional integration rule reverts in fix-loop.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+q=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(w) for w in ['only','at','a','declared','integration','boundary']]), re.I)
+s=p.read_text()
+assert a.search(s), 'mutant is a no-op: the phrase is already absent from that file'
+out=a.sub('whenever there is more than one slice', s)
+assert out!=s, 'mutant is a no-op: the substitution did not apply'
+assert 'only at a declared integration boundary' not in flat(out), 'mutant is a no-op: an occurrence survived in that file'
+assert 'only at a declared integration boundary' in flat(q.read_text()), 'mutant is a no-op: the phrase is gone from SKILL.md too, so a kill is not attributable to this file'
+p.write_text(out)\""
+run_mutant "the pre-RV repair rule reverts in parallel.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/references/parallel.md')
+q=pathlib.Path('plugins/superb/skills/pipeline/references/implement.md')
+ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(w) for w in ['raises','no','finding,','takes','no','F-ID']]), re.I)
+s=p.read_text()
+assert a.search(s), 'mutant is a no-op: the phrase is already absent from that file'
+out=a.sub('is a bug finding with an F-ID', s)
+assert out!=s, 'mutant is a no-op: the substitution did not apply'
+assert 'raises no finding, takes no f-id' not in flat(out), 'mutant is a no-op: an occurrence survived in that file'
+assert 'raises no finding, takes no f-id' in flat(q.read_text()), 'mutant is a no-op: the phrase is gone from implement.md too, so a kill is not attributable to this file'
+p.write_text(out)\""
+run_mutant "the re-review boundary rule reverts in SKILL.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+q=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(w) for w in ['only','at','a','declared','integration','boundary']]), re.I)
+s=p.read_text()
+assert a.search(s), 'mutant is a no-op: the phrase is already absent from SKILL.md'
+out=a.sub('once there is more than one', s)
+assert out!=s, 'mutant is a no-op: the substitution did not apply'
+assert 'only at a declared integration boundary' not in flat(out), 'mutant is a no-op: an occurrence survived in SKILL.md'
+assert 'only at a declared integration boundary' in flat(q.read_text()), 'mutant is a no-op: the phrase is gone from fix-loop.md too, so a kill is not attributable to this file'
+p.write_text(out)\""
+run_mutant "SKILL.md restates the per-task cost model" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(w) for w in ['an','implementer','for','every','task','of','every','phase']]), re.I)
+s=p.read_text()
+assert a.search(s), 'mutant is a no-op: the corrected cost sentence is not in the expected shape'
+out=a.sub('an implementer, a reviewer and usually a fix round or two', s)
+assert out!=s, 'mutant is a no-op: the substitution did not apply'
+assert 'an implementer, a reviewer' in flat(out), 'mutant is a no-op: the per-task cost claim was not reintroduced'
+p.write_text(out)\""
 
 echo
 echo "killed=$PASS survived=$SURV no-op=$NOOP"

@@ -379,12 +379,11 @@ When blocking findings exist (and the convergence rule permits another run):
    Iteration-log row with the set of F-IDs still open after the re-review.
 
    **Unless `M=0`.** `M=0` is not "a round that edited code and needs no plan":
-it is a round with **no ownable fix commit at all**, every targeted F-ID having
-closed by deletion or a user-ruled false positive. A round that edited code has
-an ownable commit, so its `M` is at least 1 and it owes both a fix plan and a
-reviewer. If you are about to write `M=0` over a diff, the diff is the proof
-that you should not.
- `M` does not size the fan-out — the fix diff does
+   it is a round with **no ownable fix commit at all**, every targeted F-ID
+   having closed by deletion or a user-ruled false positive. A round that edited
+   code has an ownable commit, so its `M` is at least 1 and it owes both a fix
+   plan and a reviewer. If you are about to write `M=0` over a diff, the diff is
+   the proof that you should not. `M` does not size the fan-out — the fix diff does
    (*Re-review fan-out*, below) — but it still decides **whether a round happens
    at all**. `M` is **the number of blocking F-IDs this fix-mode run targeted**,
    less every one the ledger closed by a route that leaves no ownable commit.

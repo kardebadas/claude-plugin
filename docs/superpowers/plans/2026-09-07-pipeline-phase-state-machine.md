@@ -3011,3 +3011,27 @@ says what changed and why.
   guarantee incidentally — a re-review over fix commits cannot close an `RV` no
   fan-out opened — and deleting the paragraph would have dropped it. It is
   restated on its own, without the round it used to be attached to.
+- **Adding a field to the round grammar broke four pre-existing mutants**, and
+  the plan anticipated none of them. Three were no-ops caused by reflow —
+  inserting `· fixplan …` between the declared counts and `· reports …` broke
+  sibling assertions that asserted exactly that adjacency
+  (`"re-review round loses its cluster count"`,
+  `"re-review round's cluster count disagrees with its slice count"`,
+  `"worked one-slice round adds an integration reviewer"`). Their assertions now
+  name the field that actually follows the counts, and the third was
+  re-anchored on its declaration alone rather than on field adjacency, so a
+  later reflow cannot neuter it again.
+- **The fourth was a real behaviour change, not a no-op**, and it survived with
+  no diagnostic at all: `"run tracker has no closed review round"` deletes the
+  fixture's `[x] RV` lines and expects the linter to report that nothing in the
+  run has been reviewed. A `→ round <n>:` record is **itself** a closed round
+  the linter counts, so the fixture's new appended round kept `rseen` non-zero
+  and the arm stayed quiet. The mutant now removes appended rounds too, with its
+  own no-op guard saying why.
+- **Gap found in Task 6's drafted arm** (fix it there): as written it rejects
+  `i=1` only when no boundary is named, so `1 slice + 1 integration` *with* a
+  boundary would pass — while both `SKILL.md` and the plan say `i` is 0 at one
+  slice, because that slice already sees the whole diff. Task 6 must also reject
+  `nint == 1 and nslice == 1` outright. Without that, the mutant
+  `"worked one-slice round adds an integration reviewer"` loses the arm that
+  kills it.

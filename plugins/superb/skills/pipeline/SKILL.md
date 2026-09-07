@@ -154,10 +154,23 @@ edit them.
 - **If the directory already exists, that is a user question** — resume, start
   fresh, or abort — never a silent overwrite and never a silent resume. Show
   the user the existing Current State so the choice is informed.
-- **Never `git add` anything under `docs/superpowers/`** — run state, specs and
-  plans are all **deliberately local-only** working notes in these repos. The
-  consequence is intentional and you must plan around it: none of it survives a
-  fresh clone or a lost machine. **What has to outlive the run goes into durable
+- **Never `git add` a pipeline runtime directory — anything under
+  `docs/superpowers/runs/*/`.** `progress.md`, `register.md`, `kit.md`,
+  `findings.md`, fix plans, `agent-output/`, review reports: that is **ephemeral
+  execution state**, it belongs on disk for the run and for a resume, and the
+  root `.gitignore` enforces it. **Curated permanent documentation may be
+  deliberately committed** — `docs/superpowers/specs/*.md`,
+  `docs/superpowers/plans/*.md`, and loose `docs/superpowers/runs/*.md`
+  records — when someone decides it is repository documentation. *May* is the
+  whole of the permission: nothing auto-commits it.
+
+  ```
+  runtime directory          = forbidden
+  curated permanent document = intentional, deliberate exception
+  ```
+
+  Plan around the consequence for the runtime half: none of it survives a fresh
+  clone or a lost machine. **What has to outlive the run goes into durable
   artifacts** — the commits themselves, and the Stage 5 hand-off (which is why
   Stage 5 carries the design summary and the deferred-Minors table rather than
   pointing at these files).
@@ -328,9 +341,50 @@ phase can owe two and "lanes A+B" is not something a third party can check:
       · reports j-56-int.md · coverage j-56-coverage.md → no findings
 ```
 
-It gets **its own Counters row**, and it sits where it must be satisfied: after a
-split's last sibling, above the first task of a joining phase. Full procedure in
+It gets **its own Counters row**, its own appended fix rounds, and it sits where
+it must be satisfied: after a split's last sibling (a **trailing** `RVJ`), above
+the first task of a joining phase (a **leading** `RVJ`). Full procedure in
 `references/fix-loop.md`.
+
+**Closing a gate is not accepting a phase.** Call the gate a fix loop belongs to
+its **`review_gate`** — an `RV` for a phase's own review, an `RVJ` for a split's
+or a lane join's. The loop is the same whichever it is:
+
+```
+review_gate → findings → FIX_PLAN → FIX_IMPLEMENT → RE_REVIEW(review_gate)
+            → clean → CLOSE(review_gate)
+```
+
+`CLOSE(review_gate)` is the generic terminal. `PASS` is **phase acceptance**, and
+only a phase's own `RV` produces it — so what a closure unlocks depends on which
+gate closed:
+
+```
+CLOSE(RV)              → phase PASS
+CLOSE(trailing RVJ)    → NEXT PHASE
+CLOSE(leading RVJ)     → IMPLEMENT JOINING PHASE
+```
+
+```
+A CLEAN LEADING RVJ MUST NEVER MARK THE JOINING PHASE PASS.
+```
+
+A **leading** `RVJ` gates *entry*: it reviews the lanes that merged into this
+phase, not this phase's own tasks, so after it closes the joining phase still
+owes the whole of `IMPLEMENT → RV → CLOSE(RV) → PASS`, and the non-surviving
+contributing lanes retire. A **trailing** `RVJ` closes a Rule 3 split and the
+run advances past it. An `RVJ` is not a phase gate and never stands in for one.
+
+**A round is appended under its own gate's line.** An `RVJ`-owned round is
+ordinary — an `M= C=` fix round sized from the fix diff — and it hangs under the
+`RVJ`, never under a joining phase's `RV`:
+
+```markdown
+- [x] RVJ — joint integration review · split 4a+4b · N=17 → 0 slice + 1 integration
+      · reports j-4ab-int.md · coverage j-4ab-coverage.md → F-031
+      → round 2: M=1 C=1 → 1 slice + 0 integration · fixplan j-4ab-fixplan-r2.md
+        · reports j-4ab-rr2-a.md · coverage j-4ab-rr2-coverage.md → F-031 closed
+```
 
 The **Current State** block stays at the very top so re-orienting costs one
 read and nothing else. Never move it below the phase lists, never split it,
@@ -623,7 +677,8 @@ the questions are answered, never run the pressure-test after the gate.
 6. Synthesize into one design.
 7. **GATE 1: user approves the synthesized design.** Register must be empty.
    Write the spec to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md`
-   (local-only, like everything under `docs/superpowers/` — Stage 5 is what
+   (a spec MAY be committed as permanent documentation, but nothing does it
+   for you, so treat it as local until you commit it — Stage 5 is what
    carries its decisions into something durable).
 
 ### Stage 2 — Master plan
@@ -949,8 +1004,8 @@ you did above, so without that rule one defect reopens `RV` when a human finds
 it and ships as a hand-off line when the linter finds it. Every other `FAIL`
 is reported in the hand-off, which the sentence above already requires.
 
-Invoke `superpowers:finishing-a-development-branch`. Because everything under
-`docs/superpowers/` is local-only, **the hand-off is the run's only durable
+Invoke `superpowers:finishing-a-development-branch`. Because the run directory
+is local-only, **the hand-off is the run's only durable
 output besides the commits**, and MUST include:
 
 - the **deferred Minor-findings table** from `findings.md` (ID, finding, file,
@@ -1072,7 +1127,9 @@ siblings, before the run advances past the split.
 - It is the split's **`RVJ`** line, and closes with the same evidence an `RV`
   carries. Its findings get F-IDs like any others; blocking ones run the fix
   loop under the **`RVJ`'s own Counters row** — not the siblings' shared row,
-  which they may already have spent — before advancing.
+  which they may already have spent — and their rounds are appended under the
+  **`RVJ`'s own line**, because the gate that raised a finding is the gate whose
+  evidence has to answer for it. Then `CLOSE(RVJ)`, and only then advancing.
 - The same review, and the same line, is owed wherever **two lanes join**
   (`references/parallel.md`).
 - The split is an artifact of the 12-task cap, never a reason to review less.
@@ -1171,7 +1228,7 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
 | "I'll record the iteration once I see how the fix went" | Then a crash mid-fix loses it and the cap resets. Increment in the file before dispatching. |
 | "The fix was small, one reviewer over the whole thing is fine" | One reviewer per file cluster in the fix diff, and the ranges must cover every fix commit a reviewer can own — a claim **deletion**'s is the only one the union excludes, and a claim **pin**'s is in it like any other. "Small" is a judgement about clusters, not a licence to skip coverage. |
 | "The re-review came back clean, the findings are closed" | Only if its ranges actually covered the fix diffs. Union the ranges and check before closing anything. |
-| "I'll note the design decision in the spec doc and move on" | Nothing under `docs/superpowers/` is committed. If it matters, it goes in the Stage 5 hand-off too. |
+| "I'll note the design decision in the spec doc and move on" | The run directory is never committed, and nothing commits the spec for you. If it matters, it goes in the Stage 5 hand-off too. |
 | "`resume` obviously means the most recent directory" | Recency is a guess about someone's unfinished work. More than one candidate → show each Current State and ask. |
 | "It's just `status`, I'll quickly fix that failing test while I'm here" | `status` is read-only; a fix is a run. Report it and let the user invoke `resume`. |
 | "The phase is done — I'll summarize and let the user take it from here" | A summary that ends your turn is a stop with no question. Narrate inline and start the next phase in the same motion. |
@@ -1324,8 +1381,9 @@ severity through an uncapped fix/re-review loop — and it is phase-unaware. Sta
   commits a test, so the union keeps it.
 - **Compacting before the flush** — the Run State Law is only true once the
   files actually hold everything; GATE 2's flush is what makes it true.
-- **Assuming a local spec is a durable record** — nothing under
-  `docs/superpowers/` is committed; the Stage 5 hand-off is what survives.
+- **Assuming a local spec is a durable record** — the run directory is never
+  committed, and a spec is only durable once someone deliberately commits it;
+  the Stage 5 hand-off is what survives either way.
 - **Ending the turn on a phase summary** — the most common silent failure.
   A stop with no guard-rail question is an unauthorized stop even when it asks
   nothing; close out, re-read, and dispatch the next phase in the same turn.

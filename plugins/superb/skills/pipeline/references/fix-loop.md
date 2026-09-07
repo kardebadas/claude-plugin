@@ -469,14 +469,28 @@ When blocking findings exist (and the convergence rule permits another run):
    with no slice reviewer having seen the phase diff — the exact failure the
    line exists to catch, wearing a green tick.
 
-   Only when `RV` is already `[x]` from a completed step 2 does a re-review
-   reopen it to `[~]` and reclose it with the round appended in the full
-   per-round grammar — `→ round 2: M=9 C=1 → 1 slice + 0 integration · fixplan
+   **A re-review reopens the gate that raised the findings, and no other.**
+   Call it the **`review_gate`** — an `RV` for a phase's own review, an `RVJ`
+   for a split's joint review or a lane join's. Only when the `review_gate` is
+   already `[x]` from a completed step 2 does a re-review reopen **that gate**
+   to `[~]` and reclose it with the round appended **under its own line**, in
+   the full per-round grammar — `→ round 2: M=9 C=1 → 1 slice + 0 integration · fixplan
    p3-fixplan-r2.md · reports p3-rr2-a.md · coverage p3-rr2-coverage.md
    → F-012 closed, F-014 raised` — so
    every round has a declared number its file count is checked against, not only
    the first. The fan-out comes from the fix diff's clusters. Whoever ran the
    round writes it, at whatever depth.
+
+   **An `RVJ`'s rounds belong to the `RVJ`.** Its findings run the fix loop
+   under the `RVJ`'s own Counters row (*Joint integration review*, above), and
+   its rounds are appended under the `RVJ` line. Appending them to a joining
+   phase's `RV` spends that phase's review budget on a join it never covered,
+   and leaves the `RVJ`'s own evidence claiming a clean review it did not get.
+   The clean close is `CLOSE(review_gate)`, and what it unlocks depends on the
+   gate: `CLOSE(RV)` → phase `PASS`; `CLOSE(trailing RVJ)` → next phase;
+   `CLOSE(leading RVJ)` → *implement* the joining phase, which still owes its
+   own `RV`. **A clean leading `RVJ` must never mark the joining phase
+   `PASS`.**
 4. Repeat until no Critical/Major/bug findings remain (green test suite
    included), subject to the convergence rule and the caps below.
 
@@ -620,7 +634,9 @@ however complete, authorizes nothing.
   it.** Phase close-out and next-phase start are one motion in one turn.
 - **All run state lives under
   `<PROJECT_DIR>/docs/superpowers/runs/YYYY-MM-DD-<topic>/`** — never in the
-  skill directory, and never `git add`ed.
+  skill directory, and never `git add`ed: the run directory is ignored by the
+  root `.gitignore`, because it is ephemeral execution state. Curated permanent
+  specs, plans and loose `runs/*.md` records are a deliberate exception.
 - Where a run-state file and your recollection disagree, **the file is right**.
 - No phase carries more than 12 tasks; an oversized phase was split at Stage 3,
   before GATE 2 and before any implementation.

@@ -16,8 +16,11 @@ is a cache of these files, never the other way round.
 copy, never edit in place. `kit.md` alone is filled in later, at GATE 2 from the
 approved plan, because it cannot name a run's gates before the plan does.
 
-Nothing under `docs/superpowers/` is ever `git add`ed — run state, specs and
-plans are deliberately local-only. **So the guard-rail counters belong on disk
+Nothing in the run directory — `docs/superpowers/runs/*/` — is ever `git add`ed;
+run state is deliberately local-only, and the root `.gitignore` enforces it.
+Curated permanent specs, plans and loose `runs/*.md` records may be deliberately
+committed when they are repository documentation. **So the guard-rail counters
+belong on disk
 too:** `findings.md` carries the fix-loop iteration count and recursion depth,
 because a cap compared against a remembered number stops capping the moment the
 context is compacted. And anything that must outlive the run goes into the

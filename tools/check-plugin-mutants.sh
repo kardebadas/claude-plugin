@@ -2512,6 +2512,55 @@ else
   grep -qF -- "- **Lane A:** Phase 4 — T4" "$f" || echo "mutant is a no-op: Lane A stopped naming an implementation action in the join"
 fi'
 
+# ---- ephemeral run state is ignored; curated documentation is not ----
+run_mutant "gitignore drops the run-directory rule" '
+if ! grep -qxF -- "docs/superpowers/runs/*/" .gitignore; then
+  echo "mutant is a no-op: the ignore rule is not present to remove"
+else
+  sed -i "\|^docs/superpowers/runs/\*/$|d" .gitignore
+  grep -qxF -- "docs/superpowers/runs/*/" .gitignore && echo "mutant is a no-op: the rule survived"
+fi'
+
+run_mutant "gitignore hides curated documentation too" '
+if ! grep -qxF -- "docs/superpowers/runs/*/" .gitignore; then
+  echo "mutant is a no-op: the ignore rule is not present to widen"
+else
+  sed -i "s|^docs/superpowers/runs/\*/$|docs/superpowers/|" .gitignore
+  grep -qxF -- "docs/superpowers/" .gitignore || echo "mutant is a no-op: the rule was not widened"
+fi'
+
+# ---- CLOSE(review_gate) is not PASS, and the reopen rule is gate-neutral ----
+# perl -0pi rather than sed: each phrase can wrap across lines, the pin arm
+# reads whitespace-flattened text, and sed is line-oriented -- the reflow hazard
+# that made four earlier pin mutants survive.
+run_mutant "the leading-RVJ successor is collapsed into PASS" '
+f=plugins/superb/skills/pipeline/SKILL.md
+if ! grep -qF -- "CLOSE(leading RVJ)     → IMPLEMENT JOINING PHASE" "$f"; then
+  echo "mutant is a no-op: the successor table is not in the expected shape"
+else
+  perl -0pi -e "s/CLOSE\(leading RVJ\)\s+\S+ IMPLEMENT JOINING PHASE/CLOSE(leading RVJ)     -> phase PASS/" "$f"
+  grep -qF -- "IMPLEMENT JOINING PHASE" "$f" && echo "mutant is a no-op: the successor survived"
+  grep -qF -- "CLOSE(RV)              → phase PASS" "$f" || echo "mutant is a no-op: the other successors went too"
+fi'
+
+run_mutant "the leading-RVJ invariant is deleted" '
+f=plugins/superb/skills/pipeline/SKILL.md
+if ! grep -qF -- "A CLEAN LEADING RVJ MUST NEVER MARK THE JOINING PHASE PASS." "$f"; then
+  echo "mutant is a no-op: the invariant is not present to remove"
+else
+  perl -0pi -e "s/A CLEAN LEADING RVJ MUST NEVER MARK THE JOINING PHASE PASS\.\n//" "$f"
+  grep -qF -- "A CLEAN LEADING RVJ MUST NEVER" "$f" && echo "mutant is a no-op: the invariant survived"
+fi'
+
+run_mutant "the reopen rule names RV alone again" '
+f=plugins/superb/skills/pipeline/references/fix-loop.md
+if ! grep -qF -- "A re-review reopens the gate that raised the findings" "$f"; then
+  echo "mutant is a no-op: the gate-neutral reopen rule is not present"
+else
+  perl -0pi -e "s/A re-review reopens the gate that raised the findings, and\s+no other\./A re-review reopens the phase RV./s" "$f"
+  grep -qF -- "reopens the gate that raised" "$f" && echo "mutant is a no-op: the rule survived"
+fi'
+
 echo
 echo "killed=$PASS survived=$SURV no-op=$NOOP"
 if [ "$SURV" -ne 0 ]; then

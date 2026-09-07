@@ -647,6 +647,25 @@ for n in skill_names:
                  "nothing in the repository**", AUTH,
                  "Lose it and the list stops being keyed on whether the "
                  "repository changed, which is the whole of the rule."),
+                # THE THREE CLOSURE SUCCESSORS, held where they are stated.
+                # `CLOSE(review_gate)` is the generic terminal and `PASS` is
+                # phase acceptance; collapsing them licenses exactly the error
+                # the leading-RVJ rule exists to prevent, and the collapsed
+                # form reads as correct.
+                ("the `CLOSE(review_gate)` successors",
+                 "close(leading rvj) → implement joining phase", ("SKILL.md",),
+                 "Lose it and a clean leading `RVJ` reads as acceptance of the "
+                 "phase it only gates entry to."),
+                ("the leading-`RVJ` invariant",
+                 "a clean leading rvj must never mark the joining phase pass",
+                 ("SKILL.md",),
+                 "Lose it and the one sentence separating entry from "
+                 "completion is stated nowhere."),
+                ("the gate-neutral reopen rule",
+                 "a re-review reopens the gate that raised the findings, and "
+                 "no other", AUTH,
+                 "Lose it and the rule reverts to naming `RV` alone, which is "
+                 "how an `RVJ`'s fix round ended up under a phase's `RV`."),
                 ("the narrow definition of `withdrawn`",
                  "may be marked `withdrawn` only *before* any fix commit for",
                  AUTH,
@@ -2101,6 +2120,48 @@ for _phrase, _files, _why in _pinned:
 if not _pin_bad:
     ok(f"{len(_pinned)} migration-corrected rules present in every file that "
        "states them")
+
+print("\n== run artifacts are ignored ==")
+# A RULE WITH NO MECHANISM IS THE DEFECT THIS ARM IS ABOUT. The skill's law —
+# never commit run state — was enforced by prose alone, and 41 files under
+# `docs/superpowers/` are tracked as a result. This checks the IGNORE RULE, not
+# the tree: the pre-existing run directories are tracked by explicit keep
+# decisions, so an arm phrased "no run directory is tracked" would fail on
+# history it must not touch. Git ignores only what is untracked, so the rule
+# stops the NEXT run committing its artifacts while the grandfathered files stay.
+# Mutants: "gitignore drops the run-directory rule",
+#          "gitignore hides curated documentation too".
+_gi = ROOT / ".gitignore"
+_gilines = [ln.strip() for ln in
+            (_gi.read_text(encoding="utf-8") if _gi.exists() else "").split("\n")
+            if ln.strip() and not ln.strip().startswith("#")]
+if "docs/superpowers/runs/*/" in _gilines:
+    ok("`.gitignore` covers pipeline run directories")
+else:
+    bad("`.gitignore` carries no `docs/superpowers/runs/*/` line — pipeline run "
+        "directories are ephemeral execution state (progress.md, register.md, "
+        "kit.md, findings.md, fix plans, agent-output/) and the skill's rule "
+        "against committing them is enforced by prose alone without it, which "
+        "is how a run's artifacts ride into the repository as a byproduct. "
+        "REMEDY: add `docs/superpowers/runs/*/` to the root `.gitignore`")
+# AND NOT ONE PATTERN WIDER. `docs/superpowers/` or `docs/superpowers/runs/*`
+# would also hide the specs, plans and curated loose records that ARE permanent
+# documentation. The distinction the history already draws is directory versus
+# loose file, and it is the whole policy: a runtime directory is forbidden, a
+# curated permanent document is an intentional exception.
+_wide = [ln for ln in _gilines
+         if re.match(r"^/?docs/superpowers/?$", ln)
+         or re.match(r"^/?docs/superpowers/\*", ln)
+         or re.match(r"^/?docs/superpowers/runs/?$", ln)
+         or re.match(r"^/?docs/superpowers/runs/\*$", ln)]
+if _wide:
+    bad(f"`.gitignore` carries {_wide[0]!r}, which hides curated permanent "
+        "documentation as well as ephemeral run state — specs, plans and the "
+        "loose `runs/*.md` records this repository deliberately keeps. REMEDY: "
+        "narrow it to `docs/superpowers/runs/*/`")
+else:
+    ok("`.gitignore` leaves curated specs, plans and loose `runs/*.md` trackable")
+
 
 print("\n== pipeline dispatch scripts ==")
 _tb = ROOT / "plugins/superb/skills/pipeline/scripts/task-brief"

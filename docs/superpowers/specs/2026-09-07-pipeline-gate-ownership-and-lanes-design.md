@@ -174,27 +174,140 @@ sequential run has exactly one lane, `A`.
   form the existing reader already treats as "names no phase", legitimate only
   when nothing is unfinished.
 
-**Lane membership is derived, not declared.** Phase headings already carry
-`· deps: <phases>` (`run-state.md:62`). A lane is a maximal chain of dependent
-phases, which is exactly how `parallel.md:64-67` already computes lanes. No new
-phase-level syntax.
+- A lane whose own phases are all `PASS` but whose join has not opened writes
+  `- **Lane A:** waiting at join Phase <join>` — a second sanctioned phase-less
+  form alongside `done`, so a waiting contributor never names the joining phase
+  and rule 2 below stays true.
+
+### Design — lane identity and derivation
+
+**A lane is an active execution branch between a fork and a join.** It is *not*
+a maximal chain of dependent phases. In a diamond
+
+```
+Phase A
+├── Phase B ──┐
+└── Phase C ──┴── Phase D
+```
+
+the maximal chains are `A → B → D` and `A → C → D`, so `A` and `D` each belong
+to two of them. Membership is not a partition, and *"which lane owns this
+phase's Current State"* has no answer. Every consumer of lane identity — stable
+`Lane A`/`Lane B` ids, per-lane Current State, resume, per-lane advancement
+validation, branch points, join detection, leading-`RVJ` ownership, and deciding
+when a lane stops being independently active — needs a partition.
+
+So the dependency DAG remains authoritative for **whether** a phase may
+execute, and lane ids are orchestration state recording **which concurrent
+branch** executes it. They are allocated once, deterministically, at GATE 2, and
+stay stable while that branch is active.
+
+Canonical rules:
+
+```
+1. A phase is executed by exactly one active lane.
+2. Two active lanes never execute the same phase.
+3. A fork creates additional active lanes.
+4. A join consumes two or more active lanes.
+5. Contributing lanes stay separate until the leading RVJ closes clean.
+6. After that RVJ closes, exactly one surviving lane owns the joining phase.
+7. Retired lane ids are never reused.
+8. Lane ids are stable orchestration identifiers, not re-inferred from the
+   graph on every read.
+9. Dependency edges decide whether phases may execute; lane ids only represent
+   concurrent execution branches.
+10. A sequential run is exactly one lane: Lane A.
+```
+
+**Allocation at GATE 2.** The approved dependency DAG is converted into lane
+assignments once, when the plan is approved. The deterministic ordering is
+**approved-plan order** — the order the phases appear in the approved plan —
+and nothing else. Walking phases in that order:
+
+- the first phase takes `Lane A`;
+- at a fork, the successor that comes **first in approved-plan order** keeps the
+  forking phase's lane, and each further successor takes the next unused lane id
+  (`B`, `C`, …, then `A1`, `A2`, … if the letters run out);
+- at a join, the joining phase carries **one** lane id, which must be one of its
+  contributing lanes'; that lane survives the join and the others retire.
+
+```
+before fork:            at the fork A → B, A → C:
+Lane A → Phase A        Lane A → Phase B        (first in plan order)
+                        Lane B → Phase C        (newly allocated)
+```
+
+**At a join,** both contributing lanes stay active. `Lane A` reaching the end of
+its own work writes `waiting at join Phase D`; `Lane B` keeps working. Once
+every contributor is `PASS`, the joining phase's owning lane names the leading
+`RVJ` — `- **Lane A:** Phase D — RVJ` — and the other contributors stay
+`waiting at join Phase D`. Collapse happens at closure, not before:
+
+```
+Phase B PASS
+Phase C PASS
+CLOSE(leading RVJ)      → retire Lane B
+                        → Lane A → Phase D
+```
+
+`Lane B`'s Current State line is then **removed**, and `B` is never allocated
+again in that run. Phase D proceeds normally from there:
+`IMPLEMENT → RV → CLOSE(RV) → PASS`. Nothing here lets a clean leading `RVJ`
+mark Phase D `PASS`.
+
+### Where the lane assignment lives
+
+The mapping is **persisted, never reconstructed**. Phase headings already carry
+`· deps: <phases>` (`run-state.md:62`), so the heading is the one canonical
+location and gains one more field:
+
+```
+### Phase 4 — <name> · deps: 2, 3 · lane: A
+```
+
+- Exactly one `· lane: <id>` per phase heading, `<id>` matching
+  `[A-Z][A-Za-z0-9]*`.
+- Written at GATE 2 for every phase in the approved plan; fork and join
+  transitions are already expressed by *which* id each phase carries, so no
+  transition needs recording anywhere else.
+- `phase → active lane` is therefore mechanically recoverable from the tracker
+  alone after compaction or resume. It never depends on orchestrator memory, and
+  it is never recomputed by enumerating dependency chains.
+- Current State stays derived-and-checked rather than authoritative: a
+  `- **Lane X:**` line whose id no phase heading carries is a defect.
 
 ### How it is checked
 
+The linter **validates the persisted mapping**. It never computes a phase's lane
+by enumerating maximal dependency chains.
+
 - **Every lane line is read**, via `re.findall`, not `re.search`. A duplicate
-  lane id is reported. Zero lane lines with an unfinished phase is reported.
-- **The comparison becomes per-lane.** For each lane, resolve its named phase,
-  compute that phase's dependency-closure, and compare against the earliest
-  unfinished phase **in that lane's own chain**. A lane pointing past an
-  unfinished phase in its own chain fails; a lane legitimately ahead of another
-  lane's open work does not.
-- **A join cannot begin early.** A phase whose `deps:` span two or more lanes is
-  reachable only when every contributing lane's last phase is `PASS` and the
-  join's leading `RVJ` is `[x]`. A lane line naming a join phase while either is
-  outstanding fails.
+  lane id is reported. Zero lane lines with an unfinished phase is reported. A
+  lane id in Current State that no phase heading carries is reported.
+- **The mapping itself is well-formed.** Every phase heading carries exactly one
+  `· lane:`; two ids on one heading is reported (rule 1). Two Current State
+  lanes naming the same current phase is reported (rule 2) — that is the
+  shared-ancestor and double-owned-join failure.
+- **Advancement is per lane, against that lane's own assigned phases.** For each
+  active lane, take the phases carrying its id in approved-plan order; its
+  current phase may not sit past an unfinished one among them. A lane
+  legitimately ahead of *another* lane's open work does not fail. This replaces
+  the global `max(_named) > _blockers[0][0]` comparison at `:2656`.
+- **A join cannot begin early.** For a joining phase, every contributing
+  predecessor lane's last phase must be `PASS` **and** the leading `RVJ` must be
+  `[x]` before the surviving lane may name the joining phase with an
+  implementation action. Naming it with the `RVJ` action itself is legal once
+  the contributors are all `PASS` — that is who runs the gate. So `Lane A → D`
+  fails while `B` is unfinished, fails while `C` is unfinished, and fails on an
+  implementation action while the leading `RVJ` is open.
+- **Retired ids are not reused.** A lane retires at the join that consumes it —
+  the first joining phase depending on its last phase and carrying a different
+  id. Any later phase in approved-plan order carrying that retired id is
+  reported (rule 7).
 - Resume gains lane rows: the precedence table is evaluated **per lane**, and
   its preamble changes from "the only valid next action" to "the only valid next
-  action for that lane".
+  action for that lane". The lane a resumed run picks up is read from
+  `· lane:`, not inferred.
 
 ---
 
@@ -469,9 +582,16 @@ un-fixed repo. Contractual prose gets a held-phrase pin.
 | 2 | Trailing RVJ blocker → fix → same RVJ re-review → `CLOSE(RVJ)` → NEXT PHASE | fixture + arm |
 | 2a | `RV` clean → `CLOSE(RV)` → phase PASS | existing arm + fixture |
 | 2b | A clean leading RVJ over a joining phase with unchecked tasks never reads as PASS | `run-lanes` fixture + existing no-advance arm |
-| 3 | Two concurrent lanes with different legal positions → PASS | `run-lanes` fixture |
-| 4 | Lane A points past its own unfinished phase → FAIL | mutant |
-| 5 | Lane B points past its own unfinished phase → FAIL | mutant |
+| 3 | Diamond `run-lanes` fixture (`A → B,C → D`) in a legal two-lane state → PASS | `run-lanes` fixture |
+| 3a | Fork of `A` → `Lane A` keeps `B` (first in approved-plan order), `Lane B` allocated for `C` | fixture + mapping arm |
+| 3b | A shared ancestor assigned to two active lanes → FAIL | mutant |
+| 3c | Joining phase `D` assigned to — or named current by — two lanes → FAIL | mutant |
+| 4 | Lane A points past an unfinished phase of its own assignment → FAIL | mutant |
+| 5 | Lane B points past an unfinished phase of its own assignment → FAIL | mutant |
+| 5a | `Lane A → D` while `B` unfinished → FAIL; while `C` unfinished → FAIL | mutants |
+| 5b | `Lane A → D` on an implementation action while the leading `RVJ` is open → FAIL | mutant |
+| 5c | `CLOSE(leading RVJ)` retires `Lane B` and leaves `Lane A → D` as the sole owner → PASS | fixture |
+| 5d | A retired lane id carried by a later phase → FAIL | mutant |
 | 6 | `N=8 W=8 → 2 slice` PASS; `N=8 W=1 → 2 slice` PASS; `N=12 W=1 → 3 slice` PASS | fixture + `ceil(N/5)` arm |
 | 7 | `N=8 W=8 → 4 slice` FAIL; `N=12 W=1 → 1 slice` FAIL | mutants |
 | 8 | Integration reviewer stays boundary-conditional | existing arms, unchanged |

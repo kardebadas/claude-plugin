@@ -37,6 +37,15 @@ elif _argv:
           "usage: check-plugin.py [--run <run-directory>]"); sys.exit(2)
 
 FAIL = []
+
+# THE BLOCKING LEDGER'S HEADER COLUMNS, as `templates/findings.md` ships them.
+# Named here because two things must agree about it: the arm that locates
+# `Sev`/`Phase`/`State` in a run's `findings.md`, and the template that tells a
+# run what to write. Three rounds of review found holes in a parser that tried
+# to be liberal about this; the answer was to make the GRAMMAR strict and the
+# parser small, so the failure mode is a named, reported mismatch rather than a
+# silently skipped row.
+BLOCKING_COLS = {"id", "sev", "phase", "state"}
 def ok(m):  print(f"  ok    {m}")
 def bad(m): print(f"  FAIL  {m}"); FAIL.append(m)
 
@@ -1522,7 +1531,8 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
             #          "run tracker declares an integration reviewer with no boundary",
             #          "run tracker multi-slice round is silent about its integration reviewer",
             #          "run tracker declares two integration reviewers",
-            #          "worked one-slice round adds an integration reviewer".
+            #          "worked one-slice round adds an integration reviewer",
+            #          "run tracker boundary declares a bare dash".
             ntasks = int(d.group("n"))
             if (kind == "RV" and d.group("key") == "N"
                     and d.group("waved") is None):
@@ -1549,17 +1559,19 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
             # what follows the colon is not itself a negation — otherwise the
             # declaration that licenses dropping the reviewer would also
             # license keeping it, and the round would satisfy both arms at once.
-            # INVERTED, BECAUSE A NEGATION LIST CANNOT BE EXHAUSTIVE. The
-            # first version enumerated `none`, `n/a`, `no <word>` and `-`, and
-            # `boundary: not applicable` and `boundary: nothing crosses between
-            # the slices` both walked through it (measured). A boundary has to
-            # LOOK like one instead: three or more words of substantive text
-            # that does not open with a negation. A round cannot both license
-            # the integration reviewer and say there is nothing for it to see.
+            # A NEGATION AFTER `boundary:` IS NOT A BOUNDARY. The list is the
+            # arm's whole content: a round cannot both license the integration
+            # reviewer and say there is nothing for it to cover. Two corrections
+            # from review: `-` and `—` sat inside the `\b` group, which needs a
+            # word character after the dash, so `boundary: -` (dash, space) was
+            # accepted — they are their own alternative now; and a word-count
+            # requirement was dropped because it could never run, `rec` being a
+            # flattened window whose following fields supply the words. Its
+            # removal costs nothing: a one-word boundary like `boundary: seam`
+            # is legitimate and must pass.
             elif (nslice > 1 and nint == 1
-                  and not re.search(r"boundary:\s*(?!(?:none|no|not|nothing|"
-                                    r"n/?a|-|—)\b)\S+(?:\s+\S+){2,}",
-                                    rec, re.I)):
+                  and not re.search(r"boundary:\s*(?![-—]\s|(?:none|no|not|"
+                                    r"nothing|n/?a)\b)\S", rec, re.I)):
                 viol += 1
                 bad(f"{where}: declares an integration reviewer but names no "
                     "`boundary: <what>` — an unnamed boundary is the automatic "
@@ -1889,11 +1901,13 @@ if seen and nseen and not viol:
 # is matched against FLATTENED text because prose reflows.
 # Mutants: "the conditional integration rule reverts in fix-loop.md",
 #          "the pre-RV repair rule reverts in parallel.md",
-#          "the re-review boundary rule reverts in SKILL.md".
+#          "the re-review boundary rule reverts in SKILL.md",
+#          "the conditional integration rule reverts in templates/progress.md",
+#          "a pinned file becomes unreadable".
 print("\n== migration-corrected rules stay corrected ==")
 _pinned = [
     ("only at a declared integration boundary",
-     ["references/fix-loop.md", "SKILL.md"],
+     ["references/fix-loop.md", "SKILL.md", "templates/progress.md"],
      "the phase and re-review fan-outs both spend the integration reviewer on "
      "a named boundary; without this phrase the file prescribes the retired "
      "unconditional rule and a run following it writes a tracker this gate "
@@ -1910,6 +1924,13 @@ for _phrase, _files, _why in _pinned:
         _pf = ROOT / "plugins/superb/skills/pipeline" / _rel
         _pt, _pe = read(_pf)
         if _pe:
+            # NOT `continue`. A pinned file this gate cannot read is a pin it
+            # did not check, and the pass line below would then claim the rule
+            # is present in every file that states it.
+            _pin_bad = True
+            bad(f"pipeline/{_rel} cannot be read ({_pe}), so the pin on "
+                f"\"{_phrase}\" checked nothing there. REMEDY: make the file "
+                "readable and run again")
             continue
         if _phrase not in " ".join(_pt.split()).lower():
             _pin_bad = True
@@ -2277,7 +2298,10 @@ if RUN_DIR is not None:
         #          "run tracker next action names a later phase than its own state",
         #          "run tracker phase carries no RV line at all",
         #          "run tracker ledger row bolds its severity",
-        #          "run tracker Current State phase advances while Next action does not".
+        #          "run tracker Current State phase advances while Next action does not",
+        #          "run tracker Current State names a mentioned phase",
+        #          "run tracker ledger header renames its phase column",
+        #          "run tracker second blocking table gates nothing".
         def _norm(cell):
             """A ledger cell as the comparison wants it: markdown stripped."""
             return re.sub(r"[*`_\s]+", " ", cell or "").strip().lower()
@@ -2332,19 +2356,32 @@ if RUN_DIR is not None:
             # Minor finding, which is the normal outcome of a review. The rows
             # are collected from the header until the table ends, and a
             # narrower table further down is simply a different table.
-            _hdr, _rows = None, []
+            # EVERY blocking table, and the `F-` rows of the whole file.
+            # Two bugs lived in the first version of this: it stopped at the
+            # FIRST header, so a second blocking table's rows gated nothing;
+            # and it read `_seen_fid` out of the rows it had just collected,
+            # which are empty exactly when no header was found — making the
+            # "unparseable ledger" report unreachable, so a `findings.md` whose
+            # header names `Area` where the grammar wants `Phase` read as a
+            # clean one (measured, over a ledger holding an open Critical).
+            # `_seen_fid` now scans the file, which is the only population that
+            # can answer "are there rows nobody read?".
+            _tables, _rows = [], []
             _lines = _ltext.split("\n")
             for _k, _line in enumerate(_lines):
                 _cells = [_norm(c) for c in _line.strip().strip("|").split("|")]
-                if {"id", "sev", "phase", "state"} <= set(_cells):
-                    _hdr = _cells
+                if BLOCKING_COLS <= set(_cells):
+                    _tbl = []
                     for _line2 in _lines[_k + 1:]:
                         if not _line2.lstrip().startswith("|"):
                             break
-                        _rows.append(_line2)
-                    break
-            _seen_fid = [ln for ln in _rows
-                         if re.match(r"\s*\|\s*F-\d+\s*\|", ln)]
+                        _tbl.append(_line2)
+                    _tables.append((_cells, _tbl))
+                    _rows += _tbl
+            _hdr = _tables[0][0] if _tables else None
+            _seen_fid = [ln for ln in _lines
+                         if re.match(r"\s*\|\s*F-\d+\s*\|", ln)
+                         and _norm(ln).count("|") >= 6]
             if _hdr is None:
                 if _seen_fid:
                     bad(f"{relpath(_ledger)} holds {len(_seen_fid)} `F-` row(s) "
@@ -2354,49 +2391,50 @@ if RUN_DIR is not None:
                         "as an empty one. REMEDY: keep the blocking ledger's "
                         "header row as `templates/findings.md` ships it")
             else:
-                _ci = {k: _hdr.index(k) for k in ("id", "sev", "phase", "state")}
-                for _line in _rows:
-                    if not re.match(r"\s*\|\s*F-\d+\s*\|", _line):
-                        continue
-                    _cells = [c for c in _line.strip().strip("|").split("|")]
-                    # WIDTH MUST EQUAL THE HEADER'S, not merely reach the
-                    # columns we want. A row one cell WIDER than its header
-                    # shifts every cell past the inserted one, so `State` is
-                    # read from the wrong column and the row is skipped in
-                    # silence — measured PASS past an open blocking finding
-                    # with `| F-002 | Major | X | 2 | … |` under a 7-column
-                    # header. Either width is a table this arm cannot read, and
-                    # an unreadable ledger row is reported, never assumed clean.
-                    if len(_cells) != len(_hdr):
-                        bad(f"{relpath(_ledger)}: row "
-                            f"{_norm(_cells[0]).upper()!r} has {len(_cells)} "
-                            f"cells but its header has {len(_hdr)} — the "
-                            "advancement check locates `State` and `Sev` by "
-                            "the header's columns, so a row of a different "
-                            "width is one it cannot read, and an unreadable "
-                            "row must not read as a closed one. REMEDY: match "
-                            "the header's column count")
-                        continue
-                    _lrows += 1
-                    if _norm(_cells[_ci["state"]]) != "open":
-                        continue
-                    _sev = _norm(_cells[_ci["sev"]])
-                    if _sev not in ("critical", "major", "bug"):
-                        continue
-                    _phl = re.sub(r"^phase\s*", "", _norm(_cells[_ci["phase"]]))
-                    _pi = _idx.get(f"phase {_phl}")
-                    if _pi is None:
-                        bad(f"{relpath(_ledger)}: {_norm(_cells[_ci['id']]).upper()} "
-                            f"({_sev}) is open against phase {_phl!r}, which "
-                            "matches no `## Phase` heading in the tracker — so "
-                            "the advancement check could not scope it to a "
-                            "phase and this finding gated nothing. REMEDY: make "
-                            "the ledger's Phase cell match the tracker's phase "
-                            "heading")
-                        continue
-                    _blockers.append((_pi, f"Phase {_phl}",
-                                      f"open blocking finding "
-                                      f"{_norm(_cells[_ci['id']]).upper()} ({_sev})"))
+              for _hdr, _rows in _tables:
+                  _ci = {k: _hdr.index(k) for k in ("id", "sev", "phase", "state")}
+                  for _line in _rows:
+                      if not re.match(r"\s*\|\s*F-\d+\s*\|", _line):
+                          continue
+                      _cells = [c for c in _line.strip().strip("|").split("|")]
+                      # WIDTH MUST EQUAL THE HEADER'S, not merely reach the
+                      # columns we want. A row one cell WIDER than its header
+                      # shifts every cell past the inserted one, so `State` is
+                      # read from the wrong column and the row is skipped in
+                      # silence — measured PASS past an open blocking finding
+                      # with `| F-002 | Major | X | 2 | … |` under a 7-column
+                      # header. Either width is a table this arm cannot read, and
+                      # an unreadable ledger row is reported, never assumed clean.
+                      if len(_cells) != len(_hdr):
+                          bad(f"{relpath(_ledger)}: row "
+                              f"{_norm(_cells[0]).upper()!r} has {len(_cells)} "
+                              f"cells but its header has {len(_hdr)} — the "
+                              "advancement check locates `State` and `Sev` by "
+                              "the header's columns, so a row of a different "
+                              "width is one it cannot read, and an unreadable "
+                              "row must not read as a closed one. REMEDY: match "
+                              "the header's column count")
+                          continue
+                      _lrows += 1
+                      if _norm(_cells[_ci["state"]]) != "open":
+                          continue
+                      _sev = _norm(_cells[_ci["sev"]])
+                      if _sev not in ("critical", "major", "bug"):
+                          continue
+                      _phl = re.sub(r"^phase\s*", "", _norm(_cells[_ci["phase"]]))
+                      _pi = _idx.get(f"phase {_phl}")
+                      if _pi is None:
+                          bad(f"{relpath(_ledger)}: {_norm(_cells[_ci['id']]).upper()} "
+                              f"({_sev}) is open against phase {_phl!r}, which "
+                              "matches no `## Phase` heading in the tracker — so "
+                              "the advancement check could not scope it to a "
+                              "phase and this finding gated nothing. REMEDY: make "
+                              "the ledger's Phase cell match the tracker's phase "
+                              "heading")
+                          continue
+                      _blockers.append((_pi, f"Phase {_phl}",
+                                        f"open blocking finding "
+                                        f"{_norm(_cells[_ci['id']]).upper()} ({_sev})"))
         _blockers.sort(key=lambda b: b[0])
 
         # BOTH Current State fields are read. `**Phase:**` is the field the
@@ -2418,24 +2456,38 @@ if RUN_DIR is not None:
             m = re.search(r"\*\*" + field + r":\*\*\s*(.+)", ttext)
             if not m:
                 return None, False, None
-            val = m.group(1)
-            g = (re.search(r"[Pp]hase\s+([0-9A-Za-z.]+)", val)
-                 or re.match(r"\s*([0-9]+[0-9A-Za-z.]*)\b", val))
+            # ANCHORED AT THE START, and that is the whole of the fix for a
+            # Critical. Searching the field's value for `phase <token>`
+            # anywhere read a MENTIONED phase in preference to the named one:
+            # `**Phase:** 3 — moved on past the phase 2 fix loop` resolved to
+            # 2, and the gate passed over a finding open against Phase 2. A
+            # Current State field names its phase FIRST — `templates/progress.md`
+            # prescribes `**Phase:** <id> — <name>` — so the id is the leading
+            # token, optionally introduced by the word "Phase" for the
+            # `**Next action:**` form (`Phase 2 RV — …`). Anything else names
+            # no phase, which is a state this arm reports rather than guesses
+            # at.
+            g = re.match(r"\s*(?:[Pp]hase\s+)?([0-9]+[0-9A-Za-z.]*)\b",
+                         m.group(1))
             if not g:
                 return None, True, None
             return _idx.get(f"phase {g.group(1)}".lower()), True, g.group(1)
 
-        _na_i, _na_present, _na_id = _named_phase("Next action")
-        _ph_i, _ph_present, _ph_id = _named_phase("Phase")
+        _na_i, _na_id = _named_phase("Next action")[0::2]
+        _ph_i, _ph_id = _named_phase("Phase")[0::2]
         _named = [x for x in (_na_i, _ph_i) if x is not None]
 
         # A FIELD THAT NAMES A PHASE THIS TRACKER DOES NOT HAVE is reported on
         # its own, not left to be caught by the accident of a blocker existing
         # at a lower index. The ledger half already does exactly this for an
         # unmatched `Phase` cell, and the two halves of this arm should agree.
+        # GUARDED BY `_phs`: on a tracker this gate cannot parse, `_idx` is
+        # empty and every readable field "matches no heading", so the operator
+        # got three diagnoses for one defect. The unparseable-tracker arm above
+        # is the one that owns that case.
         for _fld, _id, _i2 in (("Phase", _ph_id, _ph_i),
                                ("Next action", _na_id, _na_i)):
-            if _id is not None and _i2 is None:
+            if _phs and _id is not None and _i2 is None:
                 bad(f"{relpath(tracker)}: Current State's `**{_fld}:**` names "
                     f"phase {_id!r}, which matches no `## Phase` heading in "
                     "this tracker — so the advancement check could not locate "

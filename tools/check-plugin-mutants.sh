@@ -1994,6 +1994,70 @@ assert out!=s, 'mutant is a no-op: the substitution did not apply'
 assert 'an implementer, a reviewer' in flat(out), 'mutant is a no-op: the per-task cost claim was not reintroduced'
 p.write_text(out)\""
 
+# --- round 4: the grammar is strict now, so these are the shapes it refuses ---
+run_mutant "run tracker Current State names a mentioned phase" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+f=tools/fixtures/run-fixloop/progress.md
+if ! grep -qF "Phase:** 2 " "$f"; then
+  echo "mutant is a no-op: the Phase field does not lead with phase 2"
+else
+  sed -i "s|^- \*\*Phase:\*\*.*|- **Phase:** 3 — moved on past the phase 2 fix loop|" "$f"
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** RV — review fan-out|" "$f"
+  grep -qF "Phase:** 3 — moved on past the phase 2" "$f" || echo "mutant is a no-op: the mentioned-phase shape was not written"
+  grep -qE "^\| F-002 .*\| open \|" tools/fixtures/run-fixloop/findings.md || echo "mutant is a no-op: F-002 is not open, so nothing gates Phase 2"
+fi'
+run_mutant "run tracker ledger header renames its phase column" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+f=tools/fixtures/run-fixloop/findings.md
+if ! grep -qF "| ID | Sev | Phase |" "$f"; then
+  echo "mutant is a no-op: the blocking header is not in the shipped shape"
+else
+  sed -i "s3| ID | Sev | Phase |3| ID | Sev | Area |3" "$f"
+  grep -qF "| ID | Sev | Area |" "$f" || echo "mutant is a no-op: the column was not renamed"
+  grep -qE "^\| F-002 .*\| open \|" "$f" || echo "mutant is a no-op: F-002 is not open, so an unread ledger gates nothing"
+fi'
+run_mutant "run tracker second blocking table gates nothing" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+d=tools/fixtures/run-fixloop
+if ! grep -qF "| ID | Sev | Phase |" "$d/findings.md"; then
+  echo "mutant is a no-op: the fixture has no blocking table to duplicate"
+else
+  printf "\n## A second blocking table\n\n| ID | Sev | Phase | File:line | Finding | State | Closed by |\n| -- | --- | ----- | --------- | ------- | ----- | --------- |\n| F-009 | Critical | 2 | \`z:1\` | a second-table finding | open | |\n" >> "$d/findings.md"
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T4|" "$d/progress.md"
+  grep -qF "F-009" "$d/findings.md" || echo "mutant is a no-op: the second table was not appended"
+  grep -qF "Next action:** Phase 3" "$d/progress.md" || echo "mutant is a no-op: Next action was not advanced past Phase 2"
+fi'
+run_mutant "run tracker boundary declares a bare dash" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if ! grep -q "boundary: the T2 contract" "$f"; then
+  echo "mutant is a no-op: the fixture round no longer names its boundary"
+else
+  sed -i "s|boundary: the T2 contract consumed by the orchestrator commit in slice b|boundary: -|" "$f"
+  grep -qF "boundary: -" "$f" || echo "mutant is a no-op: the bare dash was not written"
+  grep -qF "2 slice + 1 integration" "$f" || echo "mutant is a no-op: the integration reviewer went too, so a kill could come from another arm"
+fi'
+run_mutant "the conditional integration rule reverts in templates/progress.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/templates/progress.md')
+q=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(w) for w in ['only','at','a','declared','integration','boundary']]), re.I)
+s=p.read_text()
+assert a.search(s), 'mutant is a no-op: the phrase is already absent from the template'
+out=a.sub('whenever there is more than one slice', s)
+assert 'only at a declared integration boundary' not in flat(out), 'mutant is a no-op: an occurrence survived in the template'
+assert 'only at a declared integration boundary' in flat(q.read_text()), 'mutant is a no-op: the phrase is gone from SKILL.md too, so a kill is not attributable to this file'
+p.write_text(out)\""
+run_mutant "a pinned file becomes unreadable" '
+f=plugins/superb/skills/pipeline/references/parallel.md
+if [ ! -r "$f" ]; then
+  echo "mutant is a no-op: the file is already unreadable"
+else
+  chmod 000 "$f"
+  [ -r "$f" ] && echo "mutant is a no-op: the file is still readable (running as a user that bypasses the mode bits)"
+fi'
+
 echo
 echo "killed=$PASS survived=$SURV no-op=$NOOP"
 if [ "$SURV" -ne 0 ]; then

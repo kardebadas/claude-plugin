@@ -7,8 +7,9 @@ Keep the Current State block at the very top at all times.
 # Pipeline — Progress Tracker
 
 ## Current State
-- **Phase:** <current phase number and name>
-- **Next action:** <the single next unchecked line — task, RV, or RVJ>
+- **Phase:** <phase id FIRST, then an em dash and whatever prose helps>
+- **Next action:** <the single next unchecked line — task, RV, or RVJ. Lead with
+  `Phase <id>` when the action belongs to a phase.>
 - **Last updated:** <timestamp>
 - **Run directory:** <PROJECT_DIR>/docs/superpowers/runs/YYYY-MM-DD-<topic>/
 
@@ -42,6 +43,14 @@ Task states:
   W<n> / deps — the task wave and in-phase dependencies from the GATE 2 plan
       (Rule 6). Members of one wave may be [~] together, each in its own
       wt/... worktree branch.
+
+**The Phase field's id comes FIRST**, e.g. `- **Phase:** 3 — fix loop, F-002
+open`. Everything after the em dash is prose for a human. That is not a style
+preference: the advancement check reads the phase this line NAMES, and it reads
+it as the leading token — so `**Phase:** 3 — moved on past the phase 2 fix loop`
+names phase 3, and a phase mentioned later in the sentence is prose, not the
+run's position. A field that does not begin with a phase id names no phase, and
+the gate reports that rather than guessing which number was meant.
 
 RV — the review line. Every IMPLEMENTATION phase has exactly one, last among
      its own task lines. (A split's RVJ trails it; a joining phase's RVJ leads,

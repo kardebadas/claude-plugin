@@ -69,15 +69,44 @@ written with `grep`/`sed` over raw text; every pinned phrase wraps, so three
 SURVIVED and one NO-OP'd while the arm they were proving was correct all along.
 The arm reads flattened text; the mutants now do too.
 
+## Round 3 ledger (raised by the round-2 fix's own re-review)
+
+**This round changed approach, at the user's direction.** Rounds 1→2→3 each
+produced Criticals from the same two arms — the `findings.md` ledger parse and
+the Current-State phase reader — because both parsed free-form prose, and each
+fix added a heuristic with a new gap. No finding ID repeated, so the letter of
+the convergence rule never tripped; its spirit did. The loop was stopped and the
+choice put to the user, who chose **tighten the grammar, not the parser**. Both
+arms are now smaller than before: the phase reader has one anchored token where
+it had a search, and the ledger parse requires a header the template pins.
+
+| ID | Sev | Area | File:line | Finding | State | Closed by |
+| -- | --- | ---- | --------- | ------- | ----- | --------- |
+| NEW-01 | Critical | gate | `check-plugin.py:2422` | `_named_phase` searched the whole field for `phase <token>` before its bare-id fallback, so `**Phase:** 3 — moved on past the phase 2 fix loop` resolved to 2 and the gate passed over a finding open against Phase 2 | closed | the reference is anchored at the field's start; `templates/progress.md` prescribes that form |
+| NEW-02 | Critical | gate | `check-plugin.py:2346` | N-003's row scoping made the unparseable-ledger `bad()` dead code — `_seen_fid` read `_rows`, empty exactly when no header was found — so a ledger whose header renames `Phase` read as clean with an open Critical | closed | `_seen_fid` scans the file; the header is a pinned grammar |
+| NEW-03 | Major | gate | `check-plugin.py:2335` | Only the first matching table's rows were read, so a second blocking table gated nothing | closed | every blocking table is walked, each with its own header |
+| NEW-04 | Minor | gate | `check-plugin.py:1556` | `-`/`—` sat inside a `\b` group needing a word character after the dash, so `boundary: -` passed; and the stated word-count could never run, `rec` being a flattened window | closed | dashes are their own alternative; the inoperative count dropped |
+| NEW-05 | Minor | gate | `check-plugin.py:1910` | The pin arm `continue`d past a pinned file it could not read, while its pass line claimed every file was checked | closed | an unreadable pinned file is reported |
+| NEW-06 | Minor | gate | `check-plugin.py:1895` | The pin's file list omitted `templates/progress.md` — a migration-corrected site, and the file a run copies into its own run directory | closed | added, with its own mutant |
+| NEW-07 | Minor | gate | `check-plugin.py:2428` | Two flags computed and never read (N-006's own complaint, carried into its replacement), and the nonexistent-phase report unguarded by `_phs`, giving three diagnoses for one defect | closed | flags dropped, report guarded |
+
+**A negative result worth keeping.** The re-reviewer established that the
+boundary arm's *stated* mechanism was not the one running — the word count could
+never fire — and that removing it costs nothing, because a one-word boundary
+(`boundary: seam`) is legitimate and must pass. Without that, the obvious "fix"
+would have been to enforce the word count and break a conforming shape, which is
+round 2's mistake again.
+
 ## Counters
 
 | Scope | Fix-loop iteration | Cap | Deepest fix-mode depth this chain | Cap |
 | ----- | ------------------ | --- | --------------------------------- | --- |
-| Migration (Phase 5) | 2 | 5 | 0 | 2 |
+| Migration (Phase 5) | 3 | 5 | 0 | 2 |
 
 ## Iteration log (convergence rule input)
 
 | Iter | Scope | Depth | Targeted F-IDs | Open after re-review | At |
 | ---- | ----- | ----- | -------------- | -------------------- | -- |
 | 1 | Migration | 0 | F-001..F-024 | N-001..N-010 raised | 2026-09-07 |
-| 2 | Migration | 0 | N-001..N-010 | <pending re-review> | 2026-09-07 |
+| 2 | Migration | 0 | N-001..N-010 | NEW-01..NEW-07 raised | 2026-09-07 |
+| 3 | Migration | 0 | NEW-01..NEW-07 | <pending re-review> | 2026-09-07 |

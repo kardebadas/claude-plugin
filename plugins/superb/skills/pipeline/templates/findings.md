@@ -21,6 +21,15 @@ compares **ID sets**, not prose.
 
 ## Blocking ledger (Critical / Major / bug)
 
+**The header row below is a grammar, not a suggestion.** The advancement check
+locates `Sev`, `Phase` and `State` by name in this header and reads every row
+beneath it until the table ends — so a header that renames `Phase` to something
+else, or a row whose cell count differs from its header's, is a row the check
+cannot read. It reports that rather than treating it as closed, which means a
+renamed column turns into a build failure and not a silently ungated finding.
+Keep the four names `ID`, `Sev`, `Phase` and `State`; add columns if you need
+them, and give every row the same width as the header.
+
 | ID | Sev | Phase | File:line | Finding | State | Closed by |
 | -- | --- | ----- | --------- | ------- | ----- | --------- |
 | F-001 | Critical | 2 | `src/x.php:41` | <one line> | open | |

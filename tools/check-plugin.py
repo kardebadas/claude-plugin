@@ -2316,7 +2316,17 @@ if RUN_DIR is not None:
         #          "run tracker four-column ledger renames its phase column",
         #          "run tracker loses its Phase field",
         #          "run tracker grows a second Current State block",
-        #          "run tracker ledger row id is not F-<n>".
+        #          "run tracker ledger row id is not F-<n>",
+        #          "run tracker Phase field resolves to nothing",
+        #          "run tracker hides a stale Phase field above the fresh one",
+        #          "run tracker ledger row id has a letter after the dash".
+        #
+        # RR6-4's guard — no affirmative line after a nonexistent-phase report —
+        # carries NO mutant, deliberately: removing it restores a FALSE `ok`
+        # line on a build that is red either way, so the harness (which reads
+        # only pass/fail) cannot distinguish it. Verified by hand instead: each
+        # probe above asserts zero `ok    no unfinished phase` lines alongside
+        # its FAIL. Recorded as unpinned rather than left to look watched.
         def _norm(cell):
             """A ledger cell as the comparison wants it: markdown stripped."""
             return re.sub(r"[*`_\s]+", " ", cell or "").strip().lower()
@@ -2417,8 +2427,15 @@ if RUN_DIR is not None:
             # ids (`3a`) that invite `F-002a`. Liberal in what counts as a row,
             # strict in what a row must then satisfy: an off-grammar id is now
             # read or reported, never dropped.
+            # WIDE ENOUGH TO MAKE THE TEMPLATE'S CLAIM TRUE. The first attempt
+            # required a digit straight after the dash and letters only before
+            # it, which still dropped `NEW-F2` and `RR5-2` — the exact id
+            # shapes this branch's own ledger uses for rounds 4 and 5, and
+            # `NEW-F` is the one the code comment cited as its reachability
+            # argument. Narrowing the promise instead of widening the match
+            # would have left a claim finding in a shipped template.
             _isrow = lambda ln: bool(
-                re.match(r"\|?\s*[a-z]{1,6}-\d+[0-9a-z.]*\s*\|", _norm(ln)))
+                re.match(r"\|?\s*[a-z]+[0-9a-z]*-[0-9a-z.]+\s*\|", _norm(ln)))
             _seen_fid = [ln for ln in _lines if _isrow(ln)]
             if _hdr is None:
                 if _seen_fid:
@@ -2528,6 +2545,13 @@ if RUN_DIR is not None:
                          ttext, re.M | re.S)
         _csblock = _csm.group(1) if _csm else ""
         _FIELDRE = r"^\s*(?:[-*+]\s+|\d+[.)]\s+)?\*\*%s:\*\*"
+        if _phs and len(re.findall(_FIELDRE % "Phase", _csblock, re.M)) > 1:
+            bad(f"{relpath(tracker)}: two or more `**Phase:**` fields inside "
+                "the `## Current State` block, and this gate reads the first — "
+                "so a stale line left above a fresh one is the one that counts. "
+                "This is RR5-4's rule one level down: the run's position must "
+                "live in exactly one place. REMEDY: keep one `**Phase:**` "
+                "field, and replace its value rather than adding a line")
         if _phs and not re.search(_FIELDRE % "Phase", _csblock, re.M):
             bad(f"{relpath(tracker)}: no `**Phase:**` field inside a "
                 "`## Current State` block — that field is where the "
@@ -2591,7 +2615,17 @@ if RUN_DIR is not None:
                 "empty ledger is what an unreviewed phase looks like too. "
                 "REMEDY: point Current State at that phase's own next action — "
                 "its review, or its fix loop")
-        elif _blockers and not _named and not (_ph_seen or _na_seen):
+        # THE RULE THE WHOLE ARM OBEYS: never print an affirmative line about a
+        # comparison that did not happen. Round 6 fail-closed on "could not
+        # LOCATE the field" and left two neighbours open — "located it, but it
+        # resolved to nothing" and "located a field, but not the right one" —
+        # and in the first case the same commit removed the report that had
+        # been covering it. Keying this guard off `_*_seen` ("a field exists")
+        # instead of `_*_id` ("a field named a phase") is what did it:
+        # `**Phase:** done` is a form the template blesses and `run-ok` ships,
+        # and an executor writes it exactly when it believes the run is over —
+        # which is precisely when it may be wrong about an open finding.
+        elif _blockers and not _named and not (_ph_id or _na_id):
             bad(f"{relpath(tracker)}: {_blockers[0][1]} has "
                 f"{_blockers[0][2]}, and neither Current State field names a "
                 "phase — so there is nothing to compare it against and the "
@@ -2600,10 +2634,14 @@ if RUN_DIR is not None:
         elif _named:
             ok("Current State does not point past an unfinished phase"
                + _ledger_note)
-        elif _phs:
+        elif _phs and not _blockers:
             ok("no unfinished phase in the tracker" + _ledger_note)
-        # and when `_phs` is empty the arm above already said so: a file this
-        # gate could not parse gets no affirmative line about its contents.
+        # NO AFFIRMATIVE IN THE REMAINING CASES, and each is already reported:
+        # an unparseable tracker (the `_phs` arm above), and a field naming a
+        # phase the tracker lacks (the per-field arm above). Printing
+        # "no unfinished phase" after either was a false line about a
+        # comparison the arm never made — the same class as N-008 and NEW-F6,
+        # and the last of them.
 
 # ---- every mutant this file cites by name must actually exist ----
 # The arms above cite their proofs by NAME: a `Mutant`/`Mutants` comment marker

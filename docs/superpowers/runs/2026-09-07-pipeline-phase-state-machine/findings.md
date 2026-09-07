@@ -157,6 +157,35 @@ fixture target, a ugrep dash, an edit helper discarding writes, and now a
 substring guard two lines could satisfy). It now asserts **positionally** — the
 real field inside the block changed, the decoy landed above the heading.
 
+## Round 6 ledger — the cap-exempt regression correction
+
+**The fix-loop cap (5) fired here.** The round-6 re-review returned
+`FINDINGS MUST BE FIXED` with one Critical that round 6 had itself introduced,
+and recommended treating it as a regression correction rather than a sixth
+iteration — undoing a regression completes the round already counted. The choice
+was put to the user, who directed exactly that. RR6-3 was fixed too rather than
+deferred, because deferring it would have left a claim finding in a shipped
+template.
+
+| ID | Sev | Area | File:line | Finding | State | Closed by |
+| -- | --- | ---- | --------- | ------- | ----- | --------- |
+| RR6-1 | Critical | gate | `check-plugin.py:2594` | **A round-6 regression.** The guard keyed off `_*_seen` ("a field exists") instead of `_*_id` ("a field named a phase"), so `**Phase:** done` — a form the template blesses and `run-ok` ships — plus a phaseless `Next action` printed `ok no unfinished phase` over an open Major. Round 5 had this input FAILing | closed | the affirmative arms require a comparison to have happened |
+| RR6-2 | Major | gate | `check-plugin.py:2531` | `re.search` is first-match-wins, so a stale `**Phase:**` line left above a fresh one *inside* the block silently became the field read — RR5-4's rule one level down | closed | more than one `**Phase:**` in the block is reported |
+| RR6-3 | Minor | gate | `check-plugin.py:2421` | Row-ness still required a digit after the dash and letters before it, dropping `NEW-F2` and `RR5-2` — **the ids this branch's own ledger uses for rounds 4 and 5**, and `NEW-F` was the shape the code comment cited as its own reachability argument | closed | widened to any finding-id shape, making the template's claim true rather than narrowing the claim |
+| RR6-4 | Minor | gate | `check-plugin.py:2600` | A nonexistent-phase report was followed by a false `ok no unfinished phase` | closed | guarded; **unpinnable by a mutant** (removing it restores a false line on a build red either way), so verified by hand — every probe asserts zero false-ok lines |
+
+**What the round-6 re-review established beyond the findings**, and the reason
+this correction is a generalisation rather than three patches: *"the first change
+on this branch that removed a class rather than an instance"* — it reintroduced
+round 5's exact locator bug and got a red build instead of an `ok` line, and 15
+of 18 loss shapes now report loudly. But the premise was applied one layer too
+narrowly. The five locator bugs were instances of a bigger invariant: **the arm
+must never print an affirmative line about a comparison it did not make.** Round
+6 fail-closed on "could not locate the field"; RR6-1 and RR6-2 are "located it
+but it resolved to nothing" and "located a field, but not the right one". The
+affirmative arms now require the comparison, and each remaining case is reported
+by a named arm.
+
 ## Counters
 
 | Scope | Fix-loop iteration | Cap | Deepest fix-mode depth this chain | Cap |
@@ -171,4 +200,5 @@ real field inside the block changed, the decoy landed above the heading.
 | 2 | Migration | 0 | N-001..N-010 | NEW-01..NEW-07 raised | 2026-09-07 |
 | 3 | Migration | 0 | NEW-01..NEW-07 | NEW-F1..NEW-F9 raised | 2026-09-07 |
 | 4 | Migration | 0 | NEW-F1..NEW-F9 | RR5-1..RR5-6 raised | 2026-09-07 |
-| 5 | Migration | 0 | RR5-1..RR5-6 | <pending re-review> | 2026-09-07 |
+| 5 | Migration | 0 | RR5-1..RR5-6 | RR6-1..RR6-4 raised (cap reached) | 2026-09-07 |
+| 5r | Migration | 0 | RR6-1..RR6-4 | <pending re-review> — cap-exempt regression correction, user-directed | 2026-09-07 |

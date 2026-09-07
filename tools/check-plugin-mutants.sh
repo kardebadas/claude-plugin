@@ -2142,6 +2142,46 @@ else
   grep -qF "| ID | Sev | Phase |" "$d/findings.md" || echo "mutant is a no-op: the header changed too, so a kill could come from the header arm"
 fi'
 
+# --- the regression correction: an affirmative line needs a real comparison ---
+run_mutant "run tracker Phase field resolves to nothing" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+f=tools/fixtures/run-fixloop/progress.md
+if ! grep -qF "Phase:** 2 " "$f"; then
+  echo "mutant is a no-op: the Phase field does not lead with phase 2"
+else
+  sed -i "s|^- \*\*Phase:\*\*.*|- **Phase:** done|" "$f"
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** RV — review fan-out|" "$f"
+  grep -qF -- "- **Phase:** done" "$f" || echo "mutant is a no-op: the Phase field was not made non-naming"
+  grep -q "Next action:\*\* Phase" "$f" && echo "mutant is a no-op: Next action still names a phase, so a comparison is still possible"
+  grep -qE "^\| F-002 .*\| open \|" tools/fixtures/run-fixloop/findings.md || echo "mutant is a no-op: F-002 is not open, so no phase is unfinished"
+fi'
+run_mutant "run tracker hides a stale Phase field above the fresh one" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+f=tools/fixtures/run-fixloop/progress.md
+if [ "$(grep -c -- "^- \*\*Phase:\*\*" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture does not have exactly one Phase field"
+else
+  python3 - "$f" <<"EOF"
+import pathlib,sys,re
+p=pathlib.Path(sys.argv[1]); t=p.read_text()
+out,n = re.subn(r"^- \*\*Phase:\*\*.*$", "- **Phase:** 2 — stale, left above\n- **Phase:** 3 — fresh", t, count=1, flags=re.M)
+assert n == 1, "mutant is a no-op: the Phase field was not duplicated"
+p.write_text(out)
+EOF
+  [ "$(grep -c -- "^- \*\*Phase:\*\*" "$f")" = 2 ] || echo "mutant is a no-op: there are not exactly two Phase fields now"
+fi'
+run_mutant "run tracker ledger row id has a letter after the dash" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+d=tools/fixtures/run-fixloop
+if ! grep -qE "^\| F-002 .*\| open \|" "$d/findings.md"; then
+  echo "mutant is a no-op: F-002 is not the open blocking row"
+else
+  sed -i "s3| F-002 |3| NEW-F2 |3" "$d/findings.md"
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T4|" "$d/progress.md"
+  grep -qE "^\| NEW-F2 .*\| open \|" "$d/findings.md" || echo "mutant is a no-op: the row id was not changed to the letter-after-dash shape"
+  grep -qF "| ID | Sev | Phase |" "$d/findings.md" || echo "mutant is a no-op: the header changed too, so a kill could come from the header arm"
+fi'
+
 echo
 echo "killed=$PASS survived=$SURV no-op=$NOOP"
 if [ "$SURV" -ne 0 ]; then

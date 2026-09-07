@@ -64,7 +64,22 @@ fi
 # says if everything else about the fixture was green first. Nothing else checks
 # that — the default mode never reads tools/fixtures/ — so it is checked here,
 # where the rest of the baseline is.
-for fx in tools/fixtures/run-ok tools/fixtures/run-open-rv tools/fixtures/run-fixloop; do
+#
+# ENUMERATED FROM THE TREE, never from a list kept here by hand. A hard-coded
+# set drifts the moment a fixture is added: the new fixture's conformance goes
+# unchecked in this baseline while `check-plugin.py`'s own arm requires CI to
+# lint it, so the two enumerations disagree and each looks complete on its own.
+# A directory holding a `progress.md` IS a fixture run directory -- the same
+# predicate that arm uses.
+mapfile -t RUNFX < <(cd "$D" && for d in tools/fixtures/*/; do
+  [ -f "$d/progress.md" ] && printf '%s\n' "${d%/}"
+done)
+if [ "${#RUNFX[@]}" -eq 0 ]; then
+  echo "  FAIL  no fixture run directory found under tools/fixtures/ -- every run-mode mutant below would be a no-op"
+  exit 1
+fi
+echo "  run fixtures: ${RUNFX[*]}"
+for fx in "${RUNFX[@]}"; do
   if ( cd "$D" && ./tools/check-plugin.sh --run "$fx" ) >/dev/null 2>&1; then
     echo "  ok    clean copy passes with --run over $fx"
   else
@@ -2197,6 +2212,52 @@ else
   grep -qF -- "N=13 W=1 → 2 slice + 1 integration" "$f" || echo "mutant is a no-op: the declaration was not rewritten"
   grep -qF -- "reports p2-review-{a,b,int}.md" "$f" || echo "mutant is a no-op: the reports field went too, so a kill could come from the reviewer-count arm instead"
   grep -qF -- "boundary: the T2 contract" "$f" || echo "mutant is a no-op: the boundary declaration went too, so a kill could come from an integration arm instead"
+fi'
+
+# ---- a fix round belongs to the gate that raised its findings ----
+# The RVJ in run-rvj-fix raised F-101 (Critical, now closed) and carries its own
+# appended round. Both directions of that are mutated: file the round under the
+# phase's RV instead, and remove it altogether. A third case needs no mutant --
+# an OPEN blocking finding owes no completed round, and run-fixloop's F-002 is
+# the standing conforming input for it.
+run_mutant "run tracker RVJ round is filed under the phase RV" '
+enable_run_dir tools/fixtures/run-rvj-fix || exit 0
+f=tools/fixtures/run-rvj-fix/progress.md
+if [ "$(grep -c -- "→ round 2: M=1 C=1" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture no longer has exactly one appended round"
+else
+  python3 - "$f" <<"EOF"
+import pathlib, re, sys
+p = pathlib.Path(sys.argv[1]); t = p.read_text()
+m = re.search(r"(?m)^      → round 2: M=1 C=1.*(?:\n        .*)*\n", t)
+assert m, "mutant is a no-op: the round block is not in the expected shape"
+blk = m.group(0)
+t = t[:m.start()] + t[m.end():]
+# Re-file it under the PHASE RV -- the wrong gate. The RV line is the one
+# declaring N=2 -> 1 slice; insert directly after its continuation line.
+i = t.index("      · reports p2-review-a.md · coverage p2-coverage.md → no findings\n")
+j = i + len("      · reports p2-review-a.md · coverage p2-coverage.md → no findings\n")
+p.write_text(t[:j] + blk + t[j:])
+EOF
+  grep -qF -- "→ round 2: M=1 C=1" "$f" || echo "mutant is a no-op: the round block was lost rather than moved"
+  grep -qF -- "→ F-101" "$f" || echo "mutant is a no-op: the RVJ outcome went too, so a kill could come from another arm"
+fi'
+
+run_mutant "run tracker RVJ closes a blocking finding with no round" '
+enable_run_dir tools/fixtures/run-rvj-fix || exit 0
+f=tools/fixtures/run-rvj-fix/progress.md
+if [ "$(grep -c -- "→ round 2: M=1 C=1" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture no longer has exactly one appended round"
+else
+  python3 - "$f" <<"EOF"
+import pathlib, re, sys
+p = pathlib.Path(sys.argv[1]); t = p.read_text()
+m = re.search(r"(?m)^      → round 2: M=1 C=1.*(?:\n        .*)*\n", t)
+assert m, "mutant is a no-op: the round block is not in the expected shape"
+p.write_text(t[:m.start()] + t[m.end():])
+EOF
+  grep -qF -- "→ round 2:" "$f" && echo "mutant is a no-op: the round survived"
+  grep -qF -- "→ F-101" "$f" || echo "mutant is a no-op: the RVJ outcome went too, so a kill could come from another arm"
 fi'
 
 echo

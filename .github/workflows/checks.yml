@@ -24,6 +24,9 @@ jobs:
       # paths run only inside the mutant harness's own baseline.
       - run: ./tools/check-plugin.sh --run tools/fixtures/run-open-rv
       - run: ./tools/check-plugin.sh --run tools/fixtures/run-fixloop
+      # A trailing RVJ that raised a blocking finding and carries its own
+      # appended fix round -- the gate-ownership arm's only conforming input.
+      - run: ./tools/check-plugin.sh --run tools/fixtures/run-rvj-fix
       - run: ./tools/check-plugin-mutants.sh
 
   craft-brief:

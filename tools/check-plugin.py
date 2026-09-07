@@ -1253,6 +1253,22 @@ fixp  = re.compile(r"fixplan\s+(\S+\.md)")
 route = re.compile(r"\bF-\d+\s*,?\s+(deleted|user-ruled false positive)")
 pinrt = re.compile(r"\bpinned by\b")
 outc  = re.compile(r"(?:->|→)\s*(?:no findings\b|F-\d+)")
+
+
+def outcome_fids(rec):
+    """The F-IDs a record's OUTCOME names — not every F-ID it mentions.
+
+    The outcome slot is the LAST `→ no findings` / `→ F-NNN` in the record, so
+    prose earlier in it that happens to cite an F-ID — a `boundary:` note, a
+    `scope:` note — is not read as this gate's findings. Over-collecting there
+    would demand a fix round for a finding the gate never raised, which is a
+    false FAIL on a conforming tracker: the failure mode this repository has
+    paid for most.
+    """
+    last = None
+    for last in outc.finditer(rec):
+        pass
+    return re.findall(r"F-\d+", rec[last.start():]) if last else []
 def expand_braces(spec):
     """`p3-review-{a,b,int}.md` -> the three names; a plain list passes through.
 
@@ -1375,9 +1391,14 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
         cheap one to accept: the alternative boundaries (a `#` heading, a
         fence) are line-shapes a tracker writes inside round records too, and
         each would re-open the false-FAIL this argument closes.
-    Returns (closed_rounds, no_round_records, violations).
+    Returns (closed_rounds, no_round_records, violations, gates), where
+    `gates` is one dict per `RV`/`RVJ` mark in file order:
+    `{"kind", "file", "line", "fids", "rounds"}`. `fids` are the F-IDs that
+    gate's OUTCOME named; `rounds` is how many appended rounds hang under it.
+    The run-mode gate-ownership arm reads it.
     """
     seen = nseen = viol = 0
+    gates = []
     for f in sorted(paths):
         t, e = read(f)
         if e: continue
@@ -1392,6 +1413,21 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
                 else: break
             return n
         marks = [(m.start(), (m.group(1) or m.group(2))) for m in start.finditer(flat)]
+        # EVERY APPENDED ROUND HAS AN OWNING GATE, and it is the nearest
+        # preceding `RV`/`RVJ` mark. `kind` is `"round"` for every appended
+        # record, so without this the gate a round hangs under is invisible to
+        # every arm — and the reopen rule the prose used to state named `RV`
+        # only, while an `RVJ`'s findings are required to run the fix loop
+        # under the `RVJ`'s own Counters row. A round appended to a joining
+        # phase's `RV` because its leading `RVJ` raised the findings spends
+        # that phase's review budget on a join it never covered.
+        owners, _own = [], None
+        for _p, _k in marks:
+            if _k in ("RV", "RVJ"):
+                _own = len(gates)
+                gates.append({"kind": _k, "file": relpath(f),
+                              "line": lineno(_p), "fids": [], "rounds": 0})
+            owners.append(_own)
         for idx, (pos, kind) in enumerate(marks):
             end = marks[idx + 1][0] if idx + 1 < len(marks) else len(flat)
             if bullet_bounded:
@@ -1401,6 +1437,33 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
             else:
                 end = min(end, pos + 400)
             rec = flat[pos:end]
+            _owner = gates[owners[idx]] if owners[idx] is not None else None
+            if kind in ("RV", "RVJ"):
+                _owner["fids"] = outcome_fids(rec)
+            else:
+                if _owner is None and bullet_bounded:
+                    # A ROUND WITH NO GATE ABOVE IT belongs to nothing. Its
+                    # budget, its coverage and its closure all hang off a gate,
+                    # and there is none, so nothing this file says about it can
+                    # be checked against anything.
+                    viol += 1
+                    bad(f"{relpath(f)}:{lineno(pos)}: an appended round "
+                        "precedes every `RV`/`RVJ` line in this file — a round "
+                        "is appended UNDER the gate that raised its findings, "
+                        "and one with no gate above it has no owner, no "
+                        "budget and no evidence anything can be checked "
+                        "against. REMEDY: append the round under its own "
+                        "gate's line")
+                elif _owner is not None:
+                    _owner["rounds"] += 1
+                # TRACKER MODE ONLY, and that scope is the point. The skill's
+                # prose teaches the round grammar with standalone fragments —
+                # `references/fix-loop.md` shows a `→ round 3: M=0 → no round`
+                # snippet with no gate above it, because the snippet IS the
+                # grammar being taught. A tracker is different: there a round
+                # with no gate above it is a real orphan. An arm that failed
+                # the documentation for being documentation is the defect class
+                # this repository has paid for most.
             if nor.search(rec):
                 nseen += 1
                 body = rec.split("```")[0] if "```" in rec else rec
@@ -1856,10 +1919,10 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
                                     "reviewers; a round whose clusters really "
                                     "were one cluster is a `1 slice + 0 "
                                     "integration` round")
-    return seen, nseen, viol
+    return seen, nseen, viol, gates
 
 pdir = ROOT / "plugins" / "superb" / "skills" / "pipeline"
-seen, nseen, viol = lint_review_lines(pdir.rglob("*.md"))
+seen, nseen, viol, _ = lint_review_lines(pdir.rglob("*.md"))
 if not seen: bad("no closed RV/RVJ examples found — the grammar lost its worked instances")
 # Counted and reported SEPARATELY from `seen`, and required non-zero, for the
 # reason the mutant-citation arm below requires its own list non-empty: an arm
@@ -2174,7 +2237,7 @@ if RUN_DIR is not None:
                 "this tracker names is unverifiable. REMEDY: keep the run's "
                 "`agent-output/` beside its `progress.md`")
             ao = None
-        rseen, rnseen, rviol = lint_review_lines(
+        rseen, rnseen, rviol, rgates = lint_review_lines(
             [tracker], agent_output=ao, bullet_bounded=True)
         if not rseen:
             bad(f"{relpath(tracker)}: no closed RV/RVJ round — nothing in this run "
@@ -2367,6 +2430,18 @@ if RUN_DIR is not None:
         # State block or field, a field naming a phase that does not exist.
         # Every one of those means the comparison was incomplete.
         _untrusted = False
+        # TWO POPULATIONS, TWO QUESTIONS, and conflating them is a defect in
+        # both directions. `_blockers` answers "may this phase/lane advance
+        # RIGHT NOW", so it holds only findings that are OPEN and blocking. The
+        # gate-ownership arm asks a HISTORICAL question — "was the blocking
+        # finding this gate raised closed through a round belonging to this
+        # same gate" — and a closed finding is exactly what it needs to see.
+        # Reading `_blockers` there would (a) never fire, since a closed
+        # finding is absent from it, and (b) fire wrongly on an open one, whose
+        # fix loop is legitimately still in progress and owes no completed
+        # round yet. `_fmap` is that second population: every readable ledger
+        # row, whatever its state.
+        _fmap = {}
         _ledger, _ltext, _lrows = RUN_DIR / "findings.md", None, 0
         if _ledger.is_file():
             _ltext, _lerr = read(_ledger)
@@ -2511,6 +2586,11 @@ if RUN_DIR is not None:
                               "the header's column count")
                           continue
                       _lrows += 1
+                      _fmap[_norm(_cells[_ci["id"]]).upper()] = {
+                          "sev": _norm(_cells[_ci["sev"]]),
+                          "state": _norm(_cells[_ci["state"]]),
+                          "phase": _norm(_cells[_ci["phase"]]),
+                      }
                       if _norm(_cells[_ci["state"]]) != "open":
                           continue
                       _sev = _norm(_cells[_ci["sev"]])
@@ -2539,6 +2619,54 @@ if RUN_DIR is not None:
                                         f"open blocking finding "
                                         f"{_norm(_cells[_ci['id']]).upper()} ({_sev})"))
         _blockers.sort(key=lambda b: b[0])
+
+        # ---- a gate that raised a blocking finding carries its own round ----
+        # THE QUESTION THIS ANSWERS: a closed `RV`/`RVJ` named F-NNN in its
+        # outcome, and F-NNN is blocking and now CLOSED in the ledger. Was it
+        # closed through a fix round belonging to THAT SAME gate?
+        #
+        # `references/fix-loop.md` requires an `RVJ`'s blocking findings to run
+        # the fix loop under the `RVJ`'s own Counters row, while the reopen rule
+        # named `RV` alone — so an `RVJ` fix round had a budget with no home,
+        # and a run following the letter of the rule appended it to the joining
+        # phase's `RV`: the wrong gate's evidence, spending that phase's review
+        # budget on a join it never covered. `kind` is `"round"` for every
+        # appended record, so nothing could see the difference until rounds were
+        # attributed to their owning gate.
+        #
+        # IT DOES NOT READ `_blockers`, and that is deliberate. `_blockers`
+        # holds findings that are OPEN and blocking, because it answers a
+        # different question — may this phase advance right now. Against it this
+        # arm would never fire (a closed finding is absent from it) and would
+        # fire wrongly on an open one, whose fix loop is legitimately still in
+        # progress and owes no completed round yet. `_fmap` is the historical
+        # population: every readable row, whatever its state.
+        # Mutants: "run tracker RVJ round is filed under the phase RV",
+        #          "run tracker RVJ closes a blocking finding with no round".
+        _gate_untrusted = _ltext is None
+        _owed = []
+        for _g in rgates:
+            _need = [x for x in _g["fids"]
+                     if _fmap.get(x, {}).get("sev") in ("critical", "major",
+                                                        "bug")
+                     and _fmap.get(x, {}).get("state") == "closed"]
+            if _need and not _g["rounds"]:
+                _owed.append((_g, _need))
+        for _g, _need in _owed:
+            _gate_untrusted = True
+            bad(f"{_g['file']}:{_g['line']}: this `{_g['kind']}` named "
+                f"{', '.join(sorted(_need))} in its outcome, and the ledger has "
+                "it closed and blocking — but this gate carries no appended "
+                "round of its own. A fix loop belongs to the `review_gate` that "
+                "raised its findings: the round is appended under THAT gate's "
+                "line, and a re-review reopens THAT gate, never a different "
+                "one. A blocking finding closed under another gate's line "
+                "leaves this gate's evidence claiming a clean review it never "
+                "got. REMEDY: append the fix round under this "
+                f"`{_g['kind']}`")
+        if rgates and not _gate_untrusted:
+            ok("every gate whose outcome named a now-closed blocking finding "
+               "carries an appended round of its own")
 
         # BOTH Current State fields are read. `**Phase:**` is the field the
         # resume protocol's reader looks at first, and reading only

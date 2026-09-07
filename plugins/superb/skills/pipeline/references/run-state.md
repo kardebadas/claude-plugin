@@ -50,7 +50,7 @@ one.
 - [x] RV — review fan-out · N=8 → 2 slice + 1 integration · boundary: the T3 contract consumed by T7 · reports p3-review-{a,b,int}.md · coverage p3-coverage.md → F-012, F-013
 - [x] RV — review fan-out · N=8 → 2 slice + 0 integration · no integration boundary · reports p5-review-{a,b}.md · coverage p5-coverage.md → no findings
 - [x] RV — review fan-out · N=3 → 1 slice + 0 integration · reports p2-review-a.md · coverage p2-coverage.md → no findings
-- [x] RV — review fan-out · N=12 waved → 2 slice + 1 integration · boundary: the T3 contract consumed by T7 · reports p4-review-{a,b,int}.md · coverage p4-coverage.md → F-021
+- [x] RV — review fan-out · N=12 W=4 → 3 slice + 1 integration · boundary: the T3 contract consumed by T7 · reports p4-review-{a,b,c,int}.md · coverage p4-coverage.md → F-021
 - [x] RV — review fan-out · WAIVED by user: "skip the code review on this one"
 - [ ] RVJ — joint integration review · split 4a+4b
 - [x] RVJ — joint integration review · lanes A+B (phases 5, 6) · N=17 → 0 slice + 1 integration · reports j-56-int.md · coverage j-56-coverage.md → no findings
@@ -82,9 +82,9 @@ these fields, all paths relative to `agent-output/`:
 
 - `N=<tasks> → <s> slice + <i> integration` — `N` is on the line so the fan-out
   is re-derivable at closure rather than trusted from the step most likely to
-  have been skipped. An **unwaved** phase takes `s = ceil(N/5)`; a **waved** one
-  takes a slice per wave or adjacent wave-pair (write `waved` after `N`), which
-  may be more or fewer; an **`M=`** re-review **writes its cluster count on the
+  have been skipped. **Every `N=` phase takes `s = ceil(N/5)`**, and the wave
+  count never enters it — `W=<n>` may ride the line as implementation history
+  and is informational only; an **`M=`** re-review **writes its cluster count on the
   line as `C=<n>` and `s` must equal it** — `M=9 C=3 → 3 slice + 1 integration`
   (the cluster rule, and what declaring `C` does and does not establish, is in
   `fix-loop.md`'s *Re-review fan-out*); an **`RVJ`** is always

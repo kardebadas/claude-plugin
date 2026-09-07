@@ -39,12 +39,12 @@ phase autonomously.
    "reviewers were dispatched" from "review never started".)*
    - Let `N` = number of **tasks** in this phase (from the expanded sub-plan).
      The `RV`/`RVJ` lines are not tasks and never count toward `N`.
-   - Spawn the slice reviewers in parallel. **How many depends on the regime**,
-     and the `RV` line must record which: an **unwaved** phase takes
-     `ceil(N/5)`; a **waved** phase (Rule 6) takes one slice per wave or per
-     adjacent pair of small waves — which may be more or fewer than `ceil(N/5)`
-     — and writes `waved` after `N`, because splitting a wave's members across
-     two reviewers is forbidden. Assign each an exact commit range
+   - Spawn the slice reviewers in parallel. **How many comes from the task
+     count and from nothing else: `ceil(N/5)`.** A phase that ran waves
+     (Rule 6) is sized identically — waves schedule implementation, and a
+     review slice may split tasks that executed in one wave. `W=<n>` may be
+     written after `N` as implementation history; it is informational and
+     never enters the arithmetic. Assign each an exact commit range
      (`<first-hash>^..<last-hash>`, taken from the tracker); the agent reviews
      ONLY that range's diff, running the repo `/review` skill. Ranges, not task
      names — tasks that touch the same files make a name-based slice ambiguous.

@@ -50,8 +50,8 @@ An unreviewed phase is an unticked box instead. A Rule 3 split and a lane join
 each get an `RVJ` line for the joint review no single phase's `RV` covers.
 
 **Reviewer fan-out.** A phase of N tasks gets `ceil(N/5)` slice reviewers over
-exact commit ranges — or one per wave if it ran waves, since a wave is never
-split across two reviewers — plus an integration reviewer where a boundary no
+exact commit ranges — the same count whether or not it ran implementation
+waves, and a slice may split a wave — plus an integration reviewer where a boundary no
 single slice covers is named on the round, and not otherwise: a multi-slice
 round with nothing crossing between its slices declares
 `no integration boundary` rather than paying for a third reviewer over a diff

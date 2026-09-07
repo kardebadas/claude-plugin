@@ -1203,11 +1203,13 @@ else: ok("no absolute home paths, private project names, or foreign ticket prefi
 # <s> slice + <i> integration declared on that round". Every worked example must
 # obey it, or the gate teaches its own violation. Each record is bounded at the
 # next record so one example cannot borrow its neighbour's evidence.
-# The declared slice count IS checked against `ceil(N/5)`, but only in the
-# regime that rule is defined over: an unwaved `N=` phase. A waved phase
-# legitimately departs from it and says so with the `waved` marker; an `M=`
-# round is sized by clusters and declares `C`; an `RVJ` is always
-# `0 slice + 1 integration`. The arm's own comment carries the scope argument.
+# The declared slice count IS checked against `ceil(N/5)` for EVERY `N=` phase.
+# There is no wave regime and no exemption: reviewer count comes from the task
+# count and from nothing else, so implementation scheduling cannot buy a
+# smaller review. `W=<n>` may ride the line for implementation history and is
+# parsed and IGNORED for arithmetic. An `M=` round is sized by clusters and
+# declares `C`; an `RVJ` is always `0 slice + 1 integration`. The arm's own
+# comment carries the scope argument.
 #
 # The `M=0 → no round` declaration gets its OWN arm below, because it is the one
 # round form that closes with zero reviewer evidence: no `reports`, no
@@ -1242,7 +1244,7 @@ else: ok("no absolute home paths, private project names, or foreign ticket prefi
 #          "run tracker cites a fix plan that is not in agent-output".
 print("\n== pipeline review-line examples ==")
 start = re.compile(r"(?:-\s*)?\[x\]\s*(RVJ|RV)\b|(?:->|→)\s*(round)\s+\d+\s*:")
-decl  = re.compile(r"(?P<key>N|M)=(?P<n>\d+)\s*(?P<waved>waved\s+)?(?:C=(?P<C>\d+)\s*)?"
+decl  = re.compile(r"(?P<key>N|M)=(?P<n>\d+)\s*(?:W=(?P<W>\d+)\s*)?(?:C=(?P<C>\d+)\s*)?"
                    r"(?:->|→)\s*(?P<s>\d+)\s*slice\s*\+\s*(?P<i>\d+)\s*integration")
 rpt   = re.compile(r"reports\s+(.+?)(?=\s*[·|]|\s+coverage\b|\s*$)")
 cov   = re.compile(r"coverage\s+\S+\.md")
@@ -1490,18 +1492,19 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
             #   - `M=` rounds are excluded by `key`. `M` sizes nothing; an
             #     `M=` round is sized by its fix diff's clusters and declares
             #     that count as `C`, which the arm below reads instead.
-            #   - a WAVED `N=` phase is excluded by the `waved` marker, which
-            #     the declaration carries for exactly this reason: it takes one
-            #     slice per wave or per adjacent pair of small waves, which may
-            #     be more or fewer than `ceil(N/5)`, and the wave count is not
-            #     on the line. Not a courtesy exclusion — `references/run-state.md`
-            #     carries a conforming `N=12 waved → 2 slice + 1 integration`
-            #     worked example, where `ceil(12/5)` is 3, so a version of this
-            #     arm that ignored the marker would fail the documentation.
+            #   - THERE IS NO WAVE EXCLUSION. `waved` used to exempt a round
+            #     from this arm outright, and the skill said plainly the wave
+            #     count is not on the line and therefore not re-derivable — so
+            #     `N=12 waved → 1 slice` and `N=12 waved → 9 slice` were both
+            #     accepted, and a coarse wave table silently bought a smaller
+            #     review. Waves schedule implementation; they do not size
+            #     review. `W=<n>` is parsed and ignored here for exactly that
+            #     reason: a tracker cannot buy fewer reviewers by declaring
+            #     fewer waves.
             #   - `RVJ` is excluded by `kind`, and this one is NOT free. An
             #     `RVJ` declares `0 slice + 1 integration` with its `N` the task
-            #     count across the reviewed unit, so its key is `N` and it
-            #     carries no `waved` marker: run without the `kind` test, the
+            #     count across the reviewed unit, so its key is `N`: run
+            #     without the `kind` test, the
             #     arm reports every worked `RVJ` record in the skill —
             #     `N=17 → 0 slice + 1 integration` — for declaring 0 where
             #     `ceil(17/5)` is 4 (measured, in each file that writes one).
@@ -1527,28 +1530,28 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
             # not margin — a boundary cannot license it. `s == 0` is left alone:
             # that is the `RVJ` form, which the arm above owns entirely, and
             # `RVJ` keeps its fixed `0 slice + 1 integration` shape.
-            # Mutants: "run tracker's unwaved round departs from ceil(N/5)",
+            # Mutants: "run tracker's N= round departs from ceil(N/5)",
+            #          "run tracker buys a smaller review by declaring one wave",
             #          "run tracker declares an integration reviewer with no boundary",
             #          "run tracker multi-slice round is silent about its integration reviewer",
             #          "run tracker declares two integration reviewers",
             #          "worked one-slice round adds an integration reviewer",
             #          "run tracker boundary declares a bare dash".
             ntasks = int(d.group("n"))
-            if (kind == "RV" and d.group("key") == "N"
-                    and d.group("waved") is None):
+            if kind == "RV" and d.group("key") == "N":
                 want_s = -(-ntasks // 5)
                 if nslice != want_s:
                     viol += 1
-                    bad(f"{where}: unwaved `N={ntasks}` round declares "
-                        f"{nslice} slice reviewers, but `ceil(N/5)` is "
-                        f"{want_s}. The unwaved `N=` regime is the one the "
-                        "grammar says is re-derivable from the line — that is "
-                        "what `N` is on the line for — so this is the one "
-                        "sizing error a reader of the tracker alone can "
-                        "prove. REMEDY: dispatch `ceil(N/5)` slice reviewers, "
-                        "or, if the phase ran waves and was sized per wave, "
-                        "write `waved` after `N` — the marker is what says "
-                        "which regime sized the round")
+                    bad(f"{where}: `N={ntasks}` round declares {nslice} slice "
+                        f"reviewers, but `ceil(N/5)` is {want_s}. Reviewer "
+                        "count comes from the task count and from nothing "
+                        "else — `N` is on the line precisely so a reader of "
+                        "the tracker alone can re-derive it — and the wave "
+                        "count never enters the arithmetic: implementation "
+                        "scheduling must not reduce formal review coverage. "
+                        "REMEDY: dispatch `ceil(N/5)` slice reviewers. `W=<n>` "
+                        "may stay on the line as implementation history, but "
+                        "it buys nothing here")
             if nslice > 1 and nint not in (0, 1):
                 viol += 1
                 bad(f"{where}: declares {nint} integration reviewers — the "
@@ -1871,7 +1874,7 @@ if not nseen:
         "skill's prose, or delete this arm along with the last one")
 if seen and nseen and not viol:
     ok(f"{seen} closed review rounds, {nseen} of them `M=0 → no round`: "
-       "reviewer counts, RVJ shape, unwaved `ceil(N/5)` sizing, the "
+       "reviewer counts, RVJ shape, `ceil(N/5)` sizing, the "
        "integration reviewer 0 at one slice and boundary-declared above one, "
        "`M=` cluster counts and "
        "coverage all conform, and every no-round record names its closure "
@@ -2062,7 +2065,7 @@ else:
 # WHAT THIS MODE ESTABLISHES, exactly, and what it does not:
 #   IT ESTABLISHES — for every closed `RV`/`RVJ` round in `<dir>/progress.md`:
 #     the declared `<s> slice + <i> integration` count equals the number of
-#     report files the same round lists (brace sets expanded); an unwaved `N=`
+#     report files the same round lists (brace sets expanded); an `N=`
 #     round's slice count equals `ceil(N/5)`; the integration count is 0 at one
 #     slice, and above one slice is either 1 with a named `boundary:` or 0 with
 #     `no integration boundary` declared; an appended round is keyed `M`, and
@@ -2082,7 +2085,7 @@ else:
 #     the arm above derives it. Elsewhere the two halves of the question
 #     differ. The OVER-WIDE half is caught where it leaves a trace: two
 #     reviewers handed the same range are two rows this mode compares, and it
-#     reports them. The COUNT itself is not derivable there — a waved phase's
+#     reports them. The COUNT itself is not derivable there — a fix round's
 #     wave count is not on the line, and a re-review's rule is "one reviewer
 #     per file cluster in the fix diff", whose input is the diff, with `C` a
 #     number written by whoever chose `s`, so a round declaring
@@ -2183,7 +2186,7 @@ if RUN_DIR is not None:
             # against, so this line must not be the thing that says it was.
             ok(f"{rseen} closed review rounds in the tracker"
                + (f" ({rnseen} of them `M=0 → no round`)" if rnseen else "")
-               + ", every unwaved `N=` round sized `ceil(N/5)` with its "
+               + ", every `N=` round sized `ceil(N/5)` with its "
                  "integration reviewer 0 at one slice and, above one slice, "
                  "either declared with its boundary or declared absent, every "
                  "declared report file and every declared coverage file "

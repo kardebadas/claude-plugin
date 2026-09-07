@@ -1553,14 +1553,13 @@ p.write_text(out)\""
 # that occurs in the fixture's prose as well; the third edits a worked example,
 # because the fixture has no one-slice round that could gain an integration
 # reviewer without also gaining a report file.
-run_mutant "run tracker's unwaved round departs from ceil(N/5)" '
+run_mutant "run tracker's N= round departs from ceil(N/5)" '
 enable_run || exit 0
 '"$J"' "import pathlib
 p=pathlib.Path(\"tools/fixtures/run-ok/progress.md\")
 L=p.read_text().split(chr(10))
 i=[n for n,x in enumerate(L) if x.lstrip().startswith(\"- [x] RV\") and \"N=8\" in x]
 assert len(i)==1, \"mutant is a no-op: the fixture no longer has exactly one closed round declaring N=8\"
-assert \"waved\" not in L[i[0]], \"mutant is a no-op: that round carries a waved marker, which exempts it from this arm\"
 assert \"2 slice + 1 integration\" in L[i[0]], \"mutant is a no-op: that round no longer declares 2 slice + 1 integration\"
 L[i[0]]=L[i[0]].replace(\"N=8\", \"N=11\")
 out=chr(10).join(L)
@@ -2180,6 +2179,24 @@ else
   sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T4|" "$d/progress.md"
   grep -qE "^\| NEW-F2 .*\| open \|" "$d/findings.md" || echo "mutant is a no-op: the row id was not changed to the letter-after-dash shape"
   grep -qF "| ID | Sev | Phase |" "$d/findings.md" || echo "mutant is a no-op: the header changed too, so a kill could come from the header arm"
+fi'
+
+run_mutant "run tracker buys a smaller review by declaring one wave" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if [ "$(grep -c -- "N=8 → 2 slice + 1 integration" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture no longer has exactly one N=8 round declaring 2 slice"
+else
+  # W=1 with a task count whose ceil(N/5) is 3 while the round still declares
+  # 2 slice: legal under the old waved regime, and the whole point of removing
+  # it. The declared reviewer TOTAL is left at 3 (2 slice + 1 integration) and
+  # the reports field is untouched, so a kill cannot come from the
+  # reviewer-count arm; the boundary stays named, so it cannot come from either
+  # integration arm either.
+  sed -i "s|N=8 → 2 slice + 1 integration|N=13 W=1 → 2 slice + 1 integration|" "$f"
+  grep -qF -- "N=13 W=1 → 2 slice + 1 integration" "$f" || echo "mutant is a no-op: the declaration was not rewritten"
+  grep -qF -- "reports p2-review-{a,b,int}.md" "$f" || echo "mutant is a no-op: the reports field went too, so a kill could come from the reviewer-count arm instead"
+  grep -qF -- "boundary: the T2 contract" "$f" || echo "mutant is a no-op: the boundary declaration went too, so a kill could come from an integration arm instead"
 fi'
 
 echo

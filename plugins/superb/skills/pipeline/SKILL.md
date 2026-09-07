@@ -209,9 +209,9 @@ toward Rule 3's 12-task cap nor toward `N` in `ceil(N/5)`.
       · reports p5-review-{a,b}.md · coverage p5-coverage.md → no findings
 ```
 
-The `[ ]` form carries nothing else: at GATE 2 no task has a hash, and a waved
-phase's slice count still has latitude in it (one slice per wave, or per
-adjacent pair of small waves). Both are filled in at dispatch.
+The `[ ]` form carries nothing else: at GATE 2 no task has a hash, and the
+slice count is not yet written even though `ceil(N/5)` already determines it.
+Both are filled in at dispatch.
 
 **Closing it takes artifacts, not adjectives** — these fields, each checkable by
 someone who was not there, all paths relative to `agent-output/`:
@@ -223,14 +223,14 @@ someone who was not there, all paths relative to `agent-output/`:
 | `coverage <file>` | One file holding **the slice assignment table above the `git log --oneline PB..PH`**, and ending with the verdict line `COVERED: <n>/<n> commits`. All three: a bare log is the input to a coverage judgement rather than the judgement, and a table with a gap in it sits above the log just as happily as one without. Anything short of `<n>/<n>` does not close the line. The table's own shape is fixed, below the regimes. |
 | `→ <F-IDs>` or `→ no findings` | What the round produced. |
 
-**Which regime sized the round — and whether the line proves it.** Only the
-unwaved `N=` row is re-derivable from the line; the others say so rather than
-borrowing that guarantee.
+**Which regime sized the round — and whether the line proves it.** Every `N=`
+row is re-derivable from the line; the others say so rather than borrowing that
+guarantee.
 
 | Key on the line | `s` is | Re-derivable from the line? |
 | --- | --- | --- |
-| `N=<n>`, no marker | `ceil(N/5)` | **Yes.** That is what `N` is on the line for: the fan-out is re-derivable at closure instead of trusted from the step that gets skipped. |
-| `N=<n> waved` | one slice per wave, or per adjacent pair of small waves, never splitting a wave across two reviewers — which may be more or fewer than `ceil(N/5)` | **No** — the wave count is not on the line. Write `waved` after `N`; without the marker the line claims the row above. |
+| `N=<n>` | `ceil(N/5)` | **Yes.** That is what `N` is on the line for: the fan-out is re-derivable at closure instead of trusted from the step that gets skipped. |
+| `N=<n> W=<w>` | `ceil(N/5)` — **unchanged**, because `W` is informational | **Yes.** `W` records how many implementation waves ran, for history; it never enters the arithmetic. Implementation scheduling must not reduce formal review coverage. |
 | `M=<m> C=<c>` | `c`, the file clusters in the fix diff | **As a declaration only.** `C` makes the sizing auditable and an arithmetic slip between the two numbers red, without establishing the count itself. `M` sizes nothing. |
 | `RVJ` | always `0 slice + 1 integration`, its `N` informational | **Yes**, from the form. |
 
@@ -251,7 +251,7 @@ single slice's.
 plugin's own repository ships a linter for this grammar: from a checkout of
 that repo, `./tools/check-plugin.sh --run <run-directory>` reads the tracker's
 closed `RV`/`RVJ` rounds and names any whose declared count and listed report
-files disagree, whose unwaved `N=` slice count is not `ceil(N/5)`, whose
+files disagree, whose `N=` slice count is not `ceil(N/5)`, whose
 integration count does not follow its slice count, whose `RVJ` is not
 `0 slice + 1 integration`, whose `M=` declares no `C=<n>` or a `C` its slice
 count contradicts, whose `coverage` field is absent, whose named report or
@@ -262,7 +262,7 @@ It is not in a project's own tree unless that project is the plugin, so it is
 a check a run can use, not a gate every run passes — Stage 5 is what runs it,
 and says in the hand-off what came back.
 
-**Outside the unwaved `N=` regime it still cannot check that the fan-out was
+**Outside the `N=` regime it still cannot check that the fan-out was
 sized right**, and half of that will never be checkable from the tracker: the
 duplication half is caught, since two reviewers handed one range are two rows
 the linter can compare, but the count itself is not derivable from the line
@@ -755,9 +755,9 @@ Counters row; the formal states begin only where REVIEW leaves off.
 **REVIEW** — the phase's `RV` line.
 Mark `RV` `[~]` **and save first** — it is a tracker line and Rule 2 governs it.
 `N` = the phase's task count → dispatch the slice reviewers in parallel:
-`ceil(N/5)` for an **unwaved** phase, one per wave or adjacent wave-pair for a
-**waved** one (recorded as `waved` on the line, since a wave is never split
-across two reviewers). Each owns an exact **commit range** from the tracker's
+**`ceil(N/5)`, whatever the wave count was.** Waves schedule implementation;
+they do not size review, and a slice may split tasks that ran in one wave.
+Each owns an exact **commit range** from the tracker's
 hashes, each runs the repo `/review` skill, each returns a report file even when
 it finds nothing. Add an integration reviewer **only at a declared integration
 boundary** (see *Reviewer fan-out*). Confirm the slices cover every commit on
@@ -1007,10 +1007,11 @@ still falls inside some slice's range, and that is still a check you run.
 **Slices are commit ranges, not vibes.** Take each slice's boundaries from the
 hashes recorded against its tasks in the tracker. Tasks that touch the same
 files make a "contiguous ~5 tasks" slice ambiguous; `<first>^..<last>` does not.
-In a phase that ran waves (Rule 6), take slice boundaries from the **wave
-merges** on the phase branch's first-parent history rather than by counting five
-tasks — one slice per wave, or per adjacent pair of small waves, so no slice
-splits a wave's members across two reviewers.
+A phase that ran waves (Rule 6) is sliced no differently: review slices are cut
+**after the phase's implementation has landed**, into approximately balanced
+contiguous ranges covering the whole phase diff. A slice **may** split work that
+executed in one implementation wave — implementation independence and review
+partitioning are different concerns.
 
 **The slices must cover the phase's whole diff, and that is a check you run.**
 Task hashes are where boundaries come from; they are not the definition of the

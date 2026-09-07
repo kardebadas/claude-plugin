@@ -51,4 +51,4 @@ emitted `Important`.
 
 | Iter | Scope | Depth | Targeted F-IDs | Open after re-review | At |
 | ---- | ----- | ----- | -------------- | -------------------- | -- |
-| 1 | Migration | 0 | F-001..F-024 | <pending> | 2026-09-07 |
+| 1 | Migration | 0 | F-001..F-024 | <pending re-review> | 2026-09-07 |

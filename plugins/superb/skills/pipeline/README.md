@@ -51,8 +51,11 @@ each get an `RVJ` line for the joint review no single phase's `RV` covers.
 
 **Reviewer fan-out.** A phase of N tasks gets `ceil(N/5)` slice reviewers over
 exact commit ranges — or one per wave if it ran waves, since a wave is never
-split across two reviewers — plus an integration reviewer whenever there is more
-than one slice. The slices must cover every commit on the phase branch — including
+split across two reviewers — plus an integration reviewer where a boundary no
+single slice covers is named on the round, and not otherwise: a multi-slice
+round with nothing crossing between its slices declares
+`no integration boundary` rather than paying for a third reviewer over a diff
+the slices already read. The slices must cover every commit on the phase branch — including
 any the orchestrator wrote inline, which have no task line and so are covered
 by nothing unless a slice is widened to reach them. Fix rounds get their own
 math — one reviewer per file cluster in the fix diff — and the assigned ranges

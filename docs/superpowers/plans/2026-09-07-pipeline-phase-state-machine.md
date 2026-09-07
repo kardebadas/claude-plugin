@@ -3035,3 +3035,33 @@ says what changed and why.
   `nint == 1 and nslice == 1` outright. Without that, the mutant
   `"worked one-slice round adds an integration reviewer"` loses the arm that
   kills it.
+
+### Task 6
+
+- **The plan's arm draft was incomplete but the file was not.** The gap logged
+  under Task 5 — nothing rejecting `i=1` at one slice — turned out to be already
+  covered: the existing code had *two* branches, and only the first
+  (`s > 1 ⇒ i = 1`) needed replacing. The second (`s == 1 ⇒ i = 0`) is what
+  kills `"worked one-slice round adds an integration reviewer"`, and it stays
+  unconditional: a boundary cannot license a second reviewer over a diff the one
+  slice already read in full.
+- **Converting Phase 3 to the boundary-less shape broke four mutants**, each
+  reporting a missing target rather than a gate hole:
+  `"long run-tracker round loses its coverage field"`,
+  `"run tracker's coverage table repeats a slice range"`,
+  `"run tracker's coverage table loses a slice's row"` and
+  `"run tracker's integration range collapses onto a slice's"` all target
+  Phase 3 as *the* round with an integration reviewer and a three-row coverage
+  table. Phase 3 was restored and a **Phase 4** added for the declared-absence
+  shape, so the new shape is covered without stripping anyone's target. Phase 4
+  declares `N=7`, not `N=8`, because a second `N=8` round makes the
+  `ceil(N/5)` mutant a no-op. Both reasons are recorded in the fixture itself.
+- **My own new mutant miscounted**: its guard required
+  `no integration boundary` exactly once, but the fixture prose mentions the
+  phrase. It now anchors on the bullet form `^      · no integration boundary$`,
+  with the reason in its no-op message.
+- **Third time the harness caught what the linter structurally cannot.** A
+  reflow neutering a mutant (Task 5), a rewrite leaving an arm with no subject
+  (Task 4), and a fixture change stripping four mutants of their targets (here).
+  `check-plugin.sh` says the rules hold; only the harness says the checks still
+  check. **Run it after every prose or fixture edit, and never through `tail`.**

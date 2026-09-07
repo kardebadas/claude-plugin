@@ -385,8 +385,8 @@ fi'
 run_mutant "run tracker has no closed review round" '
 enable_run || exit 0
 f=tools/fixtures/run-ok/progress.md
-if [ "$(grep -c "\[x\] RV" "$f")" != 3 ]; then
-  echo "mutant is a no-op: the fixture no longer holds exactly three closed RV records"
+if [ "$(grep -c "\[x\] RV" "$f")" != 4 ]; then
+  echo "mutant is a no-op: the fixture no longer holds exactly four closed RV records"
 else
   sed -i "/\[x\] RV/d" "$f"
   sed -i "/→ round /d" "$f"
@@ -1547,19 +1547,42 @@ assert \"N=11\" in out, \"mutant is a no-op: the task count was not raised\"
 assert \"2 slice + 1 integration\" in out, \"mutant is a no-op: the declared counts moved with it, so a kill could come from the integration arm instead\"
 assert \"reports p2-review-{a,b,int}.md\" in out, \"mutant is a no-op: the reports field went too, so a kill could come from the reviewer-count arm instead\"
 p.write_text(out)"'
-run_mutant "run tracker's multi-slice round drops its integration reviewer" '
+# The integration reviewer is conditional now, so what must not survive is
+# SILENCE about it in either direction: a reviewer with no boundary named, and a
+# multi-slice round that neither has one nor says it does not need one. Phase 2
+# is the fixture's round WITH a boundary, Phase 3 the round declaring none, so
+# each mutant has exactly one target and its kill is attributable.
+run_mutant "run tracker declares an integration reviewer with no boundary" '
 enable_run || exit 0
-'"$J"' "import pathlib
-p=pathlib.Path(\"tools/fixtures/run-ok/progress.md\")
-L=p.read_text().split(chr(10))
-i=[n for n,x in enumerate(L) if x.lstrip().startswith(\"- [x] RV\") and \"N=8\" in x]
-assert len(i)==1, \"mutant is a no-op: the fixture no longer has exactly one closed round declaring N=8\"
-assert \"2 slice + 1 integration\" in L[i[0]], \"mutant is a no-op: that round no longer declares 2 slice + 1 integration\"
-L[i[0]]=L[i[0]].replace(\"N=8\", \"N=15\").replace(\"2 slice + 1 integration\", \"3 slice + 0 integration\")
-out=chr(10).join(L)
-assert \"N=15\" in out and \"3 slice + 0 integration\" in out, \"mutant is a no-op: the integration reviewer was not dropped\"
-assert \"reports p2-review-{a,b,int}.md\" in out, \"mutant is a no-op: the reports field went too, so a kill could come from the reviewer-count arm instead\"
-p.write_text(out)"'
+f=tools/fixtures/run-ok/progress.md
+if [ "$(grep -c "boundary: the T2 contract" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture round no longer names its boundary exactly once"
+else
+  sed -i "/· boundary: the T2 contract consumed by the orchestrator commit in slice b/d" "$f"
+  grep -q "boundary: the T2 contract" "$f" && echo "mutant is a no-op: the boundary is still named on that round"
+  grep -qF "2 slice + 1 integration" "$f" || echo "mutant is a no-op: the integration reviewer went with the boundary, so a kill could come from another arm"
+  grep -qF "reports p2-review-{a,b,int}.md" "$f" || echo "mutant is a no-op: the report set went too, so a kill could come from the file-count arm"
+fi'
+run_mutant "run tracker multi-slice round is silent about its integration reviewer" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if [ "$(grep -c "^      · no integration boundary$" "$f")" != 1 ]; then
+  echo "mutant is a no-op: no round declares the absence of a boundary on a line of its own exactly once (the fixture prose mentions the phrase too, which is why this anchors on the bullet form)"
+else
+  sed -i "/^      · no integration boundary$/d" "$f"
+  grep -q "^      · no integration boundary$" "$f" && echo "mutant is a no-op: the declaration is still present"
+  grep -qF "2 slice + 0 integration" "$f" || echo "mutant is a no-op: the declared counts went with it, so a kill could come from a sizing arm"
+fi'
+run_mutant "run tracker declares two integration reviewers" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if ! grep -qF "2 slice + 1 integration" "$f"; then
+  echo "mutant is a no-op: no round declares 1 integration reviewer to double"
+else
+  sed -i "0,/2 slice + 1 integration/s|2 slice + 1 integration|2 slice + 2 integration|" "$f"
+  grep -qF "2 slice + 2 integration" "$f" || echo "mutant is a no-op: the count was not doubled"
+  grep -q "boundary: the T2 contract" "$f" || echo "mutant is a no-op: the boundary went too, so a kill could come from the unnamed-boundary arm"
+fi'
 run_mutant "worked one-slice round adds an integration reviewer" "$J \"import pathlib
 p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
 s=p.read_text(); mid=chr(183)

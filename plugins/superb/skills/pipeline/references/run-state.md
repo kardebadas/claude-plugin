@@ -47,9 +47,10 @@ one.
 - [x] T4 — <task name> · W3 · deps T3 — `nocommit` (docs only, folded into T5's commit)
 - [ ] RV — review fan-out
 - [~] RV — review fan-out · N=8 → 2 slice + 1 integration · started 2026-09-01 14:31
-- [x] RV — review fan-out · N=8 → 2 slice + 1 integration · reports p3-review-{a,b,int}.md · coverage p3-coverage.md → F-012, F-013
+- [x] RV — review fan-out · N=8 → 2 slice + 1 integration · boundary: the T3 contract consumed by T7 · reports p3-review-{a,b,int}.md · coverage p3-coverage.md → F-012, F-013
+- [x] RV — review fan-out · N=8 → 2 slice + 0 integration · no integration boundary · reports p5-review-{a,b}.md · coverage p5-coverage.md → no findings
 - [x] RV — review fan-out · N=3 → 1 slice + 0 integration · reports p2-review-a.md · coverage p2-coverage.md → no findings
-- [x] RV — review fan-out · N=12 waved → 2 slice + 1 integration · reports p4-review-{a,b,int}.md · coverage p4-coverage.md → F-021
+- [x] RV — review fan-out · N=12 waved → 2 slice + 1 integration · boundary: the T3 contract consumed by T7 · reports p4-review-{a,b,int}.md · coverage p4-coverage.md → F-021
 - [x] RV — review fan-out · WAIVED by user: "skip the code review on this one"
 - [ ] RVJ — joint integration review · split 4a+4b
 - [x] RVJ — joint integration review · lanes A+B (phases 5, 6) · N=17 → 0 slice + 1 integration · reports j-56-int.md · coverage j-56-coverage.md → no findings
@@ -87,7 +88,10 @@ these fields, all paths relative to `agent-output/`:
   line as `C=<n>` and `s` must equal it** — `M=9 C=3 → 3 slice + 1 integration`
   (the cluster rule, and what declaring `C` does and does not establish, is in
   `fix-loop.md`'s *Re-review fan-out*); an **`RVJ`** is always
-  `0 slice + 1 integration` with `N` informational. `i` is 1 whenever `s > 1`.
+  `0 slice + 1 integration` with `N` informational. `i` is **0 at one slice**;
+  above one slice it is 1 only at a **declared integration boundary**, named on
+  the round as `· boundary: <what>`, and otherwise 0 with
+  `· no integration boundary` on the round so the choice is visible.
 - `fixplan <file>` — **required on any round declaring `M=<m>` with `m >= 1`**,
   and absent from an `M=0 → no round` record, which dispatched no fix and so had
   nothing to plan. It is the round's fix plan

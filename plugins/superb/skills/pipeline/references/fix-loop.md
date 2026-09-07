@@ -441,7 +441,7 @@ fix commits, not tasks, so re-reviews get their own rule — and it is a rule ab
 | Ownable fix diff | Slice reviewers | Integration reviewer |
 |------------------|-----------------|----------------------|
 | One commit, or one file cluster | 1 | 0 (the one slice sees all) |
-| Two or more disjoint file clusters | one reviewer per file cluster | 1 |
+| Two or more disjoint file clusters | one reviewer per file cluster | 0, or 1 at a declared boundary |
 
 **Ownable** is the qualifier the rows are keyed on: an ownable commit is one a
 reviewer can be assigned, which is every commit the fix-mode run produced except

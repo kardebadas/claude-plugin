@@ -48,15 +48,23 @@ RV — the review line. Every IMPLEMENTATION phase has exactly one, last among
      sitting above that phase's first task.) Stages 1-5 seeded at
      Stage 1 are scaffolding; no RV. Not a task: excluded from Rule 3's 12-cap
      and from N in ceil(N/5).
+     i is 0 at one slice. Above one slice i is 1 only at a DECLARED
+     integration boundary - a split's siblings joining, two lanes joining, or
+     a contract introduced in one slice and consumed in another - named as
+     `boundary: <what>`; otherwise i is 0 and the round carries
+     `no integration boundary`, so an omission and a judgement never read
+     the same.
      A fix round (M=<m>, m>=1) also names its fixplan file: the round's fix
      plan, written before its first fix was dispatched. An M=0 -> no round
      record carries none - no fix ran, so there was nothing to plan.
 
   [ ] RV — review fan-out
   [~] RV — review fan-out · N=8 -> 2 slice + 1 integration · started <ts>
-  [x] RV — review fan-out · N=8 -> 2 slice + 1 integration
+  [x] RV — review fan-out · N=8 -> 2 slice + 1 integration · boundary: the T3 contract consumed by T7
       · reports p3-review-{a,b,int}.md · coverage p3-coverage.md -> F-012, F-013
-  [x] RV — review fan-out · N=8 -> 2 slice + 1 integration
+  [x] RV — review fan-out · N=8 -> 2 slice + 0 integration · no integration boundary
+      · reports p5-review-{a,b}.md · coverage p5-coverage.md -> no findings
+  [x] RV — review fan-out · N=8 -> 2 slice + 1 integration · boundary: the T3 contract consumed by T7
       · reports p3-review-{a,b,int}.md · coverage p3-coverage.md -> F-012
       -> round 2: M=1 C=1 -> 1 slice + 0 integration
          · fixplan p3-fixplan-r2.md · reports p3-rr2-a.md

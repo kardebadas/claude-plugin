@@ -1437,14 +1437,30 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
             #     `ceil(17/5)` is 4 (measured, in each file that writes one).
             #     The `RVJ` shape arm above is what holds that form instead.
             #
-            # `i` FOLLOWS `s`: 1 above one slice, 0 at one slice. Stated in
-            # `SKILL.md`'s field row and in `references/run-state.md`'s
-            # matching bullet, and encoded again in the fan-out table, whose
-            # one-slice row reads "0 (one slice sees all)" and whose every
-            # other row gives 1. `s == 0` is left alone: that is the `RVJ`
-            # form, which the arm above owns entirely.
+            # `i` AT ONE SLICE IS 0; ABOVE ONE SLICE IT IS CONDITIONAL ON A
+            # DECLARED BOUNDARY. It used to be 1 whenever `s > 1`, which spent a
+            # third reviewer on every ordinary multi-slice phase whether or not
+            # anything crossed between slices. It is now dispatched where
+            # something crosses — siblings of a split joining, two lanes
+            # joining, or a contract introduced in one slice and consumed in
+            # another — and the round NAMES that boundary.
+            #
+            # THE ABSENCE IS DECLARED TOO. A silent omission and a considered
+            # judgement read identically, and a review that reads as "not
+            # needed" when nobody decided is how the fan-out went missing for
+            # seven consecutive phases in the run that made `RV` a tracker line.
+            # So a multi-slice round with no integration reviewer says
+            # `no integration boundary`, and a reader can tell the two apart.
+            #
+            # At one slice `i` is still 0 unconditionally: that slice already
+            # sees the whole diff, so a second reviewer over it is duplication,
+            # not margin — a boundary cannot license it. `s == 0` is left alone:
+            # that is the `RVJ` form, which the arm above owns entirely, and
+            # `RVJ` keeps its fixed `0 slice + 1 integration` shape.
             # Mutants: "run tracker's unwaved round departs from ceil(N/5)",
-            #          "run tracker's multi-slice round drops its integration reviewer",
+            #          "run tracker declares an integration reviewer with no boundary",
+            #          "run tracker multi-slice round is silent about its integration reviewer",
+            #          "run tracker declares two integration reviewers",
             #          "worked one-slice round adds an integration reviewer".
             ntasks = int(d.group("n"))
             if (kind == "RV" and d.group("key") == "N"
@@ -1462,17 +1478,30 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
                         "or, if the phase ran waves and was sized per wave, "
                         "write `waved` after `N` — the marker is what says "
                         "which regime sized the round")
-            if nslice > 1 and nint != 1:
+            if nslice > 1 and nint not in (0, 1):
                 viol += 1
-                bad(f"{where}: declares {nslice} slice reviewers and "
-                    f"{nint} integration reviewers — `i` is 1 whenever `s` is "
-                    "above 1. Above one slice, nobody has seen the whole diff: "
-                    "each slice reviewer sees only its own range, so the "
-                    "cross-slice defect — a contract introduced in one slice "
-                    "and consumed in another — is what no slice can see and "
-                    "the integration reviewer exists to hunt. REMEDY: declare "
-                    "and dispatch exactly one integration reviewer over the "
-                    "union of the slices")
+                bad(f"{where}: declares {nint} integration reviewers — the "
+                    "integration slice is the whole diff, so there is at most "
+                    "one. REMEDY: declare 0 or 1")
+            elif nslice > 1 and nint == 1 and not re.search(r"boundary:\s*\S", rec):
+                viol += 1
+                bad(f"{where}: declares an integration reviewer but names no "
+                    "`boundary: <what>` — an unnamed boundary is the automatic "
+                    "third reviewer this rule replaced, and above one slice a "
+                    "reviewer with nothing named to cover reads the same diff "
+                    "the slices already read. REMEDY: name the boundary it "
+                    "covers — siblings of a split joining, two lanes joining, "
+                    "or a contract introduced in one slice and consumed in "
+                    "another — or declare `no integration boundary` and drop "
+                    "the reviewer")
+            elif nslice > 1 and nint == 0 and "no integration boundary" not in rec:
+                viol += 1
+                bad(f"{where}: declares {nslice} slice reviewers and no "
+                    "integration reviewer, and does not say why — an omission "
+                    "and a judgement read identically, which is how a review "
+                    "goes missing without anyone deciding to skip it. REMEDY: "
+                    "add `· no integration boundary` to the round, or add the "
+                    "reviewer with its `boundary:`")
             elif nslice == 1 and nint != 0:
                 viol += 1
                 bad(f"{where}: declares 1 slice reviewer and {nint} "
@@ -1737,7 +1766,8 @@ if not nseen:
 if seen and nseen and not viol:
     ok(f"{seen} closed review rounds, {nseen} of them `M=0 → no round`: "
        "reviewer counts, RVJ shape, unwaved `ceil(N/5)` sizing, the "
-       "integration reviewer above one slice, `M=` cluster counts and "
+       "integration reviewer 0 at one slice and boundary-declared above one, "
+       "`M=` cluster counts and "
        "coverage all conform, and every no-round record names its closure "
        "routes and carries no reviewer evidence")
 
@@ -1946,7 +1976,8 @@ if RUN_DIR is not None:
             ok(f"{rseen} closed review rounds in the tracker"
                + (f" ({rnseen} of them `M=0 → no round`)" if rnseen else "")
                + ", every unwaved `N=` round sized `ceil(N/5)` with its "
-                 "integration reviewer following its slice count, every "
+                 "integration reviewer 0 at one slice and, above one slice, "
+                 "either declared with its boundary or declared absent, every "
                  "declared report file and every declared coverage file "
                  "present in agent-output/, and no round of two or more "
                  "slices repeating a range across its coverage rows")

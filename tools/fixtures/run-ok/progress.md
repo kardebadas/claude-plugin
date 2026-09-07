@@ -70,6 +70,31 @@ passes too. Nor does it establish that a named report or coverage file says
 anything — their existence is checked, their contents are not, so
 `COVERED: <n>/<n>` goes unread — or that a round happened when it claims to.
 
+**The integration reviewer is conditional, and both arms of that are here.**
+Phases 2 and 3 keep their integration reviewer and each names the boundary it
+covers; **Phase 4** runs two slices with none and says so on a line of its own.
+Those are the only two legal shapes above one slice, and the arm reads both: a
+reviewer with no boundary named is the automatic third reviewer the rule
+replaced, and a multi-slice round silent about it makes an omission
+indistinguishable from a judgement. At one slice `i` is still 0
+unconditionally — Phase 1 is that shape, and no boundary can license a second
+reviewer over a diff the one slice already read in full.
+
+**Phase 4 declares `N=7`, not `N=8`**, and that is load-bearing too: a mutant
+requires exactly one closed round declaring `N=8` so its kill is attributable to
+the `ceil(N/5)` arm alone, and a second `N=8` round turned it into a no-op
+(measured). `ceil(7/5)` is also 2, so the shape this phase exists to demonstrate
+is unchanged.
+
+**Phase 4 exists rather than Phase 3 being converted**, and that is not
+arbitrary: four mutants target Phase 3 specifically as the round carrying an
+integration reviewer and a three-row coverage table — the repeated-range arm,
+the missing-row arm, the collapsed-integration-range arm and the long-record
+coverage-field arm all read it. Converting Phase 3 to the boundary-less shape
+turned all four into no-ops (measured), each reporting that its target was gone
+rather than that the gate had a hole. A new phase adds the shape without
+removing anyone's target.
+
 **Phase 3 also carries the fixture's only planned re-review round.** Its
 `round 2` declares `M=2 C=1` and names a `fixplan` file, which is what the
 fix-plan arm reads: a round that dispatched fixes must name the plan they were
@@ -92,11 +117,13 @@ records elsewhere in this tree are what keep that exemption exercised.
 ## Phase 2 — fixture, brace-expanded report set · deps: Phase 1
 - [x] T2 — another task · W1 · deps T1 — `bbbbbbb`
 - [x] RV — review fan-out · N=8 → 2 slice + 1 integration
+      · boundary: the T2 contract consumed by the orchestrator commit in slice b
       · reports p2-review-{a,b,int}.md · coverage p2-coverage.md → no findings
 
 ## Phase 3 — fixture, a record longer than the old byte window · deps: Phase 2
 - [x] T3 — a third task · W1 · deps T2 — `ccccccc`
 - [x] RV — review fan-out · N=9 → 2 slice + 1 integration
+      · boundary: T3's helper consumed by the follow-up fix in slice b
       · scope: the phase's own commits plus the follow-up fix that landed
         against T3 after the first pass, which is why this round runs wider
         than the phase line alone would suggest and why the reviewers were
@@ -111,3 +138,9 @@ records elsewhere in this tree are what keep that exemption exercised.
         · reports p3-rr2-a.md · coverage p3-rr2-coverage.md
         → F-001 closed, F-002 closed
 - [x] T4 — file coverage p3-coverage.md into the phase ledger · W1 · deps T3 — `ddddddd`
+
+## Phase 4 — fixture, multi-slice with no integration boundary · deps: Phase 3
+- [x] T5 — a fifth task · W1 · deps T4 — `eeeeeee`
+- [x] RV — review fan-out · N=7 → 2 slice + 0 integration
+      · no integration boundary
+      · reports p4-review-{a,b}.md · coverage p4-coverage.md → no findings

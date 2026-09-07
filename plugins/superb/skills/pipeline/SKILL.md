@@ -203,8 +203,10 @@ toward Rule 3's 12-task cap nor toward `N` in `ceil(N/5)`.
 ```markdown
 - [ ] RV — review fan-out
 - [~] RV — review fan-out · N=8 → 2 slice + 1 integration · started 2026-09-01 14:31
-- [x] RV — review fan-out · N=8 → 2 slice + 1 integration
+- [x] RV — review fan-out · N=8 → 2 slice + 1 integration · boundary: the T3 contract consumed by T7
       · reports p3-review-{a,b,int}.md · coverage p3-coverage.md → F-012, F-013
+- [x] RV — review fan-out · N=8 → 2 slice + 0 integration · no integration boundary
+      · reports p5-review-{a,b}.md · coverage p5-coverage.md → no findings
 ```
 
 The `[ ]` form carries nothing else: at GATE 2 no task has a hash, and a waved
@@ -216,7 +218,7 @@ someone who was not there, all paths relative to `agent-output/`:
 
 | Field | What it must satisfy |
 | --- | --- |
-| `N=<tasks> → <s> slice + <i> integration` | Which number `s` must match depends on the regime, and the declaration's own key says which — the regimes are the table below. Whichever one sized it, **`i` is 1 whenever `s > 1`**, and 0 when `s` is 1, because one slice already sees the whole diff. |
+| `N=<tasks> → <s> slice + <i> integration` | Which number `s` must match depends on the regime, and the declaration's own key says which — the regimes are the table below. Whichever one sized it, **`i` is 0 at one slice** — that slice already sees the whole diff, so a second reviewer over it is duplication a boundary cannot license. **Above one slice `i` is 1 only at a declared integration boundary**, named on the round as `· boundary: <what>`: a Rule 3 split's siblings joining, two lanes joining, or a contract introduced in one slice and consumed in another that no single slice's range covers. Otherwise `i` is 0 and the round says so (`· no integration boundary`) — an omission and a judgement read identically, and that is how a review goes missing without anyone deciding to skip it. |
 | `fixplan <file>` | Fix rounds only: **required on a round declaring `M=<m>` with `m >= 1`**, absent from an `M=0 → no round` record. The round's fix plan (`templates/fix-plan.md`), written before the first fix was dispatched — findings → fix plan → fix implementation, in that order. A round that fixed something and names no plan is a round whose fixes nobody can check against a scope. |
 | `coverage <file>` | One file holding **the slice assignment table above the `git log --oneline PB..PH`**, and ending with the verdict line `COVERED: <n>/<n> commits`. All three: a bare log is the input to a coverage judgement rather than the judgement, and a table with a gap in it sits above the log just as happily as one without. Anything short of `<n>/<n>` does not close the line. The table's own shape is fixed, below the regimes. |
 | `→ <F-IDs>` or `→ no findings` | What the round produced. |
@@ -969,8 +971,8 @@ machine away from gone. Put it in the hand-off.
 | Tasks in phase (N) | Slice reviewers | Integration reviewer | Total |
 |--------------------|-----------------|----------------------|-------|
 | 1–5                | 1               | 0 (one slice sees all) | 1   |
-| 6–10               | 2               | 1                    | 3     |
-| 11–12              | 3               | 1                    | 4     |
+| 6–10               | 2               | 0, or 1 at a declared boundary | 2–3 |
+| 11–12              | 3               | 0, or 1 at a declared boundary | 3–4 |
 
 Rule 3 caps a phase at 12 tasks, so `N > 12` cannot occur. If you are computing
 a fan-out for N of 13 or more, the phase was never split — go back and split it.
@@ -978,6 +980,22 @@ a fan-out for N of 13 or more, the phase was never split — go back and split i
 Each slice reviewer sees ONLY its slice's diff so findings map back to
 specific tasks; the integration reviewer sees the whole phase diff and hunts
 only cross-slice and cross-phase issues no single slice can see.
+
+**The integration reviewer is spent on a boundary, not on a slice count.** Three
+reviewers over an 8-task phase whose slices share no contract read the same code
+twice; that third reviewer's whole value is in what crosses between slices. So it
+is dispatched where something crosses — a Rule 3 split's siblings joining, two
+lanes joining, or a contract introduced in one slice and consumed in another that
+no single slice's range covers — and the round names it (`· boundary: <what>`).
+Where nothing crosses, the round declares `· no integration boundary`: the
+absence is a decision on the record, not a gap, because an omission and a
+judgement are indistinguishable to every later reader.
+
+**Where something does cross, it is not optional.** The two mandatory cases keep
+their own line and their own mandate: a split's `RVJ` and a lane join's `RVJ` are
+`0 slice + 1 integration` always, because there the boundary *is* the unit nobody
+else saw. And slice coverage does not change — every commit on the phase branch
+still falls inside some slice's range, and that is still a check you run.
 
 **Slices are commit ranges, not vibes.** Take each slice's boundaries from the
 hashes recorded against its tasks in the tracker. Tasks that touch the same

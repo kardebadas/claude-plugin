@@ -341,6 +341,16 @@ When blocking findings exist (and the convergence rule permits another run):
         into one agent. Five related findings take one or two agents, not five.
         Each fix agent runs the tests covering its change and reports them.
      3. **Then review the fixes** (re-review fan-out below).
+   - **Fix agents are sized like re-reviewers: by file cluster, not by finding
+     count.** One agent per independent cluster the fix plan names. Findings
+     that share a cluster share an agent — they touch the same code, and two
+     agents in it conflict. `M` sizes nothing here either, for the same reason
+     it stopped sizing the re-review: six comment corrections in one file are
+     one small diff, and six agents over it spend six dispatches to produce
+     one. Tier each dispatch by the fix's own complexity, not by the phase's:
+     a one-line correction with an exact `file:line` is a cheap-tier dispatch
+     even in a phase whose implementation needed the strongest tier
+     (`references/implement.md`, *Choosing the model*).
    - **Scale the plan, never skip it.** A round of two findings with exact
      file:line is a plan of two rows written in a minute; it is not a
      `writing-plans` run and it does not re-enter brainstorming or the master

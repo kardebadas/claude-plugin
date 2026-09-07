@@ -251,13 +251,20 @@ for n in skill_names:
                 "it into the prompt — dispatch on $ARGUMENTS"
                 + (" (an even number of backslashes escapes nothing)" if esc else ""))
         # A FOURTH severity tier reaches the ledger from OUTSIDE this skill.
-        # subagent-driven-development's task reviewer emits `Important`, whose
-        # contract is "fix everything before this task completes" — right for one
-        # task's diff, wrong for a phase, because this skill's blocking list is
-        # closed and different. In one 141-finding run, 50 findings gated phase
-        # advancement under a tier that appeared NOWHERE in the skill. So the
-        # skill may name the tier only alongside the sentence that re-tags it;
-        # naming it without one is how the leak got in.
+        # It used to arrive from `subagent-driven-development`'s reviewer, which
+        # pipeline invoked once per task until Stage 4 became
+        # `references/implement.md`; that reviewer emits `Important`, whose
+        # contract is "fix everything before this task completes" — right for
+        # one task's diff, wrong for a phase, because this skill's blocking list
+        # is closed and different. In one 141-finding run, 50 findings gated
+        # phase advancement under a tier that appeared NOWHERE in the skill.
+        #
+        # REMOVING THAT CALLER DOES NOT CLOSE THE HOLE, which is why this arm
+        # outlived it: the repo `/review` skill and any reviewer a project
+        # supplies can emit `Important` too, and its unit-scoped contract is
+        # still wrong for a phase. So the rule stands unchanged — the skill may
+        # name the tier only alongside the sentence that re-tags it; naming it
+        # without one is how the leak got in.
         #
         # SCOPED to one skill — `n == "pipeline"`, written on the arm itself so
         # the scope is visible where the arm fires — unlike the namespace arm

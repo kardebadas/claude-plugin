@@ -94,7 +94,7 @@ cannot reduce review coverage.
 | Path | Change |
 |---|---|
 | `plugins/superb/skills/pipeline/SKILL.md` | `review_gate` in the Stage 4 states and the `RV` line section; both `RVJ` transitions; `ceil(N/5)` sizing and `W` as informational in the regime table, fan-out table and REVIEW state; Current State grammar; `M` keyed on repository change; composed-skill and rationalization rows |
-| `references/fix-loop.md` | Gate-neutral reopen rule; `RVJ` fix-round home; waved sizing; `M`'s definition and its closed route list; the deletion route |
+| `references/fix-loop.md` | Gate-neutral reopen rule; `RVJ` fix-round home; `ceil(N/5)` sizing with waves as implementation-only; `M`'s definition and its closed route list; the deletion route |
 | `references/parallel.md` | Lane grammar reference; slice boundaries as whole-wave unions; join gating |
 | `references/run-state.md` | Current State grammar; the `W=` field; per-lane resume precedence; the worked `N=12 waved` example |
 | `templates/progress.md` | Current State becomes `**Lane <id>:**` lines; `W=` in the `RV` grammar comment; `RVJ` round form |

@@ -1753,6 +1753,68 @@ else:
     else:
         ok("pipeline owns an executable task-brief script")
 
+# ---- pipeline never asks for a review when one task completes ----
+# Pipeline's own review layer is the phase-level `RV` fan-out. It used also to
+# delegate implementation to `subagent-driven-development`, whose process is
+# implement -> task reviewer -> fix -> re-review per task with no
+# implementation-only mode, and to import that loop explicitly into its wave
+# path ("run its per-task review ... exactly as subagent-driven-development
+# prescribes"). Two acceptance gates for one body of work reviewed everything
+# twice and made a phase something other than the unit of acceptance. Both
+# sweeps are text sweeps because the rule is contractual prose: the failure mode
+# is a sentence coming back, and a sentence is what is checked.
+#
+# Matched against FLATTENED text, never the raw file: these phrases wrap across
+# lines in prose, and a raw-text search misses a wrapped one — which is how
+# three of them survived a line-oriented grep of this very change (measured).
+#
+# The SDD pattern bans DELEGATING implementation, not naming the skill:
+# `references/implement.md` and the composed-skills note have to say what was
+# removed and why, or a later editor re-adds it.
+#
+# SCOPED to the pipeline skill. `bug-fix` may still prefer
+# `superpowers:subagent-driven-development` at its own task scope, where SDD's
+# per-task contract is the correct one; it has no phase gate to mis-gate.
+# EXPIRY: revisit if another skill acquires a phase-advancement condition.
+# Mutants: "pipeline delegates phase implementation to sdd",
+#          "pipeline asks for a per-task review",
+#          "pipeline gates a merge on passing task review",
+#          "pipeline reviews wave members per task".
+print("\n== pipeline has no task-level review ==")
+_banned = [
+    (re.compile(r"per-task review", re.I),
+     "asks for a per-task review"),
+    (re.compile(r"passed (?:its )?task review", re.I),
+     "gates something on a task having passed review"),
+    (re.compile(r"\btask reviewer\b", re.I),
+     "names a task reviewer"),
+    (re.compile(r"reviewed per task", re.I),
+     "says wave members are reviewed per task"),
+    (re.compile(r"(?:[Ii]mplement|dispatch)[^.\n]{0,80}?\bvia\b[^.\n]{0,40}?"
+                r"subagent-driven-development", re.I),
+     "delegates implementation to subagent-driven-development"),
+]
+_hits = []
+for _f in sorted(pdir.rglob("*.md")):
+    _t, _e = read(_f)
+    if _e:
+        continue
+    _flat = " ".join(_t.split())
+    for _rx, _why in _banned:
+        _m = _rx.search(_flat)
+        if _m:
+            _hits.append(f"{relpath(_f)} {_why}: {_m.group(0)!r}")
+if _hits:
+    for _h in _hits:
+        bad(_h + " — a task completing must dispatch no reviewer, and Stage 4's "
+            "IMPLEMENT state must not hand implementation to a skill whose "
+            "process reviews every task. REMEDY: state the rule the way "
+            "references/implement.md does, and let the phase's `RV` fan-out be "
+            "the only code review in the loop")
+else:
+    ok("no file in the pipeline skill asks for a task-level review or "
+       "delegates phase implementation to subagent-driven-development")
+
 # ---- the same linter, over a REAL run's tracker ----
 # The arm above scans `pdir` only — the skill's own worked examples — so no
 # invocation of this gate has ever read a run's own tracker. `--run <dir>`

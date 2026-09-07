@@ -1610,6 +1610,47 @@ else
   head -1 "$f" | grep -q "^#!" && echo "mutant is a no-op: a shebang is still on line 1"
 fi'
 
+# The four shapes the deleted task-level loop comes back in. Each re-introduces
+# one sentence, which is exactly how it got in the first time. Anchors carry no
+# backticks: the mutant script is eval'd, so a backtick inside a double-quoted
+# sed pattern would command-substitute instead of matching.
+run_mutant "pipeline delegates phase implementation to sdd" '
+f=plugins/superb/skills/pipeline/references/fix-loop.md
+if [ "$(grep -cF "wave by wave, per" "$f")" != 1 ]; then
+  echo "mutant is a no-op: step 1 no longer points at implement.md exactly once"
+else
+  sed -i "s|wave by wave, per|wave by wave via subagent-driven-development, per|" "$f"
+  grep -qF "wave by wave via subagent-driven-development" "$f" || echo "mutant is a no-op: the delegation was not re-introduced"
+  grep -qF "Completing a task dispatches no reviewer" "$f" || echo "mutant is a no-op: the no-reviewer sentence went too, so a kill could come from another pattern"
+fi'
+run_mutant "pipeline asks for a per-task review" '
+f=plugins/superb/skills/pipeline/references/parallel.md
+if ! grep -qF "Dispatch no reviewer" "$f"; then
+  echo "mutant is a no-op: the no-reviewer sentence is already gone"
+else
+  sed -i "s|Dispatch no reviewer|Run its per-task review|" "$f"
+  grep -qF "Run its per-task review" "$f" || echo "mutant is a no-op: the per-task review sentence was not re-introduced"
+  grep -qF "When every member has landed" "$f" || echo "mutant is a no-op: the landing-based merge gate went too, so a kill could come from the merge-gate pattern"
+fi'
+run_mutant "pipeline gates a merge on passing task review" '
+f=plugins/superb/skills/pipeline/references/parallel.md
+if ! grep -qF "When every member has landed" "$f"; then
+  echo "mutant is a no-op: the landing-based merge gate is not phrased as expected"
+else
+  sed -i "s|When every member has landed|When every member has passed its task review|" "$f"
+  grep -qF "passed its task review" "$f" || echo "mutant is a no-op: the task-review merge gate was not re-introduced"
+  grep -qF "Dispatch no reviewer" "$f" || echo "mutant is a no-op: the no-reviewer sentence went too, so a kill could come from the per-task-review pattern"
+fi'
+run_mutant "pipeline reviews wave members per task" '
+f=plugins/superb/skills/pipeline/SKILL.md
+if ! grep -qF "members land independently" "$f"; then
+  echo "mutant is a no-op: Rule 6 no longer says members land independently"
+else
+  sed -i "s|members land independently|members are reviewed per task|" "$f"
+  grep -qF "members are reviewed per task" "$f" || echo "mutant is a no-op: the per-task review of wave members was not re-introduced"
+  grep -qF "No member is reviewed before its merge" "$f" || echo "mutant is a no-op: the no-review-before-merge sentence went too"
+fi'
+
 echo
 echo "killed=$PASS survived=$SURV"
 if [ "$SURV" -ne 0 ]; then

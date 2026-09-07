@@ -15,7 +15,7 @@ autonomous per-phase implement → review → recursive-fix loop.
 
 **The one exception is implementation dispatch**, which this skill owns
 (`references/implement.md`). Every available implementation skill accepts a
-task only against a per-task review it dispatches itself, which is a second
+task only against a review it dispatches for that task, which is a second
 acceptance gate for work this skill accepts at the **phase** — so composing one
 reviewed every phase twice. Owning the dispatch is what makes the invariant
 mechanical: completing a task dispatches no reviewer.
@@ -31,8 +31,8 @@ dispatch contract), `references/implement.md` (Stage 4's IMPLEMENT state: how a
 phase's tasks are dispatched, waved and merged, and why completing one
 dispatches no reviewer), `references/fix-loop.md` (Stage 4's loop and guard
 rails) and `references/parallel.md` (Rule 6: dependency annotations, waves,
-lanes, worktrees and merges, and the Brain-Agent mode). `templates/` holds the
-run-state file templates.
+lanes, worktrees and merges, and the Brain-Agent mode).
+`templates/` holds the run-state file templates.
 
 ## Invocation
 
@@ -482,8 +482,9 @@ phases, *before GATE 2*, and the user approves them as part of the plan:
   into the phase branch with the build gates green.
 - A wave of one runs as today. A wave of two or more dispatches **all members at
   once**, each implementer in **its own git worktree and branch** cut from the
-  phase branch head; members are reviewed per task exactly as
-  `subagent-driven-development` prescribes, then merged back in task order.
+  phase branch head; members land independently and are merged back in task
+  order once all of them have landed and the build gates are green. No member is
+  reviewed before its merge.
 - Phases with no dependency between them run as **concurrent lanes**, each an
   independent instance of the per-phase loop with its own Counters row.
 - **Missing or vague annotations are not a licence to guess** — a task with no
@@ -700,7 +701,8 @@ For each phase — in dependency order, independent phases concurrently as lanes
 0. **Read the tracker in full** — first action of the phase, before any
    dispatch — and reconcile any `[~]` task (Rule 4). It, not your memory, names
    the phase and its first open task.
-1. **Implement wave by wave** via `superpowers:subagent-driven-development`.
+1. **Implement wave by wave** per `references/implement.md`. Completing a task
+   dispatches no reviewer.
    A wave of one runs in the phase worktree. A wave of `k ≥ 2` dispatches `k`
    implementers **at once**, each in its own worktree/branch, each marked `[~]`
    before its own dispatch and `[x]` + hash as it lands (Rule 2); when the last
@@ -987,8 +989,8 @@ is visible in the run's one durable artifact rather than resting on your memory
 of a permission.
 
 **Nothing substitutes for the fan-out.** Implementer self-reports and their own
-mutation tests, a green suite, Stage 1b's design pressure-test, per-task review
-inside `subagent-driven-development`, your own read of the diff — each is blind
+mutation tests, a green suite, Stage 1b's design pressure-test, an
+implementer's own self-check, your own read of the diff — each is blind
 to something a fresh reviewer sees, and the rationalization table says why for
 each. The defects this catches are the author-blind ones: **a change correct in
 its own lines that activates broken code elsewhere**, a contract produced in one
@@ -1164,9 +1166,14 @@ memory — decide what happens next.**
 
 ## Composed skills (never reimplemented)
 `superpowers:brainstorming`, `superpowers:writing-plans`,
-`superpowers:subagent-driven-development`,
 `superpowers:finishing-a-development-branch`, and the repo `/review` skill
 (the deep branch-audit skill in this repo, not a generic code review).
+
+`superpowers:subagent-driven-development` is deliberately **not** composed here.
+It has no implementation-only mode — an implementer returning `DONE` dispatches
+a reviewer for that task, and a task completes only at zero open findings at any
+severity through an uncapped fix/re-review loop — and it is phase-unaware. Stage
+4's IMPLEMENT state is `references/implement.md` instead.
 
 ## Common mistakes
 - **Assuming instead of asking** — the only failure mode. See the Iron Law.

@@ -77,6 +77,17 @@ harness (`tools/check-plugin-mutants.sh`); GitHub Actions.
   `grep -n 'run_mutant \"<your name>\"\|killed=\$PASS' tools/check-plugin-mutants.sh`
   — every new name must have a lower line number than the summary — and run
   `bash -n tools/check-plugin-mutants.sh` before running the harness.
+- **Re-wrapping prose can silently neuter a mutant.** Linter *arms* match
+  whitespace-flattened text, so a reflow never breaks them — but the mutants in
+  `tools/check-plugin-mutants.sh` match **raw** text, and several anchor on a
+  whole sentence sitting on one line. Reflow such a sentence and its mutant
+  degrades to a no-op, which the harness reports as `SURVIVED` (a red build)
+  rather than as a hole in a gate. After editing any paragraph a mutant anchors
+  on, run the harness and read its `SURVIVED` diagnostics — and **never pipe the
+  harness through `tail`**, which is what hid the diagnostic the first time this
+  happened. Measured: rewrapping the Overview's
+  `` `templates/` holds the run-state file templates. `` sentence survived
+  `"template count reintroduced into SKILL.md"`.
 - **New linter arms that call `relpath` must sit after its definition**
   (`tools/check-plugin.py:1285`). The natural seam is immediately after the
   `== pipeline review-line examples ==` section's closing `ok(...)`, which is

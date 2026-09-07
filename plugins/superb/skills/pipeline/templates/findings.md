@@ -32,7 +32,7 @@ tier**: a bug finding (a failing or vacuous test, a broken build gate, a crash)
 is recorded as `Critical` or `Major` like any other blocking row, never as a
 bare `bug`, because this table has no such `Sev`.
 
-`Important` is the task reviewer's vocabulary, not a tier: **an incoming
+`Important` is another reviewer's vocabulary, not a tier: **an incoming
 `Important` is re-tagged** on the way in. The branches below are also the
 severity decider wherever this ledger has to set a tier itself — a **claim
 finding** included, whatever tier it arrived under.

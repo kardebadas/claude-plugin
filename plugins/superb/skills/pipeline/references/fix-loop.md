@@ -12,12 +12,13 @@ phase autonomously.
    every `[~]` task against the actual code before continuing** (Run State Law,
    Rule 4 — procedure in `run-state.md`). The files name the phase, its first
    open task, and every finding still open; your memory does not get a vote.
-1. **Implement** the phase **wave by wave** via
-   `superpowers:subagent-driven-development`, following the wave table the user
-   approved (Rule 6, `parallel.md`). A wave of one runs in the phase worktree;
-   a wave of `k >= 2` dispatches all `k` implementers in one message, each in
-   its own worktree and branch, and merges them in task order when all have
-   passed task review. Around **each individual task**: mark it `[~]` with a
+1. **Implement** the phase, wave by wave, per `references/implement.md`,
+   following the wave table the user approved (Rule 6, `parallel.md`). A wave of
+   one runs in the phase worktree; a wave of `k >= 2` dispatches all `k`
+   implementers in one message, each in its own worktree and branch, and merges
+   them in task order **when all have landed and the build gates are green**.
+   Completing a task dispatches no reviewer.
+   Around **each individual task**: mark it `[~]` with a
    timestamp (and its worktree branch) and save *before* dispatching; when it
    lands, mark it `[x]` with its commit hash, update the Current State block
    (phase, next action, `date` timestamp), save, then **re-read the file** to
@@ -74,8 +75,8 @@ phase autonomously.
    - Consolidate findings from all reviewers **into `findings.md`**, dedup, and
      tag each by severity. **There are exactly three tiers: Critical, Major
      (= `/review`'s "Warning"), Minor.** A reviewer that reports in another
-     vocabulary is re-tagged here, never carried: `subagent-driven-development`'s
-     task reviewer emits **Important**, whose contract is "fix everything before
+     vocabulary is re-tagged here, never carried: a reviewer may emit
+     **Important**, whose usual contract is "fix everything before
      this task completes" — right for one task's diff, wrong for a phase, and it
      is not in this skill's blocking list. So **an incoming `Important` is
      re-tagged** by consequence: it becomes **Major** if it names a measured
@@ -322,14 +323,15 @@ When blocking findings exist (and the convergence rule permits another run):
      whoever actually ran a review round, at whatever depth — a depth-1 run that
      re-reviews its own fixes records that round on the line itself. What is
      forbidden is closing an `RV` no phase-wide fan-out ever produced.
-   - **Standard path**: plan (`writing-plans`) → implement
-     (`subagent-driven-development`) → review the fixes.
-   - **Direct-fix path** (skips only the `writing-plans` step): allowed when
-     the open blocking findings number **≤ 3** AND every finding names the
-     exact file and line. Implement directly via
-     `subagent-driven-development` with the findings as the task list; the
+   - **Standard path**: plan the round (see the fix plan below) → implement
+     the fixes per `references/implement.md` → review the fixes.
+   - **Small-round path**: allowed when the open blocking findings number
+     **≤ 3** AND every finding names the exact file and line. The round's fix
+     plan is correspondingly small — two or three rows — but it is still
+     written before any fix is dispatched; the fixes then run per
+     `references/implement.md` with the plan's rows as their briefs, and the
      review step is unchanged. If any fix grows beyond the files the findings
-     name, or trips the Ambiguity guard, **abort the direct path and restart
+     name, or trips the Ambiguity guard, **abort this path and restart
      this fix-mode run on the standard path**.
    - The **Ambiguity guard applies at every depth**: a finding that can be
      fixed two materially different ways is a question, not a coin flip.

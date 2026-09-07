@@ -228,14 +228,43 @@ and nothing else. Walking phases in that order:
 - at a fork, the successor that comes **first in approved-plan order** keeps the
   forking phase's lane, and each further successor takes the next unused lane id
   (`B`, `C`, …, then `A1`, `A2`, … if the letters run out);
-- at a join, the joining phase carries **one** lane id, which must be one of its
-  contributing lanes'; that lane survives the join and the others retire.
+- at a join, the joining phase carries **one** lane id, chosen deterministically:
+  the contributing predecessor that appears **first in approved-plan order**
+  supplies the surviving lane id. All other contributing lane ids retire when the
+  leading `RVJ` closes.
 
 ```
 before fork:            at the fork A → B, A → C:
 Lane A → Phase A        Lane A → Phase B        (first in plan order)
                         Lane B → Phase C        (newly allocated)
 ```
+
+**Join allocation, stated as an algorithm.** Leaving the survivor unstated would
+contradict the whole point of allocating at GATE 2, so there is one rule:
+
+```
+contributors    = direct predecessor phases, in approved-plan order
+surviving_lane  = lane(contributors[0])
+joining_phase.lane = surviving_lane
+```
+
+```
+approved-plan order:            therefore:
+
+Phase B · lane: A               Phase D · lane: A
+Phase C · lane: B               (B is the first contributing predecessor
+Phase D · deps: B, C             in approved-plan order)
+```
+
+```
+JOIN SURVIVOR SELECTION IS DETERMINISTIC.
+THE ORCHESTRATOR MUST NOT CHOOSE A JOIN SURVIVOR AT RUNTIME.
+THE JOINING PHASE'S PERSISTED `lane:` FIELD MUST EQUAL
+THE LANE OF ITS FIRST CONTRIBUTING PREDECESSOR IN APPROVED-PLAN ORDER.
+```
+
+The survivor is therefore already written down before the run starts. Runtime
+never chooses one; it only performs the collapse the plan already recorded.
 
 **At a join,** both contributing lanes stay active. `Lane A` reaching the end of
 its own work writes `waiting at join Phase D`; `Lane B` keeps working. Once
@@ -246,8 +275,11 @@ every contributor is `PASS`, the joining phase's owning lane names the leading
 ```
 Phase B PASS
 Phase C PASS
-CLOSE(leading RVJ)      → retire Lane B
-                        → Lane A → Phase D
+leading RVJ clean
+→ CLOSE(leading RVJ)
+→ retain Lane A          (the planned survivor)
+→ retire Lane B
+→ Lane A owns Phase D
 ```
 
 `Lane B`'s Current State line is then **removed**, and `B` is never allocated
@@ -293,6 +325,12 @@ by enumerating maximal dependency chains.
   current phase may not sit past an unfinished one among them. A lane
   legitimately ahead of *another* lane's open work does not fail. This replaces
   the global `max(_named) > _blockers[0][0]` comparison at `:2656`.
+- **The join survivor is the planned one.** For every joining phase: resolve its
+  direct predecessors from `deps:`, order them by approved-plan order, read the
+  first predecessor's persisted `lane:`, and require the joining phase's `lane:`
+  to equal it. A joining phase carrying any other contributor's lane is
+  reported — this is what makes the survivor rule mechanical rather than a
+  convention, and it is checked against the persisted mapping alone.
 - **A join cannot begin early.** For a joining phase, every contributing
   predecessor lane's last phase must be `PASS` **and** the leading `RVJ` must be
   `[x]` before the surviving lane may name the joining phase with an
@@ -537,6 +575,72 @@ plus `agent-output/`, no `progress.md`, `register.md` or `kit.md`).
 
 ### Design
 
+**First, the policy itself, because the old one contradicts this design.**
+*"Never `git add` anything under `docs/superpowers/`"* cannot coexist with
+keeping committed specs and plans, keeping curated loose `runs/*.md` records,
+and adding a new one at `runs/pipeline-phase-machine.md`. The rule was written
+as a path rule; it was always a *lifecycle* rule. So the canonical distinction
+becomes:
+
+```
+EPHEMERAL PIPELINE EXECUTION STATE          CURATED PERMANENT DOCUMENTATION
+→ local-only                                → may be committed deliberately
+→ never git add
+```
+
+**Ephemeral, local-only, never `git add`ed** — everything inside a run
+directory, `docs/superpowers/runs/<run-directory>/`: `progress.md`,
+`register.md`, `kit.md`, `findings.md`, fix plans, `agent-output/`, temporary
+review reports, and any other runtime evidence. This protection is not weakened
+anywhere in this design, and it gains the mechanism it never had:
+
+```gitignore
+docs/superpowers/runs/*/
+```
+
+**Curated permanent material — may be deliberately committed** when it is
+intended as permanent repository documentation:
+
+```
+docs/superpowers/specs/*.md
+docs/superpowers/plans/*.md
+docs/superpowers/runs/*.md          ← loose files directly under runs/, not directories
+```
+
+for example `docs/superpowers/runs/pipeline-phase-machine.md` and
+`docs/superpowers/runs/pipeline-phase-seam.md`: distilled records, not live
+execution state. *May* be committed is the whole of the permission — **nothing
+auto-commits them.** They are merely allowed to be tracked when someone decides
+they are documentation.
+
+```
+runtime directory      = forbidden
+curated permanent document = intentional, deliberate exception
+```
+
+The whole `docs/superpowers/` tree does **not** become trackable by default, and
+`docs/superpowers/` is deliberately *not* the ignore pattern: it would hide the
+curated documentation this design creates.
+
+**The wording sweep.** The absolute phrasing is replaced with the precise rule
+
+```
+Never `git add` pipeline runtime directories under
+docs/superpowers/runs/*/.
+
+Curated permanent specs, plans, and loose runs/*.md records may be
+deliberately committed when they are repository documentation.
+```
+
+at each site that states the absolute form, and only there: `SKILL.md:157-158`,
+`:623`, `:950`, the rationalization row at `:1170`, the red-flag text at
+`:1324`, `run-state.md:19-20`, and `fix-loop.md:600-601`. Sites that merely name
+the run-directory path, or that make the Stage 5 hand-off the durable artifact,
+keep their meaning — a run directory is still local-only and the hand-off is
+still what survives.
+
+**Then the tree itself:**
+
 - **Remove** the 12 files under `runs/2026-09-07-pipeline-phase-state-machine/`.
 - **Keep** the PR #3 spec and plan, following the `66a1041` / `c5aacb6`
   precedent that specs and plans behind merged work are retained.
@@ -546,11 +650,10 @@ plus `agent-output/`, no `progress.md`, `register.md` or `kit.md`).
 - **Distil** the review history into one concise permanent record at
   `docs/superpowers/runs/pipeline-phase-machine.md`, matching the established
   loose-file pattern of `pipeline-phase-seam.md` and `pipeline-wave-seam.md`.
-- **Close the mechanism gap:** add `.gitignore` coverage for
-  `docs/superpowers/runs/*/` — run *directories* — leaving loose curated
-  `runs/*.md` trackable. That is the distinction the history already draws, and
-  without it the next run re-commits its artifacts. Already-tracked files are
-  unaffected, so the kept pre-PR#3 directories stay.
+- **Close the mechanism gap** with the `runs/*/` ignore rule above, leaving loose
+  curated `runs/*.md` trackable. That is the distinction the history already
+  draws, and without it the next run re-commits its artifacts. Already-tracked
+  files are unaffected, so the kept pre-PR#3 directories stay.
 
 Nothing under `runs/` is referenced by CI or the linter: `check-plugin.py:1013`
 parses only the fenced tree inside `run-state.md`, and CI lints
@@ -566,7 +669,11 @@ rather than on the tree: the pre-PR#3 run directories are tracked by an explicit
 keep decision, so an arm phrased "no run directory is tracked" would fail on
 history it must not touch. The ignore rule stops the next run committing its
 artifacts; the grandfathered files stay because git ignores only what is
-untracked.
+untracked. **No arm rejects a deliberately retained, already-tracked run
+directory** — the check enforces the ignore mechanism, never the shape of
+history. And because the pattern is `runs/*/` and not `docs/superpowers/`, a
+loose curated `runs/*.md` record stays trackable, which a second arm asserts by
+checking that the ignore rule does not cover it.
 
 ---
 
@@ -592,6 +699,8 @@ un-fixed repo. Contractual prose gets a held-phrase pin.
 | 5b | `Lane A → D` on an implementation action while the leading `RVJ` is open → FAIL | mutant |
 | 5c | `CLOSE(leading RVJ)` retires `Lane B` and leaves `Lane A → D` as the sole owner → PASS | fixture |
 | 5d | A retired lane id carried by a later phase → FAIL | mutant |
+| 5e | Join takes the first contributing predecessor's lane (`B` lane A, `C` lane B, `D` deps B,C lane **A**) → PASS | `run-lanes` fixture |
+| 5f | Join takes another contributor's lane (`D` deps B,C lane **B**, `B` first in plan order) → FAIL | mutant |
 | 6 | `N=8 W=8 → 2 slice` PASS; `N=8 W=1 → 2 slice` PASS; `N=12 W=1 → 3 slice` PASS | fixture + `ceil(N/5)` arm |
 | 7 | `N=8 W=8 → 4 slice` FAIL; `N=12 W=1 → 1 slice` FAIL | mutants |
 | 8 | Integration reviewer stays boundary-conditional | existing arms, unchanged |
@@ -601,6 +710,9 @@ un-fixed repo. Contractual prose gets a held-phrase pin.
 | 9c | A bare `withdrawn` naming no reason → FAIL | route-form arm + mutant |
 | 9d | A deletion route on an `M=0` round → FAIL | forbidden-route arm + mutant |
 | 10 | `M=0 → no round` legal only with zero repository commits; `user-ruled false positive` with no commit → legal | forbidden-route arm + mutant |
+| 10a | A runtime run directory is covered by the root `.gitignore` → PASS | `.gitignore` arm |
+| 10b | The ignore rule removed → FAIL | mutant |
+| 10c | A loose curated `runs/*.md` record stays trackable (not covered by the rule) → PASS | `.gitignore` arm |
 | 11 | No task completion dispatches a formal reviewer | existing sweep, unchanged |
 | 12 | Review cannot start before all phase tasks complete | existing arm, unchanged |
 | 13 | Failed re-review cannot advance the phase | existing arm + new gate-scoped case |

@@ -186,6 +186,34 @@ but it resolved to nothing" and "located a field, but not the right one". The
 affirmative arms now require the comparison, and each remaining case is reported
 by a named arm.
 
+## Round 7 ledger — the claims-and-guards pass
+
+The regression correction's own re-review returned **0 Critical** and
+**ship**: RR6-1's blocking Critical reversion-proven gone, 57 conforming probes
+passing, and the Current-State axis declared finished — *"I could not construct
+a green-build affirmative that skipped the field comparison, in any of the 24
+field shapes probed. Six rounds of the same defect class end here."*
+
+It recommended shipping after a cheap pass and carrying RR7-1 as a deferred
+Major. **RR7-1 was fixed instead of deferred:** Major is blocking by this
+skill's own rule, and deferring or re-tagging one to clear a gate is what the
+skill forbids. It was also the same generalisation one layer down.
+
+| ID | Sev | Area | File:line | Finding | State | Closed by |
+| -- | --- | ---- | --------- | ------- | ----- | --------- |
+| RR7-1 | Major | gate | `check-plugin.py:2452` | The generalisation was complete for the Current-State field half and not the ledger-row half: an unreadable row inside a **located** blocking table was `continue`d past in silence, because `_seen_fid` — the "rows nobody read" population — is consulted only when no header exists at all | closed | an unreadable blocking-table row is reported; a separator row is not a row |
+| RR7-2 | Minor | gate | `check-plugin.py:2437` | **The one finding in this round that could stop a run, and it was mine.** Widening row-ness made a hyphenated ordinary word a row, so a header-less `findings.md` containing `\| run-ok \| PASS \|` false-failed and reported "holds 2 rows" over zero findings | closed | a digit is required after the dash, keeping `NEW-F2` and `RR5-2` matched |
+| RR7-3 | Minor | gate | `check-plugin.py:2637` | Four shapes printed an affirmative right after the arm had reported it could not trust what it compared — two of them **false about the run's actual position**, having compared the stale field or block just declared ambiguous | closed | `_untrusted`, set by **every** report either half makes about its subject |
+
+**The rule is now a property, not a list of instances.** `_untrusted` is set by
+an unreadable ledger, an unread row, a row whose width its header contradicts, a
+finding scoped to a phase the tracker lacks, a duplicated Current State block, a
+duplicated `**Phase:**` field, and a field naming a phase that does not exist —
+and both `ok(...)` calls require it clear. Measured: six failing shapes, **zero**
+affirmatives; four conforming shapes, affirmative present. The reviewer's remedy
+was one flag on three field-half reports; extending it to the ledger half was
+needed because RR7-1's own new report was followed by an affirmative.
+
 ## Counters
 
 | Scope | Fix-loop iteration | Cap | Deepest fix-mode depth this chain | Cap |
@@ -201,4 +229,5 @@ by a named arm.
 | 3 | Migration | 0 | NEW-01..NEW-07 | NEW-F1..NEW-F9 raised | 2026-09-07 |
 | 4 | Migration | 0 | NEW-F1..NEW-F9 | RR5-1..RR5-6 raised | 2026-09-07 |
 | 5 | Migration | 0 | RR5-1..RR5-6 | RR6-1..RR6-4 raised (cap reached) | 2026-09-07 |
-| 5r | Migration | 0 | RR6-1..RR6-4 | <pending re-review> — cap-exempt regression correction, user-directed | 2026-09-07 |
+| 5r | Migration | 0 | RR6-1..RR6-4 | RR7-1..RR7-3 raised; 0 Critical, verdict ship | 2026-09-07 |
+| 5r' | Migration | 0 | RR7-1..RR7-3 | <pending final verification> — claims-and-guards pass | 2026-09-07 |

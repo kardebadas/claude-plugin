@@ -2356,10 +2356,19 @@ if RUN_DIR is not None:
             if _why:
                 _blockers.append((_i, _ph["label"], " and ".join(_why)))
 
+        # `_untrusted` IS BORN HERE, ahead of the ledger parse, because the
+        # rule covers BOTH halves: an affirmative must not follow any report
+        # this arm made about the subject it was comparing — an unreadable
+        # ledger, an unread row, a row whose width its header contradicts, a
+        # finding scoped to a phase the tracker lacks, a duplicated Current
+        # State block or field, a field naming a phase that does not exist.
+        # Every one of those means the comparison was incomplete.
+        _untrusted = False
         _ledger, _ltext, _lrows = RUN_DIR / "findings.md", None, 0
         if _ledger.is_file():
             _ltext, _lerr = read(_ledger)
             if _lerr:
+                _untrusted = True
                 bad(f"{relpath(_ledger)} cannot be read: {_lerr} — it may hold "
                     "open blocking findings, so nothing here says this run has "
                     "none. REMEDY: make the file readable and run again")
@@ -2434,13 +2443,24 @@ if RUN_DIR is not None:
             # `NEW-F` is the one the code comment cited as its reachability
             # argument. Narrowing the promise instead of widening the match
             # would have left a claim finding in a shipped template.
+            # A DIGIT IS REQUIRED AFTER THE DASH. Widening row-ness to any
+            # `<letters>-<something>` first cell made a hyphenated ordinary word
+            # a row: a header-less `findings.md` containing `| run-ok | PASS |`
+            # false-failed, and reported "holds 2 `F-` row(s)" over zero
+            # findings. That is the opposite failure direction from everything
+            # else in this arm and the one that can actually stop a run, so the
+            # lookahead pins it while keeping `NEW-F2` and `RR5-2` — the ids
+            # this branch's own ledger uses — matched.
             _isrow = lambda ln: bool(
-                re.match(r"\|?\s*[a-z]+[0-9a-z]*-[0-9a-z.]+\s*\|", _norm(ln)))
+                re.match(r"\|?\s*[a-z]+[0-9a-z]*-(?=[0-9a-z.]*\d)[0-9a-z.]+\s*\|",
+                         _norm(ln)))
             _seen_fid = [ln for ln in _lines if _isrow(ln)]
             if _hdr is None:
                 if _seen_fid:
-                    bad(f"{relpath(_ledger)} holds {len(_seen_fid)} `F-` row(s) "
-                        "but no header row naming ID/Sev/Phase/State — so the "
+                    _untrusted = True
+                    bad(f"{relpath(_ledger)} holds {len(_seen_fid)} row(s) "
+                        "that look like finding ids but no header row naming "
+                        "ID/Sev/Phase/State — so the "
                         "advancement check could not locate the columns and "
                         "read no finding. An unparseable ledger must not read "
                         "as an empty one. REMEDY: keep the blocking ledger's "
@@ -2450,6 +2470,22 @@ if RUN_DIR is not None:
                   _ci = {k: _hdr.index(k) for k in ("id", "sev", "phase", "state")}
                   for _line in _rows:
                       if not _isrow(_line):
+                          # REPORTED, NOT SKIPPED. `_seen_fid` is the "rows
+                          # nobody read" population and it is consulted only
+                          # when NO header exists — so a row inside a located
+                          # blocking table whose first cell this check cannot
+                          # read was dropped in silence. Same rule as the rest
+                          # of this arm: an unread row must not read as a
+                          # closed one. A separator row is not a row.
+                          if not re.match(r"^\s*\|[\s\-:|]+\|?\s*$", _line):
+                              _untrusted = True
+                              bad(f"{relpath(_ledger)}: a row of the blocking "
+                                  "table this check could not read: "
+                                  f"{_line.strip()[:60]!r} — its first cell is "
+                                  "not a finding id, so the row was not read, "
+                                  "and an unread row must not read as a closed "
+                                  "one. REMEDY: key the row `F-NNN`, as "
+                                  "`templates/findings.md` ships it")
                           continue
                       _cells = [c for c in _line.strip().strip("|").split("|")]
                       # WIDTH MUST EQUAL THE HEADER'S, not merely reach the
@@ -2461,6 +2497,7 @@ if RUN_DIR is not None:
                       # header. Either width is a table this arm cannot read, and
                       # an unreadable ledger row is reported, never assumed clean.
                       if len(_cells) != len(_hdr):
+                          _untrusted = True
                           bad(f"{relpath(_ledger)}: row "
                               f"{_norm(_cells[0]).upper()!r} has {len(_cells)} "
                               f"cells but its header has {len(_hdr)} — the "
@@ -2486,6 +2523,7 @@ if RUN_DIR is not None:
                       if _pi is None and not _phs:
                           continue
                       if _pi is None:
+                          _untrusted = True
                           bad(f"{relpath(_ledger)}: {_norm(_cells[_ci['id']]).upper()} "
                               f"({_sev}) is open against phase {_phl!r}, which "
                               "matches no `## Phase` heading in the tracker — so "
@@ -2535,7 +2573,15 @@ if RUN_DIR is not None:
         # duplicated block is reported, and — decisively — **a `**Phase:**`
         # field this arm cannot locate is a FAILURE, not a fallback.** The next
         # locator bug is then a red build instead of a quiet pass.
+        # `_untrusted` — SET WHEREVER THIS ARM REPORTS ABOUT ITS OWN SUBJECT.
+        # Four measured shapes printed an affirmative right after the arm had
+        # said it could not trust what it compared, and two of them were false
+        # about the run's actual position because the comparison used the stale
+        # field or stale block just declared ambiguous. One flag, guarding both
+        # `ok(...)` calls: the same one-expression move RR6-1 made, applied to
+        # the remaining three reports.
         if len(re.findall(r"^##\s+Current State\s*$", ttext, re.M)) > 1:
+            _untrusted = True
             bad(f"{relpath(tracker)}: two or more `## Current State` blocks, "
                 "and this gate reads the first — the run's position must live "
                 "in exactly one place, or an executor appending a fresh block "
@@ -2546,6 +2592,7 @@ if RUN_DIR is not None:
         _csblock = _csm.group(1) if _csm else ""
         _FIELDRE = r"^\s*(?:[-*+]\s+|\d+[.)]\s+)?\*\*%s:\*\*"
         if _phs and len(re.findall(_FIELDRE % "Phase", _csblock, re.M)) > 1:
+            _untrusted = True
             bad(f"{relpath(tracker)}: two or more `**Phase:**` fields inside "
                 "the `## Current State` block, and this gate reads the first — "
                 "so a stale line left above a fresh one is the one that counts. "
@@ -2596,6 +2643,7 @@ if RUN_DIR is not None:
         for _fld, _id, _i2 in (("Phase", _ph_id, _ph_i),
                                ("Next action", _na_id, _na_i)):
             if _phs and _id is not None and _i2 is None:
+                _untrusted = True
                 bad(f"{relpath(tracker)}: Current State's `**{_fld}:**` names "
                     f"phase {_id!r}, which matches no `## Phase` heading in "
                     "this tracker — so the advancement check could not locate "
@@ -2631,10 +2679,10 @@ if RUN_DIR is not None:
                 "phase — so there is nothing to compare it against and the "
                 "advancement invariant is uncheckable on this tracker. "
                 "REMEDY: name the phase in `**Phase:**`")
-        elif _named:
+        elif _named and not _untrusted:
             ok("Current State does not point past an unfinished phase"
                + _ledger_note)
-        elif _phs and not _blockers:
+        elif _phs and not _blockers and not _untrusted:
             ok("no unfinished phase in the tracker" + _ledger_note)
         # NO AFFIRMATIVE IN THE REMAINING CASES, and each is already reported:
         # an unparseable tracker (the `_phs` arm above), and a field naming a

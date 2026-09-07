@@ -21,17 +21,16 @@ Phase 2's own `RV` is closed with no findings, which is what makes this fixture
 precise: the `RVJ`'s round cannot be mistaken for the `RV`'s.
 
 ## Current State
-- **Phase:** done (fixture)
-- **Next action:** none; this run directory is a linter fixture
+- **Lane A:** done (fixture)
 - **Last updated:** 2026-09-07
 - **Run directory:** tools/fixtures/run-rvj-fix/
 
-## Phase 1 — fixture, closed · deps: none
+## Phase 1 — fixture, closed · deps: none · lane: A
 - [x] T1 — a task · W1 · deps none — `aaaaaaa`
 - [x] RV — review fan-out · N=1 → 1 slice + 0 integration
       · reports p1-review-a.md · coverage p1-coverage.md → no findings
 
-## Phase 2 — fixture, a split's last sibling with a trailing RVJ · deps: Phase 1
+## Phase 2 — fixture, a split's last sibling with a trailing RVJ · deps: Phase 1 · lane: A
 - [x] T2 — a task · W1 · deps T1 — `bbbbbbb`
 - [x] T3 — a task · W1 · deps T1 — `ccccccc`
 - [x] RV — review fan-out · N=2 → 1 slice + 0 integration

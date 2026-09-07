@@ -27,24 +27,23 @@ and **no** started round — the legal shape, and the one that arm must not
 report.
 
 ## Current State
-- **Phase:** 2 — implemented, unreviewed
-- **Next action:** Phase 2 RV — review fan-out over the phase branch
+- **Lane A:** Phase 2 — RV
 - **Last updated:** 2026-09-07
 - **Run directory:** tools/fixtures/run-open-rv/
 
-## Phase 1 — fixture, closed · deps: none
+## Phase 1 — fixture, closed · deps: none · lane: A
 - [x] T1 — a task · W1 · deps none — `aaaaaaa`
 - [x] RV — review fan-out · N=1 → 1 slice + 0 integration
       · reports p1-review-a.md · coverage p1-coverage.md → no findings
 
-## Phase 2 — fixture, implemented and unreviewed · deps: Phase 1
+## Phase 2 — fixture, implemented and unreviewed · deps: Phase 1 · lane: A
 - [x] T2 — a task · W1 · deps T1 — `bbbbbbb`
 - [x] T3 — a task · W1 · deps T1 — `ccccccc`
 - [x] T4 — a task · W2 · deps T2 — `ddddddd`
 - [x] T5 — a task · W2 · deps T3 — `eeeeeee`
 - [ ] RV — review fan-out
 
-## Phase 3 — fixture, a joining phase, not started · deps: Phase 2
+## Phase 3 — fixture, a joining phase, not started · deps: Phase 2 · lane: A
 - [x] RVJ — joint integration review · lanes A+B · N=5 → 0 slice + 1 integration
       · reports p3-rvj-int.md · coverage p3-rvj-coverage.md → no findings
 - [ ] T6 — a task · W1 · deps T4

@@ -61,10 +61,39 @@ For each phase:
     | W3 | T5 | no — T5 and T6 both modify chunk_store.cpp |
     | W4 | T6 | no |
 
-Then lanes: from the master plan's phase `deps:`, phases with no path between
-them are independent; each maximal chain of dependent phases is a **lane**.
-Record the lanes in the master plan (`## Lanes`) and in `progress.md`'s
-Current State (one "Next action" per active lane).
+Then lanes. **A lane is an active execution branch between a fork and a join**,
+allocated once here and never re-derived. It is *not* a maximal chain of
+dependent phases: in a diamond `A → B,C → D` the maximal chains are `A → B → D`
+and `A → C → D`, so `A` and `D` sit on both, chain membership is not a
+partition, and "which lane owns this phase" has no answer.
+
+Walk the approved plan's phases **in approved-plan order** and write each
+assignment on the phase's own heading as `· lane: <id>`:
+
+- the first phase takes `Lane A`;
+- at a **fork**, the successor first in approved-plan order keeps the forking
+  phase's lane; every further successor takes the next unused id;
+- at a **join**, the joining phase carries the lane of its **first contributing
+  predecessor in approved-plan order**. That lane survives; the other
+  contributing lanes retire when the leading `RVJ` closes, and **a retired lane
+  id is never allocated again in that run**.
+
+```
+contributors    = direct predecessor phases, in approved-plan order
+surviving_lane  = lane(contributors[0])
+joining_phase.lane = surviving_lane
+```
+
+```
+JOIN SURVIVOR SELECTION IS DETERMINISTIC.
+THE ORCHESTRATOR MUST NOT CHOOSE A JOIN SURVIVOR AT RUNTIME.
+THE JOINING PHASE'S PERSISTED `lane:` FIELD MUST EQUAL
+THE LANE OF ITS FIRST CONTRIBUTING PREDECESSOR IN APPROVED-PLAN ORDER.
+```
+
+Record the lanes in the master plan (`## Lanes`), on every phase heading as
+`· lane: <id>`, and in `progress.md`'s Current State (one `**Lane <id>:**` line
+per active lane).
 
 The GATE 2 message shows the waves and lanes explicitly. The user is approving
 a schedule, not just a task list.
@@ -164,9 +193,28 @@ phase, its own reviewers and fix loop. Rules:
   review gets its own **`RVJ`** line at the join, closed on the same evidence as
   an `RV`. Each lane's own `RV` covers one lane; the defect this review exists
   to find is the one that lives between them, so no `RV` can stand in for it.
-- Current State carries one `Next action` line per active lane, each naming
-  that lane's first unchecked line — an open `RV` included. A cold start
-  reconciles every lane's `[~]` tasks, not just the first one it sees.
+- Current State carries one `- **Lane <id>:**` line per active lane, each
+  naming that lane's phase and its first unchecked line inside it — an open
+  `RV` included. **A lane may only name a phase whose heading carries its own
+  `· lane:`**: two branches never claim one phase, and a non-surviving
+  contributor never runs the joining phase's leading `RVJ`. A lane whose branch
+  has passed while its join is unresolved writes
+  `waiting at join Phase <id>`; once the leading `RVJ` closes it is retired and
+  its line is removed. A cold start reconciles every lane's `[~]` tasks, not
+  just the first one it sees.
+
+  ```
+  Phase B PASS
+  Phase C PASS
+  leading RVJ clean
+  → CLOSE(leading RVJ)
+  → retain Lane A          (the planned survivor)
+  → retire Lane B
+  → Lane A owns Phase D
+  ```
+
+  Phase D then owes `IMPLEMENT → RV → CLOSE(RV) → PASS` on its own tasks. **A
+  clean leading `RVJ` must never mark the joining phase `PASS`.**
 - Lanes never share a worktree. If two lanes would touch the same file, the
   master plan was wrong about their independence — that is a GATE 2 question
   (or, mid-run, an Ambiguity-guard stop), not a merge to resolve by hand.

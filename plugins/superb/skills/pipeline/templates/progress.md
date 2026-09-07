@@ -7,33 +7,65 @@ Keep the Current State block at the very top at all times.
 # Pipeline — Progress Tracker
 
 ## Current State
-- **Phase:** <phase id FIRST, then an em dash and whatever prose helps>
-- **Next action:** <the single next unchecked line — task, RV, or RVJ. Lead with
-  `Phase <id>` when the action belongs to a phase.>
+- **Lane A:** <phase id FIRST, then an em dash and that lane's next unchecked
+  line — task, RV, or RVJ>
 - **Last updated:** <timestamp>
 - **Run directory:** <PROJECT_DIR>/docs/superpowers/runs/YYYY-MM-DD-<topic>/
 
-## Phase 1 — <name> · deps: none
+## Phase 1 — <name> · deps: none · lane: A
 - [x] T1 — <task name> · W1 · deps none — `a1b2c3d`
 - [~] T2 — <task name> · W2 · deps T1 — started <timestamp> in wt/p1-t2
 - [~] T3 — <task name> · W2 · deps T1 — started <timestamp> in wt/p1-t3
 - [ ] T4 — <task name> · W3 · deps T2, T3
 - [ ] RV — review fan-out
 
-## Phase 2 — <name> · deps: Phase 1
+## Phase 2 — <name> · deps: Phase 1 · lane: A
 - [ ] T1 — <task name> · W1 · deps none
 - [ ] RV — review fan-out
 
-## Phase 3a — <name> · deps: Phase 2
+## Phase 3a — <name> · deps: Phase 2 · lane: A
 - [ ] T1 — <task name> · W1 · deps none
 - [ ] RV — review fan-out
 
-## Phase 3b — <name> · deps: Phase 2
+## Phase 3b — <name> · deps: Phase 2 · lane: B
 - [ ] T1 — <task name> · W1 · deps none
 - [ ] RV — review fan-out
 - [ ] RVJ — joint integration review · split 3a+3b
 
 <!--
+Current State grammar:
+  ONE LINE PER ACTIVE LANE, and a sequential run has exactly one: `Lane A`.
+  `**Lane <id>:**` where <id> matches [A-Z][A-Za-z0-9]*. The value is
+  `Phase <phase-id> — <that lane's next unchecked line>`, phase id first.
+  Two phase-less values are legal, and both are CLAIMS the gate checks:
+    done                        — that lane owns no unfinished task, no open
+                                  RV, no unresolved fix loop, no open blocking
+                                  finding, and is not a contributor to an
+                                  unresolved join
+    waiting at join Phase <id>  — this lane's own branch has passed and the
+                                  join it feeds has not opened yet
+  There is no **Phase:** field and no **Next action:** field. One grammar, no
+  mode switch.
+  An ACTIVE lane -- one owning unfinished work, or waiting at an unresolved
+  join -- has exactly one line. A lane retired by a closed leading RVJ has none.
+
+Phase headings:
+  ## Phase <n> — <name> · deps: <phases, or none> · lane: <id>
+  `· deps:` says whether a phase MAY execute; `· lane:` says which concurrent
+  execution branch executes it. The mapping is written at GATE 2 and never
+  recomputed, so `phase -> lane` survives compaction and resume without
+  depending on anything the orchestrator remembers.
+  A lane is an ACTIVE EXECUTION BRANCH BETWEEN A FORK AND A JOIN, never a
+  maximal dependency chain: in a diamond A -> B,C -> D, both A and D sit on two
+  maximal chains, so chain membership cannot say which lane owns a phase.
+    fork  — the successor FIRST in approved-plan order keeps the forking
+            phase's lane; every further successor takes the next unused id
+    join  — the joining phase carries the lane of its FIRST CONTRIBUTING
+            PREDECESSOR in approved-plan order. That lane survives; the others
+            retire when the leading RVJ closes, and a retired id is never reused
+  A clean leading RVJ lets the joining phase START. It never marks it PASS --
+  the phase still owes IMPLEMENT -> RV -> CLOSE(RV) -> PASS on its own tasks.
+
 Task states:
   [ ] not started
   [~] STARTED, outcome unknown — written before work begins; on cold start this
@@ -44,13 +76,13 @@ Task states:
       (Rule 6). Members of one wave may be [~] together, each in its own
       wt/... worktree branch.
 
-**The Phase field's id comes FIRST**, e.g. `- **Phase:** 3 — fix loop, F-002
+**A lane line's phase id comes FIRST**, e.g. `- **Lane A:** 3 — fix loop, F-002
 open`. Everything after the em dash is prose for a human. That is not a style
 preference: the advancement check reads the phase this line NAMES, and it reads
-it as the leading token — so `**Phase:** 3 — moved on past the phase 2 fix loop`
+it as the leading token — so `**Lane A:** 3 — moved on past the phase 2 fix loop`
 names phase 3, and a phase mentioned later in the sentence is prose, not the
-run's position. A field that does not begin with a phase id names no phase at
-all — which is legitimate when nothing is unfinished (`Phase: done`), and is
+lane's position. A line that does not begin with a phase id names no phase at
+all — which is legitimate in the two phase-less forms above, and is
 reported as uncheckable when something is: the gate cannot compare a position it
 cannot locate, and it says so rather than guessing which number was meant.
 

@@ -172,12 +172,12 @@ both.
 # Pipeline — Progress Tracker
 
 ## Current State
-- **Phase:** <current phase number and name>
-- **Next action:** <the single next unchecked line — task, RV, or RVJ>
+- **Lane A:** <phase id FIRST, then that lane's next unchecked line — task, RV,
+  or RVJ>
 - **Last updated:** <timestamp>
 - **Run directory:** <path>
 
-## Phase 1 — <name> · deps: none
+## Phase 1 — <name> · deps: none · lane: A
 - [x] T1 — <task name> · W1 · deps none — `a1b2c3d`
 - [~] T2 — <task name> · W2 · deps T1 — started <timestamp> in `wt/p1-t2`
 - [~] T3 — <task name> · W2 · deps T1 — started <timestamp> in `wt/p1-t3`
@@ -337,11 +337,13 @@ read and nothing else. Never move it below the phase lists, never split it,
 never let it point at a line that isn't the first unfinished one. Timestamps
 come from a real clock (`date`), never from your sense of elapsed time.
 
-**`Next action` names the next unchecked line of this phase, and an open `RV`
-is such a line.** When the last task of a phase lands, the next action is that
-phase's `RV` — never the next phase's first task. Writing the next phase there
-while `RV` is open makes the tracker itself instruct the run to skip review,
-and the tracker is the thing every rule here tells you to obey.
+**A lane line names the next unchecked line of that lane's phase, and an open
+`RV` is such a line.** When the last task of a phase lands, the lane's next
+action is that phase's `RV` — never the next phase's first task. Writing the
+next phase there while `RV` is open makes the tracker itself instruct the run
+to skip review, and the tracker is the thing every rule here tells you to obey.
+**A lane may only name a phase its own `· lane:` carries**, and a sequential
+run has exactly one lane, `Lane A`.
 
 `[ ]` not started · `[~]` **started, outcome unknown** · `[x]` done, followed by
 the commit hash carrying it (or `` `nocommit` `` plus a one-line reason — never
@@ -1197,7 +1199,7 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
 | "I wrote those few lines inline, I know they're fine" | You are the author. Orchestrator commits have no task hash, so no slice covers them unless you extend one — they are the least-reviewed code on the branch. |
 | "The last phase closed out this way and nothing broke" | Precedent inside one run is the defect propagating, not evidence it is safe. Check the `RV` lines and backfill every open one. |
 | "I'll run the reviewers at the end, over the whole branch at once" | Per-phase is the rule: findings are cheapest while the phase is fresh and unmerged, and four merged lanes make attribution guesswork. |
-| "Next action says Phase 4 T1, and the file is the truth" | It is — and the same file has an open `RV` line above the one it names, which is the earlier unchecked line. The Law is unchanged: read the phase lists, take the *first* unfinished line, and correct a Current State that skipped it. This licenses nothing beyond an open `RV`/`RVJ`. |
+| "The lane line says Phase 4 T1, and the file is the truth" | It is — and the same file has an open `RV` line above the one it names, which is the earlier unchecked line. The Law is unchanged: read the phase lists, take the *first* unfinished line, and correct a Current State that skipped it. This licenses nothing beyond an open `RV`/`RVJ`. |
 | "I'll split the oversized phase once I see how it goes" | Splitting after implementation starts does not satisfy Rule 3. Split before GATE 2. |
 
 ## Red flags — STOP and ask the user
@@ -1256,8 +1258,8 @@ Every one of these was observed verbatim in testing. They all mean: STOP. ASK.
   reviewers that round declares, or a coverage file that does not end
   `COVERED: <n>/<n>` — on a round that owes those fields. The forms that owe
   none are the exception in `references/fix-loop.md`'s *Invariants*.
-- You are writing a `Next action` that names the **next phase** while this
-  phase's `RV` is still open.
+- You are writing a lane line that names the **next phase** while this phase's
+  `RV` is still open — or that names a phase assigned to a different lane.
 - You are writing the Stage 5 hand-off and it carries nothing about the
   `RV`-grammar linter — neither its output nor the statement that no checkout
   was at hand to run it from.

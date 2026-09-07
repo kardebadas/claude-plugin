@@ -213,10 +213,21 @@ starts a new run** — if step 1 finds nothing, report that and stop.
    surfaced. If reconciliation raised questions — partial `[~]` work whose
    disposition the plan doesn't settle, unexplained commits — these are **user
    questions; wait for the answers**.
-6. **Resume derives the state from disk, in this precedence.** Read down; the
-   first row that matches is the state, and its action is the only valid next
-   action. This protocol changes how a run is re-entered, never what the run is
-   allowed to do.
+6. **Resume derives the state from disk, per lane, in this precedence.** Read
+   the `· lane:` assignments off the phase headings first — that mapping is
+   persisted precisely so a resumed run never has to infer it — then, **for
+   each active lane**, read down; the first row that matches is that lane's
+   state, and its action is the only valid next action **for that lane**. A run
+   with two active lanes has two states and two next actions, and taking one
+   lane's action as the run's is how a resumed run abandons the other. This
+   protocol changes how a run is re-entered, never what the run is allowed to
+   do.
+
+   **A resumed run never chooses a join survivor.** The joining phase's
+   `· lane:` already names it, from GATE 2. When the leading `RVJ` closes,
+   remove the other contributing lanes' Current State lines — they are retired,
+   and a retired id is never reused — and the surviving lane owns the joining
+   phase, which then owes its own `IMPLEMENT → RV → CLOSE(RV) → PASS`.
 
    | On disk | State | The only valid next action |
    | --- | --- | --- |
@@ -226,6 +237,8 @@ starts a new run** — if step 1 finds nothing, report that and stop.
    | a round names a `fixplan` not in `agent-output/` | `FIX_PLAN` | write that round's fix plan |
    | a phase has an unchecked task and no `[~]` anywhere | `IMPLEMENT` | dispatch **that phase's** next open task, in wave order. Not its `RV` — review may not begin while a task of the phase is out — and not a later phase |
    | every task of a phase `[x]`, its `RV` `[ ]` | `REVIEW` | **review that phase.** Not the next phase — this is the most important run there is to resume: fully implemented and entirely unreviewed |
+   | every phase of this lane `[x]`, its join's leading `RVJ` `[ ]`, another contributing lane unfinished | waiting at join | **nothing for this lane.** Write `waiting at join Phase <id>` and resume the lane that is unfinished |
+   | every contributing lane `PASS`, the join's leading `RVJ` `[ ]` | `RVJ` | the **surviving** lane — the one the joining phase's `· lane:` names, and no other — runs the leading `RVJ` |
    | every task `[x]`, `RV` `[x]`, no open blocking F-ID | `PASS` | close out, then the next phase's first task |
 
    **An open blocking F-ID outranks the tracker's next unchecked line.** A fix

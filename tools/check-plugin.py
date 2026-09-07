@@ -2274,7 +2274,9 @@ def parse_tracker_phases(text):
 
     `tasks` entries are `(state, name, lineno)`; `reviews` entries are
     `(kind, state, lineno)`. The two shapes differ because the arms want
-    different things first: a task's state, a review's kind.
+    different things first: a task's state, a review's kind. `heading` is the
+    raw heading line, which `parse_phase_lanes` reads `· deps:` and `· lane:`
+    out of.
     """
     phases, cur = [], None
     for n, line in enumerate(text.split("\n"), 1):
@@ -2286,6 +2288,12 @@ def parse_tracker_phases(text):
             # four reports for one stray space, each telling the author to name
             # a phase the tracker demonstrably has.
             cur = {"label": f"Phase {mh.group(1).strip()}", "line": n,
+                   # THE WHOLE HEADING IS KEPT, because the fields after the
+                   # name are where `· deps:` and `· lane:` live and the label
+                   # regex deliberately stops before them. Reading them from
+                   # here rather than re-splitting the file elsewhere keeps one
+                   # parser of one grammar.
+                   "heading": line,
                    "tasks": [], "reviews": []}
             phases.append(cur)
             continue
@@ -2303,6 +2311,46 @@ def parse_tracker_phases(text):
             else:
                 cur["tasks"].append((st, what, n))
     return phases
+
+
+_LANEFLD = re.compile(r"·\s*lane:\s*([A-Z][A-Za-z0-9]*)")
+_DEPSFLD = re.compile(r"·\s*deps:\s*([^·]*)")
+
+
+def parse_phase_lanes(phases):
+    """`{index: lane id}`, `{index: [dep indexes]}`, and the multi-lane headings.
+
+    Read from the phase headings and from NOTHING ELSE. A lane is an active
+    execution branch between a fork and a join, not a maximal dependency chain:
+    in a diamond `A → B,C → D`, `A` and `D` sit on both maximal chains, so
+    chain membership is not a partition and "which lane owns this phase" has no
+    answer. The mapping is therefore allocated once at GATE 2, persisted on the
+    headings so it survives compaction and resume, and VALIDATED here — never
+    re-derived by enumerating chains.
+
+    Phase order is FILE ORDER, which is approved-plan order to every arm that
+    reads it; the fork and join rules are both stated over that order.
+    """
+    idx = {ph["label"].lower(): i for i, ph in enumerate(phases)}
+    lanes, deps, multi = {}, {}, []
+    for i, ph in enumerate(phases):
+        head = ph.get("heading", "")
+        found = _LANEFLD.findall(head)
+        if len(found) > 1:
+            multi.append((i, found))
+        if found:
+            lanes[i] = found[0]
+        dd, m = [], _DEPSFLD.search(head)
+        if m:
+            for tok in re.findall(r"[0-9]+[0-9A-Za-z.]*", m.group(1)):
+                j = idx.get(f"phase {tok.lower()}")
+                # A DEP NAMING A PHASE THIS TRACKER LACKS is dropped here and
+                # left to the arm that owns unresolvable references. This helper
+                # returns what it could read, never a guess.
+                if j is not None:
+                    dd.append(j)
+        deps[i] = sorted(set(dd))
+    return lanes, deps, multi
 
 
 if RUN_DIR is not None:
@@ -2489,6 +2537,7 @@ if RUN_DIR is not None:
             return re.sub(r"[*`_\s]+", " ", cell or "").strip().lower()
 
         _idx = {ph["label"].lower(): i for i, ph in enumerate(_phs)}
+        _lanemap, _depmap, _lanemulti = parse_phase_lanes(_phs)
         _blockers = []
         for _i, _ph in enumerate(_phs):
             _why = []
@@ -2747,6 +2796,31 @@ if RUN_DIR is not None:
                                         f"{_norm(_cells[_ci['id']]).upper()} ({_sev})"))
         _blockers.sort(key=lambda b: b[0])
 
+        # ---- the persisted lane mapping is well formed ----
+        # Mutants: "run tracker phase heading carries no lane",
+        #          "run tracker phase heading carries two lanes".
+        for _i2, _found in _lanemulti:
+            _untrusted = True
+            bad(f"{relpath(tracker)}: {_phs[_i2]['label']}'s heading carries "
+                f"{len(_found)} `· lane:` fields ({', '.join(_found)}) — a "
+                "phase is executed by exactly one active lane, and this gate "
+                "reads the first, so a second field is a lane assignment "
+                "nobody validates. REMEDY: one `· lane:` per heading")
+        _nolane = [ph["label"] for _i2, ph in enumerate(_phs)
+                   if _i2 not in _lanemap]
+        if _phs and _nolane:
+            _untrusted = True
+            bad(f"{relpath(tracker)}: {_nolane[0]}'s heading carries no "
+                "`· lane:` field"
+                + (f", and so do {len(_nolane) - 1} more" if len(_nolane) > 1
+                   else "")
+                + " — the phase → lane mapping is persisted on the headings so "
+                "it survives compaction and resume, and a phase with no lane "
+                "is one no per-lane check can reach. A sequential run assigns "
+                "every phase `· lane: A`. REMEDY: assign every phase its lane "
+                "at GATE 2, as `templates/progress.md` ships it")
+
+
         # ---- a gate that raised a blocking finding carries its own round ----
         # THE QUESTION THIS ANSWERS: a closed `RV`/`RVJ` named F-NNN in its
         # outcome, and F-NNN is blocking and now CLOSED in the ledger. Was it
@@ -2849,105 +2923,443 @@ if RUN_DIR is not None:
                          ttext, re.M | re.S)
         _csblock = _csm.group(1) if _csm else ""
         _FIELDRE = r"^\s*(?:[-*+]\s+|\d+[.)]\s+)?\*\*%s:\*\*"
-        if _phs and len(re.findall(_FIELDRE % "Phase", _csblock, re.M)) > 1:
+        _LANERE = re.compile(
+            r"^\s*(?:[-*+]\s+|\d+[.)]\s+)?\*\*Lane\s+([A-Z][A-Za-z0-9]*):\*\*"
+            r"\s*(.*)$", re.M)
+
+        # THE OLD TWO-FIELD GRAMMAR IS GONE, and its absence is REPORTED rather
+        # than tolerated. `templates/progress.md` prescribed one `**Next
+        # action:**` while `references/parallel.md` required one per active
+        # lane; keeping `**Phase:**` for single-lane runs would mean two
+        # grammars and a mode switch in this gate, and a mode-switch branch is
+        # what produced most of the defects this change repairs.
+        for _dead in ("Phase", "Next action"):
+            if re.search(_FIELDRE % _dead, _csblock, re.M):
+                _untrusted = True
+                bad(f"{relpath(tracker)}: Current State carries a "
+                    f"`**{_dead}:**` field, which this grammar replaced with "
+                    "one `- **Lane <id>:**` line per active lane — a sequential "
+                    "run writes exactly one, `- **Lane A:** …`. REMEDY: write "
+                    "the lane lines `templates/progress.md` ships")
+
+        _seen_lane, _lane_cs = set(), []
+        for _lid, _val in _LANERE.findall(_csblock):
+            if _lid in _seen_lane:
+                _untrusted = True
+                bad(f"{relpath(tracker)}: two or more `**Lane {_lid}:**` lines "
+                    "inside the `## Current State` block, and this gate reads "
+                    "the first — so a stale line left above a fresh one is the "
+                    "one that counts. A lane's position must live in exactly "
+                    "one place. REMEDY: keep one line per lane, and replace "
+                    "its value rather than adding a line")
+                continue
+            _seen_lane.add(_lid)
+            _lane_cs.append((_lid, _val.strip()))
+
+        if _phs and not _lane_cs:
             _untrusted = True
-            bad(f"{relpath(tracker)}: two or more `**Phase:**` fields inside "
-                "the `## Current State` block, and this gate reads the first — "
-                "so a stale line left above a fresh one is the one that counts. "
-                "This is RR5-4's rule one level down: the run's position must "
-                "live in exactly one place. REMEDY: keep one `**Phase:**` "
-                "field, and replace its value rather than adding a line")
-        if _phs and not re.search(_FIELDRE % "Phase", _csblock, re.M):
-            bad(f"{relpath(tracker)}: no `**Phase:**` field inside a "
-                "`## Current State` block — that field is where the "
-                "advancement check reads the run's position, so it read "
+            bad(f"{relpath(tracker)}: no `**Lane <id>:**` line inside a "
+                "`## Current State` block — those lines are where the "
+                "advancement check reads each lane's position, so it read "
                 "nothing and compared nothing. An unreadable position must not "
                 "read as a satisfied one. REMEDY: keep the Current State block "
                 "at the top, as `templates/progress.md` ships it")
 
-        def _named_phase(field):
-            m = re.search(_FIELDRE % field + r"\s*(.+)", _csblock, re.M)
-            if not m:
-                return None, False, None
-            # ANCHORED AT THE START, and that is the whole of the fix for a
-            # Critical. Searching the field's value for `phase <token>`
-            # anywhere read a MENTIONED phase in preference to the named one:
-            # `**Phase:** 3 — moved on past the phase 2 fix loop` resolved to
-            # 2, and the gate passed over a finding open against Phase 2. A
-            # Current State field names its phase FIRST — `templates/progress.md`
-            # prescribes `**Phase:** <id> — <name>` — so the id is the leading
-            # token, optionally introduced by the word "Phase" for the
-            # `**Next action:**` form (`Phase 2 RV — …`). Anything else names
-            # no phase, which is a state this arm reports rather than guesses
-            # at.
-            g = re.match(r"\s*(?:[Pp]hase\s+)?([0-9]+[0-9A-Za-z.]*)\b",
-                         m.group(1))
-            if not g:
-                return None, True, None
-            return _idx.get(f"phase {g.group(1)}".lower()), True, g.group(1)
+        # ---- the lane model, computed once from the persisted mapping ----
+        # A LANE IS AN ACTIVE EXECUTION BRANCH BETWEEN A FORK AND A JOIN, not a
+        # maximal dependency chain. In a diamond `A → B,C → D`, the maximal
+        # chains are `A → B → D` and `A → C → D`, so `A` and `D` sit on both:
+        # chain membership is not a partition, and "which lane owns this phase"
+        # has no answer. The mapping is therefore allocated at GATE 2, persisted
+        # on the phase headings, and VALIDATED here.
+        _lane_phases = {}
+        for _i2, _l2 in sorted(_lanemap.items()):
+            _lane_phases.setdefault(_l2, []).append(_i2)
+        _unfinished = {b[0]: b for b in _blockers}
+        _succ = {}
+        for _j2, _dd2 in _depmap.items():
+            for _x2 in _dd2:
+                _succ.setdefault(_x2, []).append(_j2)
 
-        _na_i, _na_seen, _na_id = _named_phase("Next action")
-        _ph_i, _ph_seen, _ph_id = _named_phase("Phase")
-        _named = [x for x in (_na_i, _ph_i) if x is not None]
+        def _contributors(j):
+            """The lanes whose phases are direct predecessors of `j`."""
+            out = []
+            for _x in _depmap.get(j, []):
+                _l = _lanemap.get(_x)
+                if _l is not None and _l not in out:
+                    out.append(_l)
+            return out
 
-        # A FIELD THAT NAMES A PHASE THIS TRACKER DOES NOT HAVE is reported on
-        # its own, not left to be caught by the accident of a blocker existing
-        # at a lower index. The ledger half already does exactly this for an
-        # unmatched `Phase` cell, and the two halves of this arm should agree.
-        # GUARDED BY `_phs`: on a tracker this gate cannot parse, `_idx` is
-        # empty and every readable field "matches no heading", so the operator
-        # got three diagnoses for one defect. The unparseable-tracker arm above
-        # is the one that owns that case.
-        for _fld, _id, _i2 in (("Phase", _ph_id, _ph_i),
-                               ("Next action", _na_id, _na_i)):
-            if _phs and _id is not None and _i2 is None:
+        # A JOIN consumes two or more active lanes. One contributing lane is an
+        # ordinary dependency, however many predecessors it has.
+        _joins = {j: _contributors(j) for j in sorted(_depmap)
+                  if len(_contributors(j)) >= 2}
+
+        def _leading_rvj(j):
+            """`j`'s leading `RVJ` — an `RVJ` above the phase's first task."""
+            _t1 = min((t[2] for t in _phs[j]["tasks"]), default=None)
+            return [r for r in _phs[j]["reviews"]
+                    if r[0] == "RVJ" and (_t1 is None or r[2] < _t1)]
+
+        # RETIRED vs WAITING. A non-surviving contributor stays ACTIVE, and
+        # writes `waiting at join Phase <id>`, until the join's leading `RVJ`
+        # closes; that closure is what retires it. A retired lane must then be
+        # gone from Current State — leaving it there says a branch is still
+        # executing when the run has already collapsed it.
+        _retired, _waiting = {}, {}
+        for _j2, _ls in _joins.items():
+            _surv = _lanemap.get(_j2)
+            _closed = any(r[1] == "x" for r in _leading_rvj(_j2))
+            for _l2 in _ls:
+                if _l2 == _surv:
+                    continue
+                if _closed:
+                    _retired.setdefault(_l2, _j2)
+                else:
+                    _waiting.setdefault(_l2, _j2)
+
+        # AN ACTIVE LANE owns unfinished work, or has finished its branch and is
+        # still waiting at an unresolved join. Every one of them needs a line:
+        # a lane that silently disappears from Current State is a branch nobody
+        # is tracking, and resume has no way to notice.
+        _active = {_l2 for _l2, _ps in _lane_phases.items()
+                   if _l2 not in _retired
+                   and (any(_i2 in _unfinished for _i2 in _ps)
+                        or _l2 in _waiting)}
+
+        # ---- fork allocation is deterministic ----
+        # At a fork the successor FIRST IN APPROVED-PLAN ORDER keeps the
+        # forking phase's lane, and every further successor takes a lane not
+        # carried by any earlier phase. Enforcing joins alone would leave the
+        # other half of the allocation rule unheld, and a fork that duplicates
+        # the parent's lane onto two branches makes "which branch is this" the
+        # unanswerable question the lane model exists to close.
+        # Mutants: "fork gives the parent lane to the second successor",
+        #          "fork branches share one lane".
+        for _pi2, _kids in sorted(_succ.items()):
+            if len(_kids) < 2:
+                continue
+            _kids = sorted(_kids)
+            _pl = _lanemap.get(_pi2)
+            if _pl and _lanemap.get(_kids[0]) != _pl:
                 _untrusted = True
-                bad(f"{relpath(tracker)}: Current State's `**{_fld}:**` names "
-                    f"phase {_id!r}, which matches no `## Phase` heading in "
-                    "this tracker — so the advancement check could not locate "
-                    "the run's own position and compared nothing. REMEDY: name "
-                    "a phase the tracker has")
+                bad(f"{relpath(tracker)}: {_phs[_pi2]['label']} forks, and its "
+                    f"first successor in approved-plan order, "
+                    f"{_phs[_kids[0]]['label']}, carries "
+                    f"`· lane: {_lanemap.get(_kids[0])}` rather than the "
+                    f"forking phase's own `{_pl}`. The first branch CONTINUES "
+                    "the lane; only the further branches are newly allocated. "
+                    f"REMEDY: write `· lane: {_pl}` on "
+                    f"{_phs[_kids[0]]['label']}")
+            _seen_kid = {}
+            for _k in _kids:
+                _kl = _lanemap.get(_k)
+                if _kl is None:
+                    continue
+                if _kl in _seen_kid:
+                    _untrusted = True
+                    bad(f"{relpath(tracker)}: {_phs[_pi2]['label']} forks to "
+                        f"{_phs[_seen_kid[_kl]]['label']} and "
+                        f"{_phs[_k]['label']}, and both carry "
+                        f"`· lane: {_kl}` — a fork CREATES lanes, so sibling "
+                        "branches never share one. Two active lanes never "
+                        "execute the same branch. REMEDY: allocate the next "
+                        "unused id to the later sibling")
+                _seen_kid[_kl] = _k
+            for _k in _kids[1:]:
+                _kl = _lanemap.get(_k)
+                if _kl is None or _kl == _pl:
+                    if _kl is not None and _kl == _pl:
+                        _untrusted = True
+                        bad(f"{relpath(tracker)}: {_phs[_k]['label']} is not "
+                            f"the first successor of {_phs[_pi2]['label']} in "
+                            f"approved-plan order, yet it carries the forking "
+                            f"phase's own `· lane: {_pl}`. Only the first "
+                            "branch continues the lane; every further branch "
+                            "is a NEW active lane. REMEDY: allocate the next "
+                            "unused id")
+                    continue
+                # A FRESH LANE'S FIRST PHASE IS THE BRANCH IT OPENS. If the id
+                # already appeared earlier in approved-plan order, it was not
+                # freshly allocated -- it was borrowed from another branch.
+                _first = _lane_phases.get(_kl, [_k])[0]
+                if _first < _k:
+                    _untrusted = True
+                    bad(f"{relpath(tracker)}: {_phs[_k]['label']} opens a new "
+                        f"branch of {_phs[_pi2]['label']} but carries "
+                        f"`· lane: {_kl}`, which {_phs[_first]['label']} "
+                        "already carries earlier in approved-plan order. A "
+                        "further branch takes a NEWLY ALLOCATED id. REMEDY: "
+                        "allocate the next unused id")
 
-        _ledger_note = ("" if _lrows else
-                        " (this run's ledger contributed no readable blocking "
-                        "row, so the ledger half of that established nothing)")
-        if _blockers and _named and max(_named) > _blockers[0][0]:
-            bad(f"{relpath(tracker)}: Current State names a phase later than "
-                f"{_blockers[0][1]}, which still has {_blockers[0][2]} — a "
-                "phase is complete only when its tasks are `[x]`, its `RV` is "
-                "`[x]` and every blocking finding scoped to it is closed. "
-                "Advancing here is the orchestration failure this gate exists "
-                "for: implementation complete is not phase complete, and an "
-                "empty ledger is what an unreviewed phase looks like too. "
-                "REMEDY: point Current State at that phase's own next action — "
-                "its review, or its fix loop")
+        # ---- the join survivor is the planned one ----
+        # Allocation happens at GATE 2: the joining phase carries the lane of
+        # its FIRST CONTRIBUTING PREDECESSOR IN APPROVED-PLAN ORDER. Leaving the
+        # survivor to runtime would put an orchestration choice where a
+        # persisted fact belongs, and the whole point of allocating at GATE 2 is
+        # that no choice is left.
+        # Mutants: "join phase takes the wrong contributors lane",
+        #          "retired lane id is reused later in the run".
+        for _j2 in sorted(_joins):
+            _want = _lanemap.get(_depmap[_j2][0])
+            if _want and _lanemap.get(_j2) != _want:
+                _untrusted = True
+                bad(f"{relpath(tracker)}: {_phs[_j2]['label']} joins "
+                    f"{len(_joins[_j2])} lanes and carries "
+                    f"`· lane: {_lanemap.get(_j2)}`, but its first contributing "
+                    f"predecessor in approved-plan order is "
+                    f"{_phs[_depmap[_j2][0]]['label']} on lane {_want}. The "
+                    "surviving lane is decided at GATE 2 and written down; the "
+                    "orchestrator must not choose one at runtime. REMEDY: "
+                    f"write `· lane: {_want}` on {_phs[_j2]['label']}")
+
+        # ---- a retired lane id is never reused ----
+        for _lid2 in sorted(_lane_phases):
+            _ret = next((_j2 for _j2 in sorted(_joins)
+                         if _lanemap.get(_j2) != _lid2
+                         and _lid2 in _joins[_j2]), None)
+            if _ret is None:
+                continue
+            _after = [_i2 for _i2 in _lane_phases[_lid2] if _i2 > _ret]
+            if _after:
+                _untrusted = True
+                bad(f"{relpath(tracker)}: lane {_lid2} retires at "
+                    f"{_phs[_ret]['label']}, which consumes it on lane "
+                    f"{_lanemap.get(_ret)}, but {_phs[_after[0]]['label']} "
+                    "carries it again later in approved-plan order. A retired "
+                    "lane id is never allocated again in the same run — reusing "
+                    "it makes a resumed run unable to tell which branch a phase "
+                    "belongs to. REMEDY: allocate the next unused id")
+
+        def _resolve_phase(value):
+            """`(phase index, raw id)` for a lane line's value."""
+            # ANCHORED AT THE START, and that is the whole of the fix for a
+            # Critical. Searching the value for `phase <token>` anywhere read a
+            # MENTIONED phase in preference to the named one: `Phase 3 — moved
+            # on past the phase 2 fix loop` resolved to 2, and the gate passed
+            # over a finding open against Phase 2. A lane line names its phase
+            # FIRST — `templates/progress.md` prescribes `- **Lane <id>:**
+            # Phase <id> — <that lane's next unchecked line>`.
+            g = re.match(r"\s*(?:[Pp]hase\s+)?([0-9]+[0-9A-Za-z.]*)\b", value)
+            if not g:
+                return None, None
+            return _idx.get(f"phase {g.group(1)}".lower()), g.group(1)
+
+        _lane_named, _adv = [], []
+        for _lid, _val in _lane_cs:
+            # AN UNKNOWN LANE ID validates against nothing. The mapping is
+            # persisted on the headings and Current State is checked against
+            # it, so a lane existing only here is a position this gate cannot
+            # reach — and `Lane Z: done` would otherwise read as a satisfied
+            # state for a branch that never existed.
+            if _lanemap and _lid not in _lane_phases:
+                _untrusted = True
+                bad(f"{relpath(tracker)}: Current State names "
+                    f"`**Lane {_lid}:**`, which no `## Phase` heading carries "
+                    "as `· lane:`. The phase → lane mapping is what this gate "
+                    "validates positions against, so a lane that exists only in "
+                    "Current State is a position nothing can check. REMEDY: "
+                    "assign the lane on its phases' headings at GATE 2, or "
+                    "remove the line")
+                continue
+            if _lid in _retired:
+                _untrusted = True
+                bad(f"{relpath(tracker)}: Current State still carries "
+                    f"`**Lane {_lid}:**`, but that lane retired at "
+                    f"{_phs[_retired[_lid]]['label']} — its leading `RVJ` is "
+                    f"closed, so the join has collapsed onto "
+                    f"{_lanemap.get(_retired[_lid])}. A retired lane id is "
+                    "never reused and never left in Current State: a line here "
+                    "says a branch is still executing that the run has already "
+                    "folded in. REMEDY: remove the line")
+                continue
+
+            _i, _pid = _resolve_phase(_val)
+
+            # ---- the two phase-less forms, validated as STATES ----
+            if _i is None and _pid is None:
+                _mw = re.match(r"waiting at join\s+(?:[Pp]hase\s+)?"
+                               r"([0-9]+[0-9A-Za-z.]*)\b", _val, re.I)
+                if re.match(r"done\b", _val, re.I):
+                    # `done` IS A CLAIM, NOT A STRING. An executor writes it
+                    # exactly when it believes the lane is over, which is
+                    # precisely when it may be wrong about an open finding.
+                    _own_open = [_unfinished[_i2] for _i2 in
+                                 _lane_phases.get(_lid, [])
+                                 if _i2 in _unfinished]
+                    if _own_open:
+                        bad(f"{relpath(tracker)}: Current State says "
+                            f"`**Lane {_lid}:** done`, but {_own_open[0][1]} is "
+                            f"assigned to that lane and still has "
+                            f"{_own_open[0][2]}. A lane is `done` only when it "
+                            "owns no unfinished task, no open `RV`, no "
+                            "unresolved fix loop and no open blocking finding. "
+                            "REMEDY: point the lane at its own next action")
+                    elif _lid in _waiting:
+                        bad(f"{relpath(tracker)}: Current State says "
+                            f"`**Lane {_lid}:** done`, but that lane still "
+                            f"contributes to {_phs[_waiting[_lid]]['label']}, "
+                            "whose leading `RVJ` has not closed. A contributor "
+                            "is not done while its join is unresolved — it is "
+                            "waiting, and the run has to be able to tell the "
+                            "two apart. REMEDY: write `waiting at join "
+                            f"{_phs[_waiting[_lid]]['label']}`")
+                elif _mw:
+                    _jid = _mw.group(1)
+                    _ji = _idx.get(f"phase {_jid}".lower())
+                    _why = None
+                    if _ji is None:
+                        _why = (f"names phase {_jid!r}, which matches no "
+                                "`## Phase` heading in this tracker")
+                    elif _ji not in _joins:
+                        _why = (f"names {_phs[_ji]['label']}, which is not a "
+                                "join — its `· deps:` span fewer than two "
+                                "lanes, so there is nothing there to wait for")
+                    elif _lid not in _joins[_ji]:
+                        _why = (f"names {_phs[_ji]['label']}, which this lane "
+                                "does not contribute to — no phase assigned to "
+                                f"lane {_lid} is a direct predecessor of it")
+                    else:
+                        _own_open = [_unfinished[_i2] for _i2 in
+                                     _lane_phases.get(_lid, [])
+                                     if _i2 in _unfinished]
+                        if _own_open:
+                            _why = (f"is waiting while {_own_open[0][1]}, "
+                                    "assigned to this same lane, still has "
+                                    f"{_own_open[0][2]} — a lane waits at a "
+                                    "join only once its own branch has passed")
+                    if _why:
+                        _untrusted = True
+                        bad(f"{relpath(tracker)}: Current State's "
+                            f"`**Lane {_lid}:** waiting at join …` {_why}. "
+                            "`waiting at join` is an orchestration state, not a "
+                            "phrase: it says this lane's branch is complete and "
+                            "the join it feeds has not opened. REMEDY: write "
+                            "the state the lane is actually in")
+                else:
+                    _untrusted = True
+                    bad(f"{relpath(tracker)}: Current State's "
+                        f"`**Lane {_lid}:**` names no phase and is not one of "
+                        "the two phase-less forms — its value is "
+                        f"{_val[:40]!r}. A lane line is `Phase <id> — <that "
+                        "lane's next unchecked line>`, or `done`, or `waiting "
+                        "at join Phase <id>`. REMEDY: name the lane's phase")
+                continue
+
+            if _i is None:
+                _untrusted = True
+                bad(f"{relpath(tracker)}: Current State's `**Lane {_lid}:**` "
+                    f"names phase {_pid!r}, which matches no `## Phase` heading "
+                    "in this tracker — so the advancement check could not "
+                    "locate that lane's own position and compared nothing. "
+                    "REMEDY: name a phase the tracker has")
+                continue
+
+            # ---- LANE X MAY NAME PHASE P IFF PHASE P CARRIES `· lane: X` ----
+            # Proving the lane merely EXISTS somewhere is not enough: a lane
+            # naming another lane's phase is two branches claiming one phase,
+            # and it is how a non-surviving contributor would come to run a
+            # joining phase's leading `RVJ`.
+            if _lanemap.get(_i) != _lid:
+                _untrusted = True
+                bad(f"{relpath(tracker)}: Current State's `**Lane {_lid}:**` "
+                    f"names {_phs[_i]['label']}, which carries "
+                    f"`· lane: {_lanemap.get(_i)}`. A phase is executed by "
+                    "exactly one active lane, and it is the lane its own "
+                    "heading names. REMEDY: let "
+                    f"{_lanemap.get(_i)} run {_phs[_i]['label']}, and point "
+                    f"lane {_lid} at a phase assigned to it")
+                continue
+            _lane_named.append((_lid, _i))
+
+            # ---- per-lane advancement, against that lane's OWN phases ----
+            # The old comparison was `max(_named) > _blockers[0][0]` — the
+            # latest named position against the earliest unfinished phase
+            # ANYWHERE — so Lane B legitimately at phase 6 while Lane A's phase
+            # 2 was open made it true, and a conforming two-lane tracker
+            # hard-failed this gate.
+            _own = [b for b in _blockers if _lanemap.get(b[0]) == _lid]
+            if _own and _i > _own[0][0]:
+                _adv.append((_lid, _own[0]))
+
+            # ---- a join cannot be entered early ----
+            if _i in _joins:
+                _openc = [b for b in _blockers if b[0] < _i
+                          and _lanemap.get(b[0]) in _joins[_i]]
+                _lead = _leading_rvj(_i)
+                # THE GATE ACTION IS LEGAL, THE IMPLEMENTATION ACTION IS NOT.
+                # Once every contributor is `PASS`, the surviving lane names the
+                # leading `RVJ` — that is the gate being executed. Naming a task
+                # is ENTERING the phase, and only a closed leading `RVJ`
+                # licenses that.
+                _isgate = re.search(r"(?:—|-)\s*RVJ\b", _val) is not None
+                if _openc:
+                    bad(f"{relpath(tracker)}: Current State's "
+                        f"`**Lane {_lid}:**` names {_phs[_i]['label']}, which "
+                        f"joins {len(_joins[_i])} lanes, while {_openc[0][1]} "
+                        f"— assigned to a contributing lane — still has "
+                        f"{_openc[0][2]}. A join is reachable only when every "
+                        "contributing lane's last phase is `PASS`. REMEDY: "
+                        f"write `waiting at join {_phs[_i]['label']}` until "
+                        "the contributors close")
+                elif not _lead:
+                    _untrusted = True
+                    bad(f"{relpath(tracker)}: {_phs[_i]['label']} joins "
+                        f"{len(_joins[_i])} lanes but carries no leading "
+                        "`RVJ` — an `RVJ` above the phase's first task, which "
+                        "is what reviews the lanes that merged here. Without "
+                        "it the join is entered on nobody's review. REMEDY: "
+                        "add the leading `RVJ`, above the first task")
+                elif not _isgate and not any(r[1] == "x" for r in _lead):
+                    bad(f"{relpath(tracker)}: Current State's "
+                        f"`**Lane {_lid}:**` names an implementation action in "
+                        f"{_phs[_i]['label']} while its leading `RVJ` is not "
+                        "`[x]`. A leading `RVJ` gates *entry* to a joining "
+                        "phase, so the only action legal before it closes is "
+                        "the `RVJ` itself — and a clean leading `RVJ` lets the "
+                        "phase START, it never marks it `PASS`. REMEDY: name "
+                        f"the gate — `{_phs[_i]['label']} — RVJ` — until it "
+                        "closes")
+
+        # ---- every active lane has exactly one Current State line ----
+        _missing = sorted(_active - {l for l, _ in _lane_cs})
+        for _lid in _missing:
+            _untrusted = True
+            _ps = [_i2 for _i2 in _lane_phases[_lid] if _i2 in _unfinished]
+            _what = (f"{_phs[_ps[0]]['label']} is unfinished" if _ps else
+                     f"it is waiting at {_phs[_waiting[_lid]]['label']}")
+            bad(f"{relpath(tracker)}: lane {_lid} is active — {_what} — and has "
+                "no `**Lane " + _lid + ":**` line in Current State. Every "
+                "active lane carries exactly one, or a branch disappears from "
+                "the run's own record and a resume has no way to notice it. "
+                "REMEDY: add the line")
+
+        for _lid, _b in _adv:
+            bad(f"{relpath(tracker)}: Current State's `**Lane {_lid}:**` names "
+                f"a phase later than {_b[1]}, which is assigned to that lane "
+                f"and still has {_b[2]} — a phase is complete only when its "
+                "tasks are `[x]`, its `RV` is `[x]` and every blocking finding "
+                "scoped to it is closed. Advancing here is the orchestration "
+                "failure this gate exists for: implementation complete is not "
+                "phase complete, and an empty ledger is what an unreviewed "
+                "phase looks like too. REMEDY: point that lane at its own next "
+                "action — its review, or its fix loop")
+
         # THE RULE THE WHOLE ARM OBEYS: never print an affirmative line about a
-        # comparison that did not happen. Round 6 fail-closed on "could not
-        # LOCATE the field" and left two neighbours open — "located it, but it
-        # resolved to nothing" and "located a field, but not the right one" —
-        # and in the first case the same commit removed the report that had
-        # been covering it. Keying this guard off `_*_seen` ("a field exists")
-        # instead of `_*_id` ("a field named a phase") is what did it:
-        # `**Phase:** done` is a form the template blesses and `run-ok` ships,
-        # and an executor writes it exactly when it believes the run is over —
-        # which is precisely when it may be wrong about an open finding.
-        elif _blockers and not _named and not (_ph_id or _na_id):
+        # comparison that did not happen.
+        if _adv or _missing:
+            pass
+        elif _blockers and not _lane_named and not _lane_cs:
             bad(f"{relpath(tracker)}: {_blockers[0][1]} has "
-                f"{_blockers[0][2]}, and neither Current State field names a "
-                "phase — so there is nothing to compare it against and the "
-                "advancement invariant is uncheckable on this tracker. "
-                "REMEDY: name the phase in `**Phase:**`")
-        elif _named and not _untrusted:
-            ok("Current State does not point past an unfinished phase"
-               + _ledger_note)
+                f"{_blockers[0][2]}, and no lane line names a phase — so there "
+                "is nothing to compare it against and the advancement "
+                "invariant is uncheckable on this tracker. REMEDY: name the "
+                "phase on the lane that owns it")
+        elif _lane_cs and not _untrusted:
+            ok("no lane points past an unfinished phase of its own, and every "
+               "active lane is named" + _ledger_note)
         elif _phs and not _blockers and not _untrusted:
             ok("no unfinished phase in the tracker" + _ledger_note)
-        # NO AFFIRMATIVE IN THE REMAINING CASES, and each is already reported:
-        # an unparseable tracker (the `_phs` arm above), and a field naming a
-        # phase the tracker lacks (the per-field arm above). Printing
-        # "no unfinished phase" after either was a false line about a
-        # comparison the arm never made — the same class as N-008 and NEW-F6,
-        # and the last of them.
 
 # ---- every mutant this file cites by name must actually exist ----
 # The arms above cite their proofs by NAME: a `Mutant`/`Mutants` comment marker

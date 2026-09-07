@@ -21,17 +21,16 @@ Round 2 is a **planned** round — it names its `fixplan` file, present in
 run, on a round that is not the one in `run-ok`.
 
 ## Current State
-- **Phase:** 2 — fix loop, F-002 still open after round 2
-- **Next action:** Phase 2 fix loop round 3 — write the round's fix plan for F-002
+- **Lane A:** Phase 2 — fix loop round 4, write the round's fix plan for F-002
 - **Last updated:** 2026-09-07
 - **Run directory:** tools/fixtures/run-fixloop/
 
-## Phase 1 — fixture, closed · deps: none
+## Phase 1 — fixture, closed · deps: none · lane: A
 - [x] T1 — a task · W1 · deps none — `aaaaaaa`
 - [x] RV — review fan-out · N=1 → 1 slice + 0 integration
       · reports p1-review-a.md · coverage p1-coverage.md → no findings
 
-## Phase 2 — fixture, implemented and reviewed, a finding still open · deps: Phase 1
+## Phase 2 — fixture, implemented and reviewed, a finding still open · deps: Phase 1 · lane: A
 - [x] T2 — a task · W1 · deps T1 — `bbbbbbb`
 - [x] T3 — a task · W1 · deps T1 — `ccccccc`
 - [x] RV — review fan-out · N=2 → 1 slice + 0 integration
@@ -41,6 +40,6 @@ run, on a round that is not the one in `run-ok`.
       → round 3: M=0 → no round · closures: F-003 withdrawn → duplicate of F-002,
         F-004 withdrawn → malformed → no findings
 
-## Phase 3 — fixture, not started · deps: Phase 2
+## Phase 3 — fixture, not started · deps: Phase 2 · lane: A
 - [ ] T4 — a task · W1 · deps T3
 - [ ] RV — review fan-out

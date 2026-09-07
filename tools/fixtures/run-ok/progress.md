@@ -106,23 +106,22 @@ construction — no fix ran, so there was nothing to plan — and the two such
 records elsewhere in this tree are what keep that exemption exercised.
 
 ## Current State
-- **Phase:** done (fixture)
-- **Next action:** none; this run directory is a linter fixture
+- **Lane A:** done (fixture)
 - **Last updated:** 2026-09-05
 - **Run directory:** tools/fixtures/run-ok/
 
-## Phase 1 — fixture, single report file · deps: none
+## Phase 1 — fixture, single report file · deps: none · lane: A
 - [x] T1 — a task · W1 · deps none — `aaaaaaa`
 - [x] RV — review fan-out · N=1 → 1 slice + 0 integration
       · reports p1-review-a.md · coverage p1-coverage.md → no findings
 
-## Phase 2 — fixture, brace-expanded report set · deps: Phase 1
+## Phase 2 — fixture, brace-expanded report set · deps: Phase 1 · lane: A
 - [x] T2 — another task · W1 · deps T1 — `bbbbbbb`
 - [x] RV — review fan-out · N=8 → 2 slice + 1 integration
       · boundary: the T2 contract consumed by the orchestrator commit in slice b
       · reports p2-review-{a,b,int}.md · coverage p2-coverage.md → no findings
 
-## Phase 3 — fixture, a record longer than the old byte window · deps: Phase 2
+## Phase 3 — fixture, a record longer than the old byte window · deps: Phase 2 · lane: A
 - [x] T3 — a third task · W1 · deps T2 — `ccccccc`
 - [x] RV — review fan-out · N=9 → 2 slice + 1 integration
       · boundary: T3's helper consumed by the follow-up fix in slice b
@@ -141,7 +140,7 @@ records elsewhere in this tree are what keep that exemption exercised.
         → F-001 closed, F-002 closed
 - [x] T4 — file coverage p3-coverage.md into the phase ledger · W1 · deps T3 — `ddddddd`
 
-## Phase 4 — fixture, multi-slice with no integration boundary · deps: Phase 3
+## Phase 4 — fixture, multi-slice with no integration boundary · deps: Phase 3 · lane: A
 - [x] T5 — a fifth task · W1 · deps T4 — `eeeeeee`
 - [x] RV — review fan-out · N=7 → 2 slice + 0 integration
       · no integration boundary

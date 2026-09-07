@@ -1715,6 +1715,44 @@ if seen and nseen and not viol:
        "coverage all conform, and every no-round record names its closure "
        "routes and carries no reviewer evidence")
 
+# ---- pipeline dispatches implementation itself, so it owns the scripts ----
+# The skill used to cite `scripts/task-brief` and `scripts/review-package` bare
+# and relative while owning neither: they are `subagent-driven-development`
+# internals, so the paths resolved from nothing the citing file could see, and
+# an upstream rename would go unnoticed on a green build. Now that Stage 4
+# dispatches implementers itself, the brief extractor is pipeline's own file and
+# is checked like one: present, executable, and with a shebang, because a
+# non-executable script fails at the first dispatch of a run.
+#
+# PLACED HERE, not beside the other pipeline sections above, because `relpath`
+# is defined at module scope further up this file than those sections are and
+# every message below needs it. Moving this block above `def relpath` raises
+# `NameError` on the first FAIL — which is a red build for the wrong reason.
+# Mutants: "pipeline task-brief script is missing",
+#          "pipeline task-brief script is not executable",
+#          "pipeline task-brief script loses its shebang".
+print("\n== pipeline dispatch scripts ==")
+_tb = ROOT / "plugins/superb/skills/pipeline/scripts/task-brief"
+if not _tb.is_file():
+    bad(f"{relpath(_tb)} does not exist — Stage 4 dispatches implementers "
+        "itself and cites this script for the task brief, so every dispatch of "
+        "every run fails at its first step. REMEDY: add the script, or stop "
+        "citing it")
+else:
+    _tbt, _tbe = read(_tb)
+    if _tbe:
+        bad(f"{relpath(_tb)} cannot be read: {_tbe}")
+    elif not _tbt.startswith("#!"):
+        bad(f"{relpath(_tb)} has no shebang — it is invoked as a command, not "
+            "sourced, so without one the kernel's fallback decides which shell "
+            "runs it. REMEDY: start the file with `#!/bin/sh`")
+    elif not (_tb.stat().st_mode & 0o111):
+        bad(f"{relpath(_tb)} is not executable — a dispatch citing it gets "
+            "'permission denied' at the first task of the phase. REMEDY: "
+            "`chmod +x` it and commit the mode bit")
+    else:
+        ok("pipeline owns an executable task-brief script")
+
 # ---- the same linter, over a REAL run's tracker ----
 # The arm above scans `pdir` only — the skill's own worked examples — so no
 # invocation of this gate has ever read a run's own tracker. `--run <dir>`

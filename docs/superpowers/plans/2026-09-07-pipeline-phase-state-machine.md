@@ -68,6 +68,20 @@ harness (`tools/check-plugin-mutants.sh`); GitHub Actions.
   comment, and every cited name must exist as a `run_mutant "<name>"` in
   `tools/check-plugin-mutants.sh` — `check-plugin.py:1858-1893` fails the build
   on a dangling citation.
+- **New `run_mutant` blocks go immediately BEFORE the harness's summary block**
+  — the `echo "killed=$PASS survived=$SURV"` lines and the `exit 1` under them,
+  at the end of `tools/check-plugin-mutants.sh`. Appending to the end of the
+  file instead puts them after the verdict: their kills go uncounted, and if any
+  earlier mutant survived, the `exit 1` means they never run at all. Verify
+  placement with
+  `grep -n 'run_mutant \"<your name>\"\|killed=\$PASS' tools/check-plugin-mutants.sh`
+  — every new name must have a lower line number than the summary — and run
+  `bash -n tools/check-plugin-mutants.sh` before running the harness.
+- **New linter arms that call `relpath` must sit after its definition**
+  (`tools/check-plugin.py:1285`). The natural seam is immediately after the
+  `== pipeline review-line examples ==` section's closing `ok(...)`, which is
+  where Task 1 puts the first one; put later unconditional arms beside it.
+  An arm placed above `def relpath` raises `NameError` on its first FAIL.
 - **Arm before fix.** For every mechanisable rule: add the arm, watch
   `./tools/check-plugin.sh` go **FAIL** against the un-fixed repo, then make the
   change, then watch it **PASS**. Then add the mutant and watch it print
@@ -393,7 +407,9 @@ DETAIL: <run-dir>/agent-output/<label>.md
 
 - [ ] **Step 7: Add the mutants**
 
-Append to `tools/check-plugin-mutants.sh`, after the last `run_mutant` block:
+Insert into `tools/check-plugin-mutants.sh` immediately **before** the summary
+block (see Global Constraints — appending to the end of the file puts them
+after the verdict, where their kills go uncounted):
 
 ```bash
 # Pipeline dispatches implementation itself now, so its brief extractor is a
@@ -861,7 +877,7 @@ Expected: `check-plugin: PASS` twice.
 
 - [ ] **Step 8: Add the mutants**
 
-Append to `tools/check-plugin-mutants.sh`:
+Insert into `tools/check-plugin-mutants.sh`, before the summary block:
 
 ```bash
 # The three shapes the deleted per-task loop comes back in. Each re-introduces

@@ -1583,6 +1583,33 @@ assert out!=s, 'mutant is a no-op: the integration reviewer was not added'
 assert 'M=1 C=1' in out, 'mutant is a no-op: the cluster count went too, so a kill could come from the cluster-count arm instead'
 p.write_text(out)\""
 
+
+# Pipeline dispatches implementation itself now, so its brief extractor is a
+# file this repo owns and can lose. Three ways it becomes useless at the first
+# dispatch of a run, each killed by its own arm.
+run_mutant "pipeline task-brief script is missing" '
+f=plugins/superb/skills/pipeline/scripts/task-brief
+if [ ! -f "$f" ]; then
+  echo "mutant is a no-op: the script is already absent"
+else
+  rm -f "$f"
+fi'
+run_mutant "pipeline task-brief script is not executable" '
+f=plugins/superb/skills/pipeline/scripts/task-brief
+if [ ! -x "$f" ]; then
+  echo "mutant is a no-op: the script is already non-executable"
+else
+  chmod -x "$f"
+fi'
+run_mutant "pipeline task-brief script loses its shebang" '
+f=plugins/superb/skills/pipeline/scripts/task-brief
+if ! head -1 "$f" | grep -q "^#!"; then
+  echo "mutant is a no-op: the script has no shebang to remove"
+else
+  sed -i "1d" "$f"
+  head -1 "$f" | grep -q "^#!" && echo "mutant is a no-op: a shebang is still on line 1"
+fi'
+
 echo
 echo "killed=$PASS survived=$SURV"
 if [ "$SURV" -ne 0 ]; then

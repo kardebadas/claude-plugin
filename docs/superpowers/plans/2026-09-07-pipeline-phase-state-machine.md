@@ -3065,3 +3065,26 @@ says what changed and why.
   (Task 4), and a fixture change stripping four mutants of their targets (here).
   `check-plugin.sh` says the rules hold; only the harness says the checks still
   check. **Run it after every prose or fixture edit, and never through `tail`.**
+
+### Tasks 7 and 8
+
+- **Verified together in one harness run.** Both are linter-only additions with
+  independently named mutants, so a failure is attributable either way, and the
+  harness is the slow step. Committed separately.
+- **`ttext` binding.** Done as the corrected step described — `terr` still names
+  the same value, so the existing `bad(...)` f-string is byte-identical.
+- **Arms placed inside the `--run` block**, after `lint_review_lines`, which is
+  where `tracker`, `ttext` and `ao` are in scope.
+- **`grep` here is ugrep, and it parses a pattern beginning with `-` as an
+  option.** `grep -qF "- [x] RV …"` therefore reports no match instead of
+  searching, so `"run tracker advances past a phase with an open RV"` guarded
+  itself out and survived — with a diagnostic blaming the fixture rather than
+  the guard. Three anchors now take `--`, and the hazard is documented above
+  `run_mutant()` with the measured symptom named. No pre-existing mutant hit
+  this: their anchors happen not to start with a dash.
+- **Four distinct classes of silent-gate failure have now shown up in this
+  branch, none visible to `check-plugin.sh`:** a reflow breaking a raw-text
+  anchor, a rewrite leaving an arm with no subject, a fixture change stripping
+  mutants of their targets, and ugrep eating a `-`-leading pattern. Every one
+  was found by the mutation harness. That is the argument for running it after
+  every prose, fixture or harness edit — not only after touching an arm.

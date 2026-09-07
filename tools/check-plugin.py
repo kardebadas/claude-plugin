@@ -2512,18 +2512,18 @@ if RUN_DIR is not None:
         #          "run tracker next action names a later phase than its own state",
         #          "run tracker phase carries no RV line at all",
         #          "run tracker ledger row bolds its severity",
-        #          "run tracker Current State phase advances while Next action does not",
+        #          "run tracker Current State keeps the retired Phase field",
         #          "run tracker Current State names a mentioned phase",
         #          "run tracker ledger header renames its phase column",
         #          "run tracker second blocking table gates nothing",
         #          "run tracker Current State is shadowed by a prose decoy",
         #          "run tracker ledger row id is bolded",
         #          "run tracker four-column ledger renames its phase column",
-        #          "run tracker loses its Phase field",
+        #          "run tracker loses its lane line",
         #          "run tracker grows a second Current State block",
         #          "run tracker ledger row id is not F-<n>",
-        #          "run tracker Phase field resolves to nothing",
-        #          "run tracker hides a stale Phase field above the fresh one",
+        #          "run tracker lane line resolves to nothing",
+        #          "run tracker hides a stale lane line above the fresh one",
         #          "run tracker ledger row id has a letter after the dash".
         #
         # RR6-4's guard — no affirmative line after a nonexistent-phase report —
@@ -2965,6 +2965,12 @@ if RUN_DIR is not None:
                 "read as a satisfied one. REMEDY: keep the Current State block "
                 "at the top, as `templates/progress.md` ships it")
 
+        # AN ABSENT LEDGER IS NOT AN EMPTY ONE, and the affirmative says so
+        # rather than implying a check that had no input.
+        _ledger_note = ("" if _lrows else
+                        " (this run's ledger contributed no readable blocking "
+                        "row, so the ledger half of that established nothing)")
+
         # ---- the lane model, computed once from the persisted mapping ----
         # A LANE IS AN ACTIVE EXECUTION BRANCH BETWEEN A FORK AND A JOIN, not a
         # maximal dependency chain. In a diamond `A → B,C → D`, the maximal
@@ -3001,11 +3007,17 @@ if RUN_DIR is not None:
             return [r for r in _phs[j]["reviews"]
                     if r[0] == "RVJ" and (_t1 is None or r[2] < _t1)]
 
-        # RETIRED vs WAITING. A non-surviving contributor stays ACTIVE, and
+        # RETIRED vs WAITING. A NON-SURVIVING contributor stays active, and
         # writes `waiting at join Phase <id>`, until the join's leading `RVJ`
-        # closes; that closure is what retires it. A retired lane must then be
-        # gone from Current State — leaving it there says a branch is still
+        # closes; that closure is what retires it, and a retired lane must then
+        # be gone from Current State — leaving it there says a branch is still
         # executing when the run has already collapsed it.
+        #
+        # THE SURVIVOR WAITS TOO, and is not retired by its own join: it OWNS
+        # the joining phase, so while another contributor is still unfinished it
+        # writes `waiting at join` as well. Once every contributor has passed it
+        # stops waiting and runs the leading `RVJ` — the gate is somebody's job,
+        # and it is the surviving lane's.
         _retired, _waiting = {}, {}
         for _j2, _ls in _joins.items():
             _surv = _lanemap.get(_j2)
@@ -3145,6 +3157,15 @@ if RUN_DIR is not None:
                 return None, None
             return _idx.get(f"phase {g.group(1)}".lower()), g.group(1)
 
+        # Mutants: "unfinished lane says done",
+        #          "lane waits at a join that does not exist",
+        #          "lane waits at a phase that is not a join",
+        #          "lane waits while its own branch is unfinished",
+        #          "an active lane vanishes from Current State",
+        #          "a retired lane is left in Current State",
+        #          "Current State names a lane no phase carries",
+        #          "leading RVJ round is filed under the joining phase RV",
+        #          "joining phase is entered before its leading RVJ closes".
         _lane_named, _adv = [], []
         for _lid, _val in _lane_cs:
             # AN UNKNOWN LANE ID validates against nothing. The mapping is
@@ -3215,19 +3236,45 @@ if RUN_DIR is not None:
                         _why = (f"names {_phs[_ji]['label']}, which is not a "
                                 "join — its `· deps:` span fewer than two "
                                 "lanes, so there is nothing there to wait for")
-                    elif _lid not in _joins[_ji]:
+                    elif (_lid not in _joins[_ji]
+                            and _lanemap.get(_ji) != _lid):
                         _why = (f"names {_phs[_ji]['label']}, which this lane "
-                                "does not contribute to — no phase assigned to "
-                                f"lane {_lid} is a direct predecessor of it")
+                                "neither contributes to nor survives into — no "
+                                f"phase assigned to lane {_lid} is a direct "
+                                "predecessor of it, and it is not that phase's "
+                                "own lane")
+                    elif any(r[1] == "x" for r in _leading_rvj(_ji)):
+                        _why = (f"names {_phs[_ji]['label']}, whose leading "
+                                "`RVJ` is already `[x]` — the join has "
+                                "collapsed, so this lane is either the "
+                                "surviving one (which now RUNS that phase) or "
+                                "retired (which carries no line at all)")
                     else:
+                        # MEASURED BEFORE THE JOIN, and only before it. The
+                        # surviving lane OWNS the joining phase, so its own
+                        # unfinished set includes the very phase it is waiting
+                        # for; reading that as "its branch is unfinished" made
+                        # the conforming survivor shape fail.
                         _own_open = [_unfinished[_i2] for _i2 in
                                      _lane_phases.get(_lid, [])
-                                     if _i2 in _unfinished]
+                                     if _i2 in _unfinished and _i2 < _ji]
+                        _others = [b for b in _blockers if b[0] < _ji
+                                   and _lanemap.get(b[0]) in _joins[_ji]
+                                   and _lanemap.get(b[0]) != _lid]
                         if _own_open:
                             _why = (f"is waiting while {_own_open[0][1]}, "
                                     "assigned to this same lane, still has "
                                     f"{_own_open[0][2]} — a lane waits at a "
                                     "join only once its own branch has passed")
+                        elif _lanemap.get(_ji) == _lid and not _others:
+                            # THE SURVIVOR STOPS WAITING when the last
+                            # contributor passes: the leading `RVJ` is then
+                            # runnable, and it is this lane's to run.
+                            _why = (f"is waiting at {_phs[_ji]['label']} while "
+                                    "every contributing lane has passed and "
+                                    "this lane is the surviving one — the "
+                                    "leading `RVJ` is runnable now, and running "
+                                    "it is this lane's job")
                     if _why:
                         _untrusted = True
                         bad(f"{relpath(tracker)}: Current State's "
@@ -3255,7 +3302,9 @@ if RUN_DIR is not None:
                     "REMEDY: name a phase the tracker has")
                 continue
 
-            # ---- LANE X MAY NAME PHASE P IFF PHASE P CARRIES `· lane: X` ----
+                # ---- LANE X MAY NAME PHASE P IFF PHASE P CARRIES `· lane: X` ----
+            # Mutants: "run tracker lane names another lanes phase",
+            #          "non-surviving lane runs the joining phases leading RVJ".
             # Proving the lane merely EXISTS somewhere is not enough: a lane
             # naming another lane's phase is two branches claiming one phase,
             # and it is how a non-surviving contributor would come to run a

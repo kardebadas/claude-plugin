@@ -27,6 +27,13 @@ jobs:
       # A trailing RVJ that raised a blocking finding and carries its own
       # appended fix round -- the gate-ownership arm's only conforming input.
       - run: ./tools/check-plugin.sh --run tools/fixtures/run-rvj-fix
+      # Two concurrent lanes at different legal positions, over the
+      # canonical diamond -- the only conforming input every per-lane arm has.
+      - run: ./tools/check-plugin.sh --run tools/fixtures/run-lanes
+      # The complete leading-RVJ path: blocking finding -> fix plan -> fix
+      # -> re-review under the SAME leading RVJ -> CLOSE -> Lane B retired ->
+      # Lane A enters the joining phase's IMPLEMENT, with that phase NOT PASS.
+      - run: ./tools/check-plugin.sh --run tools/fixtures/run-leading-rvj-fix
       - run: ./tools/check-plugin-mutants.sh
 
   craft-brief:

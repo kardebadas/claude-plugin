@@ -1771,8 +1771,8 @@ if ! grep -qF -- "- [x] RV — review fan-out · N=1" "$f"; then
   echo "mutant is a no-op: Phase 1s RV is not in the expected closed form"
 else
   sed -i "s|- \[x\] RV — review fan-out · N=1|- [ ] RV — review fan-out · N=1|" "$f"
-  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T3|" "$f"
-  grep -qF "Next action:** Phase 3" "$f" || echo "mutant is a no-op: Next action was not moved past Phase 1"
+  sed -i "s|^- \*\*Lane A:\*\*.*|- **Lane A:** Phase 3 — T3|" "$f"
+  grep -qF -- "- **Lane A:** Phase 3 — T3" "$f" || echo "mutant is a no-op: the lane was not moved past Phase 1"
   grep -qF -- "- [ ] RV — review fan-out · N=1" "$f" || echo "mutant is a no-op: Phase 1s RV was not reopened"
 fi'
 run_mutant "run tracker advances past a phase with an open blocking finding" '
@@ -1784,8 +1784,8 @@ else
   printf "%s\n" "| ID | Sev | Phase | File:line | Finding | State | Closed by |" \
                 "| -- | --- | ----- | --------- | ------- | ----- | --------- |" \
                 "| F-001 | Critical | 1 | src/x.php:1 | mutant | open | |" > "$d/findings.md"
-  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T3|" "$d/progress.md"
-  grep -qF "Next action:** Phase 3" "$d/progress.md" || echo "mutant is a no-op: Next action was not moved past Phase 1"
+  sed -i "s|^- \*\*Lane A:\*\*.*|- **Lane A:** Phase 3 — T3|" "$d/progress.md"
+  grep -qF -- "- **Lane A:** Phase 3 — T3" "$d/progress.md" || echo "mutant is a no-op: the lane was not moved past Phase 1"
   grep -qE "^\| F-001 .*\| open \|" "$d/findings.md" || echo "mutant is a no-op: the open blocking row was not written in the shape the arm reads"
 fi'
 run_mutant "run tracker next action names a later phase than its own state" '
@@ -1796,8 +1796,8 @@ if [ "$(grep -c "^- \[x\] T2 —" "$f")" != 1 ]; then
 else
   sed -i "s|^- \[x\] T2 —|- [ ] T2 —|" "$f"
   sed -i "s|- \[x\] RV — review fan-out · N=8|- [ ] RV — review fan-out · N=8|" "$f"
-  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 4 T5|" "$f"
-  grep -qF "Next action:** Phase 4" "$f" || echo "mutant is a no-op: Next action was not moved"
+  sed -i "s|^- \*\*Lane A:\*\*.*|- **Lane A:** Phase 4 — T5|" "$f"
+  grep -qF -- "- **Lane A:** Phase 4 — T5" "$f" || echo "mutant is a no-op: the lane was not moved"
   grep -qF -- "- [ ] RV — review fan-out · N=8" "$f" || echo "mutant is a no-op: Phase 2s RV stayed closed, so the review-not-early arm would kill this instead"
 fi'
 
@@ -1819,22 +1819,22 @@ fi'
 run_mutant "implemented-unreviewed fixture advances to the next phase" '
 enable_run_dir tools/fixtures/run-open-rv || exit 0
 f=tools/fixtures/run-open-rv/progress.md
-if ! grep -qF "Next action:** Phase 2 RV" "$f"; then
-  echo "mutant is a no-op: Next action no longer names Phase 2s RV"
+if ! grep -qF -- "- **Lane A:** Phase 2 — RV" "$f"; then
+  echo "mutant is a no-op: Lane A no longer names Phase 2s RV"
 else
-  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T6|" "$f"
-  grep -qF "Next action:** Phase 3" "$f" || echo "mutant is a no-op: Next action was not moved"
+  sed -i "s|^- \*\*Lane A:\*\*.*|- **Lane A:** Phase 3 — T6|" "$f"
+  grep -qF -- "- **Lane A:** Phase 3 — T6" "$f" || echo "mutant is a no-op: the lane was not moved"
 fi'
 run_mutant "fix-loop fixture advances with a blocking finding open" '
 enable_run_dir tools/fixtures/run-fixloop || exit 0
 f=tools/fixtures/run-fixloop/progress.md
-if ! grep -qF "Next action:** Phase 2 fix loop" "$f"; then
-  echo "mutant is a no-op: Next action no longer names Phase 2s fix loop"
+if ! grep -qF -- "- **Lane A:** Phase 2 — fix loop" "$f"; then
+  echo "mutant is a no-op: Lane A no longer names Phase 2s fix loop"
 elif ! grep -qE "^\| F-002 .*\| open \|" tools/fixtures/run-fixloop/findings.md; then
   echo "mutant is a no-op: F-002 is not open in the ledger, so the ledger arm is not what would fire"
 else
-  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T4|" "$f"
-  grep -qF "Next action:** Phase 3" "$f" || echo "mutant is a no-op: Next action was not moved"
+  sed -i "s|^- \*\*Lane A:\*\*.*|- **Lane A:** Phase 3 — T4|" "$f"
+  grep -qF -- "- **Lane A:** Phase 3 — T4" "$f" || echo "mutant is a no-op: the lane was not moved"
 fi'
 run_mutant "fix-loop fixture dispatches a round with no fix plan on disk" '
 enable_run_dir tools/fixtures/run-fixloop || exit 0
@@ -1917,9 +1917,9 @@ if [ "$(grep -c -- "^- \[ \] RV — review fan-out$" "$f")" != 2 ]; then
   echo "mutant is a no-op: the fixture no longer has exactly two bare open RV lines"
 else
   sed -i "0,/^- \[ \] RV — review fan-out$/{/^- \[ \] RV — review fan-out$/d}" "$f"
-  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T6|" "$f"
+  sed -i "s|^- \*\*Lane A:\*\*.*|- **Lane A:** Phase 3 — T6|" "$f"
   [ "$(grep -c -- "^- \[ \] RV — review fan-out$" "$f")" = 1 ] || echo "mutant is a no-op: Phase 2s RV line was not the one removed"
-  grep -qF "Next action:** Phase 3" "$f" || echo "mutant is a no-op: Next action was not moved past Phase 2"
+  grep -qF -- "- **Lane A:** Phase 3 — T6" "$f" || echo "mutant is a no-op: the lane was not moved past Phase 2"
 fi'
 run_mutant "run tracker ledger row bolds its severity" '
 enable_run_dir tools/fixtures/run-fixloop || exit 0
@@ -1928,27 +1928,24 @@ if ! grep -qE "^\| F-002 \| Major \|" "$d/findings.md"; then
   echo "mutant is a no-op: F-002 is not an unbolded Major row"
 else
   sed -i "s5| F-002 | Major |5| F-002 | **Major** |5" "$d/findings.md"
-  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T4|" "$d/progress.md"
+  sed -i "s|^- \*\*Lane A:\*\*.*|- **Lane A:** Phase 3 — T4|" "$d/progress.md"
   grep -qF "**Major**" "$d/findings.md" || echo "mutant is a no-op: the severity was not bolded"
   grep -qE "^\| F-002 .*\| open \|" "$d/findings.md" || echo "mutant is a no-op: the row is no longer open, so the ledger arm is not what would fire"
-  grep -qF "Next action:** Phase 3" "$d/progress.md" || echo "mutant is a no-op: Next action was not moved"
+  grep -qF -- "- **Lane A:** Phase 3 — T4" "$d/progress.md" || echo "mutant is a no-op: the lane was not moved"
 fi'
-run_mutant "run tracker Current State phase advances while Next action does not" '
+run_mutant "run tracker Current State keeps the retired Phase field" '
 enable_run_dir tools/fixtures/run-fixloop || exit 0
 f=tools/fixtures/run-fixloop/progress.md
-if ! grep -qF "Next action:** Phase 2 fix loop" "$f"; then
-  echo "mutant is a no-op: Next action no longer names Phase 2s fix loop"
+if ! grep -qF -- "- **Lane A:** Phase 2 — fix loop" "$f"; then
+  echo "mutant is a no-op: Lane A no longer names Phase 2s fix loop"
 else
-  # THE BARE FORM, which is the only one `templates/progress.md` prescribes
-  # (`**Phase:** <number and name>`). The first version of this mutant wrote
-  # the doubled `**Phase:** Phase 3`, which was the only shape the arm could
-  # then read — so the kill certified an arm that did nothing on any real
-  # tracker.
-  sed -i "s|^- \*\*Phase:\*\*.*|- **Phase:** 3 — moved on|" "$f"
-  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** RV — review fan-out|" "$f"
-  grep -qF "Phase:** 3 — moved on" "$f" || echo "mutant is a no-op: the Phase field was not advanced in the bare form"
-  grep -q "Phase:\*\* Phase" "$f" && echo "mutant is a no-op: the Phase field kept the doubled form, which no template writes"
-  grep -q "Next action:\*\* Phase" "$f" && echo "mutant is a no-op: Next action still names a phase, so this is not the Phase-only shape"
+  # THE RETIRED GRAMMAR MUST BE REFUSED, not silently ignored. A tracker
+  # still writing `**Phase:**` is one this gate would read no lane position
+  # from at all, and the old two-field grammar left as a tolerated alternative
+  # is the mode switch the lane model exists to remove.
+  sed -i "s|^- \*\*Lane A:\*\*|- **Phase:** 2 — stale grammar\n- **Lane A:**|" "$f"
+  grep -qF -- "- **Phase:** 2 — stale grammar" "$f" || echo "mutant is a no-op: the retired field was not inserted"
+  grep -qF -- "- **Lane A:** Phase 2 — fix loop" "$f" || echo "mutant is a no-op: the lane line went too, so a kill could come from the missing-lane arm"
 fi'
 
 # --- the migration-corrected rules must stay corrected ---
@@ -2012,12 +2009,11 @@ p.write_text(out)\""
 run_mutant "run tracker Current State names a mentioned phase" '
 enable_run_dir tools/fixtures/run-fixloop || exit 0
 f=tools/fixtures/run-fixloop/progress.md
-if ! grep -qF "Phase:** 2 " "$f"; then
-  echo "mutant is a no-op: the Phase field does not lead with phase 2"
+if ! grep -qF -- "- **Lane A:** Phase 2 " "$f"; then
+  echo "mutant is a no-op: the lane line does not lead with phase 2"
 else
-  sed -i "s|^- \*\*Phase:\*\*.*|- **Phase:** 3 — moved on past the phase 2 fix loop|" "$f"
-  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** RV — review fan-out|" "$f"
-  grep -qF "Phase:** 3 — moved on past the phase 2" "$f" || echo "mutant is a no-op: the mentioned-phase shape was not written"
+  sed -i "s|^- \*\*Lane A:\*\*.*|- **Lane A:** 3 — moved on past the phase 2 fix loop|" "$f"
+  grep -qF -- "- **Lane A:** 3 — moved on past the phase 2" "$f" || echo "mutant is a no-op: the mentioned-phase shape was not written"
   grep -qE "^\| F-002 .*\| open \|" tools/fixtures/run-fixloop/findings.md || echo "mutant is a no-op: F-002 is not open, so nothing gates Phase 2"
 fi'
 run_mutant "run tracker ledger header renames its phase column" '
@@ -2044,9 +2040,9 @@ else
   sed -i "s@a fixture finding still open | open @a fixture finding still open | closed @" "$d/findings.md"
   grep -qE "^\| F-002 .*\| open \|" "$d/findings.md" && echo "mutant is a no-op: F-002 is still open, so it co-kills this and the second table proves nothing"
   printf "\n## A second blocking table\n\n| ID | Sev | Phase | File:line | Finding | State | Closed by |\n| -- | --- | ----- | --------- | ------- | ----- | --------- |\n| F-009 | Critical | 2 | \`z:1\` | a second-table finding | open | |\n" >> "$d/findings.md"
-  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T4|" "$d/progress.md"
+  sed -i "s|^- \*\*Lane A:\*\*.*|- **Lane A:** Phase 3 — T4|" "$d/progress.md"
   grep -qF "F-009" "$d/findings.md" || echo "mutant is a no-op: the second table was not appended"
-  grep -qF "Next action:** Phase 3" "$d/progress.md" || echo "mutant is a no-op: Next action was not advanced past Phase 2"
+  grep -qF -- "- **Lane A:** Phase 3 — T4" "$d/progress.md" || echo "mutant is a no-op: the lane was not advanced past Phase 2"
 fi'
 run_mutant "run tracker boundary declares a bare dash" '
 enable_run || exit 0
@@ -2074,8 +2070,8 @@ p.write_text(out)\""
 run_mutant "run tracker Current State is shadowed by a prose decoy" '
 enable_run_dir tools/fixtures/run-fixloop || exit 0
 f=tools/fixtures/run-fixloop/progress.md
-if ! grep -qF "Phase:** 2 " "$f"; then
-  echo "mutant is a no-op: the Phase field does not lead with phase 2"
+if ! grep -qF -- "- **Lane A:** Phase 2 " "$f"; then
+  echo "mutant is a no-op: the lane line does not lead with phase 2"
 else
   python3 - "$f" <<"EOF"
 import pathlib,sys,re
@@ -2090,12 +2086,11 @@ assert t.count("## Current State")==1, "mutant is a no-op: Current State heading
 # field and it sees phase 3 over an open finding against phase 2 and fails.
 head, sep, body = t.partition("## Current State")
 assert sep, "mutant is a no-op: no Current State heading to split on"
-body2, n = re.subn(r"^- \*\*Phase:\*\*.*$", "- **Phase:** 3 — moved on", body, count=1, flags=re.M)
-assert n == 1, "mutant is a no-op: the real Phase field inside the block was not advanced"
-body2 = re.sub(r"^- \*\*Next action:\*\*.*$", "- **Next action:** RV — review fan-out", body2, count=1, flags=re.M)
-out = head + "Reminder:\n- **Phase:** 2 — fix loop, F-002 open\n\n" + sep + body2
-assert "- **Phase:** 2 — fix loop, F-002 open" in out.split("## Current State")[0], "mutant is a no-op: the decoy did not land above the heading"
-assert "- **Phase:** 3 — moved on" in out.split("## Current State")[1], "mutant is a no-op: the real field is not the advanced one"
+body2, n = re.subn(r"^- \*\*Lane A:\*\*.*$", "- **Lane A:** Phase 3 — moved on", body, count=1, flags=re.M)
+assert n == 1, "mutant is a no-op: the real lane line inside the block was not advanced"
+out = head + "Reminder:\n- **Lane A:** Phase 2 — fix loop, F-002 open\n\n" + sep + body2
+assert "- **Lane A:** Phase 2 — fix loop, F-002 open" in out.split("## Current State")[0], "mutant is a no-op: the decoy did not land above the heading"
+assert "- **Lane A:** Phase 3 — moved on" in out.split("## Current State")[1], "mutant is a no-op: the real line is not the advanced one"
 p.write_text(out)
 EOF
   grep -qE "^\| F-002 .*\| open \|" tools/fixtures/run-fixloop/findings.md || echo "mutant is a no-op: F-002 is not open, so nothing gates Phase 2"
@@ -2107,7 +2102,7 @@ if ! grep -qE "^\| F-002 \| Major \|" "$f"; then
   echo "mutant is a no-op: F-002 is not an unbolded Major row"
 else
   sed -i "s3| F-002 | Major |3| **F-002** | Major |3" "$f"
-  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T4|" tools/fixtures/run-fixloop/progress.md
+  sed -i "s|^- \*\*Lane A:\*\*.*|- **Lane A:** Phase 3 — T4|" tools/fixtures/run-fixloop/progress.md
   grep -qF "| **F-002** |" "$f" || echo "mutant is a no-op: the row id was not bolded"
   grep -qF "| ID | Sev | Phase |" "$f" || echo "mutant is a no-op: the header changed too, so a kill could come from the header arm"
 fi'
@@ -2125,14 +2120,14 @@ fi'
 # These three exist because five rounds produced five ways to lose the Phase
 # field, every one of them SILENT. The arm now reports what it cannot locate, so
 # these mutants prove the loudness, not just the parse.
-run_mutant "run tracker loses its Phase field" '
+run_mutant "run tracker loses its lane line" '
 enable_run_dir tools/fixtures/run-fixloop || exit 0
 f=tools/fixtures/run-fixloop/progress.md
-if [ "$(grep -c -- "^- \*\*Phase:\*\*" "$f")" != 1 ]; then
-  echo "mutant is a no-op: the fixture does not have exactly one Phase field"
+if [ "$(grep -c -- "^- \*\*Lane A:\*\*" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture does not have exactly one lane line"
 else
-  sed -i "/^- \*\*Phase:\*\*/d" "$f"
-  grep -q -- "^- \*\*Phase:\*\*" "$f" && echo "mutant is a no-op: a Phase field survived"
+  sed -i "/^- \*\*Lane A:\*\*/d" "$f"
+  grep -q -- "^- \*\*Lane A:\*\*" "$f" && echo "mutant is a no-op: a lane line survived"
   grep -qF "## Current State" "$f" || echo "mutant is a no-op: the Current State block went too, so a kill could come from another arm"
 fi'
 run_mutant "run tracker grows a second Current State block" '
@@ -2141,7 +2136,7 @@ f=tools/fixtures/run-fixloop/progress.md
 if [ "$(grep -c "^## Current State$" "$f")" != 1 ]; then
   echo "mutant is a no-op: the fixture does not have exactly one Current State block"
 else
-  printf "\n## Current State\n- **Phase:** 3 — a stale appended duplicate\n- **Next action:** T4 — a task\n" >> "$f"
+  printf "\n## Current State\n- **Lane A:** Phase 3 — a stale appended duplicate\n" >> "$f"
   [ "$(grep -c "^## Current State$" "$f")" = 2 ] || echo "mutant is a no-op: the second block was not appended"
 fi'
 run_mutant "run tracker ledger row id is not F-<n>" '
@@ -2151,38 +2146,37 @@ if ! grep -qE "^\| F-002 .*\| open \|" "$d/findings.md"; then
   echo "mutant is a no-op: F-002 is not the open blocking row"
 else
   sed -i "s3| F-002 |3| N-002 |3" "$d/findings.md"
-  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T4|" "$d/progress.md"
+  sed -i "s|^- \*\*Lane A:\*\*.*|- **Lane A:** Phase 3 — T4|" "$d/progress.md"
   grep -qE "^\| N-002 .*\| open \|" "$d/findings.md" || echo "mutant is a no-op: the row id was not changed"
   grep -qF "| ID | Sev | Phase |" "$d/findings.md" || echo "mutant is a no-op: the header changed too, so a kill could come from the header arm"
 fi'
 
 # --- the regression correction: an affirmative line needs a real comparison ---
-run_mutant "run tracker Phase field resolves to nothing" '
+run_mutant "run tracker lane line resolves to nothing" '
 enable_run_dir tools/fixtures/run-fixloop || exit 0
 f=tools/fixtures/run-fixloop/progress.md
-if ! grep -qF "Phase:** 2 " "$f"; then
-  echo "mutant is a no-op: the Phase field does not lead with phase 2"
+if ! grep -qF -- "- **Lane A:** Phase 2 " "$f"; then
+  echo "mutant is a no-op: the lane line does not lead with phase 2"
 else
-  sed -i "s|^- \*\*Phase:\*\*.*|- **Phase:** done|" "$f"
-  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** RV — review fan-out|" "$f"
-  grep -qF -- "- **Phase:** done" "$f" || echo "mutant is a no-op: the Phase field was not made non-naming"
-  grep -q "Next action:\*\* Phase" "$f" && echo "mutant is a no-op: Next action still names a phase, so a comparison is still possible"
+  # Neither a phase id nor one of the two blessed phase-less forms.
+  sed -i "s|^- \*\*Lane A:\*\*.*|- **Lane A:** moved on|" "$f"
+  grep -qF -- "- **Lane A:** moved on" "$f" || echo "mutant is a no-op: the lane line was not made non-naming"
   grep -qE "^\| F-002 .*\| open \|" tools/fixtures/run-fixloop/findings.md || echo "mutant is a no-op: F-002 is not open, so no phase is unfinished"
 fi'
-run_mutant "run tracker hides a stale Phase field above the fresh one" '
+run_mutant "run tracker hides a stale lane line above the fresh one" '
 enable_run_dir tools/fixtures/run-fixloop || exit 0
 f=tools/fixtures/run-fixloop/progress.md
-if [ "$(grep -c -- "^- \*\*Phase:\*\*" "$f")" != 1 ]; then
-  echo "mutant is a no-op: the fixture does not have exactly one Phase field"
+if [ "$(grep -c -- "^- \*\*Lane A:\*\*" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture does not have exactly one lane line"
 else
   python3 - "$f" <<"EOF"
 import pathlib,sys,re
 p=pathlib.Path(sys.argv[1]); t=p.read_text()
-out,n = re.subn(r"^- \*\*Phase:\*\*.*$", "- **Phase:** 2 — stale, left above\n- **Phase:** 3 — fresh", t, count=1, flags=re.M)
-assert n == 1, "mutant is a no-op: the Phase field was not duplicated"
+out,n = re.subn(r"^- \*\*Lane A:\*\*.*$", "- **Lane A:** Phase 2 — stale, left above\n- **Lane A:** Phase 3 — fresh", t, count=1, flags=re.M)
+assert n == 1, "mutant is a no-op: the lane line was not duplicated"
 p.write_text(out)
 EOF
-  [ "$(grep -c -- "^- \*\*Phase:\*\*" "$f")" = 2 ] || echo "mutant is a no-op: there are not exactly two Phase fields now"
+  [ "$(grep -c -- "^- \*\*Lane A:\*\*" "$f")" = 2 ] || echo "mutant is a no-op: there are not exactly two lane lines now"
 fi'
 run_mutant "run tracker ledger row id has a letter after the dash" '
 enable_run_dir tools/fixtures/run-fixloop || exit 0
@@ -2191,7 +2185,7 @@ if ! grep -qE "^\| F-002 .*\| open \|" "$d/findings.md"; then
   echo "mutant is a no-op: F-002 is not the open blocking row"
 else
   sed -i "s3| F-002 |3| NEW-F2 |3" "$d/findings.md"
-  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T4|" "$d/progress.md"
+  sed -i "s|^- \*\*Lane A:\*\*.*|- **Lane A:** Phase 3 — T4|" "$d/progress.md"
   grep -qE "^\| NEW-F2 .*\| open \|" "$d/findings.md" || echo "mutant is a no-op: the row id was not changed to the letter-after-dash shape"
   grep -qF "| ID | Sev | Phase |" "$d/findings.md" || echo "mutant is a no-op: the header changed too, so a kill could come from the header arm"
 fi'
@@ -2303,6 +2297,219 @@ if [ "$(grep -c -- "| withdrawn | withdrawn → duplicate of F-002 |" "$f")" != 
 else
   sed -i "s#| withdrawn | withdrawn → duplicate of F-002 |#| withdrawn | fix \`9c3a1f7\` |#" "$f"
   grep -qF -- "9c3a1f7" "$f" || echo "mutant is a no-op: the hash was not written"
+fi'
+
+# ---- the persisted lane mapping ----
+run_mutant "run tracker phase heading carries no lane" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if [ "$(grep -c "^## Phase 2 .* · lane: A$" "$f")" != 1 ]; then
+  echo "mutant is a no-op: Phase 2s heading is not in the expected shape"
+else
+  sed -i "s|^\(## Phase 2 .*\) · lane: A$|\1|" "$f"
+  grep -q "^## Phase 2 .* · lane:" "$f" && echo "mutant is a no-op: the lane field survived"
+fi'
+
+run_mutant "run tracker phase heading carries two lanes" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if [ "$(grep -c "^## Phase 3 .* · lane: A$" "$f")" != 1 ]; then
+  echo "mutant is a no-op: Phase 3s heading is not in the expected shape"
+else
+  sed -i "s|^\(## Phase 3 .* · lane: A\)$|\1 · lane: B|" "$f"
+  grep -q "^## Phase 3 .* · lane: A · lane: B$" "$f" || echo "mutant is a no-op: the second lane field was not added"
+fi'
+
+# ---- fork allocation ----
+run_mutant "fork gives the parent lane to the second successor" '
+enable_run_dir tools/fixtures/run-lanes || exit 0
+f=tools/fixtures/run-lanes/progress.md
+if [ "$(grep -c "^## Phase 3 .* · lane: B$" "$f")" != 1 ]; then
+  echo "mutant is a no-op: Phase 3s heading is not in the expected shape"
+else
+  # The SECOND branch of the fork takes the forking phase lane. Phase 4 keeps
+  # · lane: A, which is still its first contributing predecessors lane, so the
+  # join-survivor arm stays quiet and the kill is the fork arms.
+  sed -i "s|^\(## Phase 3 .*\) · lane: B$|\1 · lane: A|" "$f"
+  sed -i "s|^- \*\*Lane B:\*\* Phase 3 — T3|- **Lane A:** Phase 3 — T3|" "$f"
+  sed -i "s|^- \*\*Lane A:\*\* waiting at join Phase 4$||" "$f"
+  grep -q "^## Phase 3 .* · lane: A$" "$f" || echo "mutant is a no-op: the branch lane was not changed"
+fi'
+
+run_mutant "fork branches share one lane" '
+enable_run_dir tools/fixtures/run-lanes || exit 0
+f=tools/fixtures/run-lanes/progress.md
+if [ "$(grep -c "^## Phase 2 .* · lane: A$" "$f")" != 1 ]; then
+  echo "mutant is a no-op: Phase 2s heading is not in the expected shape"
+else
+  # Both branches on lane B: the first successor no longer continues the
+  # forking phase lane AND the siblings collide.
+  sed -i "s|^\(## Phase 2 .*\) · lane: A$|\1 · lane: B|" "$f"
+  grep -q "^## Phase 2 .* · lane: B$" "$f" || echo "mutant is a no-op: the first branch lane was not changed"
+  grep -q "^## Phase 3 .* · lane: B$" "$f" || echo "mutant is a no-op: the sibling lane went too, so the collision is not what a kill would prove"
+fi'
+
+# ---- join survivor and retirement ----
+run_mutant "join phase takes the wrong contributors lane" '
+enable_run_dir tools/fixtures/run-lanes || exit 0
+f=tools/fixtures/run-lanes/progress.md
+if [ "$(grep -c "^## Phase 4 .* · lane: A$" "$f")" != 1 ]; then
+  echo "mutant is a no-op: Phase 4s heading is not in the expected shape"
+else
+  sed -i "s|^\(## Phase 4 .*\) · lane: A$|\1 · lane: B|" "$f"
+  grep -q "^## Phase 4 .* · lane: B$" "$f" || echo "mutant is a no-op: the survivor lane was not swapped"
+fi'
+
+run_mutant "retired lane id is reused later in the run" '
+enable_run_dir tools/fixtures/run-leading-rvj-fix || exit 0
+f=tools/fixtures/run-leading-rvj-fix/progress.md
+if [ "$(grep -c "^## Phase 4 .* · lane: A$" "$f")" != 1 ]; then
+  echo "mutant is a no-op: Phase 4s heading is not in the expected shape"
+else
+  printf "\n## Phase 5 — fixture, a resurrected lane · deps: Phase 4 · lane: B\n- [ ] T5 — a task · W1 · deps T4\n- [ ] RV — review fan-out\n" >> "$f"
+  grep -q "^## Phase 5 .* · lane: B$" "$f" || echo "mutant is a no-op: the resurrected phase was not appended"
+fi'
+
+# ---- LANE X MAY NAME PHASE P IFF PHASE P CARRIES `· lane: X` ----
+run_mutant "run tracker lane names another lanes phase" '
+enable_run_dir tools/fixtures/run-lanes || exit 0
+f=tools/fixtures/run-lanes/progress.md
+if ! grep -qF -- "- **Lane A:** waiting at join Phase 4" "$f"; then
+  echo "mutant is a no-op: Lane A is not waiting at the join"
+else
+  sed -i "s|^- \*\*Lane A:\*\* waiting at join Phase 4$|- **Lane A:** Phase 3 — T3|" "$f"
+  grep -qF -- "- **Lane A:** Phase 3 — T3" "$f" || echo "mutant is a no-op: Lane A was not pointed at Lane Bs phase"
+  grep -q "^## Phase 3 .* · lane: B$" "$f" || echo "mutant is a no-op: Phase 3 no longer belongs to Lane B, so the kill would not be about ownership"
+fi'
+
+run_mutant "non-surviving lane runs the joining phases leading RVJ" '
+enable_run_dir tools/fixtures/run-lanes || exit 0
+f=tools/fixtures/run-lanes/progress.md
+if ! grep -qF -- "- **Lane B:** Phase 3 — T3" "$f"; then
+  echo "mutant is a no-op: Lane B is not at Phase 3"
+else
+  # Lane B is a contributor, not the survivor: Phase 4 carries · lane: A.
+  sed -i "s|^- \*\*Lane B:\*\* Phase 3 — T3$|- **Lane B:** Phase 4 — RVJ|" "$f"
+  grep -qF -- "- **Lane B:** Phase 4 — RVJ" "$f" || echo "mutant is a no-op: Lane B was not pointed at the join"
+  grep -q "^## Phase 4 .* · lane: A$" "$f" || echo "mutant is a no-op: Phase 4 no longer belongs to Lane A, so the kill would not be about ownership"
+fi'
+
+# ---- `done` and `waiting at join` are claims, not strings ----
+run_mutant "unfinished lane says done" '
+enable_run_dir tools/fixtures/run-leading-rvj-fix || exit 0
+f=tools/fixtures/run-leading-rvj-fix/progress.md
+if ! grep -qF -- "- **Lane A:** Phase 4 — T4" "$f"; then
+  echo "mutant is a no-op: Lane A is not inside the joining phase"
+else
+  # This is also close the leading RVJ and mark the joining phase PASS without
+  # implementing it: T4 is unchecked and RV is [ ], so done is a false claim.
+  sed -i "s|^- \*\*Lane A:\*\* Phase 4 — T4$|- **Lane A:** done|" "$f"
+  grep -qF -- "- \*\*Lane A:\*\* done" "$f" >/dev/null 2>&1
+  grep -qF -- "- [ ] T4 — a task" "$f" || echo "mutant is a no-op: the unchecked task went too, so done would not be a false claim"
+fi'
+
+run_mutant "lane waits at a join that does not exist" '
+enable_run_dir tools/fixtures/run-lanes || exit 0
+f=tools/fixtures/run-lanes/progress.md
+if ! grep -qF -- "- **Lane A:** waiting at join Phase 4" "$f"; then
+  echo "mutant is a no-op: Lane A is not waiting at the join"
+else
+  sed -i "s|^- \*\*Lane A:\*\* waiting at join Phase 4$|- **Lane A:** waiting at join Phase 9|" "$f"
+  grep -qF -- "waiting at join Phase 9" "$f" || echo "mutant is a no-op: the join id was not changed"
+fi'
+
+run_mutant "lane waits at a phase that is not a join" '
+enable_run_dir tools/fixtures/run-lanes || exit 0
+f=tools/fixtures/run-lanes/progress.md
+if ! grep -qF -- "- **Lane A:** waiting at join Phase 4" "$f"; then
+  echo "mutant is a no-op: Lane A is not waiting at the join"
+else
+  # Phase 2 has one dependency and one contributing lane: not a join at all.
+  sed -i "s|^- \*\*Lane A:\*\* waiting at join Phase 4$|- **Lane A:** waiting at join Phase 2|" "$f"
+  grep -qF -- "waiting at join Phase 2" "$f" || echo "mutant is a no-op: the join id was not changed"
+  grep -q "^## Phase 4 .* · lane: A$" "$f" || echo "mutant is a no-op: the real join changed too"
+fi'
+
+run_mutant "lane waits while its own branch is unfinished" '
+enable_run_dir tools/fixtures/run-lanes || exit 0
+f=tools/fixtures/run-lanes/progress.md
+if ! grep -qF -- "- **Lane B:** Phase 3 — T3" "$f"; then
+  echo "mutant is a no-op: Lane B is not at Phase 3"
+else
+  # Lane Bs own Phase 3 is still open, so it cannot be waiting at the join.
+  sed -i "s|^- \*\*Lane B:\*\* Phase 3 — T3$|- **Lane B:** waiting at join Phase 4|" "$f"
+  grep -qF -- "- **Lane B:** waiting at join Phase 4" "$f" || echo "mutant is a no-op: Lane B was not put into the waiting state"
+  grep -qF -- "- [ ] T3 — a task" "$f" || echo "mutant is a no-op: Phase 3 closed too, so waiting would be legitimate"
+fi'
+
+# ---- Current State must account for every active lane, and no retired one ----
+run_mutant "an active lane vanishes from Current State" '
+enable_run_dir tools/fixtures/run-lanes || exit 0
+f=tools/fixtures/run-lanes/progress.md
+if ! grep -qF -- "- **Lane B:** Phase 3 — T3" "$f"; then
+  echo "mutant is a no-op: Lane B is not at Phase 3"
+else
+  sed -i "\|^- \*\*Lane B:\*\* Phase 3 — T3$|d" "$f"
+  grep -qF -- "- **Lane B:**" "$f" && echo "mutant is a no-op: a Lane B line survived"
+  grep -q "^## Phase 3 .* · lane: B$" "$f" || echo "mutant is a no-op: Phase 3 stopped belonging to Lane B, so Lane B would not be active"
+fi'
+
+run_mutant "a retired lane is left in Current State" '
+enable_run_dir tools/fixtures/run-leading-rvj-fix || exit 0
+f=tools/fixtures/run-leading-rvj-fix/progress.md
+if ! grep -qF -- "- **Lane A:** Phase 4 — T4" "$f"; then
+  echo "mutant is a no-op: Lane A is not inside the joining phase"
+else
+  sed -i "s|^- \*\*Lane A:\*\* Phase 4 — T4$|- **Lane A:** Phase 4 — T4\n- **Lane B:** done|" "$f"
+  grep -qF -- "- **Lane B:** done" "$f" || echo "mutant is a no-op: the retired lane line was not added"
+  grep -qF -- "- **Lane A:** Phase 4 — T4" "$f" || echo "mutant is a no-op: the surviving lanes line went too"
+fi'
+
+run_mutant "Current State names a lane no phase carries" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if ! grep -qF -- "- **Lane A:** done (fixture)" "$f"; then
+  echo "mutant is a no-op: run-ok is not in the expected done state"
+else
+  sed -i "s|^- \*\*Lane A:\*\* done (fixture)$|- **Lane Z:** done (fixture)|" "$f"
+  grep -qF -- "- **Lane Z:**" "$f" || echo "mutant is a no-op: the lane id was not changed"
+fi'
+
+# ---- the leading RVJ owns its own remediation round ----
+run_mutant "leading RVJ round is filed under the joining phase RV" '
+enable_run_dir tools/fixtures/run-leading-rvj-fix || exit 0
+f=tools/fixtures/run-leading-rvj-fix/progress.md
+if [ "$(grep -c -- "→ round 2: M=1 C=1" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture no longer has exactly one appended round"
+else
+  python3 - "$f" <<"EOF"
+import pathlib, re, sys
+p = pathlib.Path(sys.argv[1]); t = p.read_text()
+m = re.search(r"(?m)^      → round 2: M=1 C=1.*(?:\n        .*)*\n", t)
+assert m, "mutant is a no-op: the round block is not in the expected shape"
+blk = m.group(0)
+t = t[:m.start()] + t[m.end():]
+# Re-file it under Phase 3s CLOSED RV -- a different gate. Phase 4s own RV
+# is `[ ]`, and an open gate is not a mark at all, so a round placed under it
+# would still be attributed to the RVJ above and the mutant would prove
+# nothing.
+k = "      · reports p3-review-a.md · coverage p3-coverage.md \u2192 no findings\n"
+i = t.index(k) + len(k)
+p.write_text(t[:i] + blk + t[i:])
+EOF
+  grep -qF -- "→ round 2: M=1 C=1" "$f" || echo "mutant is a no-op: the round block was lost rather than moved"
+  grep -qF -- "→ F-201" "$f" || echo "mutant is a no-op: the RVJ outcome went too, so a kill could come from another arm"
+fi'
+
+run_mutant "joining phase is entered before its leading RVJ closes" '
+enable_run_dir tools/fixtures/run-leading-rvj-fix || exit 0
+f=tools/fixtures/run-leading-rvj-fix/progress.md
+if ! grep -qF -- "- [x] RVJ — joint integration review · lanes A+B" "$f"; then
+  echo "mutant is a no-op: the leading RVJ is not closed to begin with"
+else
+  sed -i "s|^- \[x\] RVJ — joint integration review · lanes A+B|- [~] RVJ — joint integration review · lanes A+B|" "$f"
+  grep -qF -- "- [~] RVJ — joint integration review" "$f" || echo "mutant is a no-op: the leading RVJ was not reopened"
+  grep -qF -- "- **Lane A:** Phase 4 — T4" "$f" || echo "mutant is a no-op: Lane A stopped naming an implementation action in the join"
 fi'
 
 echo

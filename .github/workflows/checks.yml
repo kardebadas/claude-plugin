@@ -17,6 +17,13 @@ jobs:
       # ever ran it was the mutant harness's own baseline, so a break in the
       # mode would have surfaced as a harness abort rather than as itself.
       - run: ./tools/check-plugin.sh --run tools/fixtures/run-ok
+      # The two run states run-ok cannot hold: a phase implemented and
+      # unreviewed, and a phase whose boxes are all [x] while its ledger
+      # still holds an open blocking finding. The arms that read them have
+      # no other conforming input, so without these lines their happy
+      # paths run only inside the mutant harness's own baseline.
+      - run: ./tools/check-plugin.sh --run tools/fixtures/run-open-rv
+      - run: ./tools/check-plugin.sh --run tools/fixtures/run-fixloop
       - run: ./tools/check-plugin-mutants.sh
 
   craft-brief:

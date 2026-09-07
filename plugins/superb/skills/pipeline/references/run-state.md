@@ -213,14 +213,30 @@ starts a new run** — if step 1 finds nothing, report that and stop.
    surfaced. If reconciliation raised questions — partial `[~]` work whose
    disposition the plan doesn't settle, unexplained commits — these are **user
    questions; wait for the answers**.
-6. **If the register has open entries, ask them before resuming
-   implementation.** Otherwise continue the Stage 4 loop from the tracker's
-   next unchecked line — an open `RV` before any task of a later phase — under
-   all normal rules. **An open blocking F-ID outranks that line**: a fix loop
-   interrupted mid-round leaves `RV` `[x]` and every task `[x]`, so the tracker's
-   next unchecked line points past it. Read the ledger's open IDs and the
-   Iteration log's last incomplete row first, and resume the fix loop — this protocol changes how a run is
-   re-entered, never what the run is allowed to do.
+6. **Resume derives the state from disk, in this precedence.** Read down; the
+   first row that matches is the state, and its action is the only valid next
+   action. This protocol changes how a run is re-entered, never what the run is
+   allowed to do.
+
+   | On disk | State | The only valid next action |
+   | --- | --- | --- |
+   | any `[~]` line | unreconciled | Rule 4 reconciliation — an `[~]` `RV`/`RVJ` against `agent-output/`, never against the code; an `[~]` task against the tree |
+   | `register.md` has open entries | blocked on the user | **ask them**, before resuming implementation |
+   | a blocking F-ID is `open` in `findings.md` | `FIX_PLAN` / `FIX_IMPLEMENT` / `RE_REVIEW` of **the phase that owns it** | continue that phase's fix loop from the Iteration log's last incomplete row — write the round's fix plan if it is missing, dispatch the fixes if it is not, re-review if they landed |
+   | a round names a `fixplan` not in `agent-output/` | `FIX_PLAN` | write that round's fix plan |
+   | every task of a phase `[x]`, its `RV` `[ ]` | `REVIEW` | **review that phase.** Not the next phase — this is the most important run there is to resume: fully implemented and entirely unreviewed |
+   | every task `[x]`, `RV` `[x]`, no open blocking F-ID | `PASS` | close out, then the next phase's first task |
+
+   **An open blocking F-ID outranks the tracker's next unchecked line.** A fix
+   loop interrupted mid-round leaves `RV` `[x]` and every task `[x]`, so the
+   next unchecked line points *past* the phase that owns the finding. Read the
+   ledger's open IDs and the Iteration log's last incomplete row before taking
+   any line from the tracker.
+
+   **Resume never re-runs a completed implementation task, and never advances.**
+   A task line `[x]` with a hash is done; re-dispatching it is how a resumed run
+   duplicates work. And no row above has "start the next phase" as its action
+   except the last.
 
 ## Orchestrator context hygiene
 

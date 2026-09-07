@@ -1123,7 +1123,15 @@ else:
         # run-mode arm exercised by nothing but the mutant harness's own
         # baseline — where a break surfaces as "the clean copy does not pass"
         # and stops the harness, not as itself. Held on the raw text.
-        # Mutants: "CI stops running the gate in run mode".
+        #
+        # AND EVERY FIXTURE RUN DIRECTORY MUST BE NAMED, not just one. Fixtures
+        # exist because a run state has arms no other input reaches; a fixture
+        # CI never lints is a happy path exercised only by the harness's
+        # baseline, which is the very gap the paragraph above describes. Adding
+        # the third fixture is what made "at least one `--run`" too weak: two of
+        # the three would have satisfied it while going unrun.
+        # Mutants: "CI stops running the gate in run mode",
+        #          "CI stops linting one of the fixture run directories".
         if "check-plugin.sh --run " not in t:
             bad("checks.yml never runs ./tools/check-plugin.sh with `--run` — "
                 "the run mode's arms are then exercised by no CI step, and a "
@@ -1131,8 +1139,21 @@ else:
                 "of as the failure it is. REMEDY: keep a "
                 "`./tools/check-plugin.sh --run tools/fixtures/run-ok` step "
                 "beside the bare one")
+        _fxroot = ROOT / "tools/fixtures"
+        _fx = sorted(d for d in _fxroot.glob("*") if (d / "progress.md").is_file()) \
+              if _fxroot.is_dir() else []
+        for _d in _fx:
+            _rel = _d.relative_to(ROOT).as_posix()
+            if f"--run {_rel}" not in t:
+                bad(f"checks.yml never lints {_rel} with `--run` — it holds a "
+                    "`progress.md`, so it is a fixture run directory that "
+                    "exists to exercise arms no other input reaches, and CI "
+                    "runs none of them over it. REMEDY: add a "
+                    f"`./tools/check-plugin.sh --run {_rel}` step, or delete "
+                    "the fixture")
         if not FAIL: ok(f"checks.yml runs {len(refs)} scripts, all present and "
-                        "executable, and lints a run directory with `--run`")
+                        f"executable, and lints all {len(_fx)} fixture run "
+                        "directories with `--run`")
 
 print("== no personal leakage ==")
 # Foreign project conventions leak the same way absolute home paths do: a build

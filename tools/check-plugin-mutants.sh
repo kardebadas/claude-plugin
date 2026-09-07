@@ -54,13 +54,15 @@ fi
 # says if everything else about the fixture was green first. Nothing else checks
 # that — the default mode never reads tools/fixtures/ — so it is checked here,
 # where the rest of the baseline is.
-if ( cd "$D" && ./tools/check-plugin.sh --run tools/fixtures/run-ok ) >/dev/null 2>&1; then
-  echo "  ok    clean copy passes with --run over tools/fixtures/run-ok"
-else
-  echo "  FAIL  tools/fixtures/run-ok does not conform on a clean copy — every run-mode mutant below would then kill for that reason instead of its own"
-  ( cd "$D" && ./tools/check-plugin.sh --run tools/fixtures/run-ok ) | grep FAIL
-  exit 1
-fi
+for fx in tools/fixtures/run-ok tools/fixtures/run-open-rv tools/fixtures/run-fixloop; do
+  if ( cd "$D" && ./tools/check-plugin.sh --run "$fx" ) >/dev/null 2>&1; then
+    echo "  ok    clean copy passes with --run over $fx"
+  else
+    echo "  FAIL  $fx does not conform on a clean copy — every run-mode mutant over it would then kill for that reason instead of its own"
+    ( cd "$D" && ./tools/check-plugin.sh --run "$fx" ) | grep FAIL
+    exit 1
+  fi
+done
 
 echo "mutants:"
 J="python3 -c"
@@ -116,8 +118,8 @@ run_mutant "CI stops running the gate"             "sed -i 's|./tools/check-plug
 # reading the raw text for `--run`. Guarded at both ends.
 run_mutant "CI stops running the gate in run mode" '
 f=.github/workflows/checks.yml
-if [ "$(grep -cF -- "check-plugin.sh --run " "$f")" != 1 ]; then
-  echo "mutant is a no-op: checks.yml no longer runs the gate in run mode exactly once, so there is no step to delete"
+if [ "$(grep -cF -- "check-plugin.sh --run " "$f")" -lt 1 ]; then
+  echo "mutant is a no-op: checks.yml no longer runs the gate in run mode at all, so there is no step to delete"
 else
   sed -i "/check-plugin.sh --run /d" "$f"
   grep -qF -- "check-plugin.sh --run " "$f" && echo "mutant is a no-op: the run-mode step was not deleted"
@@ -200,18 +202,19 @@ p.write_text(out)\""
 # alone is deliberately NOT a mutation: the fixture conforms, so a copy with
 # only `enable_run` applied must still PASS, which is what makes each fixture
 # edit below the whole cause of its own kill.
-enable_run() { # inside the copy: make the wrapper pass --run by default
-  local f=tools/check-plugin.sh a='check-plugin.py" "$@"'
+enable_run_dir() { # inside the copy: make the wrapper pass --run <dir>
+  local d="$1" f=tools/check-plugin.sh a='check-plugin.py" "$@"'
   if ! grep -qF "$a" "$f"; then
     echo "mutant is a no-op: the wrapper no longer invokes check-plugin.py with forwarded arguments, so --run cannot be reached"
     return 1
   fi
-  sed -i 's|check-plugin.py" "$@"|check-plugin.py" --run tools/fixtures/run-ok "$@"|' "$f"
-  if ! grep -qF -- '--run tools/fixtures/run-ok' "$f"; then
+  sed -i "s|check-plugin.py\" \"\$@\"|check-plugin.py\" --run $d \"\$@\"|" "$f"
+  if ! grep -qF -- "--run $d" "$f"; then
     echo "mutant is a no-op: --run was not injected into the wrapper, so the run mode was never entered"
     return 1
   fi
 }
+enable_run() { enable_run_dir tools/fixtures/run-ok; }
 # An unrecognised argument must be REFUSED, not ignored. Ignored, `--rn` runs
 # the default mode and prints PASS, which a caller reads as "the run directory
 # conforms" when the run directory was never opened.
@@ -1758,6 +1761,64 @@ else
   sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 4 T5|" "$f"
   grep -qF "Next action:** Phase 4" "$f" || echo "mutant is a no-op: Next action was not moved"
   grep -qF -- "- [ ] RV — review fan-out · N=8" "$f" || echo "mutant is a no-op: Phase 2s RV stayed closed, so the review-not-early arm would kill this instead"
+fi'
+
+# The two resume states, each attacked at the thing that makes it that state.
+# run-open-rv is "implemented and entirely unreviewed"; run-fixloop is "every
+# box [x] and only the ledger knows". Neither shape exists in run-ok, which is
+# why they are separate fixtures rather than extra phases there.
+run_mutant "implemented-unreviewed fixture opens its review early" '
+enable_run_dir tools/fixtures/run-open-rv || exit 0
+f=tools/fixtures/run-open-rv/progress.md
+if [ "$(grep -c -- "- \[ \] RV — review fan-out$" "$f")" != 2 ]; then
+  echo "mutant is a no-op: the fixture no longer has exactly two bare open RV lines"
+else
+  sed -i "s|^- \[x\] T5 — a task · W2 · deps T3 — .eeeeeee.|- [ ] T5 — a task · W2 · deps T3|" "$f"
+  grep -q -- "^- \[ \] T5 — a task" "$f" || echo "mutant is a no-op: T5 was not reopened"
+  sed -i "0,/^- \[ \] RV — review fan-out$/s|^- \[ \] RV — review fan-out$|- [~] RV — review fan-out · N=4 → 1 slice + 0 integration · started 2026-09-07 10:00|" "$f"
+  grep -q -- "^- \[~\] RV" "$f" || echo "mutant is a no-op: Phase 2s review was not opened"
+fi'
+run_mutant "implemented-unreviewed fixture advances to the next phase" '
+enable_run_dir tools/fixtures/run-open-rv || exit 0
+f=tools/fixtures/run-open-rv/progress.md
+if ! grep -qF "Next action:** Phase 2 RV" "$f"; then
+  echo "mutant is a no-op: Next action no longer names Phase 2s RV"
+else
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T6|" "$f"
+  grep -qF "Next action:** Phase 3" "$f" || echo "mutant is a no-op: Next action was not moved"
+fi'
+run_mutant "fix-loop fixture advances with a blocking finding open" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+f=tools/fixtures/run-fixloop/progress.md
+if ! grep -qF "Next action:** Phase 2 fix loop" "$f"; then
+  echo "mutant is a no-op: Next action no longer names Phase 2s fix loop"
+elif ! grep -qE "^\| F-002 .*\| open \|" tools/fixtures/run-fixloop/findings.md; then
+  echo "mutant is a no-op: F-002 is not open in the ledger, so the ledger arm is not what would fire"
+else
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T4|" "$f"
+  grep -qF "Next action:** Phase 3" "$f" || echo "mutant is a no-op: Next action was not moved"
+fi'
+run_mutant "fix-loop fixture dispatches a round with no fix plan on disk" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+p=tools/fixtures/run-fixloop/agent-output/p2-fixplan-r2.md
+if [ ! -f "$p" ]; then
+  echo "mutant is a no-op: the fix plan is already absent"
+else
+  rm -f "$p"
+  grep -qF "fixplan p2-fixplan-r2.md" tools/fixtures/run-fixloop/progress.md || echo "mutant is a no-op: the round no longer names that plan, so its absence is not a missing plan"
+fi'
+
+# One fixture going unrun, rather than all of them. The arm above used to accept
+# a single `--run` step, which a repo with three fixtures satisfies while two go
+# unlinted; this is the mutant that says so.
+run_mutant "CI stops linting one of the fixture run directories" '
+f=.github/workflows/checks.yml
+if ! grep -qF -- "--run tools/fixtures/run-fixloop" "$f"; then
+  echo "mutant is a no-op: checks.yml does not lint run-fixloop, so there is no step to delete"
+else
+  sed -i "/--run tools\/fixtures\/run-fixloop/d" "$f"
+  grep -qF -- "--run tools/fixtures/run-fixloop" "$f" && echo "mutant is a no-op: the step was not deleted"
+  grep -qF -- "--run tools/fixtures/run-ok" "$f" || echo "mutant is a no-op: it took the run-ok step too, so a kill could come from the at-least-one arm instead"
 fi'
 
 echo

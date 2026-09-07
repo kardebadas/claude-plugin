@@ -3088,3 +3088,30 @@ says what changed and why.
   mutants of their targets, and ugrep eating a `-`-leading pattern. Every one
   was found by the mutation harness. That is the argument for running it after
   every prose, fixture or harness edit — not only after touching an arm.
+
+### Task 9
+
+- **`enable_run` kept as a wrapper.** `enable_run_dir <dir>` is the new
+  primitive and `enable_run() { enable_run_dir tools/fixtures/run-ok; }` keeps
+  every pre-existing run-mode mutant byte-identical, so none of them had to be
+  touched to add two fixtures.
+- **`run-fixloop` records two closed rounds, not a round in progress.** The plan
+  sketched "round 2's fix plan written, fixes pending", but an in-progress round
+  is `RV` `[~]`, which the precedence table's first row sends to Rule 4
+  reconciliation rather than to the fix loop — a different state from the one
+  this fixture is for. The conforming way to express "the fix loop is not
+  finished" with every box `[x]` is a closed round plus an **open ledger row**,
+  which is exactly the case the no-advance arm's ledger half reads and the case
+  the tracker's own next-unchecked-line rule cannot see. Round 2 closed F-001;
+  F-002 stayed open, so round 3 is owed a fix plan.
+- **Adding a third fixture made the CI arm too weak, so it was strengthened.**
+  It accepted "at least one `--run` step", which three fixtures satisfy while
+  two go unlinted — the same gap its own comment describes for the mode as a
+  whole. It now requires **every** directory under `tools/fixtures/` holding a
+  `progress.md` to be named in a `--run` step, with
+  `"CI stops linting one of the fixture run directories"` proving it can fail.
+- **A pre-existing mutant guard broke on the CI change.**
+  `"CI stops running the gate in run mode"` required *exactly one* run-mode step
+  and there are now three, so it guarded itself out and survived. Relaxed to
+  "at least one"; it still deletes every run-mode step, which is what the
+  at-least-one arm reads.

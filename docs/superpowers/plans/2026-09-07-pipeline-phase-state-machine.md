@@ -2985,3 +2985,29 @@ says what changed and why.
   prose:** an arm whose subject vanishes from the docs does not fail — it starts
   checking nothing. Only the harness sees that. Run it after every prose rewrite
   and read the `SURVIVED` diagnostics.
+
+### Task 5
+
+- **The arm went RED on the skill's own worked examples, which is the gate
+  working.** Three worked `M=` rounds (`SKILL.md`'s round 2, `fix-loop.md`'s
+  round 4 and its inline per-round grammar) declared fixes with no `fixplan`
+  field. All three now carry one — the skill's examples must obey the grammar
+  they teach, which is what `pdir.rglob("*.md")` in the examples arm is for.
+- **Step 4's anchor had already moved**, as the Task 3 entry warned: the block
+  read `Standard path` / `Small-round path`, so Step 4 replaced that rather than
+  the `Direct-fix path` text the plan quoted. The result is the same ordered
+  `FINDINGS → FIX PLAN → FIX IMPLEMENTATION` block plus "scale the plan, never
+  skip it".
+- **Step 4b removed the pre-`RV` round from all six sites**, as the corrected
+  step required: `fix-loop.md`'s paragraph and its Counters invariant,
+  `templates/findings.md`'s example row, scope definition and "open a new row"
+  sentence, `check-plugin.py`'s held-phrase entry, its mutant citation, its
+  summary clause and its "TWO CROSS-REFERENCED EXCEPTIONS" comment, and the
+  harness's mutant plus the sibling assertion in the mutant above it. The one
+  surviving mention in the skill is `implement.md`'s prohibition, which is the
+  point. Mutant count therefore went 124 → 123 → 125 (two added, one retired).
+- **`fix-loop.md` gained a rule the plan did not specify**: *"A re-review never
+  closes an unopened `RV`."* The deleted pre-`RV` paragraph carried that
+  guarantee incidentally — a re-review over fix commits cannot close an `RV` no
+  fan-out opened — and deleting the paragraph would have dropped it. It is
+  restated on its own, without the round it used to be attached to.

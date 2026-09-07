@@ -628,10 +628,13 @@ digraph pipeline {
     "Stage 4 FIX_PLAN: one scoped fix plan for this round's blocking findings" -> "Stage 4 FIX_IMPLEMENT: fix agents, one per file cluster";
     "Stage 4 FIX_IMPLEMENT: fix agents, one per file cluster" -> "Stage 4 RE_REVIEW: sized from the fix diff (C=<n>)";
     "Stage 4 RE_REVIEW: sized from the fix diff (C=<n>)" -> "Stage 4 FIX_PLAN: one scoped fix plan for this round's blocking findings" [label="blocking findings remain"];
-    "Stage 4 RE_REVIEW: sized from the fix diff (C=<n>)" -> "Stage 4 PASS: RV [x], close-out written and saved" [label="clean"];
+    "Stage 4 RE_REVIEW: sized from the fix diff (C=<n>)" -> "CLOSE(review_gate): the gate that raised the findings goes [x]" [label="clean"];
+    "CLOSE(review_gate): the gate that raised the findings goes [x]" -> "Stage 4 PASS: RV [x], close-out written and saved" [label="the gate was this phase's RV"];
+    "CLOSE(review_gate): the gate that raised the findings goes [x]" -> "Stage 4 IMPLEMENT: every task in the phase, waves of tasks (ambiguity -> ask)" [label="the gate was a LEADING RVJ: the joining phase now STARTS, it does not PASS"];
+    "CLOSE(review_gate): the gate that raised the findings goes [x]" -> "Stage 4 IMPLEMENT: every task in the phase, waves of tasks (ambiguity -> ask)" [label="the gate was a TRAILING RVJ: next phase"];
     "Stage 4 PASS: RV [x], close-out written and saved" -> "Stage 4b: joint integration review over a split's combined diff" [label="last sibling of a split"];
     "Stage 4b: joint integration review over a split's combined diff" -> "Stage 4 FIX_PLAN: one scoped fix plan for this round's blocking findings" [label="blocking findings"];
-    "Stage 4b: joint integration review over a split's combined diff" -> "Stage 4 PASS: RV [x], close-out written and saved" [label="clean"];
+    "Stage 4b: joint integration review over a split's combined diff" -> "CLOSE(review_gate): the gate that raised the findings goes [x]" [label="clean"];
     "Stage 4 PASS: RV [x], close-out written and saved" -> "Stage 4 IMPLEMENT: every task in the phase, waves of tasks (ambiguity -> ask)" [label="next phase"];
     "Stage 4 PASS: RV [x], close-out written and saved" -> "Stage 5: finishing-a-development-branch" [label="all phases done"];
 }
@@ -794,6 +797,14 @@ IMPLEMENT ─► REVIEW ─► DECIDE ─┬─ no blocking findings ───�
                                   FIX_PLAN ─► FIX_IMPLEMENT ─► RE_REVIEW┤
                                     ▲                                   │
                                     └──────── blocking findings remain ─┘
+
+CLOSE(review_gate) is the clean terminal of that loop, and PASS above is what it
+unlocks ONLY when the gate was this phase's own RV:
+
+    CLOSE(RV)           ─► phase PASS ─► NEXT_PHASE
+    CLOSE(trailing RVJ) ─► NEXT_PHASE
+    CLOSE(leading RVJ)  ─► IMPLEMENT the joining phase, which still owes
+                           IMPLEMENT ─► RV ─► CLOSE(RV) ─► PASS of its own
 ```
 
 **0. Read the tracker in full** — first action of the phase, before any dispatch

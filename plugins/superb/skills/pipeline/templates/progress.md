@@ -74,10 +74,14 @@ Phase headings:
             retire when the leading RVJ closes, and a retired id is never reused
   A clean leading RVJ lets the joining phase START. It never marks it PASS --
   the phase still owes IMPLEMENT -> RV -> CLOSE(RV) -> PASS on its own tasks.
-  A Rule 3 split is a fork with no joining phase after it: its siblings take
-  their own lanes, its TRAILING RVJ reviews them as a unit, and those lanes end
-  at `done` when their work is finished rather than being retired by a join.
-  Retirement belongs to a lane join, which has a joining phase to collapse onto.
+  A Rule 3 split forks: its siblings take their own lanes and its TRAILING RVJ
+  reviews them as a unit. What happens to those lanes depends on what follows.
+  If a later phase depends on two or more of the siblings, that phase IS a lane
+  join -- it carries a LEADING RVJ of its own and collapses the lanes onto the
+  surviving one, exactly as any join does; the trailing RVJ reviewed the split,
+  the leading one reviews the merge into the phase that consumes it. If nothing
+  consumes them together, the lanes simply end at `done` when their work is
+  finished.
 
 Task states:
   [ ] not started

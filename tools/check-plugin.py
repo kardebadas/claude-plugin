@@ -1563,7 +1563,15 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
                 # no findings to report and no outcome to write. Failing the
                 # form the skill prescribes would be the false-FAIL this
                 # repository has paid for most.
-                if not outc.search(rec) and "WAIVED by user:" not in rec:
+                # TRACKER MODE ONLY. In documentation mode the record is cut
+                # at a 400-character window, so a conforming worked example
+                # whose outcome sits past that window has its slot truncated
+                # away rather than omitted — and a false FAIL on conforming
+                # input is the worst failure this gate has. A tracker record is
+                # bounded by the next bullet or heading, never by a byte count,
+                # so the slot is genuinely absent when it is missing there.
+                if (bullet_bounded and not outc.search(rec)
+                        and "WAIVED by user:" not in rec):
                     viol += 1
                     _owner["untrusted"] = True
                     bad(f"{relpath(f)}:{lineno(pos)}: this closed `{kind}` "
@@ -1696,10 +1704,10 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
             # the line, so each of these is a sum a reader can do from the
             # line alone and neither reaches for the diff.
             #
-            # `s == ceil(N/5)` FOR AN UNWAVED `N=` ROUND. The field row in
-            # `SKILL.md` says that regime — and only that regime — makes the
-            # fan-out "re-derivable from the line", and the fan-out table
-            # states the same rule independently. It was nonetheless the one
+            # `s == ceil(N/5)` FOR EVERY `N=` ROUND. The field row in
+            # `SKILL.md` says every `N=` row makes the fan-out "re-derivable
+            # from the line" — the wave count never enters it — and the
+            # fan-out table states the same rule independently. It was nonetheless the one
             # regime nothing checked, and this repo's own conforming fixture
             # violated it: `N=9 → 3 slice + 1 integration`, where `ceil(9/5)`
             # is 2, passed both gates (measured). A rule two documents state
@@ -2183,7 +2191,8 @@ _gilines = [ln.strip() for ln in
 # MATCHED BY SHAPE, not by one literal. `/docs/superpowers/runs/*/` and
 # `docs/superpowers/runs/**/` are the same rule to git, and an arm that accepts
 # only one spelling fails a repository that wrote another.
-if any(re.fullmatch(r"/?docs/superpowers/runs/\*{1,2}/", ln) for ln in _gilines):
+if any(re.fullmatch(r"/?docs/superpowers/runs/\*{1,2}/(?:\*{1,2})?", ln)
+       for ln in _gilines):
     ok("`.gitignore` covers pipeline run directories")
 else:
     bad("`.gitignore` carries no `docs/superpowers/runs/*/` line — pipeline run "
@@ -2200,6 +2209,10 @@ else:
 _wide = [ln for ln in _gilines
          if re.match(r"^/?docs/superpowers/?$", ln)
          or re.fullmatch(r"/?docs/superpowers/\*{1,2}/?", ln)
+         # `runs/**` WITHOUT THE TRAILING SLASH matches files as well as
+         # directories, so it hides the loose curated records too. It is
+         # the wide pattern that looks narrow.
+         or re.fullmatch(r"/?docs/superpowers/runs/\*{1,2}", ln)
          or re.match(r"^/?docs/superpowers/runs/?$", ln)
          or re.match(r"^/?docs/superpowers/runs/\*$", ln)]
 if _wide:
@@ -2343,13 +2356,13 @@ else:
 #     own in it, and no two of those rows carry the same range; and an
 #     `M=0 → no round` record carries its closure routes and no reviewer
 #     evidence. Plus: the tracker is readable, and at least one round is closed.
-#   IT DOES NOT ESTABLISH that the fan-out was SIZED correctly OUTSIDE THE
-#     UNWAVED `N=` REGIME — inside it the size IS derivable from the line, and
-#     the arm above derives it. Elsewhere the two halves of the question
-#     differ. The OVER-WIDE half is caught where it leaves a trace: two
-#     reviewers handed the same range are two rows this mode compares, and it
-#     reports them. The COUNT itself is not derivable there — a fix round's
-#     wave count is not on the line, and a re-review's rule is "one reviewer
+#   IT DOES NOT ESTABLISH that the fan-out was SIZED correctly ON AN `M=`
+#     RE-REVIEW ROUND — on an `N=` round the size IS derivable from the line,
+#     and the arm above derives it. On a fix round the two halves of the
+#     question differ. The OVER-WIDE half is caught where it leaves a trace:
+#     two reviewers handed the same range are two rows this mode compares, and
+#     it reports them. The COUNT itself is not derivable there — a re-review's
+#     rule is "one reviewer
 #     per file cluster in the fix diff", whose input is the diff, with `C` a
 #     number written by whoever chose `s`, so a round declaring
 #     `M=7 C=1 → 1 slice + 0 integration` over a seven-cluster diff is
@@ -2457,8 +2470,18 @@ def parse_phase_lanes(phases):
             # token regex read those as no dependency at all, which emptied the
             # dep graph and made every fork, join, survivor and retirement check
             # evaporate with no report.
-            for tok in re.findall(r"[0-9A-Za-z][0-9A-Za-z.]*", m.group(1)):
-                if tok.lower() in ("none", "phase"):
+            # ITEM BY ITEM, not word by word. `deps:` is a comma-separated
+            # list of phase ids, each optionally introduced by the word
+            # `Phase`. Scanning it for bare word tokens turned ordinary prose
+            # — `deps: none (root phase)`, `deps: n/a` — into one report per
+            # word, each naming a word as a phase.
+            for item in m.group(1).split(","):
+                item = item.strip().strip("`")
+                if not item or item.lower() in ("none", "-", "\u2014"):
+                    continue
+                tok = re.sub(r"^[Pp]hase\s+", "", item).strip()
+                if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.]*", tok):
+                    unres.append((i, item))
                     continue
                 j = idx.get(f"phase {tok.lower()}")
                 if j is None:
@@ -3230,6 +3253,8 @@ if RUN_DIR is not None:
                     if _closed:
                         _early_join.append((_j2, _l2, _unfinished[_unfin[0]]))
                     _waiting.setdefault(_l2, _j2)
+        # Mutants: "a leading RVJ closes over an unfinished contributor",
+        #          "a closed leading RVJ retires a lane whose branch is unfinished".
         for _j2, _l2, _b in _early_join:
             _untrusted = True
             bad(f"{relpath(tracker)}: {_phs[_j2]['label']}'s leading `RVJ` is "
@@ -3367,6 +3392,12 @@ if RUN_DIR is not None:
                     "it makes a resumed run unable to tell which branch a phase "
                     "belongs to. REMEDY: allocate the next unused id")
 
+        # THE TWO PHASE-LESS FORMS ARE MATCHED FIRST, because widening the id
+        # token to accept letter-led ids (`A2`, `B1` — the shape
+        # `references/parallel.md` documents) would otherwise read `done` as a
+        # phase id and report it as a phase the tracker lacks.
+        _PHASELESS = re.compile(r"^\s*(?:done\b|waiting at join\b)", re.I)
+
         def _resolve_phase(value):
             """`(phase index, raw id)` for a lane line's value."""
             # ANCHORED AT THE START, and that is the whole of the fix for a
@@ -3376,7 +3407,10 @@ if RUN_DIR is not None:
             # over a finding open against Phase 2. A lane line names its phase
             # FIRST — `templates/progress.md` prescribes `- **Lane <id>:**
             # Phase <id> — <that lane's next unchecked line>`.
-            g = re.match(r"\s*(?:[Pp]hase\s+)?([0-9]+[0-9A-Za-z.]*)\b", value)
+            if _PHASELESS.match(value):
+                return None, None
+            g = re.match(r"\s*(?:[Pp]hase\s+)?([0-9A-Za-z][0-9A-Za-z.]*)\b",
+                         value)
             if not g:
                 return None, None
             return _idx.get(f"phase {g.group(1)}".lower()), g.group(1)
@@ -3424,7 +3458,7 @@ if RUN_DIR is not None:
             # ---- the two phase-less forms, validated as STATES ----
             if _i is None and _pid is None:
                 _mw = re.match(r"waiting at join\s+(?:[Pp]hase\s+)?"
-                               r"([0-9]+[0-9A-Za-z.]*)\b", _val, re.I)
+                               r"([0-9A-Za-z][0-9A-Za-z.]*)\b", _val, re.I)
                 if re.match(r"done\b", _val, re.I):
                     # `done` IS A CLAIM, NOT A STRING. An executor writes it
                     # exactly when it believes the lane is over, which is
@@ -3469,7 +3503,8 @@ if RUN_DIR is not None:
                                 f"phase assigned to lane {_lid} is a direct "
                                 "predecessor of it, and it is not that phase's "
                                 "own lane")
-                    elif any(r[1] == "x" for r in _leading_rvj(_ji)):
+                    elif (_lid not in _waiting
+                          and any(r[1] == "x" for r in _leading_rvj(_ji))):
                         _why = (f"names {_phs[_ji]['label']}, whose leading "
                                 "`RVJ` is already `[x]` — the join has "
                                 "collapsed, so this lane is either the "

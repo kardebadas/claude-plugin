@@ -39,3 +39,19 @@ precise: the `RVJ`'s round cannot be mistaken for the `RV`'s.
       · reports j2-int.md · coverage j2-coverage.md → F-101
       → round 2: M=1 C=1 → 1 slice + 0 integration · fixplan j2-fixplan-r2.md
         · reports j2-rr2-a.md · coverage j2-rr2-coverage.md → F-101 closed
+
+## Phase 3 — fixture, the last phase, its RV the final record · deps: Phase 2 · lane: A
+- [x] T4 — a task · W1 · deps T3 — `ddddddd`
+- [x] RV — review fan-out · N=1 → 1 slice + 0 integration
+      · reports p3-review-a.md · coverage p3-coverage.md → no findings
+
+## Notes
+
+**Prose after the last record, deliberately.** A record is bounded by the next
+bullet **or the next heading**; the final record of a tracker has no following
+bullet, so without the heading boundary it runs to end-of-file and swallows
+whatever follows. This section ends with an outcome-shaped phrase naming a
+finding the ledger records as closed and blocking → F-101 — so absorbing it
+would rewrite Phase 3's `RV` outcome and demand a fix round of a gate that
+raised nothing.
+

@@ -79,10 +79,19 @@ assignment on the phase's own heading as `· lane: <id>`:
   id is never allocated again in that run**.
 
 ```
-contributors    = direct predecessor phases, in approved-plan order
+contributors    = IMMEDIATE predecessor phases, in approved-plan order
 surviving_lane  = lane(contributors[0])
 joining_phase.lane = surviving_lane
 ```
+
+**Immediate**, and the word is load-bearing. A `deps:` entry that another entry
+already reaches is redundant — `deps: Phase 2, Phase 3, Phase 4` where Phase 4
+itself depends on Phase 2 and Phase 3 — and a redundant entry is not a branch
+arriving. Forks and joins are read off the **transitive reduction** of the
+dependency graph: what a phase may execute after is the whole of `deps:`, but
+what counts as a contributing branch is only the deps nothing else reaches.
+Without that rule one spelled-out edge turns a linear chain into a fork and a
+join, and the survivor is computed from a predecessor that was never a branch.
 
 ```
 JOIN SURVIVOR SELECTION IS DETERMINISTIC.

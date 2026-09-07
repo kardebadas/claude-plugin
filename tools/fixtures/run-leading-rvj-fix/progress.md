@@ -30,6 +30,13 @@ joining phase `PASS`, and this fixture is what proves the gate agrees.
 closing is what retires it; leaving the line would say a branch is still
 executing that the run has already folded in. Its id is never allocated again.
 
+**`Phase 5` carries a REDUNDANT dep**, `deps: Phase 3, Phase 4`, where `Phase 4`
+already depends on `Phase 3`. It is an ordinary next phase, not a second join:
+forks and joins are read off the **transitive reduction**, so an edge another
+edge already reaches is not a branch arriving. Read the raw `deps:` instead and
+`Phase 5` becomes a two-lane join owing a leading `RVJ` it should not have, and
+its survivor is computed from a predecessor that was never a branch.
+
 The `RVJ`'s fix round is appended **under the `RVJ` itself**, not under
 `Phase 4`'s `RV`. Move it and the gate-ownership arm fires: a blocking finding
 closed under another gate's line leaves this gate's evidence claiming a clean
@@ -61,4 +68,8 @@ review it never got.
       → round 2: M=1 C=1 → 1 slice + 0 integration · fixplan j4-fixplan-r2.md
         · reports j4-rr2-a.md · coverage j4-rr2-coverage.md → F-201 closed
 - [ ] T4 — a task · W1 · deps T2, T3
+- [ ] RV — review fan-out
+
+## Phase 5 — fixture, after the join, with a redundant dep · deps: Phase 3, Phase 4 · lane: A
+- [ ] T5 — a task · W1 · deps T4
 - [ ] RV — review fan-out

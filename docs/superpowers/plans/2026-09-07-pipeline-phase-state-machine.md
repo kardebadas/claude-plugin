@@ -2878,3 +2878,70 @@ independent of each other; Task 3 depends on both. Phase 5 is strictly last:
 Task 12 may not dispatch over a red gate, and Task 13 is the acceptance, so
 Task 11's version bump names the version this ships as rather than closing the
 work.
+
+---
+
+## Execution log — deviations from the plan as written
+
+Kept here rather than by rewriting the task text, so Phase 5 reviews the plan
+that was approved plus an honest record of where reality differed. Each entry
+says what changed and why.
+
+### Task 1
+
+- **Arm placement moved.** The plan said insert immediately before
+  `print("\n== pipeline review-line examples ==")` (then line 1202).
+  `relpath` is defined at `tools/check-plugin.py:1285`, *below* that point, so
+  the arm raised `NameError` on its first FAIL. Both Task 1's and Task 3's
+  sections now sit immediately after that section's closing `ok(...)`, which is
+  below every helper they use. Recorded as a Global Constraint.
+- **Mutant placement moved.** "Append to `tools/check-plugin-mutants.sh`" was
+  read literally as append-to-EOF, which put the new `run_mutant` calls after
+  the harness's `killed=…` summary and its `exit 1` — uncounted, and unreachable
+  whenever an earlier mutant survives. They now sit immediately before the
+  summary. Recorded as a Global Constraint.
+
+### Task 2
+
+- **The Overview's composition claim had to change.** Not in the plan. The
+  Overview asserted pipeline "never reimplements brainstorming, planning,
+  implementation, or review"; owning the dispatch makes the third false. It now
+  claims the other three and records implementation dispatch as the one
+  deliberate exception, with the reason (every available implementation skill
+  accepts a task only against a review it dispatches for that task, which is a
+  second acceptance gate for work accepted at the phase).
+
+### Task 3
+
+- **A fifth sweep pattern was added:** `reviewed per task`. The four patterns
+  the plan specified did not catch `SKILL.md:475` — "members are **reviewed per
+  task** exactly as `subagent-driven-development` prescribes" — because that
+  sentence has no `via`, so the SDD-delegation pattern missed it and no other
+  pattern matched. A fourth mutant, `"pipeline reviews wave members per task"`,
+  proves the new arm can fail.
+- **Two extra sites had to be fixed for the sweep to go green**, both outside
+  the plan's list for this task:
+  - `SKILL.md:18` — the Overview carve-out written in Task 2 itself said "a
+    per-task review it dispatches itself", tripping the sweep it exists to
+    explain. Reworded to "a review it dispatches for that task".
+  - `references/fix-loop.md:326-334` — the fix-mode implementation paths
+    delegated to `subagent-driven-development` ("Standard path: plan
+    (`writing-plans`) → implement (`subagent-driven-development`)" and
+    "Direct-fix path … Implement directly via `subagent-driven-development`").
+    The plan deferred this text to Task 5, but the sweep reads the whole skill,
+    so leaving it would have kept the gate red from this commit through Task 4.
+    Both paths now implement per `references/implement.md`, and the
+    "Direct-fix path" is renamed **"Small-round path"** with its planning
+    exemption already removed — which is Correction 2's requirement arriving one
+    task earlier than planned. **Task 5 Step 4 must therefore replace the
+    renamed text, not the original.**
+
+### Task 5 (adjustment required by the above)
+
+- Step 4's anchor is no longer the `Standard path` / `Direct-fix path` block as
+  quoted. The block now reads `Standard path` / `Small-round path`, already
+  pointing at `references/implement.md` and already requiring a plan. Step 4's
+  job narrows to: replace it with the ordered
+  `FINDINGS → FIX PLAN → FIX IMPLEMENTATION` block and the "scale the plan,
+  never skip it" paragraph, and keep the ≤3-findings case as a *small plan*
+  rather than a second path.

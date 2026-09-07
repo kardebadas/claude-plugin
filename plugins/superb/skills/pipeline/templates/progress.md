@@ -49,8 +49,10 @@ open`. Everything after the em dash is prose for a human. That is not a style
 preference: the advancement check reads the phase this line NAMES, and it reads
 it as the leading token — so `**Phase:** 3 — moved on past the phase 2 fix loop`
 names phase 3, and a phase mentioned later in the sentence is prose, not the
-run's position. A field that does not begin with a phase id names no phase, and
-the gate reports that rather than guessing which number was meant.
+run's position. A field that does not begin with a phase id names no phase at
+all — which is legitimate when nothing is unfinished (`Phase: done`), and is
+reported as uncheckable when something is: the gate cannot compare a position it
+cannot locate, and it says so rather than guessing which number was meant.
 
 RV — the review line. Every IMPLEMENTATION phase has exactly one, last among
      its own task lines. (A split's RVJ trails it; a joining phase's RVJ leads,

@@ -1902,8 +1902,12 @@ if seen and nseen and not viol:
 # Mutants: "the conditional integration rule reverts in fix-loop.md",
 #          "the pre-RV repair rule reverts in parallel.md",
 #          "the re-review boundary rule reverts in SKILL.md",
-#          "the conditional integration rule reverts in templates/progress.md",
-#          "a pinned file becomes unreadable".
+#          "the conditional integration rule reverts in templates/progress.md".
+# The unreadable-pinned-file branch below carries NO mutant, deliberately: a
+# skill file this gate cannot read trips several arms at once, so no mutation
+# isolates this one and a citation would claim a proof nobody has. It is a
+# defensive branch, verified by hand (chmod 000 over `references/parallel.md`
+# reports it), and recorded here as unpinned rather than left to look watched.
 print("\n== migration-corrected rules stay corrected ==")
 _pinned = [
     ("only at a declared integration boundary",
@@ -2117,9 +2121,14 @@ def parse_tracker_phases(text):
     """
     phases, cur = [], None
     for n, line in enumerate(text.split("\n"), 1):
-        mh = re.match(r"##\s+(Phase\s+[^\s—·]+)", line)
+        mh = re.match(r"##\s+Phase\s+([^\s—·]+)", line)
         if mh:
-            cur = {"label": mh.group(1).strip(), "line": n,
+            # NORMALISED AT CAPTURE. The label used to keep the whitespace it
+            # matched, while every lookup builds `phase <id>` with one space —
+            # so `## Phase  2` (two spaces) matched nothing and produced up to
+            # four reports for one stray space, each telling the author to name
+            # a phase the tracker demonstrably has.
+            cur = {"label": f"Phase {mh.group(1).strip()}", "line": n,
                    "tasks": [], "reviews": []}
             phases.append(cur)
             continue
@@ -2301,7 +2310,10 @@ if RUN_DIR is not None:
         #          "run tracker Current State phase advances while Next action does not",
         #          "run tracker Current State names a mentioned phase",
         #          "run tracker ledger header renames its phase column",
-        #          "run tracker second blocking table gates nothing".
+        #          "run tracker second blocking table gates nothing",
+        #          "run tracker Current State is shadowed by a prose decoy",
+        #          "run tracker ledger row id is bolded",
+        #          "run tracker four-column ledger renames its phase column".
         def _norm(cell):
             """A ledger cell as the comparison wants it: markdown stripped."""
             return re.sub(r"[*`_\s]+", " ", cell or "").strip().lower()
@@ -2366,7 +2378,7 @@ if RUN_DIR is not None:
             # clean one (measured, over a ledger holding an open Critical).
             # `_seen_fid` now scans the file, which is the only population that
             # can answer "are there rows nobody read?".
-            _tables, _rows = [], []
+            _tables = []
             _lines = _ltext.split("\n")
             for _k, _line in enumerate(_lines):
                 _cells = [_norm(c) for c in _line.strip().strip("|").split("|")]
@@ -2377,11 +2389,24 @@ if RUN_DIR is not None:
                             break
                         _tbl.append(_line2)
                     _tables.append((_cells, _tbl))
-                    _rows += _tbl
             _hdr = _tables[0][0] if _tables else None
-            _seen_fid = [ln for ln in _lines
-                         if re.match(r"\s*\|\s*F-\d+\s*\|", ln)
-                         and _norm(ln).count("|") >= 6]
+            # NORMALISED, LIKE EVERY OTHER COMPARISON HERE. This was the one
+            # that was not, so `| **F-002** |` and `` | `F-002` | `` were
+            # silently not rows at all — dropped from the table walk AND from
+            # `_seen_fid`, so nothing reported them (measured PASS past an open
+            # Major). The ledger's own prose bolds and backticks IDs freely,
+            # which is exactly why every other cell comparison goes through
+            # `_norm`.
+            #
+            # AND NO WIDTH FILTER. A `count("|") >= 6` test excluded a
+            # four-column blocking table — the minimum `templates/findings.md`
+            # blesses — making the template's "a renamed column turns into a
+            # build failure" claim false for that shape. Row-ness is "the first
+            # cell is an F-id", and width is checked against the header later,
+            # where a mismatch is reported rather than used to decide.
+            _isrow = lambda ln: bool(
+                re.match(r"\|?\s*f-\d+\s*\|", _norm(ln)))
+            _seen_fid = [ln for ln in _lines if _isrow(ln)]
             if _hdr is None:
                 if _seen_fid:
                     bad(f"{relpath(_ledger)} holds {len(_seen_fid)} `F-` row(s) "
@@ -2394,7 +2419,7 @@ if RUN_DIR is not None:
               for _hdr, _rows in _tables:
                   _ci = {k: _hdr.index(k) for k in ("id", "sev", "phase", "state")}
                   for _line in _rows:
-                      if not re.match(r"\s*\|\s*F-\d+\s*\|", _line):
+                      if not _isrow(_line):
                           continue
                       _cells = [c for c in _line.strip().strip("|").split("|")]
                       # WIDTH MUST EQUAL THE HEADER'S, not merely reach the
@@ -2423,6 +2448,13 @@ if RUN_DIR is not None:
                           continue
                       _phl = re.sub(r"^phase\s*", "", _norm(_cells[_ci["phase"]]))
                       _pi = _idx.get(f"phase {_phl}")
+                      # GUARDED BY `_phs`, like its Current-State sibling: on a
+                      # tracker this gate cannot parse, `_idx` is empty and
+                      # every ledger row "matches no heading", which is a
+                      # second and actively misleading diagnosis for one
+                      # defect. The unparseable-tracker arm owns that case.
+                      if _pi is None and not _phs:
+                          continue
                       if _pi is None:
                           bad(f"{relpath(_ledger)}: {_norm(_cells[_ci['id']]).upper()} "
                               f"({_sev}) is open against phase {_phl!r}, which "
@@ -2452,8 +2484,24 @@ if RUN_DIR is not None:
         # fan-out` names no phase either, and the template says it need not).
         # An arm that fails the shape its own templates prescribe is wrong
         # about the shape, not the tracker.
+        # THE FIELD IS LOCATED IN THE `## Current State` BLOCK, AT A LINE
+        # START. Round 4 anchored the phase token inside the field's value but
+        # left the FIELD itself found by a search over the whole tracker — so
+        # any prose line mentioning `**Phase:** 2` outranked the real Current
+        # State, and the gate passed over an open finding (measured). The
+        # decoy is not hypothetical: this migration added a literal
+        # `**Phase:**` example to `templates/progress.md`, the file every run
+        # copies into its own run directory. The block is bounded by the next
+        # `##` heading, and the field must be a list item on its own line,
+        # which is the only form `templates/progress.md` writes.
+        _cs = ttext.split("## Current State", 1)
+        _csblock = ""
+        if len(_cs) > 1:
+            _csblock = re.split(r"^##\s", _cs[1], maxsplit=1, flags=re.M)[0]
+
         def _named_phase(field):
-            m = re.search(r"\*\*" + field + r":\*\*\s*(.+)", ttext)
+            m = re.search(r"^\s*[-*]\s*\*\*" + field + r":\*\*\s*(.+)",
+                          _csblock, re.M)
             if not m:
                 return None, False, None
             # ANCHORED AT THE START, and that is the whole of the fix for a

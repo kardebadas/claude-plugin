@@ -97,11 +97,41 @@ never fire — and that removing it costs nothing, because a one-word boundary
 would have been to enforce the word count and break a conforming shape, which is
 round 2's mistake again.
 
+## Round 4 ledger (raised by the round-3 fix's own re-review)
+
+**Round 4's re-review came back with the risk of the grammar approach not
+having materialised:** both directions were clean — no shape the templates or
+the three fixtures prescribe now fails — all seven NEW-* closed, and no
+regressions. What remained were three small mechanical defects in a parser that
+is now smaller than it was, plus six Minors. All ten are fixed here.
+
+| ID | Sev | Area | File:line | Finding | State | Closed by |
+| -- | --- | ---- | --------- | ------- | ----- | --------- |
+| NEW-F1 | Critical | gate | `check-plugin.py:2456` | The phase token was anchored inside the field's value but the FIELD was still located by a search over the whole tracker, so a prose line containing `**Phase:** 2` outranked the real Current State — and round 4 had itself added a literal `**Phase:**` example to the template every run copies | closed | the `## Current State` block is isolated first; the field must be a list item at a line start |
+| NEW-F2 | Critical | gate | `check-plugin.py:2383` | The row detector was the one comparison in the arm that skipped `_norm`, so `\| **F-002** \|` was not a row at all — dropped from the table walk and from `_seen_fid`, so nothing reported it | closed | one normalised row test used everywhere |
+| NEW-F3 | Major | gate | `check-plugin.py:2384` | `_seen_fid`'s `count("\|") >= 6` filter excluded a four-column blocking table, the minimum the template blesses, making its "a renamed column turns into a build failure" claim false for that shape | closed | no width filter; row-ness is "first cell is an F-id", width is checked against the header and reported |
+| NEW-F4 | Minor | gate | `check-plugin-mutants.sh` | The second-blocking-table mutant was co-killed by table 1's own open row, so it proved nothing about walking more than one table | closed | the mutant closes table 1's row first |
+| NEW-F5 | Minor | gate | `check-plugin-mutants.sh` | The unreadable-pinned-file mutant was co-killed by the generic read arm | closed | mutant deleted; the branch is recorded as deliberately unpinned, because an unreadable skill file trips several arms and no mutation isolates it |
+| NEW-F6 | Minor | gate | `check-plugin.py:2426` | NEW-07 guarded the Current-State half's "matches no heading" report but left the ledger half's identical report unguarded, so an unparseable tracker drew a second, misleading diagnosis | closed | both halves guarded by `_phs`; one diagnosis, verified |
+| NEW-F7 | Minor | prose | `templates/progress.md:52` | The template claimed the gate reports a phase-less field; it does not, and `run-ok` ships that shape legitimately | closed | the claim now matches the behaviour: legitimate when nothing is unfinished, reported as uncheckable when something is |
+| NEW-F8 | Minor | gate | `check-plugin.py:2380` | `_rows += _tbl` was a dead assignment that also shadowed the loop variable | closed | deleted |
+| NEW-F9 | Minor | gate | `check-plugin.py:2120` | The phase label kept the whitespace it matched while every lookup builds one space, so `## Phase  2` matched nothing and drew four reports for one stray space | closed | the label is normalised at capture; verified 0 reports |
+
+**A process bug of the executor's own, recorded because it discarded work
+silently.** The edit helper used through this branch wrote its file only after
+every edit in a batch succeeded, so one missed anchor calling `sys.exit(1)`
+threw away three edits that had already applied — and the verification run
+immediately afterwards was testing unmodified code, reporting the old failure.
+It was caught only because a probe that should have gone to zero stayed at
+three. The helper now writes what succeeded before reporting what did not. Same
+class as every other finding in this ledger: a green-looking result from a check
+that never ran.
+
 ## Counters
 
 | Scope | Fix-loop iteration | Cap | Deepest fix-mode depth this chain | Cap |
 | ----- | ------------------ | --- | --------------------------------- | --- |
-| Migration (Phase 5) | 3 | 5 | 0 | 2 |
+| Migration (Phase 5) | 4 | 5 | 0 | 2 |
 
 ## Iteration log (convergence rule input)
 
@@ -109,4 +139,5 @@ round 2's mistake again.
 | ---- | ----- | ----- | -------------- | -------------------- | -- |
 | 1 | Migration | 0 | F-001..F-024 | N-001..N-010 raised | 2026-09-07 |
 | 2 | Migration | 0 | N-001..N-010 | NEW-01..NEW-07 raised | 2026-09-07 |
-| 3 | Migration | 0 | NEW-01..NEW-07 | <pending re-review> | 2026-09-07 |
+| 3 | Migration | 0 | NEW-01..NEW-07 | NEW-F1..NEW-F9 raised | 2026-09-07 |
+| 4 | Migration | 0 | NEW-F1..NEW-F9 | <pending re-review> | 2026-09-07 |

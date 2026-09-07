@@ -2022,6 +2022,13 @@ d=tools/fixtures/run-fixloop
 if ! grep -qF "| ID | Sev | Phase |" "$d/findings.md"; then
   echo "mutant is a no-op: the fixture has no blocking table to duplicate"
 else
+  # ATTRIBUTABLE: the first table own open row is closed first, so the only
+  # thing that can gate Phase 2 is the SECOND table row. Left open, F-002
+  # co-killed this and it proved nothing about walking more than one table.
+  # (No apostrophes here on purpose: this script is single-quoted in the
+  # harness, so one would terminate it.)
+  sed -i "s@a fixture finding still open | open @a fixture finding still open | closed @" "$d/findings.md"
+  grep -qE "^\| F-002 .*\| open \|" "$d/findings.md" && echo "mutant is a no-op: F-002 is still open, so it co-kills this and the second table proves nothing"
   printf "\n## A second blocking table\n\n| ID | Sev | Phase | File:line | Finding | State | Closed by |\n| -- | --- | ----- | --------- | ------- | ----- | --------- |\n| F-009 | Critical | 2 | \`z:1\` | a second-table finding | open | |\n" >> "$d/findings.md"
   sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T4|" "$d/progress.md"
   grep -qF "F-009" "$d/findings.md" || echo "mutant is a no-op: the second table was not appended"
@@ -2049,13 +2056,45 @@ out=a.sub('whenever there is more than one slice', s)
 assert 'only at a declared integration boundary' not in flat(out), 'mutant is a no-op: an occurrence survived in the template'
 assert 'only at a declared integration boundary' in flat(q.read_text()), 'mutant is a no-op: the phrase is gone from SKILL.md too, so a kill is not attributable to this file'
 p.write_text(out)\""
-run_mutant "a pinned file becomes unreadable" '
-f=plugins/superb/skills/pipeline/references/parallel.md
-if [ ! -r "$f" ]; then
-  echo "mutant is a no-op: the file is already unreadable"
+# --- round 5: the field's LOCATION, and the one comparison that skipped _norm
+run_mutant "run tracker Current State is shadowed by a prose decoy" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+f=tools/fixtures/run-fixloop/progress.md
+if ! grep -qF "Phase:** 2 " "$f"; then
+  echo "mutant is a no-op: the Phase field does not lead with phase 2"
 else
-  chmod 000 "$f"
-  [ -r "$f" ] && echo "mutant is a no-op: the file is still readable (running as a user that bypasses the mode bits)"
+  python3 - "$f" <<"EOF"
+import pathlib,sys
+p=pathlib.Path(sys.argv[1]); t=p.read_text()
+assert t.count("## Current State")==1, "mutant is a no-op: Current State heading is absent or duplicated"
+t=t.replace("## Current State","A prose line mentioning - **Phase:** 2 above the block.\n\n## Current State",1)
+import re
+t=re.sub(r"^- \*\*Phase:\*\*.*$", "- **Phase:** 3 — moved on", t, count=1, flags=re.M)
+t=re.sub(r"^- \*\*Next action:\*\*.*$", "- **Next action:** RV — review fan-out", t, count=1, flags=re.M)
+p.write_text(t)
+EOF
+  grep -qF "Phase:** 3 — moved on" "$f" || echo "mutant is a no-op: the real Phase field was not advanced"
+  grep -qE "^\| F-002 .*\| open \|" tools/fixtures/run-fixloop/findings.md || echo "mutant is a no-op: F-002 is not open, so nothing gates Phase 2"
+fi'
+run_mutant "run tracker ledger row id is bolded" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+f=tools/fixtures/run-fixloop/findings.md
+if ! grep -qE "^\| F-002 \| Major \|" "$f"; then
+  echo "mutant is a no-op: F-002 is not an unbolded Major row"
+else
+  sed -i "s3| F-002 | Major |3| **F-002** | Major |3" "$f"
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T4|" tools/fixtures/run-fixloop/progress.md
+  grep -qF "| **F-002** |" "$f" || echo "mutant is a no-op: the row id was not bolded"
+  grep -qF "| ID | Sev | Phase |" "$f" || echo "mutant is a no-op: the header changed too, so a kill could come from the header arm"
+fi'
+run_mutant "run tracker four-column ledger renames its phase column" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+d=tools/fixtures/run-fixloop
+if ! grep -qE "^\| F-002 .*\| open \|" "$d/findings.md"; then
+  echo "mutant is a no-op: F-002 is not open, so an unread ledger gates nothing"
+else
+  printf "# fixture\n\n## Blocking ledger\n\n| ID | Sev | Area | State |\n| -- | --- | ---- | ----- |\n| F-002 | Major | 2 | open |\n" > "$d/findings.md"
+  grep -qF "| ID | Sev | Area | State |" "$d/findings.md" || echo "mutant is a no-op: the narrow renamed table was not written"
 fi'
 
 echo

@@ -5,14 +5,15 @@ phase autonomously.
 
 ## Per-phase loop (each phase in dependency order; independent phases concurrently as lanes — `parallel.md`)
 
-0. **Read the run state in full** — `progress.md`, then `findings.md`, then
+0. **Read state** (state: entry) — **read the run state in full** — `progress.md`, then `findings.md`, then
    `register.md`, from `<PROJECT_DIR>/docs/superpowers/runs/YYYY-MM-DD-<topic>/`,
    created at Stage 1. This is the first action of the phase: before dispatching
    any agent, before opening the sub-plan, before touching source. **Reconcile
    every `[~]` task against the actual code before continuing** (Run State Law,
    Rule 4 — procedure in `run-state.md`). The files name the phase, its first
    open task, and every finding still open; your memory does not get a vote.
-1. **Implement** the phase, wave by wave, per `references/implement.md`,
+1. **IMPLEMENT** — implement the phase, wave by wave, per
+   `references/implement.md`,
    following the wave table the user approved (Rule 6, `parallel.md`). A wave of
    one runs in the phase worktree; a wave of `k >= 2` dispatches all `k`
    implementers in one message, each in its own worktree and branch, and merges
@@ -32,7 +33,7 @@ phase autonomously.
    the turn** — on a mailbox harness a finished agent cannot wake you, and the
    turn-end is what makes a run stop after every task. See *Who wakes you after
    a dispatch* in `SKILL.md`.
-2. **Review**: *(this step is a tracker line — the phase's `RV`. Mark it `[~]`
+2. **REVIEW**: *(this step is a tracker line — the phase's `RV`. Mark it `[~]`
    with a timestamp and save **before** dispatching any reviewer, exactly as
    Rule 2 requires of a task. A run that dies here must be able to tell
    "reviewers were dispatched" from "review never started".)*
@@ -109,12 +110,12 @@ phase autonomously.
      `N=<tasks> → <s> slice + <i> integration`, exactly `s + i` report files,
      the coverage file, and the F-IDs or `no findings` (`SKILL.md`, *The RV
      line*). Fewer report files than declared reviewers does not close it.
-3. **Decide**:
+3. **DECIDE**:
    - Any **Critical, Major, or bug** finding → go to **Fix loop**.
    - **Minor-only or none** → phase passes; **advance** to the next phase.
    - **If this phase is the last sibling of a Rule 3 split**, the joint
      integration review (below) runs before advancing past the split.
-4. **Close out and advance.** In this order, no reordering:
+4. **PASS — close out and advance.** In this order, no reordering:
    0. Confirm this phase's **`RV` — and, for a split's last sibling, its
       `RVJ` — is `[x]`** with every round's report files present and counted and
       each coverage file ending `COVERED: <n>/<n>` — for every round that owes

@@ -37,6 +37,15 @@ elif _argv:
           "usage: check-plugin.py [--run <run-directory>]"); sys.exit(2)
 
 FAIL = []
+
+# THE BLOCKING LEDGER'S HEADER COLUMNS, as `templates/findings.md` ships them.
+# Named here because two things must agree about it: the arm that locates
+# `Sev`/`Phase`/`State` in a run's `findings.md`, and the template that tells a
+# run what to write. Three rounds of review found holes in a parser that tried
+# to be liberal about this; the answer was to make the GRAMMAR strict and the
+# parser small, so the failure mode is a named, reported mismatch rather than a
+# silently skipped row.
+BLOCKING_COLS = {"id", "sev", "phase", "state"}
 def ok(m):  print(f"  ok    {m}")
 def bad(m): print(f"  FAIL  {m}"); FAIL.append(m)
 
@@ -251,13 +260,20 @@ for n in skill_names:
                 "it into the prompt — dispatch on $ARGUMENTS"
                 + (" (an even number of backslashes escapes nothing)" if esc else ""))
         # A FOURTH severity tier reaches the ledger from OUTSIDE this skill.
-        # subagent-driven-development's task reviewer emits `Important`, whose
-        # contract is "fix everything before this task completes" — right for one
-        # task's diff, wrong for a phase, because this skill's blocking list is
-        # closed and different. In one 141-finding run, 50 findings gated phase
-        # advancement under a tier that appeared NOWHERE in the skill. So the
-        # skill may name the tier only alongside the sentence that re-tags it;
-        # naming it without one is how the leak got in.
+        # It used to arrive from `subagent-driven-development`'s reviewer, which
+        # pipeline invoked once per task until Stage 4 became
+        # `references/implement.md`; that reviewer emits `Important`, whose
+        # contract is "fix everything before this task completes" — right for
+        # one task's diff, wrong for a phase, because this skill's blocking list
+        # is closed and different. In one 141-finding run, 50 findings gated
+        # phase advancement under a tier that appeared NOWHERE in the skill.
+        #
+        # REMOVING THAT CALLER DOES NOT CLOSE THE HOLE, which is why this arm
+        # outlived it: the repo `/review` skill and any reviewer a project
+        # supplies can emit `Important` too, and its unit-scoped contract is
+        # still wrong for a phase. So the rule stands unchanged — the skill may
+        # name the tier only alongside the sentence that re-tags it; naming it
+        # without one is how the leak got in.
         #
         # SCOPED to one skill — `n == "pipeline"`, written on the arm itself so
         # the scope is visible where the arm fires — unlike the namespace arm
@@ -548,18 +564,22 @@ for n in skill_names:
             # lives in the authority's *Re-review fan-out* and in `SKILL.md`'s
             # summary of it. Either can go while the other stands.
             #
-            # THE TWO CROSS-REFERENCED EXCEPTIONS are held because other
-            # sites cite them BY NAME rather than restating them. The
+            # THE ONE CROSS-REFERENCED EXCEPTION is held because other
+            # sites cite it BY NAME rather than restating it. The
             # Invariant's reviewer-evidence exception is cited as
             # `references/fix-loop.md`'s *Invariants* from that file's own
             # ledger step and from `SKILL.md` in two places — grep the marker
             # for the current set — and delete it and every one of those
             # citations dangles while the texts still read as if the rule were
-            # somewhere. The pre-`RV`
-            # recording rule is the other: it is what says a round run before
-            # any reviewer existed is recorded in `findings.md` and does NOT
-            # close the `RV` line, so losing it re-opens a green tick over a
-            # phase no slice reviewer ever read.
+            # somewhere.
+            #
+            # There were TWO. The second was the pre-`RV` round's recording
+            # rule, and it went with the pre-`RV` round itself: a build gate
+            # failing before any reviewer exists is unfinished implementation
+            # now, repaired inside IMPLEMENT, so there is no such round to
+            # record and no rule to hold. Do not restore it looking for a
+            # missing pair — `references/implement.md` states the replacement,
+            # and the sweep for a task-level review is what holds it.
             #
             # THE COVERAGE ROW GRAMMAR is held because an ARM READS IT. This
             # gate takes the report key from a row's first cell and the range
@@ -589,7 +609,6 @@ for n in skill_names:
             #          "the slice distinctness rule blurred in fix-loop.md",
             #          "the slice distinctness rule blurred in SKILL.md",
             #          "the Invariant's reviewer-evidence exception blurred in fix-loop.md",
-            #          "the pre-RV recording rule blurred in fix-loop.md",
             #          "the coverage-row grammar blurred in SKILL.md",
             #          "the coverage-row grammar blurred in run-state.md".
             # ONE CLAUSE PER ENTRY, carried on the entry. The message used to
@@ -660,11 +679,6 @@ for n in skill_names:
                  "whole of the exception", AUTH,
                  "Lose it and every site that reads the exception from here "
                  "rather than restating it cites a rule stated nowhere."),
-                ("the pre-`RV` round's recording rule",
-                 "a pre-`rv` round is recorded in `findings.md`, and nowhere "
-                 "else", AUTH,
-                 "Lose it and a fix round run before any reviewer existed can "
-                 "close the `RV` line no slice reviewer ever read."),
                 ("the coverage table's row grammar",
                  "keyed by its report filename, with that reviewer's exact "
                  "range in the row's second cell, and every report file the "
@@ -1083,9 +1097,9 @@ if len(FAIL) == _inv_before:
        "`Files:` exception included — the re-review sizing phrase present in "
        "every file that states it, the `C=<n>` rule and both distinctness "
        "rules and the coverage table's row grammar present in every file that "
-       "states them, the `RV` evidence exception and the pre-`RV` recording "
-       "rule present in the authority that the sites citing them read them "
-       "from, Stage 5's linter duty, its absence statement and what it does "
+       "states them, the `RV` evidence exception present in the authority "
+       "that the sites citing it read it from, Stage 5's linter duty, its "
+       "absence statement and what it does "
        "with a `FAIL` all held, the `M=0` "
        "licence rule present in `SKILL.md` by a phrase its worked example "
        "does not carry, a template shipped for every run-state file the "
@@ -1125,7 +1139,15 @@ else:
         # run-mode arm exercised by nothing but the mutant harness's own
         # baseline — where a break surfaces as "the clean copy does not pass"
         # and stops the harness, not as itself. Held on the raw text.
-        # Mutants: "CI stops running the gate in run mode".
+        #
+        # AND EVERY FIXTURE RUN DIRECTORY MUST BE NAMED, not just one. Fixtures
+        # exist because a run state has arms no other input reaches; a fixture
+        # CI never lints is a happy path exercised only by the harness's
+        # baseline, which is the very gap the paragraph above describes. Adding
+        # the third fixture is what made "at least one `--run`" too weak: two of
+        # the three would have satisfied it while going unrun.
+        # Mutants: "CI stops running the gate in run mode",
+        #          "CI stops linting one of the fixture run directories".
         if "check-plugin.sh --run " not in t:
             bad("checks.yml never runs ./tools/check-plugin.sh with `--run` — "
                 "the run mode's arms are then exercised by no CI step, and a "
@@ -1133,8 +1155,25 @@ else:
                 "of as the failure it is. REMEDY: keep a "
                 "`./tools/check-plugin.sh --run tools/fixtures/run-ok` step "
                 "beside the bare one")
+        _fxroot = ROOT / "tools/fixtures"
+        _fx = sorted(d for d in _fxroot.glob("*") if (d / "progress.md").is_file()) \
+              if _fxroot.is_dir() else []
+        for _d in _fx:
+            _rel = _d.relative_to(ROOT).as_posix()
+            # EXACT STEP, not a substring: `--run tools/fixtures/run-ok`
+            # occurs inside `--run tools/fixtures/run-ok-2`, so a substring
+            # test lets one fixture's step satisfy another's requirement. The
+            # step must end at the path.
+            if not re.search(r"--run\s+" + re.escape(_rel) + r"(?:\s|$)", t, re.M):
+                bad(f"checks.yml never lints {_rel} with `--run` — it holds a "
+                    "`progress.md`, so it is a fixture run directory that "
+                    "exists to exercise arms no other input reaches, and CI "
+                    "runs none of them over it. REMEDY: add a "
+                    f"`./tools/check-plugin.sh --run {_rel}` step, or delete "
+                    "the fixture")
         if not FAIL: ok(f"checks.yml runs {len(refs)} scripts, all present and "
-                        "executable, and lints a run directory with `--run`")
+                        f"executable, and lints all {len(_fx)} fixture run "
+                        "directories with `--run`")
 
 print("== no personal leakage ==")
 # Foreign project conventions leak the same way absolute home paths do: a build
@@ -1198,7 +1237,9 @@ else: ok("no absolute home paths, private project names, or foreign ticket prefi
 # only be conservative about the positive checks.
 # Mutants: "no-round round declares a reports field",
 #          "no-round round names no closure route",
-#          "no-round round names a pinned route".
+#          "no-round round names a pinned route",
+#          "run tracker fix round names no fix plan",
+#          "run tracker cites a fix plan that is not in agent-output".
 print("\n== pipeline review-line examples ==")
 start = re.compile(r"(?:-\s*)?\[x\]\s*(RVJ|RV)\b|(?:->|→)\s*(round)\s+\d+\s*:")
 decl  = re.compile(r"(?P<key>N|M)=(?P<n>\d+)\s*(?P<waved>waved\s+)?(?:C=(?P<C>\d+)\s*)?"
@@ -1206,6 +1247,7 @@ decl  = re.compile(r"(?P<key>N|M)=(?P<n>\d+)\s*(?P<waved>waved\s+)?(?:C=(?P<C>\d
 rpt   = re.compile(r"reports\s+(.+?)(?=\s*[·|]|\s+coverage\b|\s*$)")
 cov   = re.compile(r"coverage\s+\S+\.md")
 nor   = re.compile(r"\bM=0\s*(?:->|→)\s*no\s+round\b")
+fixp  = re.compile(r"fixplan\s+(\S+\.md)")
 route = re.compile(r"\bF-\d+\s*,?\s+(deleted|user-ruled false positive)")
 pinrt = re.compile(r"\bpinned by\b")
 outc  = re.compile(r"(?:->|→)\s*(?:no findings\b|F-\d+)")
@@ -1366,6 +1408,10 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
                     probs.append("lists a `reports` field")
                 if cov.search(body):
                     probs.append("lists a `coverage` field")
+                if fixp.search(body):
+                    probs.append("names a `fixplan` file — an `M=0` round "
+                                 "dispatched no fix, so there was nothing to "
+                                 "plan and no plan to name")
                 if decl.search(body):
                     probs.append("declares reviewer counts as well as `no round`")
                 if not route.search(body):
@@ -1393,7 +1439,32 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
                         "F-019 user-ruled false positive → no findings`")
                 continue
             d = decl.search(rec)
-            if not d: continue          # e.g. the WAIVED form, which carries no counts
+            if not d:
+                # NARROWED TO THE FORM IT WAS WRITTEN FOR. This `continue`
+                # predates the phase-state-machine branch — it exists so the
+                # `WAIVED by user:` form, which carries no counts by design,
+                # is not reported as malformed. But this branch hung two new
+                # invariants (the fix-plan requirement and the conditional
+                # integration reviewer) off the code path behind it, which
+                # promoted a laxity into a bypass: a round written
+                # `→ round 2: C=1 → 1 slice + 0 integration` parsed as nothing
+                # and skipped six arms at once (measured PASS with no fix plan
+                # named and none on disk). It is also self-concealing, because
+                # `seen` is not incremented and a conforming round elsewhere
+                # keeps `rseen` non-zero.
+                # Mutants: "run tracker round loses its M= declaration".
+                if "WAIVED by user:" in rec:
+                    continue
+                viol += 1
+                bad(f"{relpath(f)}:{lineno(pos)}: closed {kind} record carries "
+                    "no parseable `N=`/`M=` declaration — every arm that sizes "
+                    "or scopes a round reads that declaration, so a record "
+                    "without one is not a lax round, it is a round no check "
+                    "reaches. REMEDY: write the declaration "
+                    "(`N=<n> → <s> slice + <i> integration`, or "
+                    "`M=<m> C=<c> → …` on a fix round), or, if the review was "
+                    "waived, write the `WAIVED by user: \"<their words>\"` form")
+                continue
             seen += 1
             nslice, nint = int(d.group("s")), int(d.group("i"))
             want = nslice + nint
@@ -1436,15 +1507,32 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
             #     `ceil(17/5)` is 4 (measured, in each file that writes one).
             #     The `RVJ` shape arm above is what holds that form instead.
             #
-            # `i` FOLLOWS `s`: 1 above one slice, 0 at one slice. Stated in
-            # `SKILL.md`'s field row and in `references/run-state.md`'s
-            # matching bullet, and encoded again in the fan-out table, whose
-            # one-slice row reads "0 (one slice sees all)" and whose every
-            # other row gives 1. `s == 0` is left alone: that is the `RVJ`
-            # form, which the arm above owns entirely.
+            # `i` AT ONE SLICE IS 0; ABOVE ONE SLICE IT IS CONDITIONAL ON A
+            # DECLARED BOUNDARY. It used to be 1 whenever `s > 1`, which spent a
+            # third reviewer on every ordinary multi-slice phase whether or not
+            # anything crossed between slices. It is now dispatched where
+            # something crosses — siblings of a split joining, two lanes
+            # joining, or a contract introduced in one slice and consumed in
+            # another — and the round NAMES that boundary.
+            #
+            # THE ABSENCE IS DECLARED TOO. A silent omission and a considered
+            # judgement read identically, and a review that reads as "not
+            # needed" when nobody decided is how the fan-out went missing for
+            # seven consecutive phases in the run that made `RV` a tracker line.
+            # So a multi-slice round with no integration reviewer says
+            # `no integration boundary`, and a reader can tell the two apart.
+            #
+            # At one slice `i` is still 0 unconditionally: that slice already
+            # sees the whole diff, so a second reviewer over it is duplication,
+            # not margin — a boundary cannot license it. `s == 0` is left alone:
+            # that is the `RVJ` form, which the arm above owns entirely, and
+            # `RVJ` keeps its fixed `0 slice + 1 integration` shape.
             # Mutants: "run tracker's unwaved round departs from ceil(N/5)",
-            #          "run tracker's multi-slice round drops its integration reviewer",
-            #          "worked one-slice round adds an integration reviewer".
+            #          "run tracker declares an integration reviewer with no boundary",
+            #          "run tracker multi-slice round is silent about its integration reviewer",
+            #          "run tracker declares two integration reviewers",
+            #          "worked one-slice round adds an integration reviewer",
+            #          "run tracker boundary declares a bare dash".
             ntasks = int(d.group("n"))
             if (kind == "RV" and d.group("key") == "N"
                     and d.group("waved") is None):
@@ -1461,17 +1549,47 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
                         "or, if the phase ran waves and was sized per wave, "
                         "write `waved` after `N` — the marker is what says "
                         "which regime sized the round")
-            if nslice > 1 and nint != 1:
+            if nslice > 1 and nint not in (0, 1):
                 viol += 1
-                bad(f"{where}: declares {nslice} slice reviewers and "
-                    f"{nint} integration reviewers — `i` is 1 whenever `s` is "
-                    "above 1. Above one slice, nobody has seen the whole diff: "
-                    "each slice reviewer sees only its own range, so the "
-                    "cross-slice defect — a contract introduced in one slice "
-                    "and consumed in another — is what no slice can see and "
-                    "the integration reviewer exists to hunt. REMEDY: declare "
-                    "and dispatch exactly one integration reviewer over the "
-                    "union of the slices")
+                bad(f"{where}: declares {nint} integration reviewers — the "
+                    "integration slice is the whole diff, so there is at most "
+                    "one. REMEDY: declare 0 or 1")
+            # `NO INTEGRATION BOUNDARY` IS NOT A BOUNDARY, and neither is
+            # `boundary: none`. The test reads a boundary as named only when
+            # what follows the colon is not itself a negation — otherwise the
+            # declaration that licenses dropping the reviewer would also
+            # license keeping it, and the round would satisfy both arms at once.
+            # A NEGATION AFTER `boundary:` IS NOT A BOUNDARY. The list is the
+            # arm's whole content: a round cannot both license the integration
+            # reviewer and say there is nothing for it to cover. Two corrections
+            # from review: `-` and `—` sat inside the `\b` group, which needs a
+            # word character after the dash, so `boundary: -` (dash, space) was
+            # accepted — they are their own alternative now; and a word-count
+            # requirement was dropped because it could never run, `rec` being a
+            # flattened window whose following fields supply the words. Its
+            # removal costs nothing: a one-word boundary like `boundary: seam`
+            # is legitimate and must pass.
+            elif (nslice > 1 and nint == 1
+                  and not re.search(r"boundary:\s*(?![-—]\s|(?:none|no|not|"
+                                    r"nothing|n/?a)\b)\S", rec, re.I)):
+                viol += 1
+                bad(f"{where}: declares an integration reviewer but names no "
+                    "`boundary: <what>` — an unnamed boundary is the automatic "
+                    "third reviewer this rule replaced, and above one slice a "
+                    "reviewer with nothing named to cover reads the same diff "
+                    "the slices already read. REMEDY: name the boundary it "
+                    "covers — siblings of a split joining, two lanes joining, "
+                    "or a contract introduced in one slice and consumed in "
+                    "another — or declare `no integration boundary` and drop "
+                    "the reviewer")
+            elif nslice > 1 and nint == 0 and "no integration boundary" not in rec:
+                viol += 1
+                bad(f"{where}: declares {nslice} slice reviewers and no "
+                    "integration reviewer, and does not say why — an omission "
+                    "and a judgement read identically, which is how a review "
+                    "goes missing without anyone deciding to skip it. REMEDY: "
+                    "add `· no integration boundary` to the round, or add the "
+                    "reviewer with its `boundary:`")
             elif nslice == 1 and nint != 0:
                 viol += 1
                 bad(f"{where}: declares 1 slice reviewer and {nint} "
@@ -1537,6 +1655,49 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
                 viol += 1; bad(f"{where}: declares {want} reviewers, lists {got} report files")
             if not cov.search(rec):
                 viol += 1; bad(f"{where}: closed review round with no coverage file")
+            # A ROUND THAT DISPATCHED FIXES MUST NAME THE PLAN THEY CAME FROM.
+            # `M=<m>` with m >= 1 IS that round: `M` is the count of blocking
+            # F-IDs the fix run targeted, less every one closed by a route that
+            # leaves no ownable commit, so m >= 1 means fix commits exist.
+            # Findings -> fix plan -> fix implementation was prose only, and the
+            # path for three-or-fewer findings explicitly skipped the plan,
+            # which is how a round became a sequence of unplanned single fixes.
+            # `M=0 → no round` records are excluded by the `nor` branch above,
+            # which `continue`s before reaching here: no fix ran, so there was
+            # nothing to plan.
+            # AND AN APPENDED ROUND IS A FIX ROUND BY DEFINITION, SO IT IS
+            # KEYED `M`. The requirement below was scoped to `key == "M"`,
+            # which made it optional to anyone who wrote `N=` on a fix round:
+            # `→ round 2: N=2 C=1 → 1 slice + 0 integration` with no `fixplan`
+            # passed every arm (measured), because `ceil(2/5)` is 1 and the
+            # `C=` arm is `M`-scoped too. `kind` is `"round"` for exactly the
+            # appended records, so the round mark decides the key rather than
+            # the key deciding its own scope.
+            # Mutants: "run tracker fix round is keyed N instead of M".
+            if kind == "round" and d.group("key") != "M":
+                viol += 1
+                bad(f"{where}: appended round is keyed "
+                    f"`{d.group('key')}={d.group('n')}` — a re-review round is "
+                    "sized by its fix diff's file clusters, not by a task "
+                    "count, so it is keyed `M` with a `C=<n>` beside it. Keyed "
+                    "`N`, it also escapes the fix-plan requirement, which is "
+                    "scoped to fix rounds. REMEDY: write "
+                    "`M=<m> C=<c> → <s> slice + <i> integration`")
+            if d.group("key") == "M" and int(d.group("n")) >= 1:
+                fp = fixp.search(rec)
+                if not fp:
+                    viol += 1
+                    bad(f"{where}: round declaring `M={d.group('n')}` names no "
+                        "`fixplan <file>.md` — fixes were dispatched with no "
+                        "plan on disk for anyone to check them against. "
+                        "REMEDY: write the round's fix plan to agent-output/ "
+                        "and name it on the round")
+                elif agent_output is not None and not (agent_output / fp.group(1)).exists():
+                    viol += 1
+                    bad(f"{where}: round names fix plan {fp.group(1)!r}, which "
+                        "is not in agent-output/ — a named-but-absent plan "
+                        "reads exactly like a planned round. REMEDY: write the "
+                        "file, or correct the name")
             if agent_output is not None and r:
                 for nm in expand_braces(r.group(1)):
                     if not (agent_output / nm).exists():
@@ -1711,9 +1872,164 @@ if not nseen:
 if seen and nseen and not viol:
     ok(f"{seen} closed review rounds, {nseen} of them `M=0 → no round`: "
        "reviewer counts, RVJ shape, unwaved `ceil(N/5)` sizing, the "
-       "integration reviewer above one slice, `M=` cluster counts and "
+       "integration reviewer 0 at one slice and boundary-declared above one, "
+       "`M=` cluster counts and "
        "coverage all conform, and every no-round record names its closure "
        "routes and carries no reviewer evidence")
+
+# ---- pipeline dispatches implementation itself, so it owns the scripts ----
+# The skill used to cite `scripts/task-brief` and `scripts/review-package` bare
+# and relative while owning neither: they are `subagent-driven-development`
+# internals, so the paths resolved from nothing the citing file could see, and
+# an upstream rename would go unnoticed on a green build. Now that Stage 4
+# dispatches implementers itself, the brief extractor is pipeline's own file and
+# is checked like one: present, executable, and with a shebang, because a
+# non-executable script fails at the first dispatch of a run.
+#
+# PLACED HERE, not beside the other pipeline sections above, because `relpath`
+# is defined at module scope further up this file than those sections are and
+# every message below needs it. Moving this block above `def relpath` raises
+# `NameError` on the first FAIL — which is a red build for the wrong reason.
+# Mutants: "pipeline task-brief script is missing",
+#          "pipeline task-brief script is not executable",
+#          "pipeline task-brief script loses its shebang".
+# ---- the rules the migration review corrected stay corrected ----
+# Round 1 of the whole-change review found four prose sites still carrying the
+# retired rules, and the fixes pinned none of them — so each could rot back on
+# a green build, which is the failure mode this repo answers with held phrases
+# everywhere else. Each entry is (phrase, files that must carry it); the phrase
+# is matched against FLATTENED text because prose reflows.
+# Mutants: "the conditional integration rule reverts in fix-loop.md",
+#          "the pre-RV repair rule reverts in parallel.md",
+#          "the re-review boundary rule reverts in SKILL.md",
+#          "the conditional integration rule reverts in templates/progress.md".
+# The unreadable-pinned-file branch below carries NO mutant, deliberately: a
+# skill file this gate cannot read trips several arms at once, so no mutation
+# isolates this one and a citation would claim a proof nobody has. It is a
+# defensive branch, verified by hand (chmod 000 over `references/parallel.md`
+# reports it), and recorded here as unpinned rather than left to look watched.
+print("\n== migration-corrected rules stay corrected ==")
+_pinned = [
+    ("only at a declared integration boundary",
+     ["references/fix-loop.md", "SKILL.md", "templates/progress.md"],
+     "the phase and re-review fan-outs both spend the integration reviewer on "
+     "a named boundary; without this phrase the file prescribes the retired "
+     "unconditional rule and a run following it writes a tracker this gate "
+     "rejects"),
+    ("raises no finding, takes no f-id",
+     ["references/parallel.md", "references/implement.md"],
+     "a build-gate failure before `RV` is unfinished implementation, not a "
+     "finding; without this phrase the wave procedure sends it into the fix "
+     "loop, which has no pre-`RV` entry any more"),
+]
+_pin_bad = False
+for _phrase, _files, _why in _pinned:
+    for _rel in _files:
+        _pf = ROOT / "plugins/superb/skills/pipeline" / _rel
+        _pt, _pe = read(_pf)
+        if _pe:
+            # NOT `continue`. A pinned file this gate cannot read is a pin it
+            # did not check, and the pass line below would then claim the rule
+            # is present in every file that states it.
+            _pin_bad = True
+            bad(f"pipeline/{_rel} cannot be read ({_pe}), so the pin on "
+                f"\"{_phrase}\" checked nothing there. REMEDY: make the file "
+                "readable and run again")
+            continue
+        if _phrase not in " ".join(_pt.split()).lower():
+            _pin_bad = True
+            bad(f"pipeline/{_rel} no longer carries \"{_phrase}\" — {_why}. "
+                "REMEDY: restore the phrase, or, if the rule genuinely changed, "
+                "change it in every file that states it and retire this pin")
+if not _pin_bad:
+    ok(f"{len(_pinned)} migration-corrected rules present in every file that "
+       "states them")
+
+print("\n== pipeline dispatch scripts ==")
+_tb = ROOT / "plugins/superb/skills/pipeline/scripts/task-brief"
+if not _tb.is_file():
+    bad(f"{relpath(_tb)} does not exist — Stage 4 dispatches implementers "
+        "itself and cites this script for the task brief, so every dispatch of "
+        "every run fails at its first step. REMEDY: add the script, or stop "
+        "citing it")
+else:
+    _tbt, _tbe = read(_tb)
+    if _tbe:
+        bad(f"{relpath(_tb)} cannot be read: {_tbe}")
+    elif not _tbt.startswith("#!"):
+        bad(f"{relpath(_tb)} has no shebang — it is invoked as a command, not "
+            "sourced, so without one the kernel's fallback decides which shell "
+            "runs it. REMEDY: start the file with `#!/bin/sh`")
+    elif not (_tb.stat().st_mode & 0o111):
+        bad(f"{relpath(_tb)} is not executable — a dispatch citing it gets "
+            "'permission denied' at the first task of the phase. REMEDY: "
+            "`chmod +x` it and commit the mode bit")
+    else:
+        ok("pipeline owns an executable task-brief script")
+
+# ---- pipeline never asks for a review when one task completes ----
+# Pipeline's own review layer is the phase-level `RV` fan-out. It used also to
+# delegate implementation to `subagent-driven-development`, whose process is
+# implement -> task reviewer -> fix -> re-review per task with no
+# implementation-only mode, and to import that loop explicitly into its wave
+# path ("run its per-task review ... exactly as subagent-driven-development
+# prescribes"). Two acceptance gates for one body of work reviewed everything
+# twice and made a phase something other than the unit of acceptance. Both
+# sweeps are text sweeps because the rule is contractual prose: the failure mode
+# is a sentence coming back, and a sentence is what is checked.
+#
+# Matched against FLATTENED text, never the raw file: these phrases wrap across
+# lines in prose, and a raw-text search misses a wrapped one — which is how
+# three of them survived a line-oriented grep of this very change (measured).
+#
+# The SDD pattern bans DELEGATING implementation, not naming the skill:
+# `references/implement.md` and the composed-skills note have to say what was
+# removed and why, or a later editor re-adds it.
+#
+# SCOPED to the pipeline skill. `bug-fix` may still prefer
+# `superpowers:subagent-driven-development` at its own task scope, where SDD's
+# per-task contract is the correct one; it has no phase gate to mis-gate.
+# EXPIRY: revisit if another skill acquires a phase-advancement condition.
+# Mutants: "pipeline delegates phase implementation to sdd",
+#          "pipeline asks for a per-task review",
+#          "pipeline gates a merge on passing task review",
+#          "pipeline reviews wave members per task".
+print("\n== pipeline has no task-level review ==")
+_banned = [
+    (re.compile(r"per-task review", re.I),
+     "asks for a per-task review"),
+    (re.compile(r"passed (?:its )?task review", re.I),
+     "gates something on a task having passed review"),
+    (re.compile(r"\btask reviewer\b", re.I),
+     "names a task reviewer"),
+    (re.compile(r"reviewed per task", re.I),
+     "says wave members are reviewed per task"),
+    (re.compile(r"an implementer,\s*a reviewer", re.I),
+     "states a per-task cost model (an implementer AND a reviewer per task)"),
+    (re.compile(r"(?:[Ii]mplement|dispatch)[^.\n]{0,80}?\bvia\b[^.\n]{0,40}?"
+                r"subagent-driven-development", re.I),
+     "delegates implementation to subagent-driven-development"),
+]
+_hits = []
+for _f in sorted(pdir.rglob("*.md")):
+    _t, _e = read(_f)
+    if _e:
+        continue
+    _flat = " ".join(_t.split())
+    for _rx, _why in _banned:
+        _m = _rx.search(_flat)
+        if _m:
+            _hits.append(f"{relpath(_f)} {_why}: {_m.group(0)!r}")
+if _hits:
+    for _h in _hits:
+        bad(_h + " — a task completing must dispatch no reviewer, and Stage 4's "
+            "IMPLEMENT state must not hand implementation to a skill whose "
+            "process reviews every task. REMEDY: state the rule the way "
+            "references/implement.md does, and let the phase's `RV` fan-out be "
+            "the only code review in the loop")
+else:
+    ok("no file in the pipeline skill asks for a task-level review or "
+       "delegates phase implementation to subagent-driven-development")
 
 # ---- the same linter, over a REAL run's tracker ----
 # The arm above scans `pdir` only — the skill's own worked examples — so no
@@ -1747,8 +2063,12 @@ if seen and nseen and not viol:
 #   IT ESTABLISHES — for every closed `RV`/`RVJ` round in `<dir>/progress.md`:
 #     the declared `<s> slice + <i> integration` count equals the number of
 #     report files the same round lists (brace sets expanded); an unwaved `N=`
-#     round's slice count equals `ceil(N/5)`; the integration count is 1
-#     wherever the slice count is above 1 and 0 where it is 1; an `RVJ` round
+#     round's slice count equals `ceil(N/5)`; the integration count is 0 at one
+#     slice, and above one slice is either 1 with a named `boundary:` or 0 with
+#     `no integration boundary` declared; an appended round is keyed `M`, and
+#     one declaring `M>=1` names a `fixplan` file present in `agent-output/`;
+#     every closed record carries a parseable declaration unless it is the
+#     `WAIVED` form; an `RVJ` round
 #     declares `0 slice + 1 integration`; an `M=` round declares a `C=<n>`
 #     cluster count and its slice count equals it; the round names a `coverage`
 #     file; every report file it names, and the coverage file it names, exist in
@@ -1785,6 +2105,49 @@ if seen and nseen and not viol:
 #          "run tracker has no closed review round",
 #          "run directory has no progress.md",
 #          "run directory has no agent-output".
+def parse_tracker_phases(text):
+    """Split a tracker into phases with their task and RV/RVJ bullet states.
+
+    A phase is a `## Phase <x>` heading; its bullets are the `- [ ] T<n>` and
+    `- [ ] RV`/`RVJ` lines under it, until the next such heading. Returned in
+    FILE ORDER, because that order is what "a later phase" means to every arm
+    that reads this. Only the box character is read — the fields after it are
+    `lint_review_lines`' business, and duplicating any of that here would give
+    two parsers of one grammar.
+
+    `tasks` entries are `(state, name, lineno)`; `reviews` entries are
+    `(kind, state, lineno)`. The two shapes differ because the arms want
+    different things first: a task's state, a review's kind.
+    """
+    phases, cur = [], None
+    for n, line in enumerate(text.split("\n"), 1):
+        mh = re.match(r"##\s+Phase\s+([^\s—·]+)", line)
+        if mh:
+            # NORMALISED AT CAPTURE. The label used to keep the whitespace it
+            # matched, while every lookup builds `phase <id>` with one space —
+            # so `## Phase  2` (two spaces) matched nothing and produced up to
+            # four reports for one stray space, each telling the author to name
+            # a phase the tracker demonstrably has.
+            cur = {"label": f"Phase {mh.group(1).strip()}", "line": n,
+                   "tasks": [], "reviews": []}
+            phases.append(cur)
+            continue
+        if cur is None:
+            continue
+        # `\**` BEFORE THE ID: a tracker written `- [ ] **T5** — …` is still a
+        # task line, and reading it as "this phase has no tasks" is how an arm
+        # that counts open tasks silently starts checking nothing. Same for a
+        # dotted id (`T2.1`), which `[\w.]+` keeps.
+        mb = re.match(r"\s*-\s*\[([ x~])\]\s*\**\s*(RVJ|RV|T[\w.]+)", line)
+        if mb:
+            st, what = mb.group(1), mb.group(2)
+            if what in ("RV", "RVJ"):
+                cur["reviews"].append((what, st, n))
+            else:
+                cur["tasks"].append((st, what, n))
+    return phases
+
+
 if RUN_DIR is not None:
     print(f"\n== run tracker: {relpath(RUN_DIR)} ==")
     tracker = RUN_DIR / "progress.md"
@@ -1793,13 +2156,14 @@ if RUN_DIR is not None:
             "something that is not a pipeline run directory, so nothing was "
             "checked. REMEDY: pass the run directory that holds the run's "
             "`progress.md`")
-    elif (terr := read(tracker)[1]):
+    elif (terr := (_tr := read(tracker))[1]):
         bad(f"{relpath(tracker)} cannot be read: {terr} — the "
             "tracker exists and may hold closed rounds, so nothing here is a "
             "statement about whether this run has been reviewed, and in "
             "particular not that it has not been. REMEDY: make the file "
             "readable and run again")
     else:
+        ttext = _tr[0]
         ao = RUN_DIR / "agent-output"
         if not ao.is_dir():
             bad(f"{relpath(ao)} does not exist — a closed review round has "
@@ -1820,10 +2184,512 @@ if RUN_DIR is not None:
             ok(f"{rseen} closed review rounds in the tracker"
                + (f" ({rnseen} of them `M=0 → no round`)" if rnseen else "")
                + ", every unwaved `N=` round sized `ceil(N/5)` with its "
-                 "integration reviewer following its slice count, every "
+                 "integration reviewer 0 at one slice and, above one slice, "
+                 "either declared with its boundary or declared absent, every "
                  "declared report file and every declared coverage file "
                  "present in agent-output/, and no round of two or more "
                  "slices repeating a range across its coverage rows")
+
+        # ---- review may not begin while a task in the phase is unchecked ----
+        # The failure this catches is the old per-task shape wearing the new
+        # vocabulary: reviewers dispatched over T1..T3 while T4..T8 are still
+        # out, which is per-task review at a coarser grain and re-splits the
+        # phase into pieces nobody reviewed as a unit. It is checkable from the
+        # tracker alone, because a started round and an unchecked task line
+        # cannot both be true of a phase reviewed as a whole.
+        #
+        # `[~]` COUNTS AS STARTED. That is the point of the marker: it is
+        # written before the reviewers go out, so a round that is merely
+        # dispatched — not yet closed — is already too early if a task of its
+        # own phase is open.
+        # Mutants: "run tracker reviews a phase with an unchecked task",
+        #          "run tracker reviews a phase with a task still in progress".
+        _phs = parse_tracker_phases(ttext)
+
+        # A TRACKER THIS PARSER CANNOT READ IS NOT A TRACKER THAT PASSES. Both
+        # arms below are only as good as their subject, and `parse_tracker_phases`
+        # yields nothing for a tracker whose phases are `### Phase N` instead of
+        # `## Phase N`. Without this, the review-not-early arm is skipped by its
+        # own `elif _phs:` and the no-advance arm falls through to an
+        # affirmative pass — measured PASS with a review opened early AND
+        # `Next action` advanced. This file already states the principle at the
+        # examples arm ("an arm whose subject can vanish from the docs is an arm
+        # that silently starts checking nothing, and the count in the pass line
+        # is what makes that visible"); these two arms were not given it.
+        # Mutants: "run tracker phases are demoted below the parser".
+        if not _phs:
+            bad(f"{relpath(tracker)}: no `## Phase <x>` heading this gate can "
+                "parse, yet the file holds closed review rounds — so every "
+                "phase-scoped check below had no subject and established "
+                "nothing. REMEDY: write phase headings as `## Phase <x> — …`, "
+                "which is the form `templates/progress.md` ships")
+
+        # ---- review may not begin while a task in the phase is unchecked ----
+        # The failure this catches is the old per-task shape wearing the new
+        # vocabulary: reviewers dispatched over T1..T3 while T4..T8 are still
+        # out, which is per-task review at a coarser grain and re-splits the
+        # phase into pieces nobody reviewed as a unit.
+        #
+        # `[~]` COUNTS AS STARTED. That is the point of the marker: it is
+        # written before the reviewers go out, so a round that is merely
+        # dispatched is already too early if a task of its own phase is open.
+        #
+        # `RVJ` IS JUDGED BY ITS PLACEMENT, NOT BY THE SAME RULE. An `RVJ` above
+        # a phase's first task is a JOINING phase's line: its subject is the
+        # lanes that merged into this phase, not this phase's own tasks, and the
+        # skill's templates prescribe exactly that shape ("a joining phase's
+        # `RVJ` leads, sitting above that phase's first task"). Judged by the
+        # `RV` rule it FAILED a legal tracker (measured), which would have
+        # pressured a real run into ticking the box early or moving the line —
+        # both worse than the state the arm protects. A TRAILING `RVJ` — below
+        # the phase's last task — reviews work that includes this phase, so it
+        # takes the same all-tasks-`[x]` condition as `RV`.
+        # Mutants: "run tracker reviews a phase with an unchecked task",
+        #          "run tracker reviews a phase with a task still in progress",
+        #          "run tracker opens a trailing RVJ over unfinished work".
+        _early = []
+        for _ph in _phs:
+            _opent = [x for x in _ph["tasks"] if x[0] != "x"]
+            if not _opent:
+                continue
+            _first_task = min(x[2] for x in _ph["tasks"])
+            _startedr = [r for r in _ph["reviews"]
+                         if r[1] in ("~", "x")
+                         and (r[0] == "RV" or r[2] > _first_task)]
+            if _startedr:
+                _early.append(
+                    f"{relpath(tracker)}:{_startedr[0][2]}: {_ph['label']}'s "
+                    f"{_startedr[0][0]} is `[{_startedr[0][1]}]` while "
+                    f"{len(_opent)} task line(s) in that phase are not `[x]` "
+                    f"(first at line {_opent[0][2]}, {_opent[0][1]})")
+        if _early:
+            for _e in _early:
+                bad(_e + " — a phase is reviewed as one unit once all of its "
+                    "tasks have landed; a round opened earlier reviews part of "
+                    "a phase, which is per-task review at a coarser grain. "
+                    "REMEDY: finish the phase's tasks, then open its review. "
+                    "If the round did cover everything, the unchecked task "
+                    "lines are the thing that is wrong and Rule 4 "
+                    "reconciliation is the fix")
+        elif _phs:
+            ok(f"{len(_phs)} phases "
+               f"({sum(len(x['tasks']) for x in _phs)} task lines), none with a "
+               "review round opened while one of its own tasks was unchecked")
+
+        # ---- Current State may not point past an unfinished phase ----
+        # This is the advancement invariant, checked. Four ways a phase is
+        # unfinished, and the tracker's own "next unchecked line" rule can only
+        # see the first:
+        #   1. a bullet in it is not `[x]` — an open task, or an open RV/RVJ;
+        #   2. it carries NO review line at all — see below;
+        #   3. a blocking finding scoped to it is still `open` in findings.md —
+        #      a fix loop interrupted mid-round leaves every box `[x]`, so the
+        #      next unchecked line points PAST the phase that owns the finding;
+        #   4. a round names a fix plan that is not on disk (arm above).
+        # The history this exists for: a real run skipped the review fan-out for
+        # seven consecutive phases because every gate read "no open blocking
+        # IDs", which is vacuously true when review never ran.
+        #
+        # (2) IS NOT A TECHNICALITY. `any()` over an empty list is `False`, so a
+        # phase given no `RV` line reads exactly like a phase whose `RV` closed
+        # — measured PASS over a tracker openly advancing past a phase that was
+        # implemented and never reviewed. `SKILL.md` warns in its own words that
+        # "a review line added later is a review line that can be forgotten";
+        # this is that state, and the vacuity the 2026-09-01 fix removed from
+        # the predicate had simply moved one level up.
+        #
+        # findings.md is read ONLY IF PRESENT, and an UNPARSEABLE ledger is
+        # reported rather than treated as empty — an absent or unreadable
+        # ledger must never read as a clean one, which is the same mistake in
+        # miniature and the one this arm exists to refuse.
+        # Mutants: "run tracker advances past a phase with an open RV",
+        #          "run tracker advances past a phase with an open blocking finding",
+        #          "run tracker next action names a later phase than its own state",
+        #          "run tracker phase carries no RV line at all",
+        #          "run tracker ledger row bolds its severity",
+        #          "run tracker Current State phase advances while Next action does not",
+        #          "run tracker Current State names a mentioned phase",
+        #          "run tracker ledger header renames its phase column",
+        #          "run tracker second blocking table gates nothing",
+        #          "run tracker Current State is shadowed by a prose decoy",
+        #          "run tracker ledger row id is bolded",
+        #          "run tracker four-column ledger renames its phase column",
+        #          "run tracker loses its Phase field",
+        #          "run tracker grows a second Current State block",
+        #          "run tracker ledger row id is not F-<n>",
+        #          "run tracker Phase field resolves to nothing",
+        #          "run tracker hides a stale Phase field above the fresh one",
+        #          "run tracker ledger row id has a letter after the dash".
+        #
+        # RR6-4's guard — no affirmative line after a nonexistent-phase report —
+        # carries NO mutant, deliberately: removing it restores a FALSE `ok`
+        # line on a build that is red either way, so the harness (which reads
+        # only pass/fail) cannot distinguish it. Verified by hand instead: each
+        # probe above asserts zero `ok    no unfinished phase` lines alongside
+        # its FAIL. Recorded as unpinned rather than left to look watched.
+        def _norm(cell):
+            """A ledger cell as the comparison wants it: markdown stripped."""
+            return re.sub(r"[*`_\s]+", " ", cell or "").strip().lower()
+
+        _idx = {ph["label"].lower(): i for i, ph in enumerate(_phs)}
+        _blockers = []
+        for _i, _ph in enumerate(_phs):
+            _why = []
+            # AN `RVJ` IS NOT THIS PHASE'S `RV`. A joining phase's `RVJ` sits
+            # above its first task and reviews the LANES that merged into it —
+            # which is exactly why the review-not-early arm exempts it. Asking
+            # only whether a phase has "any review line" let that same `RVJ`
+            # stand in for the phase's own review, so a joining phase with
+            # every task `[x]` and no `RV` was not a blocker (measured PASS).
+            # The two arms read one list and have to agree about what an `RVJ`
+            # covers: it covers the join, never this phase's tasks.
+            if not any(r[0] == "RV" for r in _ph["reviews"]):
+                _why.append("no `RV` line — an implementation phase ends with "
+                            "one, and a phase with none reads exactly like a "
+                            "phase whose review closed. An `RVJ` does not "
+                            "substitute: it reviews the unit that joined here, "
+                            "not this phase's own tasks")
+            if any(x[0] != "x" for x in _ph["tasks"]):
+                _why.append("an open task line")
+            if any(r[1] != "x" for r in _ph["reviews"]):
+                _why.append("an open RV/RVJ line")
+            if _why:
+                _blockers.append((_i, _ph["label"], " and ".join(_why)))
+
+        # `_untrusted` IS BORN HERE, ahead of the ledger parse, because the
+        # rule covers BOTH halves: an affirmative must not follow any report
+        # this arm made about the subject it was comparing — an unreadable
+        # ledger, an unread row, a row whose width its header contradicts, a
+        # finding scoped to a phase the tracker lacks, a duplicated Current
+        # State block or field, a field naming a phase that does not exist.
+        # Every one of those means the comparison was incomplete.
+        _untrusted = False
+        _ledger, _ltext, _lrows = RUN_DIR / "findings.md", None, 0
+        if _ledger.is_file():
+            _ltext, _lerr = read(_ledger)
+            if _lerr:
+                _untrusted = True
+                bad(f"{relpath(_ledger)} cannot be read: {_lerr} — it may hold "
+                    "open blocking findings, so nothing here says this run has "
+                    "none. REMEDY: make the file readable and run again")
+                _ltext = None
+        if _ltext:
+            # LOCATE THE COLUMNS FROM THE LEDGER'S OWN HEADER, never by
+            # counting. The previous fixed `|`-spine dropped a row whose table
+            # had an extra column, whose `Sev` was bolded, whose state read
+            # `Open`, or whose `Phase` cell read `Phase 2` — four measured
+            # shapes, each leaving the arm's ledger half vacuous while the pass
+            # line still claimed the invariant. Markdown bolding defeating the
+            # one arm between the run and this failure is not an acceptable
+            # margin.
+            # AND ONLY THE BLOCKING TABLE'S ROWS ARE ITS ROWS. `findings.md`
+            # ships a SECOND `F-`-keyed table — *Deferred Minor findings*,
+            # four columns against the blocking table's seven — so applying the
+            # blocking header's width to every `F-` row in the file failed the
+            # shipped template, and with it every real run that defers a single
+            # Minor finding, which is the normal outcome of a review. The rows
+            # are collected from the header until the table ends, and a
+            # narrower table further down is simply a different table.
+            # EVERY blocking table, and the `F-` rows of the whole file.
+            # Two bugs lived in the first version of this: it stopped at the
+            # FIRST header, so a second blocking table's rows gated nothing;
+            # and it read `_seen_fid` out of the rows it had just collected,
+            # which are empty exactly when no header was found — making the
+            # "unparseable ledger" report unreachable, so a `findings.md` whose
+            # header names `Area` where the grammar wants `Phase` read as a
+            # clean one (measured, over a ledger holding an open Critical).
+            # `_seen_fid` now scans the file, which is the only population that
+            # can answer "are there rows nobody read?".
+            _tables = []
+            _lines = _ltext.split("\n")
+            for _k, _line in enumerate(_lines):
+                _cells = [_norm(c) for c in _line.strip().strip("|").split("|")]
+                if BLOCKING_COLS <= set(_cells):
+                    _tbl = []
+                    for _line2 in _lines[_k + 1:]:
+                        if not _line2.lstrip().startswith("|"):
+                            break
+                        _tbl.append(_line2)
+                    _tables.append((_cells, _tbl))
+            _hdr = _tables[0][0] if _tables else None
+            # NORMALISED, LIKE EVERY OTHER COMPARISON HERE. This was the one
+            # that was not, so `| **F-002** |` and `` | `F-002` | `` were
+            # silently not rows at all — dropped from the table walk AND from
+            # `_seen_fid`, so nothing reported them (measured PASS past an open
+            # Major). The ledger's own prose bolds and backticks IDs freely,
+            # which is exactly why every other cell comparison goes through
+            # `_norm`.
+            #
+            # AND NO WIDTH FILTER. A `count("|") >= 6` test excluded a
+            # four-column blocking table — the minimum `templates/findings.md`
+            # blesses — making the template's "a renamed column turns into a
+            # build failure" claim false for that shape. Row-ness is "the first
+            # cell is an F-id", and width is checked against the header later,
+            # where a mismatch is reported rather than used to decide.
+            # "THE FIRST CELL LOOKS LIKE A FINDING ID", not "is F- plus
+            # digits". Requiring the exact grammar dropped an off-grammar id
+            # from the table walk AND from `_seen_fid`, so an open blocking row
+            # keyed `N-002` or `F-002a` was ungated in silence — NEW-F2's
+            # failure mode on a different decoration of the same cell.
+            # Reachability is not hypothetical: this migration's own ledgers use
+            # `N-`, `NEW-` and `NEW-F` ids, and the template ships split phase
+            # ids (`3a`) that invite `F-002a`. Liberal in what counts as a row,
+            # strict in what a row must then satisfy: an off-grammar id is now
+            # read or reported, never dropped.
+            # WIDE ENOUGH TO MAKE THE TEMPLATE'S CLAIM TRUE. The first attempt
+            # required a digit straight after the dash and letters only before
+            # it, which still dropped `NEW-F2` and `RR5-2` — the exact id
+            # shapes this branch's own ledger uses for rounds 4 and 5, and
+            # `NEW-F` is the one the code comment cited as its reachability
+            # argument. Narrowing the promise instead of widening the match
+            # would have left a claim finding in a shipped template.
+            # A DIGIT IS REQUIRED AFTER THE DASH. Widening row-ness to any
+            # `<letters>-<something>` first cell made a hyphenated ordinary word
+            # a row: a header-less `findings.md` containing `| run-ok | PASS |`
+            # false-failed, and reported "holds 2 `F-` row(s)" over zero
+            # findings. That is the opposite failure direction from everything
+            # else in this arm and the one that can actually stop a run, so the
+            # lookahead pins it while keeping `NEW-F2` and `RR5-2` — the ids
+            # this branch's own ledger uses — matched.
+            _isrow = lambda ln: bool(
+                re.match(r"\|?\s*[a-z]+[0-9a-z]*-(?=[0-9a-z.]*\d)[0-9a-z.]+\s*\|",
+                         _norm(ln)))
+            _seen_fid = [ln for ln in _lines if _isrow(ln)]
+            if _hdr is None:
+                if _seen_fid:
+                    _untrusted = True
+                    bad(f"{relpath(_ledger)} holds {len(_seen_fid)} row(s) "
+                        "that look like finding ids but no header row naming "
+                        "ID/Sev/Phase/State — so the "
+                        "advancement check could not locate the columns and "
+                        "read no finding. An unparseable ledger must not read "
+                        "as an empty one. REMEDY: keep the blocking ledger's "
+                        "header row as `templates/findings.md` ships it")
+            else:
+              for _hdr, _rows in _tables:
+                  _ci = {k: _hdr.index(k) for k in ("id", "sev", "phase", "state")}
+                  for _line in _rows:
+                      if not _isrow(_line):
+                          # REPORTED, NOT SKIPPED. `_seen_fid` is the "rows
+                          # nobody read" population and it is consulted only
+                          # when NO header exists — so a row inside a located
+                          # blocking table whose first cell this check cannot
+                          # read was dropped in silence. Same rule as the rest
+                          # of this arm: an unread row must not read as a
+                          # closed one. A separator row is not a row.
+                          if not re.match(r"^\s*\|[\s\-:|]+\|?\s*$", _line):
+                              _untrusted = True
+                              bad(f"{relpath(_ledger)}: a row of the blocking "
+                                  "table this check could not read: "
+                                  f"{_line.strip()[:60]!r} — its first cell is "
+                                  "not a finding id, so the row was not read, "
+                                  "and an unread row must not read as a closed "
+                                  "one. REMEDY: key the row `F-NNN`, as "
+                                  "`templates/findings.md` ships it")
+                          continue
+                      _cells = [c for c in _line.strip().strip("|").split("|")]
+                      # WIDTH MUST EQUAL THE HEADER'S, not merely reach the
+                      # columns we want. A row one cell WIDER than its header
+                      # shifts every cell past the inserted one, so `State` is
+                      # read from the wrong column and the row is skipped in
+                      # silence — measured PASS past an open blocking finding
+                      # with `| F-002 | Major | X | 2 | … |` under a 7-column
+                      # header. Either width is a table this arm cannot read, and
+                      # an unreadable ledger row is reported, never assumed clean.
+                      if len(_cells) != len(_hdr):
+                          _untrusted = True
+                          bad(f"{relpath(_ledger)}: row "
+                              f"{_norm(_cells[0]).upper()!r} has {len(_cells)} "
+                              f"cells but its header has {len(_hdr)} — the "
+                              "advancement check locates `State` and `Sev` by "
+                              "the header's columns, so a row of a different "
+                              "width is one it cannot read, and an unreadable "
+                              "row must not read as a closed one. REMEDY: match "
+                              "the header's column count")
+                          continue
+                      _lrows += 1
+                      if _norm(_cells[_ci["state"]]) != "open":
+                          continue
+                      _sev = _norm(_cells[_ci["sev"]])
+                      if _sev not in ("critical", "major", "bug"):
+                          continue
+                      _phl = re.sub(r"^phase\s*", "", _norm(_cells[_ci["phase"]]))
+                      _pi = _idx.get(f"phase {_phl}")
+                      # GUARDED BY `_phs`, like its Current-State sibling: on a
+                      # tracker this gate cannot parse, `_idx` is empty and
+                      # every ledger row "matches no heading", which is a
+                      # second and actively misleading diagnosis for one
+                      # defect. The unparseable-tracker arm owns that case.
+                      if _pi is None and not _phs:
+                          continue
+                      if _pi is None:
+                          _untrusted = True
+                          bad(f"{relpath(_ledger)}: {_norm(_cells[_ci['id']]).upper()} "
+                              f"({_sev}) is open against phase {_phl!r}, which "
+                              "matches no `## Phase` heading in the tracker — so "
+                              "the advancement check could not scope it to a "
+                              "phase and this finding gated nothing. REMEDY: make "
+                              "the ledger's Phase cell match the tracker's phase "
+                              "heading")
+                          continue
+                      _blockers.append((_pi, f"Phase {_phl}",
+                                        f"open blocking finding "
+                                        f"{_norm(_cells[_ci['id']]).upper()} ({_sev})"))
+        _blockers.sort(key=lambda b: b[0])
+
+        # BOTH Current State fields are read. `**Phase:**` is the field the
+        # resume protocol's reader looks at first, and reading only
+        # `**Next action:**` left two measured passes: `Phase: 3` while Phase 2
+        # held an open finding, and a bare `Next action: T4 — a task` (the
+        # template's own suggested form) naming no phase at all.
+        # THE TEMPLATE IS THE AUTHORITY ON SHAPE. This first required the
+        # literal word "phase" inside the field's value, which
+        # `templates/progress.md`'s `**Phase:** <number and name>` never
+        # contains — so the field the resume protocol reads FIRST was
+        # unreadable on every conforming tracker, the arm rested entirely on
+        # `**Next action:**`, and its "neither field names a phase" branch then
+        # fired on the ordinary mid-run case (`Next action: RV — review
+        # fan-out` names no phase either, and the template says it need not).
+        # An arm that fails the shape its own templates prescribe is wrong
+        # about the shape, not the tracker.
+        # THE FIELD IS LOCATED IN THE `## Current State` BLOCK, AT A LINE
+        # START. Round 4 anchored the phase token inside the field's value but
+        # left the FIELD itself found by a search over the whole tracker — so
+        # any prose line mentioning `**Phase:** 2` outranked the real Current
+        # State, and the gate passed over an open finding (measured). The
+        # decoy is not hypothetical: this migration added a literal
+        # `**Phase:**` example to `templates/progress.md`, the file every run
+        # copies into its own run directory. The block is bounded by the next
+        # `##` heading, and the field must be a list item on its own line,
+        # which is the only form `templates/progress.md` writes.
+        # THE STRUCTURAL FIX, and the one that ends this family. Five rounds
+        # produced five ways to lose this field — searched the whole tracker,
+        # read a mentioned phase, required the literal word, required a `-`/`*`
+        # bullet — and every one of them failed the SAME way: silently. The arm
+        # fell back to `**Next action:**` and printed an affirmative pass. So
+        # the marker is optional now (any list form, or none, which is three
+        # markdown-legal shapes round 5 had made unreadable), the heading is
+        # anchored at a line start so prose quoting it cannot open a block, a
+        # duplicated block is reported, and — decisively — **a `**Phase:**`
+        # field this arm cannot locate is a FAILURE, not a fallback.** The next
+        # locator bug is then a red build instead of a quiet pass.
+        # `_untrusted` — SET WHEREVER THIS ARM REPORTS ABOUT ITS OWN SUBJECT.
+        # Four measured shapes printed an affirmative right after the arm had
+        # said it could not trust what it compared, and two of them were false
+        # about the run's actual position because the comparison used the stale
+        # field or stale block just declared ambiguous. One flag, guarding both
+        # `ok(...)` calls: the same one-expression move RR6-1 made, applied to
+        # the remaining three reports.
+        if len(re.findall(r"^##\s+Current State\s*$", ttext, re.M)) > 1:
+            _untrusted = True
+            bad(f"{relpath(tracker)}: two or more `## Current State` blocks, "
+                "and this gate reads the first — the run's position must live "
+                "in exactly one place, or an executor appending a fresh block "
+                "leaves the stale one authoritative. REMEDY: keep one block, "
+                "at the top, as `templates/progress.md` ships it")
+        _csm = re.search(r"^##\s+Current State\s*$(.*?)(?=^##\s|\Z)",
+                         ttext, re.M | re.S)
+        _csblock = _csm.group(1) if _csm else ""
+        _FIELDRE = r"^\s*(?:[-*+]\s+|\d+[.)]\s+)?\*\*%s:\*\*"
+        if _phs and len(re.findall(_FIELDRE % "Phase", _csblock, re.M)) > 1:
+            _untrusted = True
+            bad(f"{relpath(tracker)}: two or more `**Phase:**` fields inside "
+                "the `## Current State` block, and this gate reads the first — "
+                "so a stale line left above a fresh one is the one that counts. "
+                "This is RR5-4's rule one level down: the run's position must "
+                "live in exactly one place. REMEDY: keep one `**Phase:**` "
+                "field, and replace its value rather than adding a line")
+        if _phs and not re.search(_FIELDRE % "Phase", _csblock, re.M):
+            bad(f"{relpath(tracker)}: no `**Phase:**` field inside a "
+                "`## Current State` block — that field is where the "
+                "advancement check reads the run's position, so it read "
+                "nothing and compared nothing. An unreadable position must not "
+                "read as a satisfied one. REMEDY: keep the Current State block "
+                "at the top, as `templates/progress.md` ships it")
+
+        def _named_phase(field):
+            m = re.search(_FIELDRE % field + r"\s*(.+)", _csblock, re.M)
+            if not m:
+                return None, False, None
+            # ANCHORED AT THE START, and that is the whole of the fix for a
+            # Critical. Searching the field's value for `phase <token>`
+            # anywhere read a MENTIONED phase in preference to the named one:
+            # `**Phase:** 3 — moved on past the phase 2 fix loop` resolved to
+            # 2, and the gate passed over a finding open against Phase 2. A
+            # Current State field names its phase FIRST — `templates/progress.md`
+            # prescribes `**Phase:** <id> — <name>` — so the id is the leading
+            # token, optionally introduced by the word "Phase" for the
+            # `**Next action:**` form (`Phase 2 RV — …`). Anything else names
+            # no phase, which is a state this arm reports rather than guesses
+            # at.
+            g = re.match(r"\s*(?:[Pp]hase\s+)?([0-9]+[0-9A-Za-z.]*)\b",
+                         m.group(1))
+            if not g:
+                return None, True, None
+            return _idx.get(f"phase {g.group(1)}".lower()), True, g.group(1)
+
+        _na_i, _na_seen, _na_id = _named_phase("Next action")
+        _ph_i, _ph_seen, _ph_id = _named_phase("Phase")
+        _named = [x for x in (_na_i, _ph_i) if x is not None]
+
+        # A FIELD THAT NAMES A PHASE THIS TRACKER DOES NOT HAVE is reported on
+        # its own, not left to be caught by the accident of a blocker existing
+        # at a lower index. The ledger half already does exactly this for an
+        # unmatched `Phase` cell, and the two halves of this arm should agree.
+        # GUARDED BY `_phs`: on a tracker this gate cannot parse, `_idx` is
+        # empty and every readable field "matches no heading", so the operator
+        # got three diagnoses for one defect. The unparseable-tracker arm above
+        # is the one that owns that case.
+        for _fld, _id, _i2 in (("Phase", _ph_id, _ph_i),
+                               ("Next action", _na_id, _na_i)):
+            if _phs and _id is not None and _i2 is None:
+                _untrusted = True
+                bad(f"{relpath(tracker)}: Current State's `**{_fld}:**` names "
+                    f"phase {_id!r}, which matches no `## Phase` heading in "
+                    "this tracker — so the advancement check could not locate "
+                    "the run's own position and compared nothing. REMEDY: name "
+                    "a phase the tracker has")
+
+        _ledger_note = ("" if _lrows else
+                        " (this run's ledger contributed no readable blocking "
+                        "row, so the ledger half of that established nothing)")
+        if _blockers and _named and max(_named) > _blockers[0][0]:
+            bad(f"{relpath(tracker)}: Current State names a phase later than "
+                f"{_blockers[0][1]}, which still has {_blockers[0][2]} — a "
+                "phase is complete only when its tasks are `[x]`, its `RV` is "
+                "`[x]` and every blocking finding scoped to it is closed. "
+                "Advancing here is the orchestration failure this gate exists "
+                "for: implementation complete is not phase complete, and an "
+                "empty ledger is what an unreviewed phase looks like too. "
+                "REMEDY: point Current State at that phase's own next action — "
+                "its review, or its fix loop")
+        # THE RULE THE WHOLE ARM OBEYS: never print an affirmative line about a
+        # comparison that did not happen. Round 6 fail-closed on "could not
+        # LOCATE the field" and left two neighbours open — "located it, but it
+        # resolved to nothing" and "located a field, but not the right one" —
+        # and in the first case the same commit removed the report that had
+        # been covering it. Keying this guard off `_*_seen` ("a field exists")
+        # instead of `_*_id` ("a field named a phase") is what did it:
+        # `**Phase:** done` is a form the template blesses and `run-ok` ships,
+        # and an executor writes it exactly when it believes the run is over —
+        # which is precisely when it may be wrong about an open finding.
+        elif _blockers and not _named and not (_ph_id or _na_id):
+            bad(f"{relpath(tracker)}: {_blockers[0][1]} has "
+                f"{_blockers[0][2]}, and neither Current State field names a "
+                "phase — so there is nothing to compare it against and the "
+                "advancement invariant is uncheckable on this tracker. "
+                "REMEDY: name the phase in `**Phase:**`")
+        elif _named and not _untrusted:
+            ok("Current State does not point past an unfinished phase"
+               + _ledger_note)
+        elif _phs and not _blockers and not _untrusted:
+            ok("no unfinished phase in the tracker" + _ledger_note)
+        # NO AFFIRMATIVE IN THE REMAINING CASES, and each is already reported:
+        # an unparseable tracker (the `_phs` arm above), and a field naming a
+        # phase the tracker lacks (the per-field arm above). Printing
+        # "no unfinished phase" after either was a false line about a
+        # comparison the arm never made — the same class as N-008 and NEW-F6,
+        # and the last of them.
 
 # ---- every mutant this file cites by name must actually exist ----
 # The arms above cite their proofs by NAME: a `Mutant`/`Mutants` comment marker

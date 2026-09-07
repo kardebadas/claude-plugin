@@ -74,8 +74,9 @@ a schedule, not just a task list.
 Let the phase branch be `P` (checked out in the phase worktree) and the wave be
 `W` with members `T_a … T_k`.
 
-**Wave of one** — dispatch in the phase worktree exactly as
-`subagent-driven-development` describes. Nothing below applies.
+**Wave of one** — dispatch in the phase worktree as
+`references/implement.md`, *Dispatching one task*, describes. Nothing below
+applies.
 
 **Wave of two or more:**
 
@@ -90,31 +91,42 @@ Let the phase branch be `P` (checked out in the phase worktree) and the wave be
    dispatch.
 4. Dispatch all `k` implementers **in one message**. Each dispatch names its
    worktree path as the working directory and its branch, carries the task
-   brief (`scripts/task-brief` run against the sub-plan), the project quality
+   brief (`<skill-dir>/scripts/task-brief` run against the sub-plan, with
+   `<skill-dir>` resolved as `references/implement.md` describes), the project
+   quality
    gates, and the <=10-line return contract (`BRANCH:` line included). The
    implementer commits on its own branch only.
    After dispatching, if you have no local work left, **wait — do not end the
    turn.** On a mailbox harness (Codex) a finished member cannot wake you, so
    ending the turn here parks the wave until the user types something. See
    *Who wakes you after a dispatch* in `SKILL.md`.
-5. As each member returns DONE, run its per-task review (review package over
-   `BASE..wt/<phase>-t<i>`, task reviewer, fix loop, adversarial pass on
-   trigger) exactly as `subagent-driven-development` prescribes, in that
-   member's worktree. Reviews of different members may run concurrently.
-6. When every member has passed its task review, **merge in task order** onto
+5. As each member returns, record it: commit hash against its task line, `[x]`,
+   saved (Rule 2). A member returning `NEEDS_CONTEXT` or `BLOCKED` is a
+   guard-rail stop, not a finding. **Dispatch no reviewer** — the phase's `RV`
+   fan-out reviews all of this work as one unit once the phase's last task has
+   landed (`references/implement.md`, *The no-task-review rule*).
+6. When every member has landed, **merge in task order** onto
    `P`, one no-fast-forward merge per member, each merge message naming the
-   task (`merge T4 — <task name>`).
+   task (`merge T4 — <task name>`). Then run the build gates. The merge gate is
+   the build, not a reviewer; a gate failing here means this wave's
+   implementation is not finished, so it is repaired inside IMPLEMENT and the
+   gate re-run. It raises no finding and opens no remediation round.
    - **Conflict** — abort the merge. The `Files:` sets were not disjoint. Set
      that task back to `[ ]`, drop its branch and worktree, re-dispatch it
-     **alone** on the merged head after the rest of the wave lands, and add a
-     Minor finding to `findings.md` naming the wrong annotation.
+     **alone** on the merged head after the rest of the wave lands. Record the
+     wrong `Files:` annotation as a note for the phase review to read — not as
+     a ledger entry: nothing before `RV` writes to `findings.md`, and a
+     reviewer raising it later gives it an F-ID then.
 7. Run **the project's build gates** on `P` after the last merge — the gates the
    approved plan names, or the ones the repo's own `AGENTS.md` / `CLAUDE.md`
    declares. This skill does not know what they are and must not guess: a gate
    invented here fails a repo that never had it, and a gate omitted here lets a
    broken wave merge. If the plan named none, that is an Ambiguity-guard stop,
-   not a licence to skip the step. A failure is a bug finding with an F-ID and
-   goes through the fix loop before the next wave.
+   not a licence to skip the step. **A failure means this wave's implementation
+   is not finished:** repair it inside IMPLEMENT — the task's own implementer,
+   or a fresh agent scoped to the failure — and re-run the gate until it is
+   green. It raises no finding, takes no F-ID, needs no fix plan and spends no
+   iteration budget (`references/implement.md`, *Leaving IMPLEMENT*).
 8. Mark each member `[x]` with **its own head hash** (the commit on its branch,
    preserved by the merge — never the merge commit). Update Current State to
    the next wave. Save. Re-read.
@@ -122,8 +134,8 @@ Let the phase branch be `P` (checked out in the phase worktree) and the wave be
    reviewers may use them), then delete them.
 
 Slice reviewers for a phase that contained waves take ranges over `P`'s
-first-parent history: `<wave base>^..<wave merge>` covers a whole wave, and
-`scripts/review-package BASE HEAD` includes merged commits. Assign slices by
+first-parent history: `<wave base>^..<wave merge>` covers a whole wave, and a
+range spanning a wave merge includes the merged commits. Assign slices by
 wave boundaries, not by counting five tasks.
 
 **Then check the union covers the whole phase** — `PB..PH`, the phase branch's

@@ -21,6 +21,21 @@ compares **ID sets**, not prose.
 
 ## Blocking ledger (Critical / Major / bug)
 
+**The header row below is a grammar, not a suggestion.** The advancement check
+locates `Sev`, `Phase` and `State` by name in this header and reads every row
+beneath it until the table ends — so a header that renames `Phase` to something
+else, or a row whose cell count differs from its header's, is a row the check
+cannot read. It reports that rather than treating it as closed, which means a
+renamed column turns into a build failure and not a silently ungated finding.
+Keep the four names `ID`, `Sev`, `Phase` and `State`; add columns if you need
+them, and give every row the same width as the header.
+
+**IDs are `F-NNN`.** The check treats any `<letters>-<digits>` first cell as a
+row so an off-grammar id is read or reported rather than silently skipped — but
+the grammar is `F-` plus digits, and a row keyed anything else is a row whose
+findings nobody guaranteed to be gated by ID. Use `F-001`, `F-002`, and keep a
+rediscovered finding's original ID.
+
 | ID | Sev | Phase | File:line | Finding | State | Closed by |
 | -- | --- | ----- | --------- | ------- | ----- | --------- |
 | F-001 | Critical | 2 | `src/x.php:41` | <one line> | open | |
@@ -32,7 +47,7 @@ tier**: a bug finding (a failing or vacuous test, a broken build gate, a crash)
 is recorded as `Critical` or `Major` like any other blocking row, never as a
 bare `bug`, because this table has no such `Sev`.
 
-`Important` is the task reviewer's vocabulary, not a tier: **an incoming
+`Important` is another reviewer's vocabulary, not a tier: **an incoming
 `Important` is re-tagged** on the way in. The branches below are also the
 severity decider wherever this ledger has to set a tier itself — a **claim
 finding** included, whatever tier it arrived under.
@@ -81,19 +96,19 @@ dispatching, never after.
 | Scope | Fix-loop iteration | Cap | Deepest fix-mode depth this chain | Cap |
 | ----- | ------------------ | --- | --------------------------------- | --- |
 | Phase 2 | 2 | 5 | 1 | 2 |
-| Phase 3 pre-RV | 1 | 5 | 0 | 2 |
 | RVJ split 4a+4b | 1 | 5 | 0 | 2 |
 
-**Scope** is a phase, a phase's pre-`RV` rounds (build-gate failures fixed before
-its review ever ran), or an `RVJ` (a split or lane join). Each gets its own row
-so no review arrives at a spent budget.
+**Scope** is a phase or an `RVJ` (a split or lane join). Each gets its own row
+so no review arrives at a spent budget. A build-gate failure before the phase's
+review has run is not a scope here at all: it is unfinished implementation,
+repaired inside IMPLEMENT, and it opens no round and spends no budget.
 
 Iteration counters are **per phase** (a split's siblings share the split group's
 counter; an `RVJ` gets its **own** row, so a joint review's fix loop is not
 spending a budget three siblings already used); depth is **per recursion
 chain** — Stage 4's own run of a phase is
-depth 0, its first fix-mode recursion is depth 1. Open a new row the moment a new **scope** starts — a phase, its pre-`RV` rounds,
-or an `RVJ` — and never edit another scope's row. A backfilled review opens its
+depth 0, its first fix-mode recursion is depth 1. Open a new row the moment a new **scope** starts — a phase or an `RVJ` — and
+never edit another scope's row. A backfilled review opens its
 own `<phase> backfill` row rather than reusing the phase's spent one.
 
 ## Iteration log (convergence rule input)

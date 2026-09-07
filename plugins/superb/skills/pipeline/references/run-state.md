@@ -47,9 +47,10 @@ one.
 - [x] T4 — <task name> · W3 · deps T3 — `nocommit` (docs only, folded into T5's commit)
 - [ ] RV — review fan-out
 - [~] RV — review fan-out · N=8 → 2 slice + 1 integration · started 2026-09-01 14:31
-- [x] RV — review fan-out · N=8 → 2 slice + 1 integration · reports p3-review-{a,b,int}.md · coverage p3-coverage.md → F-012, F-013
+- [x] RV — review fan-out · N=8 → 2 slice + 1 integration · boundary: the T3 contract consumed by T7 · reports p3-review-{a,b,int}.md · coverage p3-coverage.md → F-012, F-013
+- [x] RV — review fan-out · N=8 → 2 slice + 0 integration · no integration boundary · reports p5-review-{a,b}.md · coverage p5-coverage.md → no findings
 - [x] RV — review fan-out · N=3 → 1 slice + 0 integration · reports p2-review-a.md · coverage p2-coverage.md → no findings
-- [x] RV — review fan-out · N=12 waved → 2 slice + 1 integration · reports p4-review-{a,b,int}.md · coverage p4-coverage.md → F-021
+- [x] RV — review fan-out · N=12 waved → 2 slice + 1 integration · boundary: the T3 contract consumed by T7 · reports p4-review-{a,b,int}.md · coverage p4-coverage.md → F-021
 - [x] RV — review fan-out · WAIVED by user: "skip the code review on this one"
 - [ ] RVJ — joint integration review · split 4a+4b
 - [x] RVJ — joint integration review · lanes A+B (phases 5, 6) · N=17 → 0 slice + 1 integration · reports j-56-int.md · coverage j-56-coverage.md → no findings
@@ -77,7 +78,7 @@ blank field is unverifiable and that is the whole point of recording it.
 
 **`RV`/`RVJ` are the exception in what they carry, not in whether they are
 checkable.** They produced review, not code, so instead of a hash they close on
-four fields, all paths relative to `agent-output/`:
+these fields, all paths relative to `agent-output/`:
 
 - `N=<tasks> → <s> slice + <i> integration` — `N` is on the line so the fan-out
   is re-derivable at closure rather than trusted from the step most likely to
@@ -87,7 +88,16 @@ four fields, all paths relative to `agent-output/`:
   line as `C=<n>` and `s` must equal it** — `M=9 C=3 → 3 slice + 1 integration`
   (the cluster rule, and what declaring `C` does and does not establish, is in
   `fix-loop.md`'s *Re-review fan-out*); an **`RVJ`** is always
-  `0 slice + 1 integration` with `N` informational. `i` is 1 whenever `s > 1`.
+  `0 slice + 1 integration` with `N` informational. `i` is **0 at one slice**;
+  above one slice it is 1 only at a **declared integration boundary**, named on
+  the round as `· boundary: <what>`, and otherwise 0 with
+  `· no integration boundary` on the round so the choice is visible.
+- `fixplan <file>` — **required on any round declaring `M=<m>` with `m >= 1`**,
+  and absent from an `M=0 → no round` record, which dispatched no fix and so had
+  nothing to plan. It is the round's fix plan
+  (`templates/fix-plan.md`), written **before** the first fix was dispatched:
+  findings → fix plan → fix implementation, in that order. A round that fixed
+  something and names no plan is a round nobody can check the fixes against.
 - `reports <files>` — **exactly `s + i` files, one per reviewer**, each the
   `DETAIL:` path that reviewer returned. A review dispatch always requires its
   report file, clean or not — the "omit `DETAIL:` if nothing is longer" licence
@@ -203,14 +213,31 @@ starts a new run** — if step 1 finds nothing, report that and stop.
    surfaced. If reconciliation raised questions — partial `[~]` work whose
    disposition the plan doesn't settle, unexplained commits — these are **user
    questions; wait for the answers**.
-6. **If the register has open entries, ask them before resuming
-   implementation.** Otherwise continue the Stage 4 loop from the tracker's
-   next unchecked line — an open `RV` before any task of a later phase — under
-   all normal rules. **An open blocking F-ID outranks that line**: a fix loop
-   interrupted mid-round leaves `RV` `[x]` and every task `[x]`, so the tracker's
-   next unchecked line points past it. Read the ledger's open IDs and the
-   Iteration log's last incomplete row first, and resume the fix loop — this protocol changes how a run is
-   re-entered, never what the run is allowed to do.
+6. **Resume derives the state from disk, in this precedence.** Read down; the
+   first row that matches is the state, and its action is the only valid next
+   action. This protocol changes how a run is re-entered, never what the run is
+   allowed to do.
+
+   | On disk | State | The only valid next action |
+   | --- | --- | --- |
+   | any `[~]` line | unreconciled | Rule 4 reconciliation — an `[~]` `RV`/`RVJ` against `agent-output/`, never against the code; an `[~]` task against the tree |
+   | `register.md` has open entries | blocked on the user | **ask them**, before resuming implementation |
+   | a blocking F-ID is `open` in `findings.md` | `FIX_PLAN` / `FIX_IMPLEMENT` / `RE_REVIEW` of **the phase that owns it** | continue that phase's fix loop from the Iteration log's last incomplete row — write the round's fix plan if it is missing, dispatch the fixes if it is not, re-review if they landed |
+   | a round names a `fixplan` not in `agent-output/` | `FIX_PLAN` | write that round's fix plan |
+   | a phase has an unchecked task and no `[~]` anywhere | `IMPLEMENT` | dispatch **that phase's** next open task, in wave order. Not its `RV` — review may not begin while a task of the phase is out — and not a later phase |
+   | every task of a phase `[x]`, its `RV` `[ ]` | `REVIEW` | **review that phase.** Not the next phase — this is the most important run there is to resume: fully implemented and entirely unreviewed |
+   | every task `[x]`, `RV` `[x]`, no open blocking F-ID | `PASS` | close out, then the next phase's first task |
+
+   **An open blocking F-ID outranks the tracker's next unchecked line.** A fix
+   loop interrupted mid-round leaves `RV` `[x]` and every task `[x]`, so the
+   next unchecked line points *past* the phase that owns the finding. Read the
+   ledger's open IDs and the Iteration log's last incomplete row before taking
+   any line from the tracker.
+
+   **Resume never re-runs a completed implementation task, and never advances.**
+   A task line `[x]` with a hash is done; re-dispatching it is how a resumed run
+   duplicates work. And no row above has "start the next phase" as its action
+   except the last.
 
 ## Orchestrator context hygiene
 

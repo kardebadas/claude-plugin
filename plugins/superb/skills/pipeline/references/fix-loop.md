@@ -5,19 +5,21 @@ phase autonomously.
 
 ## Per-phase loop (each phase in dependency order; independent phases concurrently as lanes — `parallel.md`)
 
-0. **Read the run state in full** — `progress.md`, then `findings.md`, then
+0. **Read state** (state: entry) — **read the run state in full** — `progress.md`, then `findings.md`, then
    `register.md`, from `<PROJECT_DIR>/docs/superpowers/runs/YYYY-MM-DD-<topic>/`,
    created at Stage 1. This is the first action of the phase: before dispatching
    any agent, before opening the sub-plan, before touching source. **Reconcile
    every `[~]` task against the actual code before continuing** (Run State Law,
    Rule 4 — procedure in `run-state.md`). The files name the phase, its first
    open task, and every finding still open; your memory does not get a vote.
-1. **Implement** the phase **wave by wave** via
-   `superpowers:subagent-driven-development`, following the wave table the user
-   approved (Rule 6, `parallel.md`). A wave of one runs in the phase worktree;
-   a wave of `k >= 2` dispatches all `k` implementers in one message, each in
-   its own worktree and branch, and merges them in task order when all have
-   passed task review. Around **each individual task**: mark it `[~]` with a
+1. **IMPLEMENT** — implement the phase, wave by wave, per
+   `references/implement.md`,
+   following the wave table the user approved (Rule 6, `parallel.md`). A wave of
+   one runs in the phase worktree; a wave of `k >= 2` dispatches all `k`
+   implementers in one message, each in its own worktree and branch, and merges
+   them in task order **when all have landed and the build gates are green**.
+   Completing a task dispatches no reviewer.
+   Around **each individual task**: mark it `[~]` with a
    timestamp (and its worktree branch) and save *before* dispatching; when it
    lands, mark it `[x]` with its commit hash, update the Current State block
    (phase, next action, `date` timestamp), save, then **re-read the file** to
@@ -31,7 +33,7 @@ phase autonomously.
    the turn** — on a mailbox harness a finished agent cannot wake you, and the
    turn-end is what makes a run stop after every task. See *Who wakes you after
    a dispatch* in `SKILL.md`.
-2. **Review**: *(this step is a tracker line — the phase's `RV`. Mark it `[~]`
+2. **REVIEW**: *(this step is a tracker line — the phase's `RV`. Mark it `[~]`
    with a timestamp and save **before** dispatching any reviewer, exactly as
    Rule 2 requires of a task. A run that dies here must be able to tell
    "reviewers were dispatched" from "review never started".)*
@@ -60,12 +62,18 @@ phase autonomously.
      `^` base: a commit sitting immediately before a slice's first task falls
      into no slice at all, so derive `PB` with `git merge-base` rather than
      assuming `<first-task-hash>^`. Being their author is not a review.
-   - Whenever there is more than one slice, spawn **one additional
-     integration reviewer** in the same parallel batch. Its scope is the
-     phase's combined diff, and it looks only for what single slices cannot
-     see: cross-slice contract mismatches (producer in one slice, consumer in
-     another), regressions the phase introduces into earlier phases' work,
-     and duplicated or conflicting changes across slices.
+   - Add **one integration reviewer only at a declared integration
+     boundary** — a Rule 3 split's siblings joining, two lanes joining, or a
+     contract introduced in one slice and consumed in another that no single
+     slice's range covers — and name it on the round as `· boundary: <what>`.
+     At one slice `i` is 0, because that slice already sees the whole diff.
+     Above one slice with no such boundary, `i` is 0 and the round records
+     `· no integration boundary`, so an omission and a judgement never read
+     the same. When it does run, its scope is the phase's combined diff, and
+     it looks only for what single slices cannot see: cross-slice contract
+     mismatches (producer in one slice, consumer in another), regressions the
+     phase introduces into earlier phases' work, and duplicated or
+     conflicting changes across slices.
    - **Run the repo test suite for the phase's changed code as part of this
      step.** Failing tests or a broken build on the phase's changes are
      **bug findings by definition**, whether or not any reviewer reported
@@ -74,8 +82,8 @@ phase autonomously.
    - Consolidate findings from all reviewers **into `findings.md`**, dedup, and
      tag each by severity. **There are exactly three tiers: Critical, Major
      (= `/review`'s "Warning"), Minor.** A reviewer that reports in another
-     vocabulary is re-tagged here, never carried: `subagent-driven-development`'s
-     task reviewer emits **Important**, whose contract is "fix everything before
+     vocabulary is re-tagged here, never carried: a reviewer may emit
+     **Important**, whose usual contract is "fix everything before
      this task completes" — right for one task's diff, wrong for a phase, and it
      is not in this skill's blocking list. So **an incoming `Important` is
      re-tagged** by consequence: it becomes **Major** if it names a measured
@@ -108,12 +116,15 @@ phase autonomously.
      `N=<tasks> → <s> slice + <i> integration`, exactly `s + i` report files,
      the coverage file, and the F-IDs or `no findings` (`SKILL.md`, *The RV
      line*). Fewer report files than declared reviewers does not close it.
-3. **Decide**:
+3. **DECIDE**:
    - Any **Critical, Major, or bug** finding → go to **Fix loop**.
-   - **Minor-only or none** → phase passes; **advance** to the next phase.
+   - **Minor-only or none** → the phase passes **once its `RV` is `[x]` and the
+     close-out write in step 4 has landed**; then advance. Findings alone never
+     license the advance — an empty ledger is what an unreviewed phase looks
+     like too, which is the whole reason `RV` is a tracker line.
    - **If this phase is the last sibling of a Rule 3 split**, the joint
      integration review (below) runs before advancing past the split.
-4. **Close out and advance.** In this order, no reordering:
+4. **PASS — close out and advance.** In this order, no reordering:
    0. Confirm this phase's **`RV` — and, for a split's last sibling, its
       `RVJ` — is `[x]`** with every round's report files present and counted and
       each coverage file ending `COVERED: <n>/<n>` — for every round that owes
@@ -322,15 +333,44 @@ When blocking findings exist (and the convergence rule permits another run):
      whoever actually ran a review round, at whatever depth — a depth-1 run that
      re-reviews its own fixes records that round on the line itself. What is
      forbidden is closing an `RV` no phase-wide fan-out ever produced.
-   - **Standard path**: plan (`writing-plans`) → implement
-     (`subagent-driven-development`) → review the fixes.
-   - **Direct-fix path** (skips only the `writing-plans` step): allowed when
-     the open blocking findings number **≤ 3** AND every finding names the
-     exact file and line. Implement directly via
-     `subagent-driven-development` with the findings as the task list; the
-     review step is unchanged. If any fix grows beyond the files the findings
-     name, or trips the Ambiguity guard, **abort the direct path and restart
-     this fix-mode run on the standard path**.
+   - **Every round is planned**, and the three states this file owns are
+     `FIX_PLAN` → `FIX_IMPLEMENT` → `RE_REVIEW` (`SKILL.md`, *Stage 4*). In
+     this order, no reordering:
+
+     ```
+     FINDINGS → FIX PLAN → FIX IMPLEMENTATION
+     ```
+
+     1. **Write the fix plan** for this round to
+        `agent-output/p<phase>-fixplan-r<round>.md` from
+        `templates/fix-plan.md`, and name it on the round in `progress.md`. It
+        states the findings in scope, root cause where known, the files each
+        fix touches, dependencies between fixes, the tests required, what may
+        run in parallel, and how each fix is verified.
+     2. **Then dispatch the fixes**, per `references/implement.md` — one agent
+        per independent file cluster the plan names, related findings batched
+        into one agent. Five related findings take one or two agents, not five.
+        Each fix agent runs the tests covering its change and reports them.
+     3. **Then review the fixes** (re-review fan-out below).
+   - **Fix agents are sized like re-reviewers: by file cluster, not by finding
+     count.** One agent per independent cluster the fix plan names. Findings
+     that share a cluster share an agent — they touch the same code, and two
+     agents in it conflict. `M` sizes nothing here either, for the same reason
+     it stopped sizing the re-review: six comment corrections in one file are
+     one small diff, and six agents over it spend six dispatches to produce
+     one. Tier each dispatch by the fix's own complexity, not by the phase's:
+     a one-line correction with an exact `file:line` is a cheap-tier dispatch
+     even in a phase whose implementation needed the strongest tier
+     (`references/implement.md`, *Choosing the model*).
+   - **Scale the plan, never skip it.** A round of two findings with exact
+     file:line is a plan of two rows written in a minute; it is not a
+     `writing-plans` run and it does not re-enter brainstorming or the master
+     plan. What the artifact buys is that the round's scope is fixed before the
+     first edit and checkable afterwards. The path that used to skip it — up to
+     three findings naming exact file and line — is the shape this rule exists
+     to stop: a finding, a reaction, then the next finding. If any fix grows
+     beyond the files the findings name, or trips the Ambiguity guard, **abort
+     and re-plan the round**.
    - The **Ambiguity guard applies at every depth**: a finding that can be
      fixed two materially different ways is a question, not a coin flip.
 3. After the recursive run returns, **re-review** using the re-review fan-out
@@ -338,7 +378,12 @@ When blocking findings exist (and the convergence rule permits another run):
    assignments cover every fix diff. Update the ledger and complete the
    Iteration-log row with the set of F-IDs still open after the re-review.
 
-   **Unless `M=0`.** `M` does not size the fan-out — the fix diff does
+   **Unless `M=0`.** `M=0` is not "a round that edited code and needs no plan":
+   it is a round with **no ownable fix commit at all**, every targeted F-ID
+   having closed by deletion or a user-ruled false positive. A round that edited
+   code has an ownable commit, so its `M` is at least 1 and it owes both a fix
+   plan and a reviewer. If you are about to write `M=0` over a diff, the diff is
+   the proof that you should not. `M` does not size the fan-out — the fix diff does
    (*Re-review fan-out*, below) — but it still decides **whether a round happens
    at all**. `M` is **the number of blocking F-IDs this fix-mode run targeted**,
    less every one the ledger closed by a route that leaves no ownable commit.
@@ -384,33 +429,29 @@ When blocking findings exist (and the convergence rule permits another run):
    commit is owed an owner — the round runs, and it is written like any other:
 
    ```markdown
-         → round 4: M=1 C=1 → 1 slice + 0 integration · reports p3-rr4-a.md
+         → round 4: M=1 C=1 → 1 slice + 0 integration
+           · fixplan p3-fixplan-r4.md · reports p3-rr4-a.md
            · coverage p3-rr4-coverage.md → no findings
    ```
 
-   **What this does to the `RV` line depends on whether the fan-out has run.**
-   A fix loop can be entered from step 1 — a wave's build gates failing is a bug
-   finding before any reviewer exists (`parallel.md`). In that case `RV` is
-   still `[ ]` and **stays `[ ]`**: a re-review over fix commits is not the
-   phase review, and closing `RV` on it would tick the box with no slice
-   reviewer having seen the phase diff — the exact failure the line exists to
-   catch, wearing a green tick. Such a round also gets **its own Counters row**
-   (`<phase> pre-RV`), never the phase's review budget: gates failing three
-   times during implementation must not leave the real review two iterations.
+   **Nothing before `RV` enters this loop.** A wave's build gates failing, a
+   red test before any reviewer exists, a broken build on the phase branch —
+   these are unfinished implementation, repaired inside IMPLEMENT and re-gated
+   there (`references/implement.md`). They raise no finding, take no F-ID, need
+   no fix plan and spend no iteration budget. This loop has one entry: REVIEW,
+   or a re-review, returning blocking findings.
 
-   **A pre-`RV` round is recorded in `findings.md`, and nowhere else** — its
-   `<phase> pre-RV` Counters row, plus the Iteration-log row step 1 above
-   opens for it. That is where "recorded, not
-   omitted" is satisfied for such a round, including one that ran no reviewers
-   at all: while the `RV` line stays `[ ]` it has no closed form for a round to
-   be appended to, and the per-round grammar above is a grammar for closed
-   rounds. Its closure routes are read where every route is, from each F-ID's
-   `Closed by` cell in the ledger.
+   **A re-review never closes an unopened `RV`.** A re-review runs over fix
+   commits, not over the phase diff, so it can only append a round to an `RV`
+   the fan-out already closed. Closing `RV` on a re-review would tick the box
+   with no slice reviewer having seen the phase diff — the exact failure the
+   line exists to catch, wearing a green tick.
 
    Only when `RV` is already `[x]` from a completed step 2 does a re-review
    reopen it to `[~]` and reclose it with the round appended in the full
-   per-round grammar — `→ round 2: M=9 C=1 → 1 slice + 0 integration · reports
-   p3-rr2-a.md · coverage p3-rr2-coverage.md → F-012 closed, F-014 raised` — so
+   per-round grammar — `→ round 2: M=9 C=1 → 1 slice + 0 integration · fixplan
+   p3-fixplan-r2.md · reports p3-rr2-a.md · coverage p3-rr2-coverage.md
+   → F-012 closed, F-014 raised` — so
    every round has a declared number its file count is checked against, not only
    the first. The fan-out comes from the fix diff's clusters. Whoever ran the
    round writes it, at whatever depth.
@@ -426,7 +467,7 @@ fix commits, not tasks, so re-reviews get their own rule — and it is a rule ab
 | Ownable fix diff | Slice reviewers | Integration reviewer |
 |------------------|-----------------|----------------------|
 | One commit, or one file cluster | 1 | 0 (the one slice sees all) |
-| Two or more disjoint file clusters | one reviewer per file cluster | 1 |
+| Two or more disjoint file clusters | one reviewer per file cluster | 0, or 1 at a declared boundary |
 
 **Ownable** is the qualifier the rows are keyed on: an ownable commit is one a
 reviewer can be assigned, which is every commit the fix-mode run produced except
@@ -561,14 +602,16 @@ however complete, authorizes nothing.
 - Where a run-state file and your recollection disagree, **the file is right**.
 - No phase carries more than 12 tasks; an oversized phase was split at Stage 3,
   before GATE 2 and before any implementation.
-- Counters are **per phase** (iteration) — with separate rows for an `RVJ` and
-  for any pre-`RV` fix loop, so neither spends the phase's review budget — and
+- Counters are **per phase** (iteration) — with a separate row for an `RVJ`, so
+  it does not spend the phase's review budget — and
   **per recursion chain** (depth),
   and both live in `findings.md` — incremented in the file **before** each
   dispatch, read from the file before each cap check, never carried in context.
   Reset the iteration counter by opening a new phase row.
 - **Re-reviews are sized from the fix diff** — one reviewer per file cluster,
-  integration above one — **not** from task count or finding count, and their
+  and an integration reviewer above one cluster only at a declared boundary
+  (*Re-review fan-out* below is the authority for the number) — **not** from
+  task count or finding count, and their
   assigned ranges must union to cover every fix commit a reviewer can own. A
   claim **deletion**'s commit is the one that has no owner; a claim **pin**'s is
   in the union like any other, because a pin commits a test

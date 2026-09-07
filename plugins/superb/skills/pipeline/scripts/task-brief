@@ -1,0 +1,59 @@
+#!/bin/sh
+# task-brief <plan-file> <task-number>
+#
+# Prints the `## Task <n>` block of a plan: its heading and everything under it,
+# up to the next heading at the same or a shallower level. Fence-aware: a line
+# starting with a hash inside a fenced code block is content, not a heading, and
+# a fence closes only on a marker of its own character and at least its own
+# length, so the nested fences a plan's task blocks carry do not end it early.
+#
+# Exit 0 with the block on stdout; 2 on a usage or IO error; 3 when the plan has
+# no such task. 3 is separate on purpose: an empty brief on exit 0 is how an
+# implementer gets dispatched with no requirements and invents its own.
+set -eu
+
+if [ $# -ne 2 ]; then
+  echo "usage: task-brief <plan-file> <task-number>" >&2
+  exit 2
+fi
+plan=$1
+want=$2
+if [ ! -f "$plan" ]; then
+  echo "task-brief: not a file: $plan" >&2
+  exit 2
+fi
+case $want in
+  '' | *[!0-9]*)
+    echo "task-brief: task number must be digits, got: $want" >&2
+    exit 2
+    ;;
+esac
+
+out=$(awk -v want="$want" '
+  function level(s,   n) { n = 0; while (substr(s, n + 1, 1) == "#") n++; return n }
+  /^[ \t]*(`{3,}|~{3,})/ {
+    ln = $0; sub(/^[ \t]*/, "", ln)
+    ch = substr(ln, 1, 1); n = 0
+    while (substr(ln, n + 1, 1) == ch) n++
+    if (!fence) { fence = 1; fch = ch; flen = n }
+    else if (ch == fch && n >= flen) { fence = 0 }
+    if (inblk) print
+    next
+  }
+  !fence && /^#+[ \t]*[Tt]ask[ \t]+[0-9]+/ {
+    num = $0
+    sub(/^#+[ \t]*[Tt]ask[ \t]+/, "", num)
+    sub(/[^0-9].*$/, "", num)
+    if (num + 0 == want + 0) { inblk = 1; lvl = level($0); print; next }
+    if (inblk && level($0) <= lvl) inblk = 0
+    next
+  }
+  !fence && inblk && /^#+[ \t]/ { if (level($0) <= lvl) { inblk = 0; next } }
+  inblk { print }
+' "$plan")
+
+if [ -z "$out" ]; then
+  echo "task-brief: $plan has no 'Task $want' heading" >&2
+  exit 3
+fi
+printf '%s\n' "$out"

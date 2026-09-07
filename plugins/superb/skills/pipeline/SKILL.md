@@ -10,8 +10,15 @@ argument-hint: "[resume|status]"
 
 `pipeline` drives a feature from idea to a finished branch by **composing
 existing superpowers skills** — it never reimplements brainstorming, planning,
-implementation, or review. It calls those skills and manages the seams between
-them, plus an autonomous per-phase implement → review → recursive-fix loop.
+or review. It calls those skills and manages the seams between them, plus an
+autonomous per-phase implement → review → recursive-fix loop.
+
+**The one exception is implementation dispatch**, which this skill owns
+(`references/implement.md`). Every available implementation skill accepts a
+task only against a review it dispatches for that task, which is a second
+acceptance gate for work this skill accepts at the **phase** — so composing one
+reviewed every phase twice. Owning the dispatch is what makes the invariant
+mechanical: completing a task dispatches no reviewer.
 
 **Core principle: compose, don't reimplement.** Every stage delegates to the
 canonical skill for that job. This skill's only original logic is the
@@ -20,9 +27,12 @@ reviewer fan-out math, and the fix loop.
 
 **Reference files** — read at the stage that needs them:
 `references/run-state.md` (file formats, task-line grammar, cold-start resume,
-dispatch contract), `references/fix-loop.md` (Stage 4's loop and guard rails)
-and `references/parallel.md` (Rule 6: dependency annotations, waves, lanes,
-worktrees and merges, and the Brain-Agent mode). `templates/` holds the run-state file templates.
+dispatch contract), `references/implement.md` (Stage 4's IMPLEMENT state: how a
+phase's tasks are dispatched, waved and merged, and why completing one
+dispatches no reviewer), `references/fix-loop.md` (Stage 4's loop and guard
+rails) and `references/parallel.md` (Rule 6: dependency annotations, waves,
+lanes, worktrees and merges, and the Brain-Agent mode).
+`templates/` holds the run-state file templates.
 
 ## Invocation
 
@@ -193,20 +203,23 @@ toward Rule 3's 12-task cap nor toward `N` in `ceil(N/5)`.
 ```markdown
 - [ ] RV — review fan-out
 - [~] RV — review fan-out · N=8 → 2 slice + 1 integration · started 2026-09-01 14:31
-- [x] RV — review fan-out · N=8 → 2 slice + 1 integration
+- [x] RV — review fan-out · N=8 → 2 slice + 1 integration · boundary: the T3 contract consumed by T7
       · reports p3-review-{a,b,int}.md · coverage p3-coverage.md → F-012, F-013
+- [x] RV — review fan-out · N=8 → 2 slice + 0 integration · no integration boundary
+      · reports p5-review-{a,b}.md · coverage p5-coverage.md → no findings
 ```
 
 The `[ ]` form carries nothing else: at GATE 2 no task has a hash, and a waved
 phase's slice count still has latitude in it (one slice per wave, or per
 adjacent pair of small waves). Both are filled in at dispatch.
 
-**Closing it takes artifacts, not adjectives** — four fields, each checkable by
+**Closing it takes artifacts, not adjectives** — these fields, each checkable by
 someone who was not there, all paths relative to `agent-output/`:
 
 | Field | What it must satisfy |
 | --- | --- |
-| `N=<tasks> → <s> slice + <i> integration` | Which number `s` must match depends on the regime, and the declaration's own key says which — the regimes are the table below. Whichever one sized it, **`i` is 1 whenever `s > 1`**, and 0 when `s` is 1, because one slice already sees the whole diff. |
+| `N=<tasks> → <s> slice + <i> integration` | Which number `s` must match depends on the regime, and the declaration's own key says which — the regimes are the table below. Whichever one sized it, **`i` is 0 at one slice** — that slice already sees the whole diff, so a second reviewer over it is duplication a boundary cannot license. **Above one slice `i` is 1 only at a declared integration boundary**, named on the round as `· boundary: <what>`: a Rule 3 split's siblings joining, two lanes joining, or a contract introduced in one slice and consumed in another that no single slice's range covers. Otherwise `i` is 0 and the round says so (`· no integration boundary`) — an omission and a judgement read identically, and that is how a review goes missing without anyone deciding to skip it. |
+| `fixplan <file>` | Fix rounds only: **required on a round declaring `M=<m>` with `m >= 1`**, absent from an `M=0 → no round` record. The round's fix plan (`templates/fix-plan.md`), written before the first fix was dispatched — findings → fix plan → fix implementation, in that order. A round that fixed something and names no plan is a round whose fixes nobody can check against a scope. |
 | `coverage <file>` | One file holding **the slice assignment table above the `git log --oneline PB..PH`**, and ending with the verdict line `COVERED: <n>/<n> commits`. All three: a bare log is the input to a coverage judgement rather than the judgement, and a table with a gap in it sits above the log just as happily as one without. Anything short of `<n>/<n>` does not close the line. The table's own shape is fixed, below the regimes. |
 | `→ <F-IDs>` or `→ no findings` | What the round produced. |
 
@@ -261,8 +274,9 @@ passes.
 are read against the round they sit in, never against the whole line:
 
 ```markdown
-      → round 2: M=9 C=1 → 1 slice + 0 integration · reports p3-rr2-a.md
-        · coverage p3-rr2-coverage.md → F-012 closed, F-014 raised
+      → round 2: M=9 C=1 → 1 slice + 0 integration · fixplan p3-fixplan-r2.md
+        · reports p3-rr2-a.md · coverage p3-rr2-coverage.md
+        → F-012 closed, F-014 raised
 ```
 
 The fan-out is **one reviewer per file cluster in the fix diff**, integration
@@ -472,8 +486,9 @@ phases, *before GATE 2*, and the user approves them as part of the plan:
   into the phase branch with the build gates green.
 - A wave of one runs as today. A wave of two or more dispatches **all members at
   once**, each implementer in **its own git worktree and branch** cut from the
-  phase branch head; members are reviewed per task exactly as
-  `subagent-driven-development` prescribes, then merged back in task order.
+  phase branch head; members land independently and are merged back in task
+  order once all of them have landed and the build gates are green. No member is
+  reviewed before its merge.
 - Phases with no dependency between them run as **concurrent lanes**, each an
   independent instance of the per-phase loop with its own Counters row.
 - **Missing or vague annotations are not a licence to guess** — a task with no
@@ -526,7 +541,13 @@ digraph pipeline {
     "Stage 3: expand each phase (1 agent/phase, each runs writing-plans, annotates deps+files)" [shape=box];
     "Stage 3a: split any phase over 12 tasks; compute waves and lanes (Rule 6)" [shape=box];
     "GATE 2: approve expanded plan (register must be empty)" [shape=diamond];
-    "Stage 4: autonomous loop — lanes of phases, waves of tasks (ambiguity -> ask)" [shape=box];
+    "Stage 4 IMPLEMENT: every task in the phase, waves of tasks (ambiguity -> ask)" [shape=box];
+    "Stage 4 REVIEW: RV fan-out over the whole phase diff (all reviewers return first)" [shape=box];
+    "Stage 4 DECIDE: consolidate, dedup, F-IDs, tiers" [shape=diamond];
+    "Stage 4 FIX_PLAN: one scoped fix plan for this round's blocking findings" [shape=box];
+    "Stage 4 FIX_IMPLEMENT: fix agents, one per file cluster" [shape=box];
+    "Stage 4 RE_REVIEW: sized from the fix diff (C=<n>)" [shape=box];
+    "Stage 4 PASS: RV [x], close-out written and saved" [shape=box];
     "Stage 4b: joint integration review over a split's combined diff" [shape=box];
     "Stage 5: finishing-a-development-branch" [shape=doublecircle];
 
@@ -538,10 +559,20 @@ digraph pipeline {
     "Stage 2: master plan (writing-plans)" -> "Stage 3: expand each phase (1 agent/phase, each runs writing-plans, annotates deps+files)";
     "Stage 3: expand each phase (1 agent/phase, each runs writing-plans, annotates deps+files)" -> "Stage 3a: split any phase over 12 tasks; compute waves and lanes (Rule 6)";
     "Stage 3a: split any phase over 12 tasks; compute waves and lanes (Rule 6)" -> "GATE 2: approve expanded plan (register must be empty)";
-    "GATE 2: approve expanded plan (register must be empty)" -> "Stage 4: autonomous loop — lanes of phases, waves of tasks (ambiguity -> ask)" [label="approved"];
-    "Stage 4: autonomous loop — lanes of phases, waves of tasks (ambiguity -> ask)" -> "Stage 4b: joint integration review over a split's combined diff" [label="last sibling of a split"];
-    "Stage 4b: joint integration review over a split's combined diff" -> "Stage 4: autonomous loop — lanes of phases, waves of tasks (ambiguity -> ask)" [label="findings / next phase"];
-    "Stage 4: autonomous loop — lanes of phases, waves of tasks (ambiguity -> ask)" -> "Stage 5: finishing-a-development-branch" [label="all phases done"];
+    "GATE 2: approve expanded plan (register must be empty)" -> "Stage 4 IMPLEMENT: every task in the phase, waves of tasks (ambiguity -> ask)" [label="approved"];
+    "Stage 4 IMPLEMENT: every task in the phase, waves of tasks (ambiguity -> ask)" -> "Stage 4 REVIEW: RV fan-out over the whole phase diff (all reviewers return first)" [label="every task [x] + gates green"];
+    "Stage 4 REVIEW: RV fan-out over the whole phase diff (all reviewers return first)" -> "Stage 4 DECIDE: consolidate, dedup, F-IDs, tiers";
+    "Stage 4 DECIDE: consolidate, dedup, F-IDs, tiers" -> "Stage 4 PASS: RV [x], close-out written and saved" [label="no blocking findings"];
+    "Stage 4 DECIDE: consolidate, dedup, F-IDs, tiers" -> "Stage 4 FIX_PLAN: one scoped fix plan for this round's blocking findings" [label="blocking findings"];
+    "Stage 4 FIX_PLAN: one scoped fix plan for this round's blocking findings" -> "Stage 4 FIX_IMPLEMENT: fix agents, one per file cluster";
+    "Stage 4 FIX_IMPLEMENT: fix agents, one per file cluster" -> "Stage 4 RE_REVIEW: sized from the fix diff (C=<n>)";
+    "Stage 4 RE_REVIEW: sized from the fix diff (C=<n>)" -> "Stage 4 FIX_PLAN: one scoped fix plan for this round's blocking findings" [label="blocking findings remain"];
+    "Stage 4 RE_REVIEW: sized from the fix diff (C=<n>)" -> "Stage 4 PASS: RV [x], close-out written and saved" [label="clean"];
+    "Stage 4 PASS: RV [x], close-out written and saved" -> "Stage 4b: joint integration review over a split's combined diff" [label="last sibling of a split"];
+    "Stage 4b: joint integration review over a split's combined diff" -> "Stage 4 FIX_PLAN: one scoped fix plan for this round's blocking findings" [label="blocking findings"];
+    "Stage 4b: joint integration review over a split's combined diff" -> "Stage 4 PASS: RV [x], close-out written and saved" [label="clean"];
+    "Stage 4 PASS: RV [x], close-out written and saved" -> "Stage 4 IMPLEMENT: every task in the phase, waves of tasks (ambiguity -> ask)" [label="next phase"];
+    "Stage 4 PASS: RV [x], close-out written and saved" -> "Stage 5: finishing-a-development-branch" [label="all phases done"];
 }
 ```
 
@@ -638,9 +669,9 @@ one written at GATE 2 is part of the plan the user approved.
 
 ### Compacting at GATE 2
 
-Stage 4 is the long stage — one orchestrator turn per dispatch, and every task
-takes an implementer, a reviewer and usually a fix round or two, across every
-phase. Your whole context is re-sent on each of them. Stage 1's question rounds
+Stage 4 is the long stage — one orchestrator turn per dispatch, an implementer
+for every task of every phase, then that phase's review fan-out and any fix
+rounds it opens. Your whole context is re-sent on each of them. Stage 1's question rounds
 are the worst of it: Rule 5 keeps agent *output* out of context behind a
 `DETAIL:` pointer, but a conversation with the user cannot be pointer-ised. It
 is simply there, re-sent every turn until the run ends.
@@ -685,55 +716,123 @@ anyway (Rules 1 and 4), so it resumes from the same state either way. They may
 want the design conversation for something else.
 
 ### Stage 4 — Autonomous per-phase loop
-For each phase — in dependency order, independent phases concurrently as lanes
-— see `references/fix-loop.md`. In short:
-0. **Read the tracker in full** — first action of the phase, before any
-   dispatch — and reconcile any `[~]` task (Rule 4). It, not your memory, names
-   the phase and its first open task.
-1. **Implement wave by wave** via `superpowers:subagent-driven-development`.
-   A wave of one runs in the phase worktree. A wave of `k ≥ 2` dispatches `k`
-   implementers **at once**, each in its own worktree/branch, each marked `[~]`
-   before its own dispatch and `[x]` + hash as it lands (Rule 2); when the last
-   member lands, merge the member branches in task order, run the build gates,
-   and only then re-read the tracker for the next wave. Independent phases run
-   as concurrent lanes. Procedure: `references/parallel.md`.
-2. **Review**: mark the phase's **`RV` line `[~]` and save first** — it is a
-   tracker line and Rule 2 governs it. Then `N` = task count in the phase →
-   spawn the slice reviewers in parallel — `ceil(N/5)` for an **unwaved** phase,
-   one per wave or adjacent wave-pair for a **waved** one (recorded as `waved`
-   on the line, since a wave is never split across two reviewers) — each owning
-   an exact **commit range** taken from the tracker's hashes, each running the
-   repo `/review` skill, each returning a report file even when it finds
-   nothing, **plus one integration reviewer over the whole phase diff whenever
-   there is more than one slice**. Confirm the slices cover every commit on the
-   phase branch, including any you wrote inline yourself. Run the test suite —
-   failing tests are bug findings.
-   Consolidate + dedup into `findings.md`, **assigning each new finding a
-   stable `F-NNN` ID**. **Three tiers only** — Critical / Major (= `/review`
-   "Warning") / Minor; ties within them resolve upward; a rediscovered finding
-   keeps its old ID; **an incoming `Important` is re-tagged** to Major or Minor
-   by the predicate in `references/fix-loop.md` and never carried as a tier. Then
-   close `RV` `[x]` with those F-IDs — or `no findings` — and the
-   `agent-output/` paths.
-3. **Fix loop**: if any Critical/Major/bug → recurse `pipeline` in
-   fix-mode on the open F-IDs, then re-review. Repeat until clean, subject to
-   the convergence rule (an ID still open after a fix-mode run that targeted
-   it, or a repeated open-ID set, stops the loop with a user question — before
-   the caps). Minor-only ≠ blocking.
-4. **Advance** to next phase — only with the phase's **`RV` line `[x]`**
-   carrying its F-IDs or `no findings` and its `agent-output/` paths, no open
-   blocking IDs in `findings.md`, green tests, **and the tracker written and
-   saved** with the phase fully checked off (hashes included) and Current State
-   pointing at the **next unchecked line**. The `RV` condition is listed first
-   because it is the only one an unreviewed phase fails — the other three all
-   pass vacuously when step 2 never ran.
 
-   For the **last sibling of a Rule 3 split**, that next unchecked line is the
-   split's **`RVJ`**, not the next phase: the joint review over the siblings'
-   combined diff runs and closes `RVJ` `[x]`, its blocking findings going
-   through the fix loop, before the run advances. The last sibling's own `RV`
-   never substitutes for it. Minor findings are deferred to the Stage 5 hand-off, not
-   discarded.
+For each phase — in dependency order, independent phases concurrently as lanes
+— see `references/fix-loop.md`. **A phase is a transaction:** it is the unit of
+execution and the unit of acceptance, and the run stays inside it until it
+passes.
+
+```
+IMPLEMENT ─► REVIEW ─► DECIDE ─┬─ no blocking findings ──────────────► PASS ─► NEXT_PHASE
+                               │                                        ▲
+                               └─ blocking findings                     │
+                                    ▼                                   │
+                                  FIX_PLAN ─► FIX_IMPLEMENT ─► RE_REVIEW┤
+                                    ▲                                   │
+                                    └──────── blocking findings remain ─┘
+```
+
+**0. Read the tracker in full** — first action of the phase, before any dispatch
+— and reconcile any `[~]` line (Rule 4). It, not your memory, names the phase,
+its state, and its next open line.
+
+**IMPLEMENT** — `references/implement.md`.
+Dispatch every task in the phase, wave by wave per the approved wave table.
+Mark each `[~]` before its dispatch and `[x]` with its commit hash as it lands
+(Rule 2). Merge each wave in task order and run the build gates.
+```
+COMPLETING AN IMPLEMENTATION TASK DISPATCHES NO REVIEWER.
+```
+The only transition here is task → next task. An implementer fixing its own
+compile error, failing test or obvious mistake is implementation, not the fix
+loop — and so is a red build gate after a wave merge: it means the
+implementation is not finished, so it is repaired here and re-gated here. **No
+remediation round opens before `RV`.** No finding, no F-ID, no fix plan, no
+Counters row; the formal states begin only where REVIEW leaves off.
+*Exit:* every task line in the phase `[x]` with a hash (or a justified
+`nocommit`), every wave merged, build gates green.
+
+**REVIEW** — the phase's `RV` line.
+Mark `RV` `[~]` **and save first** — it is a tracker line and Rule 2 governs it.
+`N` = the phase's task count → dispatch the slice reviewers in parallel:
+`ceil(N/5)` for an **unwaved** phase, one per wave or adjacent wave-pair for a
+**waved** one (recorded as `waved` on the line, since a wave is never split
+across two reviewers). Each owns an exact **commit range** from the tracker's
+hashes, each runs the repo `/review` skill, each returns a report file even when
+it finds nothing. Add an integration reviewer **only at a declared integration
+boundary** (see *Reviewer fan-out*). Confirm the slices cover every commit on
+the phase branch, including any you wrote inline yourself. Run the test suite —
+failing tests are bug findings.
+```
+REVIEW MAY NOT BEGIN WHILE ANY TASK IN THIS PHASE IS UNCHECKED.
+ALL REVIEWERS MUST RETURN BEFORE ANY FIX IS DISPATCHED.
+```
+A reviewer discovers problems; it never starts a fix. Do not dispatch a fixer
+because the first report came back while others are still out.
+*Exit:* every dispatched reviewer has returned.
+
+**DECIDE.**
+Consolidate + dedup every report into `findings.md`, **assigning each new
+finding a stable `F-NNN` ID**. **Three tiers only** — Critical / Major (=
+`/review` "Warning") / Minor; ties within them resolve upward; a rediscovered
+finding keeps its old ID; **an incoming `Important` is re-tagged** to Major or
+Minor by the predicate in `references/fix-loop.md` and never carried as a tier. Close `RV` `[x]` with those F-IDs — or `no findings` — its
+`agent-output/` paths and its coverage file.
+- **No Critical/Major/bug** → `PASS`. Minor findings defer to the Stage 5
+  hand-off; they are not blocking and not discarded.
+- **Any Critical/Major/bug** → `FIX_PLAN`. **The phase does not advance.**
+
+**FIX_PLAN** — `references/fix-loop.md`, and required.
+Write the phase's fix plan for this round to
+`agent-output/p<phase>-fixplan-r<round>.md` from `templates/fix-plan.md`, and
+name it on the round. Findings → fix plan → fix implementation, in that order.
+No fix is dispatched before its plan is on disk.
+
+**FIX_IMPLEMENT.**
+Execute the fix plan with the **minimum reasonable number of fix agents** — one
+per independent file cluster the plan names, related findings batched together.
+Fix agents run the tests covering their change. They do not review their own
+fixes as a substitute for `RE_REVIEW`.
+
+**RE_REVIEW.**
+Reopen `RV` to `[~]` and append this round. Size it from the **fix diff** — one
+slice per file cluster, recorded as `C=<n>` — never from the finding count. The
+re-review reads: whether the blocking findings were actually resolved, the fix
+diff, regressions the fixes introduced, interactions between fixes, and whether
+the phase now satisfies its plan. It is not a rerun of the original per-slice
+structure.
+- Clean → `PASS`.
+- Blocking findings remain → back to `FIX_PLAN` for the next round, subject to
+  the convergence rule (an ID still open after a fix run that targeted it, or a
+  repeated open-ID set, stops the run with a user question — **before** the
+  caps).
+
+**PASS.**
+Only with all of this true and **written and saved**: every task `[x]` with its
+hash; required tests and build gates green; the phase's `RV` `[x]` carrying
+every round's F-IDs or `no findings`, its `agent-output/` paths and coverage;
+every fix plan the rounds name present in `agent-output/`; no open blocking F-ID
+scoped to this phase; Current State pointing at the **next unchecked line**.
+The `RV` condition is listed first because it is the only one an unreviewed
+phase fails — the others all pass vacuously when REVIEW never ran.
+
+For the **last sibling of a Rule 3 split**, the next unchecked line is the
+split's **`RVJ`**, not the next phase: the joint review over the siblings'
+combined diff runs and closes `RVJ` `[x]`, its blocking findings going through
+the same fix loop, before the run advances. The last sibling's own `RV` never
+substitutes for it.
+
+**NEXT_PHASE.**
+```
+PASS IS THE ONLY EDGE INTO THE NEXT PHASE.
+
+Implementation complete is not phase complete.
+All task lines [x] is not phase complete.
+An empty ledger is not phase complete.
+```
+If the fix loop cannot converge, **stop and ask the user**. A cap firing or the
+convergence rule firing never licenses the next phase — those are escape
+hatches out of the run, not around the gate.
 
 Stage 4 is autonomous about **execution**, not about **requirements**: the
 Ambiguity guard (below) interrupts the run whenever the plan doesn't decide
@@ -872,8 +971,8 @@ machine away from gone. Put it in the hand-off.
 | Tasks in phase (N) | Slice reviewers | Integration reviewer | Total |
 |--------------------|-----------------|----------------------|-------|
 | 1–5                | 1               | 0 (one slice sees all) | 1   |
-| 6–10               | 2               | 1                    | 3     |
-| 11–12              | 3               | 1                    | 4     |
+| 6–10               | 2               | 0, or 1 at a declared boundary | 2–3 |
+| 11–12              | 3               | 0, or 1 at a declared boundary | 3–4 |
 
 Rule 3 caps a phase at 12 tasks, so `N > 12` cannot occur. If you are computing
 a fan-out for N of 13 or more, the phase was never split — go back and split it.
@@ -881,6 +980,29 @@ a fan-out for N of 13 or more, the phase was never split — go back and split i
 Each slice reviewer sees ONLY its slice's diff so findings map back to
 specific tasks; the integration reviewer sees the whole phase diff and hunts
 only cross-slice and cross-phase issues no single slice can see.
+
+**Reviewers are dispatched at the standard capable tier or above**, and a
+phase whose diff is architecture-sensitive takes the strongest available — the
+fan-out is the largest dispatch class in a run, so the tier is chosen here and
+not defaulted (`references/implement.md`, *Choosing the model*). A slice
+reviewer reads a range against a plan; that is not cheap-tier work, and a
+reviewer that misses a cross-slice contract mismatch costs a whole fix round.
+
+**The integration reviewer is spent on a boundary, not on a slice count.** Three
+reviewers over an 8-task phase whose slices share no contract read the same code
+twice; that third reviewer's whole value is in what crosses between slices. So it
+is dispatched where something crosses — a Rule 3 split's siblings joining, two
+lanes joining, or a contract introduced in one slice and consumed in another that
+no single slice's range covers — and the round names it (`· boundary: <what>`).
+Where nothing crosses, the round declares `· no integration boundary`: the
+absence is a decision on the record, not a gap, because an omission and a
+judgement are indistinguishable to every later reader.
+
+**Where something does cross, it is not optional.** The two mandatory cases keep
+their own line and their own mandate: a split's `RVJ` and a lane join's `RVJ` are
+`0 slice + 1 integration` always, because there the boundary *is* the unit nobody
+else saw. And slice coverage does not change — every commit on the phase branch
+still falls inside some slice's range, and that is still a check you run.
 
 **Slices are commit ranges, not vibes.** Take each slice's boundaries from the
 hashes recorded against its tasks in the tracker. Tasks that touch the same
@@ -910,7 +1032,10 @@ believes.
 
 `ceil(N/5)` is defined over **tasks**. Fix-mode returns produce fix commits,
 not tasks, so a re-review is sized from the **fix diff**: **one slice reviewer
-per file cluster**, plus an integration reviewer once there is more than one.
+per file cluster**, plus an integration reviewer above one cluster **only at a
+declared boundary** named on the round, and `· no integration boundary`
+otherwise — the same conditional rule the phase fan-out takes, and
+`references/fix-loop.md`'s *Re-review fan-out* table is its authority.
 `M` is still recorded on the round, and `M=0` still licenses a round with no
 reviewers in it — but `M` does not size the fan-out, because six comment
 corrections in one file are one small diff and three reviewers over it
@@ -977,8 +1102,8 @@ is visible in the run's one durable artifact rather than resting on your memory
 of a permission.
 
 **Nothing substitutes for the fan-out.** Implementer self-reports and their own
-mutation tests, a green suite, Stage 1b's design pressure-test, per-task review
-inside `subagent-driven-development`, your own read of the diff — each is blind
+mutation tests, a green suite, Stage 1b's design pressure-test, an
+implementer's own self-check, your own read of the diff — each is blind
 to something a fresh reviewer sees, and the rationalization table says why for
 each. The defects this catches are the author-blind ones: **a change correct in
 its own lines that activates broken code elsewhere**, a contract produced in one
@@ -1154,9 +1279,14 @@ memory — decide what happens next.**
 
 ## Composed skills (never reimplemented)
 `superpowers:brainstorming`, `superpowers:writing-plans`,
-`superpowers:subagent-driven-development`,
 `superpowers:finishing-a-development-branch`, and the repo `/review` skill
 (the deep branch-audit skill in this repo, not a generic code review).
+
+`superpowers:subagent-driven-development` is deliberately **not** composed here.
+It has no implementation-only mode — an implementer returning `DONE` dispatches
+a reviewer for that task, and a task completes only at zero open findings at any
+severity through an uncapped fix/re-review loop — and it is phase-unaware. Stage
+4's IMPLEMENT state is `references/implement.md` instead.
 
 ## Common mistakes
 - **Assuming instead of asking** — the only failure mode. See the Iron Law.

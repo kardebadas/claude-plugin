@@ -20,6 +20,12 @@ PASS=0; SURV=0; SURVIVORS=()
 # into silent no-ops — and discarding that message left the operator reading
 # `SURVIVED  <name>` with no way to tell a rotted mutant from a real hole in the
 # gate. A killed mutant still prints exactly one line, as before.
+# `grep` here may be ugrep, which parses a PATTERN BEGINNING WITH `-` as an
+# option and exits with a usage error — so `grep -qF "- [x] RV ..."` reports no
+# match rather than searching, and the mutant guarding on it silently reports
+# itself a no-op (measured: "run tracker advances past a phase with an open RV"
+# survived that way). Any pattern that can start with a dash takes `--` before
+# it, or anchors with `^-` as a regex instead of a fixed string.
 run_mutant() { # name, shell applied inside the copy
   local name="$1" script="$2" dir="$WORK/m" out
   rm -rf "$dir"; mkdir -p "$dir"
@@ -28,11 +34,21 @@ run_mutant() { # name, shell applied inside the copy
   if ( cd "$dir" && ./tools/check-plugin.sh ) >/dev/null 2>&1; then
     printf '  SURVIVED  %s\n' "$name"; SURV=$((SURV+1)); SURVIVORS+=("$name")
     if [ -n "$out" ]; then printf '%s\n' "$out" | sed 's/^/            | /'; fi
+  elif printf '%s' "$out" | grep -q "mutant is a no-op"; then
+    # KILLED, BUT BY SOMETHING OTHER THAN ITSELF. A mutant whose own guard
+    # reported a no-op did not apply the mutation it is named for, so the kill
+    # says nothing about the arm this mutant exists to prove — and reporting it
+    # as `killed` hides a rotted anchor behind a green harness. Discarding this
+    # output on the kill path is how three anchors in one branch went stale
+    # while every run read PASS.
+    printf '  NO-OP     %s\n' "$name"; NOOP=$((NOOP+1)); NOOPS+=("$name")
+    printf '%s\n' "$out" | sed 's/^/            | /'
   else
     printf '  killed    %s\n' "$name"; PASS=$((PASS+1))
   fi
 }
 
+NOOP=0; NOOPS=()
 echo "baseline (unmutated copy must PASS):"
 D="$WORK/base"; mkdir -p "$D"
 tar -C "$SRC" --exclude=.git --exclude=__pycache__ -cf - . | tar -C "$D" -xf -
@@ -48,13 +64,15 @@ fi
 # says if everything else about the fixture was green first. Nothing else checks
 # that — the default mode never reads tools/fixtures/ — so it is checked here,
 # where the rest of the baseline is.
-if ( cd "$D" && ./tools/check-plugin.sh --run tools/fixtures/run-ok ) >/dev/null 2>&1; then
-  echo "  ok    clean copy passes with --run over tools/fixtures/run-ok"
-else
-  echo "  FAIL  tools/fixtures/run-ok does not conform on a clean copy — every run-mode mutant below would then kill for that reason instead of its own"
-  ( cd "$D" && ./tools/check-plugin.sh --run tools/fixtures/run-ok ) | grep FAIL
-  exit 1
-fi
+for fx in tools/fixtures/run-ok tools/fixtures/run-open-rv tools/fixtures/run-fixloop; do
+  if ( cd "$D" && ./tools/check-plugin.sh --run "$fx" ) >/dev/null 2>&1; then
+    echo "  ok    clean copy passes with --run over $fx"
+  else
+    echo "  FAIL  $fx does not conform on a clean copy — every run-mode mutant over it would then kill for that reason instead of its own"
+    ( cd "$D" && ./tools/check-plugin.sh --run "$fx" ) | grep FAIL
+    exit 1
+  fi
+done
 
 echo "mutants:"
 J="python3 -c"
@@ -110,8 +128,8 @@ run_mutant "CI stops running the gate"             "sed -i 's|./tools/check-plug
 # reading the raw text for `--run`. Guarded at both ends.
 run_mutant "CI stops running the gate in run mode" '
 f=.github/workflows/checks.yml
-if [ "$(grep -cF -- "check-plugin.sh --run " "$f")" != 1 ]; then
-  echo "mutant is a no-op: checks.yml no longer runs the gate in run mode exactly once, so there is no step to delete"
+if [ "$(grep -cF -- "check-plugin.sh --run " "$f")" -lt 1 ]; then
+  echo "mutant is a no-op: checks.yml no longer runs the gate in run mode at all, so there is no step to delete"
 else
   sed -i "/check-plugin.sh --run /d" "$f"
   grep -qF -- "check-plugin.sh --run " "$f" && echo "mutant is a no-op: the run-mode step was not deleted"
@@ -169,14 +187,14 @@ a='M=9 C=1 \u2192 1 slice + 0 integration'
 assert s.count(a)==1, 'mutant is a no-op: the re-review round example no longer declares M=9 C=1 over one slice exactly once'
 out=s.replace(a, 'M=9 \u2192 1 slice + 0 integration')
 assert 'M=9 C=' not in out, 'mutant is a no-op: the cluster count was not removed'
-assert '1 slice + 0 integration \u00b7 reports p3-rr2-a.md' in out, 'mutant is a no-op: it took the declared counts or the reports field too, so a kill could come from the reviewer-count arm instead'
+assert '1 slice + 0 integration \u00b7 fixplan p3-fixplan-r2.md' in out, 'mutant is a no-op: it took the declared counts or the fixplan field too, so a kill could come from the reviewer-count or fix-plan arm instead'
 p.write_text(out)\""
 run_mutant "re-review round's cluster count disagrees with its slice count" "$J \"import pathlib
 p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md'); s=p.read_text()
 a='M=9 C=1 \u2192 1 slice + 0 integration'
 assert s.count(a)==1, 'mutant is a no-op: the re-review round example no longer declares M=9 C=1 over one slice exactly once'
 out=s.replace(a, 'M=9 C=2 \u2192 1 slice + 0 integration')
-assert 'M=9 C=2 \u2192 1 slice + 0 integration \u00b7 reports p3-rr2-a.md' in out, 'mutant is a no-op: the disagreement did not apply, or it moved the slice count with it'
+assert 'M=9 C=2 \u2192 1 slice + 0 integration \u00b7 fixplan p3-fixplan-r2.md' in out, 'mutant is a no-op: the disagreement did not apply, or it moved the slice count with it'
 p.write_text(out)\""
 
 # --- the linter must also be able to fail over a REAL run directory ---
@@ -194,18 +212,19 @@ p.write_text(out)\""
 # alone is deliberately NOT a mutation: the fixture conforms, so a copy with
 # only `enable_run` applied must still PASS, which is what makes each fixture
 # edit below the whole cause of its own kill.
-enable_run() { # inside the copy: make the wrapper pass --run by default
-  local f=tools/check-plugin.sh a='check-plugin.py" "$@"'
+enable_run_dir() { # inside the copy: make the wrapper pass --run <dir>
+  local d="$1" f=tools/check-plugin.sh a='check-plugin.py" "$@"'
   if ! grep -qF "$a" "$f"; then
     echo "mutant is a no-op: the wrapper no longer invokes check-plugin.py with forwarded arguments, so --run cannot be reached"
     return 1
   fi
-  sed -i 's|check-plugin.py" "$@"|check-plugin.py" --run tools/fixtures/run-ok "$@"|' "$f"
-  if ! grep -qF -- '--run tools/fixtures/run-ok' "$f"; then
+  sed -i "s|check-plugin.py\" \"\$@\"|check-plugin.py\" --run $d \"\$@\"|" "$f"
+  if ! grep -qF -- "--run $d" "$f"; then
     echo "mutant is a no-op: --run was not injected into the wrapper, so the run mode was never entered"
     return 1
   fi
 }
+enable_run() { enable_run_dir tools/fixtures/run-ok; }
 # An unrecognised argument must be REFUSED, not ignored. Ignored, `--rn` runs
 # the default mode and prints PASS, which a caller reads as "the run directory
 # conforms" when the run directory was never opened.
@@ -385,11 +404,13 @@ fi'
 run_mutant "run tracker has no closed review round" '
 enable_run || exit 0
 f=tools/fixtures/run-ok/progress.md
-if [ "$(grep -c "\[x\] RV" "$f")" != 3 ]; then
-  echo "mutant is a no-op: the fixture no longer holds exactly three closed RV records"
+if [ "$(grep -c "\[x\] RV" "$f")" != 4 ]; then
+  echo "mutant is a no-op: the fixture no longer holds exactly four closed RV records"
 else
   sed -i "/\[x\] RV/d" "$f"
+  sed -i "/→ round /d" "$f"
   grep -q "\[x\] RV" "$f" && echo "mutant is a no-op: the closed records were not removed"
+  grep -q "→ round " "$f" && echo "mutant is a no-op: an appended round survived, and a round record is itself a closed round the linter counts"
 fi'
 # Both "missing" branches must report a NAMED failure of their own, and each
 # mutant below is what says so: neutralise either branch and its mutant is the
@@ -1284,7 +1305,7 @@ fi'
 # Nine rule statements reached this branch stated in prose and held by nothing:
 # the `C=<n>` rule in all three files that state it, the coverage table's
 # distinctness rule in both, the fix diff's slice distinctness in both, the
-# Invariant's reviewer-evidence exception, the pre-`RV` recording rule, the
+# Invariant's reviewer-evidence exception, the
 # coverage table's row grammar, and Rule 5b's one `Files:` exception at both
 # ends. Every one was removed individually and `check-plugin.sh` reported PASS.
 # Two of them are worse than unheld: the gate hard-FAILs an `M=` round with no
@@ -1423,21 +1444,6 @@ assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and t
 assert 'the number of blocking f-ids this fix-mode run targeted' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
 assert 'm=0 \u2192 no round' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
 assert 'one reviewer per file cluster' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
-assert 'a pre-'+bt+'rv'+bt+' round is recorded in '+bt+'findings.md'+bt+', and nowhere else' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
-p.write_text(out)\""
-run_mutant "the pre-RV recording rule blurred in fix-loop.md" "$J \"import pathlib,re
-p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
-s=p.read_text(); bt=chr(96); ap=chr(39); ws=chr(92)+'s+'
-flat=lambda x: ' '.join(x.split()).lower()
-a=re.compile(ws.join([re.escape(x) for x in ['A', 'pre-'+bt+'RV'+bt, 'round', 'is', 'recorded', 'in', bt+'findings.md'+bt+',', 'and', 'nowhere', 'else']]), re.I)
-assert len(a.findall(s))==1, 'mutant is a no-op: the phrase this mutant names is absent, reworded or duplicated in that file'
-out=a.sub('A round run before the review is recorded wherever it fits', s)
-assert out!=s, 'mutant is a no-op: the phrase was not blurred'
-assert len(a.findall(out))==0, 'mutant is a no-op: an occurrence survived, and the arm reads flattened text, so the phrase is still present'
-assert 'the number of blocking f-ids this fix-mode run targeted' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
-assert 'm=0 \u2192 no round' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
-assert 'one reviewer per file cluster' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
-assert 'the round forms that carry no reviewer evidence are the whole of the exception' in flat(out), 'mutant is a no-op: a sibling phrase held in the same file went too, so a kill would not be attributable to the phrase this mutant names'
 p.write_text(out)\""
 run_mutant "the coverage-row grammar blurred in SKILL.md" "$J \"import pathlib,re
 p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
@@ -1535,8 +1541,10 @@ p.write_text(out)\""
 # two documents call re-derivable from the line, and this repo's own conforming
 # fixture broke it: `N=9 → 3 slice + 1 integration` passed both gates. So did
 # `N=1 → 2 slice + 1 integration`, and `N=9 → 4 slice + 0 integration`, which
-# also breaks "`i` is 1 whenever `s > 1`" — stated in `SKILL.md` and in
-# `references/run-state.md` and encoded a third time in the fan-out table.
+# also breaks the integration rule — `i` is 0 at one slice, and above one slice
+# is 1 only with a named `boundary:` or 0 with `no integration boundary`
+# declared, stated in `SKILL.md` and in `references/run-state.md` and encoded a
+# third time in the fan-out table.
 #
 # Each mutant below changes ONLY the numbers its arm reads, and asserts that
 # the reviewer count, the cluster count and the report list all still agree, so
@@ -1560,33 +1568,630 @@ assert \"N=11\" in out, \"mutant is a no-op: the task count was not raised\"
 assert \"2 slice + 1 integration\" in out, \"mutant is a no-op: the declared counts moved with it, so a kill could come from the integration arm instead\"
 assert \"reports p2-review-{a,b,int}.md\" in out, \"mutant is a no-op: the reports field went too, so a kill could come from the reviewer-count arm instead\"
 p.write_text(out)"'
-run_mutant "run tracker's multi-slice round drops its integration reviewer" '
+# The integration reviewer is conditional now, so what must not survive is
+# SILENCE about it in either direction: a reviewer with no boundary named, and a
+# multi-slice round that neither has one nor says it does not need one. Phase 2
+# is the fixture's round WITH a boundary, Phase 3 the round declaring none, so
+# each mutant has exactly one target and its kill is attributable.
+run_mutant "run tracker declares an integration reviewer with no boundary" '
 enable_run || exit 0
-'"$J"' "import pathlib
-p=pathlib.Path(\"tools/fixtures/run-ok/progress.md\")
-L=p.read_text().split(chr(10))
-i=[n for n,x in enumerate(L) if x.lstrip().startswith(\"- [x] RV\") and \"N=8\" in x]
-assert len(i)==1, \"mutant is a no-op: the fixture no longer has exactly one closed round declaring N=8\"
-assert \"2 slice + 1 integration\" in L[i[0]], \"mutant is a no-op: that round no longer declares 2 slice + 1 integration\"
-L[i[0]]=L[i[0]].replace(\"N=8\", \"N=15\").replace(\"2 slice + 1 integration\", \"3 slice + 0 integration\")
-out=chr(10).join(L)
-assert \"N=15\" in out and \"3 slice + 0 integration\" in out, \"mutant is a no-op: the integration reviewer was not dropped\"
-assert \"reports p2-review-{a,b,int}.md\" in out, \"mutant is a no-op: the reports field went too, so a kill could come from the reviewer-count arm instead\"
-p.write_text(out)"'
+f=tools/fixtures/run-ok/progress.md
+if [ "$(grep -c "boundary: the T2 contract" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture round no longer names its boundary exactly once"
+else
+  sed -i "/· boundary: the T2 contract consumed by the orchestrator commit in slice b/d" "$f"
+  grep -q "boundary: the T2 contract" "$f" && echo "mutant is a no-op: the boundary is still named on that round"
+  grep -qF "2 slice + 1 integration" "$f" || echo "mutant is a no-op: the integration reviewer went with the boundary, so a kill could come from another arm"
+  grep -qF "reports p2-review-{a,b,int}.md" "$f" || echo "mutant is a no-op: the report set went too, so a kill could come from the file-count arm"
+fi'
+run_mutant "run tracker multi-slice round is silent about its integration reviewer" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if [ "$(grep -c "^      · no integration boundary$" "$f")" != 1 ]; then
+  echo "mutant is a no-op: no round declares the absence of a boundary on a line of its own exactly once (the fixture prose mentions the phrase too, which is why this anchors on the bullet form)"
+else
+  sed -i "/^      · no integration boundary$/d" "$f"
+  grep -q "^      · no integration boundary$" "$f" && echo "mutant is a no-op: the declaration is still present"
+  grep -qF "2 slice + 0 integration" "$f" || echo "mutant is a no-op: the declared counts went with it, so a kill could come from a sizing arm"
+fi'
+# ATTRIBUTABLE, which took more than doubling the number: a round declaring
+# `2 slice + 2 integration` while listing three report files is also caught by
+# the reviewer-count arm, so the kill said nothing about the at-most-one rule.
+# The mutation now grows the report list and the coverage table to match, which
+# leaves exactly one arm able to object.
+run_mutant "run tracker declares two integration reviewers" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+c=tools/fixtures/run-ok/agent-output/p2-coverage.md
+if ! grep -qF "2 slice + 1 integration" "$f"; then
+  echo "mutant is a no-op: no round declares 1 integration reviewer to double"
+elif ! grep -qF "reports p2-review-{a,b,int}.md" "$f"; then
+  echo "mutant is a no-op: Phase 2s report set is not the brace form this mutant grows"
+else
+  sed -i "0,/2 slice + 1 integration/s|2 slice + 1 integration|2 slice + 2 integration|" "$f"
+  sed -i "s|reports p2-review-{a,b,int}.md|reports p2-review-{a,b,int,int2}.md|" "$f"
+  printf "fixture reviewer report - phase 2 second integration slice\n" > tools/fixtures/run-ok/agent-output/p2-review-int2.md
+  printf "| p2-review-int2.md | bbbbbbb^..b2b2b2b |\n" >> "$c"
+  grep -qF "2 slice + 2 integration" "$f" || echo "mutant is a no-op: the count was not doubled"
+  grep -qF "reports p2-review-{a,b,int,int2}.md" "$f" || echo "mutant is a no-op: the report list did not grow, so the reviewer-count arm would kill this instead"
+  grep -q "boundary: the T2 contract" "$f" || echo "mutant is a no-op: the boundary went too, so a kill could come from the unnamed-boundary arm"
+fi'
 run_mutant "worked one-slice round adds an integration reviewer" "$J \"import pathlib
 p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
 s=p.read_text(); mid=chr(183)
-a='M=1 C=1 → 1 slice + 0 integration ' + mid + ' reports p3-rr4-a.md'
+a='M=1 C=1 → 1 slice + 0 integration'
 assert s.count(a)==1, 'mutant is a no-op: the worked pin round is absent, reworded or duplicated'
-out=s.replace(a, 'M=1 C=1 → 1 slice + 1 integration ' + mid + ' reports p3-rr4-{a,b}.md')
+out=s.replace(a, 'M=1 C=1 → 1 slice + 1 integration')
+out=out.replace(mid + ' reports p3-rr4-a.md', mid + ' reports p3-rr4-{a,b}.md')
 assert out!=s, 'mutant is a no-op: the integration reviewer was not added'
 assert 'M=1 C=1' in out, 'mutant is a no-op: the cluster count went too, so a kill could come from the cluster-count arm instead'
+assert 'reports p3-rr4-{a,b}.md' in out, 'mutant is a no-op: the report list did not grow with the reviewer count, so a kill could come from the file-count arm instead'
 p.write_text(out)\""
 
+
+# Pipeline dispatches implementation itself now, so its brief extractor is a
+# file this repo owns and can lose. Three ways it becomes useless at the first
+# dispatch of a run, each killed by its own arm.
+run_mutant "pipeline task-brief script is missing" '
+f=plugins/superb/skills/pipeline/scripts/task-brief
+if [ ! -f "$f" ]; then
+  echo "mutant is a no-op: the script is already absent"
+else
+  rm -f "$f"
+fi'
+run_mutant "pipeline task-brief script is not executable" '
+f=plugins/superb/skills/pipeline/scripts/task-brief
+if [ ! -x "$f" ]; then
+  echo "mutant is a no-op: the script is already non-executable"
+else
+  chmod -x "$f"
+fi'
+run_mutant "pipeline task-brief script loses its shebang" '
+f=plugins/superb/skills/pipeline/scripts/task-brief
+if ! head -1 "$f" | grep -q "^#!"; then
+  echo "mutant is a no-op: the script has no shebang to remove"
+else
+  sed -i "1d" "$f"
+  head -1 "$f" | grep -q "^#!" && echo "mutant is a no-op: a shebang is still on line 1"
+fi'
+
+# The four shapes the deleted task-level loop comes back in. Each re-introduces
+# one sentence, which is exactly how it got in the first time. Anchors carry no
+# backticks: the mutant script is eval'd, so a backtick inside a double-quoted
+# sed pattern would command-substitute instead of matching.
+run_mutant "pipeline delegates phase implementation to sdd" '
+f=plugins/superb/skills/pipeline/references/fix-loop.md
+if [ "$(grep -cF "wave by wave, per" "$f")" != 1 ]; then
+  echo "mutant is a no-op: step 1 no longer points at implement.md exactly once"
+else
+  sed -i "s|wave by wave, per|wave by wave via subagent-driven-development, per|" "$f"
+  grep -qF "wave by wave via subagent-driven-development" "$f" || echo "mutant is a no-op: the delegation was not re-introduced"
+  grep -qF "Completing a task dispatches no reviewer" "$f" || echo "mutant is a no-op: the no-reviewer sentence went too, so a kill could come from another pattern"
+fi'
+run_mutant "pipeline asks for a per-task review" '
+f=plugins/superb/skills/pipeline/references/parallel.md
+if ! grep -qF "Dispatch no reviewer" "$f"; then
+  echo "mutant is a no-op: the no-reviewer sentence is already gone"
+else
+  sed -i "s|Dispatch no reviewer|Run its per-task review|" "$f"
+  grep -qF "Run its per-task review" "$f" || echo "mutant is a no-op: the per-task review sentence was not re-introduced"
+  grep -qF "When every member has landed" "$f" || echo "mutant is a no-op: the landing-based merge gate went too, so a kill could come from the merge-gate pattern"
+fi'
+run_mutant "pipeline gates a merge on passing task review" '
+f=plugins/superb/skills/pipeline/references/parallel.md
+if ! grep -qF "When every member has landed" "$f"; then
+  echo "mutant is a no-op: the landing-based merge gate is not phrased as expected"
+else
+  sed -i "s|When every member has landed|When every member has passed its task review|" "$f"
+  grep -qF "passed its task review" "$f" || echo "mutant is a no-op: the task-review merge gate was not re-introduced"
+  grep -qF "Dispatch no reviewer" "$f" || echo "mutant is a no-op: the no-reviewer sentence went too, so a kill could come from the per-task-review pattern"
+fi'
+run_mutant "pipeline reviews wave members per task" '
+f=plugins/superb/skills/pipeline/SKILL.md
+if ! grep -qF "members land independently" "$f"; then
+  echo "mutant is a no-op: Rule 6 no longer says members land independently"
+else
+  sed -i "s|members land independently|members are reviewed per task|" "$f"
+  grep -qF "members are reviewed per task" "$f" || echo "mutant is a no-op: the per-task review of wave members was not re-introduced"
+  grep -qF "reviewed before its merge" "$f" || echo "mutant is a no-op: the no-review-before-merge sentence went too"
+fi'
+
+# Fix planning precedes fixing, or the round is a sequence of reactions. Phase
+# 3's round 2 is the fixture's only planned round, so both mutants are
+# attributable: nothing else names a fixplan.
+run_mutant "run tracker fix round names no fix plan" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if ! grep -qF "fixplan p3-fixplan-r2.md" "$f"; then
+  echo "mutant is a no-op: the fixture round no longer names a fix plan"
+else
+  sed -i "s| · fixplan p3-fixplan-r2.md||" "$f"
+  grep -qF "· fixplan" "$f" && echo "mutant is a no-op: a fixplan field is still on the round (the fixture prose names the field too, which is why this anchors on the middot form)"
+  grep -qF "M=2 C=1" "$f" || echo "mutant is a no-op: the M= declaration went with it, so a kill could come from a sizing arm instead"
+  grep -qF "reports p3-rr2-a.md" "$f" || echo "mutant is a no-op: the reports field went too, so a kill could come from the report arm instead"
+fi'
+run_mutant "run tracker cites a fix plan that is not in agent-output" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if ! grep -qF "fixplan p3-fixplan-r2.md" "$f"; then
+  echo "mutant is a no-op: the fixture round no longer names p3-fixplan-r2.md"
+elif [ -e tools/fixtures/run-ok/agent-output/p3-fixplan-r9.md ]; then
+  echo "mutant is a no-op: p3-fixplan-r9.md exists, so the renamed plan would be found"
+else
+  sed -i "s|fixplan p3-fixplan-r2.md|fixplan p3-fixplan-r9.md|" "$f"
+  grep -qF "fixplan p3-fixplan-r9.md" "$f" || echo "mutant is a no-op: the rename did not apply"
+fi'
+
+# Review before the phase finished, in both shapes a real run produces: a task
+# never started, and a task dispatched and still out. Only the box character
+# changes, so the kill is attributable to the review-not-early arm and not to a
+# hash or field arm.
+run_mutant "run tracker reviews a phase with an unchecked task" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if [ "$(grep -c "^- \[x\] T2 —" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture has no single closed T2 to reopen"
+else
+  sed -i "s|^- \[x\] T2 —|- [ ] T2 —|" "$f"
+  grep -q "^- \[ \] T2 —" "$f" || echo "mutant is a no-op: T2 was not reopened"
+  grep -q "^- \[x\] RV — review fan-out · N=8" "$f" || echo "mutant is a no-op: Phase 2s round is no longer closed, so there is no started review to be early"
+fi'
+run_mutant "run tracker reviews a phase with a task still in progress" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if [ "$(grep -c "^- \[x\] T3 —" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture has no single closed T3 to reopen"
+else
+  sed -i "s|^- \[x\] T3 —|- [~] T3 —|" "$f"
+  grep -q "^- \[~\] T3 —" "$f" || echo "mutant is a no-op: T3 was not set in-progress"
+  grep -q "^- \[x\] RV — review fan-out · N=9" "$f" || echo "mutant is a no-op: Phase 3s round is no longer closed, so there is no started review to be early"
+fi'
+
+# The advancement invariant, attacked three ways. The first two make a phase
+# unfinished and leave Current State pointing past it; the third moves the
+# pointer over a phase the boxes alone cannot show as unfinished.
+run_mutant "run tracker advances past a phase with an open RV" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if ! grep -qF -- "- [x] RV — review fan-out · N=1" "$f"; then
+  echo "mutant is a no-op: Phase 1s RV is not in the expected closed form"
+else
+  sed -i "s|- \[x\] RV — review fan-out · N=1|- [ ] RV — review fan-out · N=1|" "$f"
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T3|" "$f"
+  grep -qF "Next action:** Phase 3" "$f" || echo "mutant is a no-op: Next action was not moved past Phase 1"
+  grep -qF -- "- [ ] RV — review fan-out · N=1" "$f" || echo "mutant is a no-op: Phase 1s RV was not reopened"
+fi'
+run_mutant "run tracker advances past a phase with an open blocking finding" '
+enable_run || exit 0
+d=tools/fixtures/run-ok
+if [ -e "$d/findings.md" ]; then
+  echo "mutant is a no-op: the fixture already has a findings.md, so a kill would not prove the ledger half runs"
+else
+  printf "%s\n" "| ID | Sev | Phase | File:line | Finding | State | Closed by |" \
+                "| -- | --- | ----- | --------- | ------- | ----- | --------- |" \
+                "| F-001 | Critical | 1 | src/x.php:1 | mutant | open | |" > "$d/findings.md"
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T3|" "$d/progress.md"
+  grep -qF "Next action:** Phase 3" "$d/progress.md" || echo "mutant is a no-op: Next action was not moved past Phase 1"
+  grep -qE "^\| F-001 .*\| open \|" "$d/findings.md" || echo "mutant is a no-op: the open blocking row was not written in the shape the arm reads"
+fi'
+run_mutant "run tracker next action names a later phase than its own state" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if [ "$(grep -c "^- \[x\] T2 —" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture has no single closed T2 to reopen"
+else
+  sed -i "s|^- \[x\] T2 —|- [ ] T2 —|" "$f"
+  sed -i "s|- \[x\] RV — review fan-out · N=8|- [ ] RV — review fan-out · N=8|" "$f"
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 4 T5|" "$f"
+  grep -qF "Next action:** Phase 4" "$f" || echo "mutant is a no-op: Next action was not moved"
+  grep -qF -- "- [ ] RV — review fan-out · N=8" "$f" || echo "mutant is a no-op: Phase 2s RV stayed closed, so the review-not-early arm would kill this instead"
+fi'
+
+# The two resume states, each attacked at the thing that makes it that state.
+# run-open-rv is "implemented and entirely unreviewed"; run-fixloop is "every
+# box [x] and only the ledger knows". Neither shape exists in run-ok, which is
+# why they are separate fixtures rather than extra phases there.
+run_mutant "implemented-unreviewed fixture opens its review early" '
+enable_run_dir tools/fixtures/run-open-rv || exit 0
+f=tools/fixtures/run-open-rv/progress.md
+if [ "$(grep -c -- "- \[ \] RV — review fan-out$" "$f")" != 2 ]; then
+  echo "mutant is a no-op: the fixture no longer has exactly two bare open RV lines"
+else
+  sed -i "s|^- \[x\] T5 — a task · W2 · deps T3 — .eeeeeee.|- [ ] T5 — a task · W2 · deps T3|" "$f"
+  grep -q -- "^- \[ \] T5 — a task" "$f" || echo "mutant is a no-op: T5 was not reopened"
+  sed -i "0,/^- \[ \] RV — review fan-out$/s|^- \[ \] RV — review fan-out$|- [~] RV — review fan-out · N=4 → 1 slice + 0 integration · started 2026-09-07 10:00|" "$f"
+  grep -q -- "^- \[~\] RV" "$f" || echo "mutant is a no-op: Phase 2s review was not opened"
+fi'
+run_mutant "implemented-unreviewed fixture advances to the next phase" '
+enable_run_dir tools/fixtures/run-open-rv || exit 0
+f=tools/fixtures/run-open-rv/progress.md
+if ! grep -qF "Next action:** Phase 2 RV" "$f"; then
+  echo "mutant is a no-op: Next action no longer names Phase 2s RV"
+else
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T6|" "$f"
+  grep -qF "Next action:** Phase 3" "$f" || echo "mutant is a no-op: Next action was not moved"
+fi'
+run_mutant "fix-loop fixture advances with a blocking finding open" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+f=tools/fixtures/run-fixloop/progress.md
+if ! grep -qF "Next action:** Phase 2 fix loop" "$f"; then
+  echo "mutant is a no-op: Next action no longer names Phase 2s fix loop"
+elif ! grep -qE "^\| F-002 .*\| open \|" tools/fixtures/run-fixloop/findings.md; then
+  echo "mutant is a no-op: F-002 is not open in the ledger, so the ledger arm is not what would fire"
+else
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T4|" "$f"
+  grep -qF "Next action:** Phase 3" "$f" || echo "mutant is a no-op: Next action was not moved"
+fi'
+run_mutant "fix-loop fixture dispatches a round with no fix plan on disk" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+p=tools/fixtures/run-fixloop/agent-output/p2-fixplan-r2.md
+if [ ! -f "$p" ]; then
+  echo "mutant is a no-op: the fix plan is already absent"
+else
+  rm -f "$p"
+  grep -qF "fixplan p2-fixplan-r2.md" tools/fixtures/run-fixloop/progress.md || echo "mutant is a no-op: the round no longer names that plan, so its absence is not a missing plan"
+fi'
+
+# One fixture going unrun, rather than all of them. The arm above used to accept
+# a single `--run` step, which a repo with three fixtures satisfies while two go
+# unlinted; this is the mutant that says so.
+run_mutant "CI stops linting one of the fixture run directories" '
+f=.github/workflows/checks.yml
+if ! grep -qF -- "--run tools/fixtures/run-fixloop" "$f"; then
+  echo "mutant is a no-op: checks.yml does not lint run-fixloop, so there is no step to delete"
+else
+  sed -i "/--run tools\/fixtures\/run-fixloop/d" "$f"
+  grep -qF -- "--run tools/fixtures/run-fixloop" "$f" && echo "mutant is a no-op: the step was not deleted"
+  grep -qF -- "--run tools/fixtures/run-ok" "$f" || echo "mutant is a no-op: it took the run-ok step too, so a kill could come from the at-least-one arm instead"
+fi'
+
+# --- the arms the migration review added, each with the shape it was measured
+# --- passing before the fix
+run_mutant "run tracker round loses its M= declaration" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if ! grep -qF "round 2: M=2 C=1" "$f"; then
+  echo "mutant is a no-op: the fixture round no longer declares M=2 C=1"
+else
+  sed -i "s|round 2: M=2 C=1 → |round 2: |" "$f"
+  grep -qF "round 2: M=2 C=1" "$f" && echo "mutant is a no-op: the declaration is still on the round line (the fixture prose quotes M=2 C=1 as well, which is why this anchors on the round line)"
+  grep -qF "fixplan p3-fixplan-r2.md" "$f" || echo "mutant is a no-op: the fixplan field went too, so a kill could come from the fix-plan arm instead"
+fi'
+run_mutant "run tracker fix round is keyed N instead of M" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if ! grep -qF "round 2: M=2 C=1" "$f"; then
+  echo "mutant is a no-op: the fixture round no longer declares M=2 C=1"
+else
+  sed -i "s|round 2: M=2 C=1|round 2: N=2 C=1|" "$f"
+  grep -qF "round 2: N=2 C=1" "$f" || echo "mutant is a no-op: the round was not re-keyed"
+  grep -qF "fixplan p3-fixplan-r2.md" "$f" || echo "mutant is a no-op: the fixplan field went too, so a kill could come from the fix-plan arm instead"
+fi'
+run_mutant "run tracker phases are demoted below the parser" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if [ "$(grep -c "^## Phase " "$f")" -lt 2 ]; then
+  echo "mutant is a no-op: the fixture has fewer than two parseable phase headings"
+else
+  sed -i "s|^## Phase |### Phase |" "$f"
+  grep -q "^## Phase " "$f" && echo "mutant is a no-op: a parseable heading survived"
+  grep -q "^### Phase " "$f" || echo "mutant is a no-op: the headings were not demoted"
+fi'
+run_mutant "run tracker opens a trailing RVJ over unfinished work" '
+enable_run_dir tools/fixtures/run-open-rv || exit 0
+f=tools/fixtures/run-open-rv/progress.md
+if ! grep -qF -- "- [x] RVJ — joint integration review · lanes A+B" "$f"; then
+  echo "mutant is a no-op: the fixture has no leading RVJ to move"
+else
+  python3 - "$f" <<"EOF"
+import pathlib,sys
+p=pathlib.Path(sys.argv[1]); t=p.read_text()
+lead="""- [x] RVJ — joint integration review · lanes A+B · N=5 → 0 slice + 1 integration
+      · reports p3-rvj-int.md · coverage p3-rvj-coverage.md → no findings
+- [ ] T6 — a task · W1 · deps T4"""
+trail="""- [ ] T6 — a task · W1 · deps T4
+- [x] RVJ — joint integration review · lanes A+B · N=5 → 0 slice + 1 integration
+      · reports p3-rvj-int.md · coverage p3-rvj-coverage.md → no findings"""
+assert t.count(lead)==1, "mutant is a no-op: the leading RVJ block is not in the expected shape"
+p.write_text(t.replace(lead,trail))
+EOF
+fi'
+run_mutant "run tracker phase carries no RV line at all" '
+enable_run_dir tools/fixtures/run-open-rv || exit 0
+f=tools/fixtures/run-open-rv/progress.md
+if [ "$(grep -c -- "^- \[ \] RV — review fan-out$" "$f")" != 2 ]; then
+  echo "mutant is a no-op: the fixture no longer has exactly two bare open RV lines"
+else
+  sed -i "0,/^- \[ \] RV — review fan-out$/{/^- \[ \] RV — review fan-out$/d}" "$f"
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T6|" "$f"
+  [ "$(grep -c -- "^- \[ \] RV — review fan-out$" "$f")" = 1 ] || echo "mutant is a no-op: Phase 2s RV line was not the one removed"
+  grep -qF "Next action:** Phase 3" "$f" || echo "mutant is a no-op: Next action was not moved past Phase 2"
+fi'
+run_mutant "run tracker ledger row bolds its severity" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+d=tools/fixtures/run-fixloop
+if ! grep -qE "^\| F-002 \| Major \|" "$d/findings.md"; then
+  echo "mutant is a no-op: F-002 is not an unbolded Major row"
+else
+  sed -i "s5| F-002 | Major |5| F-002 | **Major** |5" "$d/findings.md"
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T4|" "$d/progress.md"
+  grep -qF "**Major**" "$d/findings.md" || echo "mutant is a no-op: the severity was not bolded"
+  grep -qE "^\| F-002 .*\| open \|" "$d/findings.md" || echo "mutant is a no-op: the row is no longer open, so the ledger arm is not what would fire"
+  grep -qF "Next action:** Phase 3" "$d/progress.md" || echo "mutant is a no-op: Next action was not moved"
+fi'
+run_mutant "run tracker Current State phase advances while Next action does not" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+f=tools/fixtures/run-fixloop/progress.md
+if ! grep -qF "Next action:** Phase 2 fix loop" "$f"; then
+  echo "mutant is a no-op: Next action no longer names Phase 2s fix loop"
+else
+  # THE BARE FORM, which is the only one `templates/progress.md` prescribes
+  # (`**Phase:** <number and name>`). The first version of this mutant wrote
+  # the doubled `**Phase:** Phase 3`, which was the only shape the arm could
+  # then read — so the kill certified an arm that did nothing on any real
+  # tracker.
+  sed -i "s|^- \*\*Phase:\*\*.*|- **Phase:** 3 — moved on|" "$f"
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** RV — review fan-out|" "$f"
+  grep -qF "Phase:** 3 — moved on" "$f" || echo "mutant is a no-op: the Phase field was not advanced in the bare form"
+  grep -q "Phase:\*\* Phase" "$f" && echo "mutant is a no-op: the Phase field kept the doubled form, which no template writes"
+  grep -q "Next action:\*\* Phase" "$f" && echo "mutant is a no-op: Next action still names a phase, so this is not the Phase-only shape"
+fi'
+
+# --- the migration-corrected rules must stay corrected ---
+# WHITESPACE-FLEXIBLE, and that is not a style choice. Every phrase pinned here
+# wraps across lines in the file that carries it, and the arm reads FLATTENED
+# text — so a `grep -qF`/`sed` mutant on the raw file matches nothing, reports
+# itself a no-op and proves the pin unwatched. All four of these were written
+# that way first and all four failed (measured: three SURVIVED, one NO-OP).
+run_mutant "the conditional integration rule reverts in fix-loop.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+q=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(w) for w in ['only','at','a','declared','integration','boundary']]), re.I)
+s=p.read_text()
+assert a.search(s), 'mutant is a no-op: the phrase is already absent from that file'
+out=a.sub('whenever there is more than one slice', s)
+assert out!=s, 'mutant is a no-op: the substitution did not apply'
+assert 'only at a declared integration boundary' not in flat(out), 'mutant is a no-op: an occurrence survived in that file'
+assert 'only at a declared integration boundary' in flat(q.read_text()), 'mutant is a no-op: the phrase is gone from SKILL.md too, so a kill is not attributable to this file'
+p.write_text(out)\""
+run_mutant "the pre-RV repair rule reverts in parallel.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/references/parallel.md')
+q=pathlib.Path('plugins/superb/skills/pipeline/references/implement.md')
+ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(w) for w in ['raises','no','finding,','takes','no','F-ID']]), re.I)
+s=p.read_text()
+assert a.search(s), 'mutant is a no-op: the phrase is already absent from that file'
+out=a.sub('is a bug finding with an F-ID', s)
+assert out!=s, 'mutant is a no-op: the substitution did not apply'
+assert 'raises no finding, takes no f-id' not in flat(out), 'mutant is a no-op: an occurrence survived in that file'
+assert 'raises no finding, takes no f-id' in flat(q.read_text()), 'mutant is a no-op: the phrase is gone from implement.md too, so a kill is not attributable to this file'
+p.write_text(out)\""
+run_mutant "the re-review boundary rule reverts in SKILL.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+q=pathlib.Path('plugins/superb/skills/pipeline/references/fix-loop.md')
+ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(w) for w in ['only','at','a','declared','integration','boundary']]), re.I)
+s=p.read_text()
+assert a.search(s), 'mutant is a no-op: the phrase is already absent from SKILL.md'
+out=a.sub('once there is more than one', s)
+assert out!=s, 'mutant is a no-op: the substitution did not apply'
+assert 'only at a declared integration boundary' not in flat(out), 'mutant is a no-op: an occurrence survived in SKILL.md'
+assert 'only at a declared integration boundary' in flat(q.read_text()), 'mutant is a no-op: the phrase is gone from fix-loop.md too, so a kill is not attributable to this file'
+p.write_text(out)\""
+run_mutant "SKILL.md restates the per-task cost model" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(w) for w in ['an','implementer','for','every','task','of','every','phase']]), re.I)
+s=p.read_text()
+assert a.search(s), 'mutant is a no-op: the corrected cost sentence is not in the expected shape'
+out=a.sub('an implementer, a reviewer and usually a fix round or two', s)
+assert out!=s, 'mutant is a no-op: the substitution did not apply'
+assert 'an implementer, a reviewer' in flat(out), 'mutant is a no-op: the per-task cost claim was not reintroduced'
+p.write_text(out)\""
+
+# --- round 4: the grammar is strict now, so these are the shapes it refuses ---
+run_mutant "run tracker Current State names a mentioned phase" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+f=tools/fixtures/run-fixloop/progress.md
+if ! grep -qF "Phase:** 2 " "$f"; then
+  echo "mutant is a no-op: the Phase field does not lead with phase 2"
+else
+  sed -i "s|^- \*\*Phase:\*\*.*|- **Phase:** 3 — moved on past the phase 2 fix loop|" "$f"
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** RV — review fan-out|" "$f"
+  grep -qF "Phase:** 3 — moved on past the phase 2" "$f" || echo "mutant is a no-op: the mentioned-phase shape was not written"
+  grep -qE "^\| F-002 .*\| open \|" tools/fixtures/run-fixloop/findings.md || echo "mutant is a no-op: F-002 is not open, so nothing gates Phase 2"
+fi'
+run_mutant "run tracker ledger header renames its phase column" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+f=tools/fixtures/run-fixloop/findings.md
+if ! grep -qF "| ID | Sev | Phase |" "$f"; then
+  echo "mutant is a no-op: the blocking header is not in the shipped shape"
+else
+  sed -i "s3| ID | Sev | Phase |3| ID | Sev | Area |3" "$f"
+  grep -qF "| ID | Sev | Area |" "$f" || echo "mutant is a no-op: the column was not renamed"
+  grep -qE "^\| F-002 .*\| open \|" "$f" || echo "mutant is a no-op: F-002 is not open, so an unread ledger gates nothing"
+fi'
+run_mutant "run tracker second blocking table gates nothing" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+d=tools/fixtures/run-fixloop
+if ! grep -qF "| ID | Sev | Phase |" "$d/findings.md"; then
+  echo "mutant is a no-op: the fixture has no blocking table to duplicate"
+else
+  # ATTRIBUTABLE: the first table own open row is closed first, so the only
+  # thing that can gate Phase 2 is the SECOND table row. Left open, F-002
+  # co-killed this and it proved nothing about walking more than one table.
+  # (No apostrophes here on purpose: this script is single-quoted in the
+  # harness, so one would terminate it.)
+  sed -i "s@a fixture finding still open | open @a fixture finding still open | closed @" "$d/findings.md"
+  grep -qE "^\| F-002 .*\| open \|" "$d/findings.md" && echo "mutant is a no-op: F-002 is still open, so it co-kills this and the second table proves nothing"
+  printf "\n## A second blocking table\n\n| ID | Sev | Phase | File:line | Finding | State | Closed by |\n| -- | --- | ----- | --------- | ------- | ----- | --------- |\n| F-009 | Critical | 2 | \`z:1\` | a second-table finding | open | |\n" >> "$d/findings.md"
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T4|" "$d/progress.md"
+  grep -qF "F-009" "$d/findings.md" || echo "mutant is a no-op: the second table was not appended"
+  grep -qF "Next action:** Phase 3" "$d/progress.md" || echo "mutant is a no-op: Next action was not advanced past Phase 2"
+fi'
+run_mutant "run tracker boundary declares a bare dash" '
+enable_run || exit 0
+f=tools/fixtures/run-ok/progress.md
+if ! grep -q "boundary: the T2 contract" "$f"; then
+  echo "mutant is a no-op: the fixture round no longer names its boundary"
+else
+  sed -i "s|boundary: the T2 contract consumed by the orchestrator commit in slice b|boundary: -|" "$f"
+  grep -qF "boundary: -" "$f" || echo "mutant is a no-op: the bare dash was not written"
+  grep -qF "2 slice + 1 integration" "$f" || echo "mutant is a no-op: the integration reviewer went too, so a kill could come from another arm"
+fi'
+run_mutant "the conditional integration rule reverts in templates/progress.md" "$J \"import pathlib,re
+p=pathlib.Path('plugins/superb/skills/pipeline/templates/progress.md')
+q=pathlib.Path('plugins/superb/skills/pipeline/SKILL.md')
+ws=chr(92)+'s+'
+flat=lambda x: ' '.join(x.split()).lower()
+a=re.compile(ws.join([re.escape(w) for w in ['only','at','a','declared','integration','boundary']]), re.I)
+s=p.read_text()
+assert a.search(s), 'mutant is a no-op: the phrase is already absent from the template'
+out=a.sub('whenever there is more than one slice', s)
+assert 'only at a declared integration boundary' not in flat(out), 'mutant is a no-op: an occurrence survived in the template'
+assert 'only at a declared integration boundary' in flat(q.read_text()), 'mutant is a no-op: the phrase is gone from SKILL.md too, so a kill is not attributable to this file'
+p.write_text(out)\""
+# --- round 5: the field's LOCATION, and the one comparison that skipped _norm
+run_mutant "run tracker Current State is shadowed by a prose decoy" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+f=tools/fixtures/run-fixloop/progress.md
+if ! grep -qF "Phase:** 2 " "$f"; then
+  echo "mutant is a no-op: the Phase field does not lead with phase 2"
+else
+  python3 - "$f" <<"EOF"
+import pathlib,sys,re
+p=pathlib.Path(sys.argv[1]); t=p.read_text()
+assert t.count("## Current State")==1, "mutant is a no-op: Current State heading is absent or duplicated"
+# ORDER MATTERS, and the first version of this mutant got it wrong: inserting
+# the decoy first made the count=1 substitution below advance the DECOY, so the
+# real field stayed at phase 2 and the tracker was correct. Advance the REAL
+# field first, THEN put a decoy naming the earlier phase above the heading. The
+# decoy is a genuine line-start list item, so this pins the BLOCK ISOLATION
+# alone: read the decoy and the gate sees phase 2 and passes; read the real
+# field and it sees phase 3 over an open finding against phase 2 and fails.
+head, sep, body = t.partition("## Current State")
+assert sep, "mutant is a no-op: no Current State heading to split on"
+body2, n = re.subn(r"^- \*\*Phase:\*\*.*$", "- **Phase:** 3 — moved on", body, count=1, flags=re.M)
+assert n == 1, "mutant is a no-op: the real Phase field inside the block was not advanced"
+body2 = re.sub(r"^- \*\*Next action:\*\*.*$", "- **Next action:** RV — review fan-out", body2, count=1, flags=re.M)
+out = head + "Reminder:\n- **Phase:** 2 — fix loop, F-002 open\n\n" + sep + body2
+assert "- **Phase:** 2 — fix loop, F-002 open" in out.split("## Current State")[0], "mutant is a no-op: the decoy did not land above the heading"
+assert "- **Phase:** 3 — moved on" in out.split("## Current State")[1], "mutant is a no-op: the real field is not the advanced one"
+p.write_text(out)
+EOF
+  grep -qE "^\| F-002 .*\| open \|" tools/fixtures/run-fixloop/findings.md || echo "mutant is a no-op: F-002 is not open, so nothing gates Phase 2"
+fi'
+run_mutant "run tracker ledger row id is bolded" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+f=tools/fixtures/run-fixloop/findings.md
+if ! grep -qE "^\| F-002 \| Major \|" "$f"; then
+  echo "mutant is a no-op: F-002 is not an unbolded Major row"
+else
+  sed -i "s3| F-002 | Major |3| **F-002** | Major |3" "$f"
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T4|" tools/fixtures/run-fixloop/progress.md
+  grep -qF "| **F-002** |" "$f" || echo "mutant is a no-op: the row id was not bolded"
+  grep -qF "| ID | Sev | Phase |" "$f" || echo "mutant is a no-op: the header changed too, so a kill could come from the header arm"
+fi'
+run_mutant "run tracker four-column ledger renames its phase column" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+d=tools/fixtures/run-fixloop
+if ! grep -qE "^\| F-002 .*\| open \|" "$d/findings.md"; then
+  echo "mutant is a no-op: F-002 is not open, so an unread ledger gates nothing"
+else
+  printf "# fixture\n\n## Blocking ledger\n\n| ID | Sev | Area | State |\n| -- | --- | ---- | ----- |\n| F-002 | Major | 2 | open |\n" > "$d/findings.md"
+  grep -qF "| ID | Sev | Area | State |" "$d/findings.md" || echo "mutant is a no-op: the narrow renamed table was not written"
+fi'
+
+# --- round 6: the structural half, and the id grammar ---
+# These three exist because five rounds produced five ways to lose the Phase
+# field, every one of them SILENT. The arm now reports what it cannot locate, so
+# these mutants prove the loudness, not just the parse.
+run_mutant "run tracker loses its Phase field" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+f=tools/fixtures/run-fixloop/progress.md
+if [ "$(grep -c -- "^- \*\*Phase:\*\*" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture does not have exactly one Phase field"
+else
+  sed -i "/^- \*\*Phase:\*\*/d" "$f"
+  grep -q -- "^- \*\*Phase:\*\*" "$f" && echo "mutant is a no-op: a Phase field survived"
+  grep -qF "## Current State" "$f" || echo "mutant is a no-op: the Current State block went too, so a kill could come from another arm"
+fi'
+run_mutant "run tracker grows a second Current State block" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+f=tools/fixtures/run-fixloop/progress.md
+if [ "$(grep -c "^## Current State$" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture does not have exactly one Current State block"
+else
+  printf "\n## Current State\n- **Phase:** 3 — a stale appended duplicate\n- **Next action:** T4 — a task\n" >> "$f"
+  [ "$(grep -c "^## Current State$" "$f")" = 2 ] || echo "mutant is a no-op: the second block was not appended"
+fi'
+run_mutant "run tracker ledger row id is not F-<n>" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+d=tools/fixtures/run-fixloop
+if ! grep -qE "^\| F-002 .*\| open \|" "$d/findings.md"; then
+  echo "mutant is a no-op: F-002 is not the open blocking row"
+else
+  sed -i "s3| F-002 |3| N-002 |3" "$d/findings.md"
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T4|" "$d/progress.md"
+  grep -qE "^\| N-002 .*\| open \|" "$d/findings.md" || echo "mutant is a no-op: the row id was not changed"
+  grep -qF "| ID | Sev | Phase |" "$d/findings.md" || echo "mutant is a no-op: the header changed too, so a kill could come from the header arm"
+fi'
+
+# --- the regression correction: an affirmative line needs a real comparison ---
+run_mutant "run tracker Phase field resolves to nothing" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+f=tools/fixtures/run-fixloop/progress.md
+if ! grep -qF "Phase:** 2 " "$f"; then
+  echo "mutant is a no-op: the Phase field does not lead with phase 2"
+else
+  sed -i "s|^- \*\*Phase:\*\*.*|- **Phase:** done|" "$f"
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** RV — review fan-out|" "$f"
+  grep -qF -- "- **Phase:** done" "$f" || echo "mutant is a no-op: the Phase field was not made non-naming"
+  grep -q "Next action:\*\* Phase" "$f" && echo "mutant is a no-op: Next action still names a phase, so a comparison is still possible"
+  grep -qE "^\| F-002 .*\| open \|" tools/fixtures/run-fixloop/findings.md || echo "mutant is a no-op: F-002 is not open, so no phase is unfinished"
+fi'
+run_mutant "run tracker hides a stale Phase field above the fresh one" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+f=tools/fixtures/run-fixloop/progress.md
+if [ "$(grep -c -- "^- \*\*Phase:\*\*" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the fixture does not have exactly one Phase field"
+else
+  python3 - "$f" <<"EOF"
+import pathlib,sys,re
+p=pathlib.Path(sys.argv[1]); t=p.read_text()
+out,n = re.subn(r"^- \*\*Phase:\*\*.*$", "- **Phase:** 2 — stale, left above\n- **Phase:** 3 — fresh", t, count=1, flags=re.M)
+assert n == 1, "mutant is a no-op: the Phase field was not duplicated"
+p.write_text(out)
+EOF
+  [ "$(grep -c -- "^- \*\*Phase:\*\*" "$f")" = 2 ] || echo "mutant is a no-op: there are not exactly two Phase fields now"
+fi'
+run_mutant "run tracker ledger row id has a letter after the dash" '
+enable_run_dir tools/fixtures/run-fixloop || exit 0
+d=tools/fixtures/run-fixloop
+if ! grep -qE "^\| F-002 .*\| open \|" "$d/findings.md"; then
+  echo "mutant is a no-op: F-002 is not the open blocking row"
+else
+  sed -i "s3| F-002 |3| NEW-F2 |3" "$d/findings.md"
+  sed -i "s|^- \*\*Next action:\*\*.*|- **Next action:** Phase 3 T4|" "$d/progress.md"
+  grep -qE "^\| NEW-F2 .*\| open \|" "$d/findings.md" || echo "mutant is a no-op: the row id was not changed to the letter-after-dash shape"
+  grep -qF "| ID | Sev | Phase |" "$d/findings.md" || echo "mutant is a no-op: the header changed too, so a kill could come from the header arm"
+fi'
+
 echo
-echo "killed=$PASS survived=$SURV"
+echo "killed=$PASS survived=$SURV no-op=$NOOP"
 if [ "$SURV" -ne 0 ]; then
   printf 'survivors:\n'; printf '  - %s\n' "${SURVIVORS[@]}"
+fi
+if [ "$NOOP" -ne 0 ]; then
+  printf 'no-ops (killed by another arm, so they prove nothing about their own):\n'
+  printf '  - %s\n' "${NOOPS[@]}"
+fi
+if [ "$SURV" -ne 0 ] || [ "$NOOP" -ne 0 ]; then
   echo "check-plugin-mutants: FAIL"; exit 1
 fi
 echo "check-plugin-mutants: PASS"

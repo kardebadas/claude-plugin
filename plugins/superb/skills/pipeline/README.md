@@ -51,8 +51,11 @@ each get an `RVJ` line for the joint review no single phase's `RV` covers.
 
 **Reviewer fan-out.** A phase of N tasks gets `ceil(N/5)` slice reviewers over
 exact commit ranges — or one per wave if it ran waves, since a wave is never
-split across two reviewers — plus an integration reviewer whenever there is more
-than one slice. The slices must cover every commit on the phase branch — including
+split across two reviewers — plus an integration reviewer where a boundary no
+single slice covers is named on the round, and not otherwise: a multi-slice
+round with nothing crossing between its slices declares
+`no integration boundary` rather than paying for a third reviewer over a diff
+the slices already read. The slices must cover every commit on the phase branch — including
 any the orchestrator wrote inline, which have no task line and so are covered
 by nothing unless a slice is widened to reach them. Fix rounds get their own
 math — one reviewer per file cluster in the fix diff — and the assigned ranges
@@ -91,10 +94,17 @@ disambiguation; dropping it also works when nothing else claims the name.
 ## Requires
 
 The [superpowers](https://github.com/obra/superpowers) plugin. This skill calls
-`superpowers:brainstorming`, `superpowers:writing-plans`,
-`superpowers:subagent-driven-development` and
+`superpowers:brainstorming`, `superpowers:writing-plans` and
 `superpowers:finishing-a-development-branch`, and it expects a `/review` skill
 in the repo it is run against.
+
+It does **not** call `superpowers:subagent-driven-development`. That skill has
+no implementation-only mode — an implementer returning `DONE` dispatches a
+reviewer for that task, and a task completes only at zero open findings at any
+severity through an uncapped fix/re-review loop — and it is phase-unaware.
+Stage 4's IMPLEMENT state is `references/implement.md` instead, so completing a
+task dispatches no reviewer and the phase's `RV` fan-out is the only code
+review in the loop.
 
 ## Run state lives in the project, never in the plugin
 

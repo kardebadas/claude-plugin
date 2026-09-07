@@ -71,8 +71,19 @@ is what this rule exists to stop.
    (Rule 2). A run that dies mid-dispatch must be able to tell "dispatched"
    from "never started".
 2. Build the payload from `templates/implementer-prompt.md`. Fill every slot.
-   The brief comes from `scripts/task-brief <sub-plan> <n>` — pass the **path**,
-   never the brief's text (Rule 5: hold pointers, not payloads).
+   The brief comes from `<skill-dir>/scripts/task-brief <sub-plan> <n>` — pass
+   the **path**, never the brief's text (Rule 5: hold pointers, not payloads).
+
+   **`<skill-dir>` is resolved once, by you, and interpolated into the payload
+   as an absolute path.** A run executes in the *user's project*, whose working
+   directory contains no copy of this plugin — the skill lives in the installed
+   plugin cache — so a repo-relative citation like
+   `plugins/superb/skills/pipeline/scripts/…` resolves in exactly one
+   repository, this plugin's own. Take the directory this file is being read
+   from (the harness supplies it; `CLAUDE_PLUGIN_ROOT` when set) and write the
+   absolute path into the dispatch beside the working directory. If you cannot
+   resolve it, that is an Ambiguity-guard stop, not a guess: an implementer
+   handed an unresolvable command invents its own requirements.
 3. Dispatch one agent. Wait for it (`SKILL.md`, *Who wakes you after a
    dispatch*).
 4. On return:

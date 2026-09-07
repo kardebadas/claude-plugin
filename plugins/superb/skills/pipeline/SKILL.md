@@ -570,7 +570,7 @@ digraph pipeline {
     "Stage 4 RE_REVIEW: sized from the fix diff (C=<n>)" -> "Stage 4 PASS: RV [x], close-out written and saved" [label="clean"];
     "Stage 4 PASS: RV [x], close-out written and saved" -> "Stage 4b: joint integration review over a split's combined diff" [label="last sibling of a split"];
     "Stage 4b: joint integration review over a split's combined diff" -> "Stage 4 FIX_PLAN: one scoped fix plan for this round's blocking findings" [label="blocking findings"];
-    "Stage 4b: joint integration review over a split's combined diff" -> "Stage 4 IMPLEMENT: every task in the phase, waves of tasks (ambiguity -> ask)" [label="clean / next phase"];
+    "Stage 4b: joint integration review over a split's combined diff" -> "Stage 4 PASS: RV [x], close-out written and saved" [label="clean"];
     "Stage 4 PASS: RV [x], close-out written and saved" -> "Stage 4 IMPLEMENT: every task in the phase, waves of tasks (ambiguity -> ask)" [label="next phase"];
     "Stage 4 PASS: RV [x], close-out written and saved" -> "Stage 5: finishing-a-development-branch" [label="all phases done"];
 }
@@ -669,9 +669,9 @@ one written at GATE 2 is part of the plan the user approved.
 
 ### Compacting at GATE 2
 
-Stage 4 is the long stage — one orchestrator turn per dispatch, and every task
-takes an implementer, a reviewer and usually a fix round or two, across every
-phase. Your whole context is re-sent on each of them. Stage 1's question rounds
+Stage 4 is the long stage — one orchestrator turn per dispatch, an implementer
+for every task of every phase, then that phase's review fan-out and any fix
+rounds it opens. Your whole context is re-sent on each of them. Stage 1's question rounds
 are the worst of it: Rule 5 keeps agent *output* out of context behind a
 `DETAIL:` pointer, but a conversation with the user cannot be pointer-ised. It
 is simply there, re-sent every turn until the run ends.
@@ -981,6 +981,13 @@ Each slice reviewer sees ONLY its slice's diff so findings map back to
 specific tasks; the integration reviewer sees the whole phase diff and hunts
 only cross-slice and cross-phase issues no single slice can see.
 
+**Reviewers are dispatched at the standard capable tier or above**, and a
+phase whose diff is architecture-sensitive takes the strongest available — the
+fan-out is the largest dispatch class in a run, so the tier is chosen here and
+not defaulted (`references/implement.md`, *Choosing the model*). A slice
+reviewer reads a range against a plan; that is not cheap-tier work, and a
+reviewer that misses a cross-slice contract mismatch costs a whole fix round.
+
 **The integration reviewer is spent on a boundary, not on a slice count.** Three
 reviewers over an 8-task phase whose slices share no contract read the same code
 twice; that third reviewer's whole value is in what crosses between slices. So it
@@ -1025,7 +1032,10 @@ believes.
 
 `ceil(N/5)` is defined over **tasks**. Fix-mode returns produce fix commits,
 not tasks, so a re-review is sized from the **fix diff**: **one slice reviewer
-per file cluster**, plus an integration reviewer once there is more than one.
+per file cluster**, plus an integration reviewer above one cluster **only at a
+declared boundary** named on the round, and `· no integration boundary`
+otherwise — the same conditional rule the phase fan-out takes, and
+`references/fix-loop.md`'s *Re-review fan-out* table is its authority.
 `M` is still recorded on the round, and `M=0` still licenses a round with no
 reviewers in it — but `M` does not size the fan-out, because six comment
 corrections in one file are one small diff and three reviewers over it

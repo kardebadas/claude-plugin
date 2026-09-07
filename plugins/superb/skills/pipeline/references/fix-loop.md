@@ -62,12 +62,18 @@ phase autonomously.
      `^` base: a commit sitting immediately before a slice's first task falls
      into no slice at all, so derive `PB` with `git merge-base` rather than
      assuming `<first-task-hash>^`. Being their author is not a review.
-   - Whenever there is more than one slice, spawn **one additional
-     integration reviewer** in the same parallel batch. Its scope is the
-     phase's combined diff, and it looks only for what single slices cannot
-     see: cross-slice contract mismatches (producer in one slice, consumer in
-     another), regressions the phase introduces into earlier phases' work,
-     and duplicated or conflicting changes across slices.
+   - Add **one integration reviewer only at a declared integration
+     boundary** — a Rule 3 split's siblings joining, two lanes joining, or a
+     contract introduced in one slice and consumed in another that no single
+     slice's range covers — and name it on the round as `· boundary: <what>`.
+     At one slice `i` is 0, because that slice already sees the whole diff.
+     Above one slice with no such boundary, `i` is 0 and the round records
+     `· no integration boundary`, so an omission and a judgement never read
+     the same. When it does run, its scope is the phase's combined diff, and
+     it looks only for what single slices cannot see: cross-slice contract
+     mismatches (producer in one slice, consumer in another), regressions the
+     phase introduces into earlier phases' work, and duplicated or
+     conflicting changes across slices.
    - **Run the repo test suite for the phase's changed code as part of this
      step.** Failing tests or a broken build on the phase's changes are
      **bug findings by definition**, whether or not any reviewer reported
@@ -327,7 +333,9 @@ When blocking findings exist (and the convergence rule permits another run):
      whoever actually ran a review round, at whatever depth — a depth-1 run that
      re-reviews its own fixes records that round on the line itself. What is
      forbidden is closing an `RV` no phase-wide fan-out ever produced.
-   - **Every round is planned.** In this order, no reordering:
+   - **Every round is planned**, and the three states this file owns are
+     `FIX_PLAN` → `FIX_IMPLEMENT` → `RE_REVIEW` (`SKILL.md`, *Stage 4*). In
+     this order, no reordering:
 
      ```
      FINDINGS → FIX PLAN → FIX IMPLEMENTATION
@@ -370,7 +378,13 @@ When blocking findings exist (and the convergence rule permits another run):
    assignments cover every fix diff. Update the ledger and complete the
    Iteration-log row with the set of F-IDs still open after the re-review.
 
-   **Unless `M=0`.** `M` does not size the fan-out — the fix diff does
+   **Unless `M=0`.** `M=0` is not "a round that edited code and needs no plan":
+it is a round with **no ownable fix commit at all**, every targeted F-ID having
+closed by deletion or a user-ruled false positive. A round that edited code has
+an ownable commit, so its `M` is at least 1 and it owes both a fix plan and a
+reviewer. If you are about to write `M=0` over a diff, the diff is the proof
+that you should not.
+ `M` does not size the fan-out — the fix diff does
    (*Re-review fan-out*, below) — but it still decides **whether a round happens
    at all**. `M` is **the number of blocking F-IDs this fix-mode run targeted**,
    less every one the ledger closed by a route that leaves no ownable commit.
@@ -596,7 +610,9 @@ however complete, authorizes nothing.
   dispatch, read from the file before each cap check, never carried in context.
   Reset the iteration counter by opening a new phase row.
 - **Re-reviews are sized from the fix diff** — one reviewer per file cluster,
-  integration above one — **not** from task count or finding count, and their
+  and an integration reviewer above one cluster only at a declared boundary
+  (*Re-review fan-out* below is the authority for the number) — **not** from
+  task count or finding count, and their
   assigned ranges must union to cover every fix commit a reviewer can own. A
   claim **deletion**'s commit is the one that has no owner; a claim **pin**'s is
   in the union like any other, because a pin commits a test

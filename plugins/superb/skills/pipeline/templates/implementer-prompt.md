@@ -9,6 +9,9 @@ Model: <choose explicitly based on this task's complexity — see
        `references/implement.md`, *Choosing the model*. Name the tier and the
        reason in one clause; do not leave this slot on a default.>
 Working directory: <the phase worktree, or this wave member's worktree>
+Skill directory: <absolute path to this skill, resolved by the orchestrator —
+       the `<skill-dir>` used below. A run's cwd is the user's project, which
+       holds no copy of this plugin, so a relative path resolves nowhere.>
 
 ## Your task
 
@@ -17,7 +20,7 @@ requirements, and its exact values (names, signatures, magic strings, test
 cases) are to be used verbatim. Get it with:
 
 ```
-plugins/superb/skills/pipeline/scripts/task-brief <sub-plan-path> <n>
+<skill-dir>/scripts/task-brief <sub-plan-path> <n>
 ```
 
 ## Context

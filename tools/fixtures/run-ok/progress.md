@@ -12,9 +12,10 @@ start, which is what a real tracker's prose does and what the byte-capped
 reader this fixture replaced reported as a missing coverage file.
 
 **Every round here is sized by the regime its own key names**, and the two
-arithmetic arms read that: all three phases are unwaved `N=`, so `s` is
-`ceil(N/5)` — `N=1` takes 1, `N=8` takes 2, `N=9` takes 2 — and `i` is 1 above
-one slice and 0 at one slice. An earlier version of this fixture declared
+arithmetic arms read that: all four phases are unwaved `N=`, so `s` is
+`ceil(N/5)` — `N=1` takes 1, `N=7` takes 2, `N=8` takes 2, `N=9` takes 2 — and
+`i` is 0 at one slice, while above one slice it is 1 with a named `boundary:`
+(Phases 2 and 3) or 0 with `no integration boundary` declared (Phase 4). An earlier version of this fixture declared
 `N=9 → 3 slice + 1 integration` and both gates passed it: the one regime the
 skill says *is* re-derivable from the line was the regime the fixture broke.
 
@@ -46,7 +47,8 @@ real tracker does. Read this file as a linter input, not as a model of a run.
 It establishes, for every closed `RV`/`RVJ` round in the tracker: the
 declared `<s> slice + <i> integration` count equals the number of report
 files that round lists, with brace sets expanded; an unwaved `N=` round's `s`
-equals `ceil(N/5)`; `i` is 1 whenever `s` is above 1 and 0 at one slice; an
+equals `ceil(N/5)`; `i` is 0 at one slice, and above one slice is either 1 with
+a named `boundary:` or 0 with `no integration boundary` declared; an
 `RVJ` round declares `0 slice + 1 integration`; an `M=` re-review round
 declares a `C=<n>` cluster count and `s` equals it; the round names a
 `coverage` file; every report file it names, and the coverage file it names,

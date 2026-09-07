@@ -224,6 +224,7 @@ starts a new run** — if step 1 finds nothing, report that and stop.
    | `register.md` has open entries | blocked on the user | **ask them**, before resuming implementation |
    | a blocking F-ID is `open` in `findings.md` | `FIX_PLAN` / `FIX_IMPLEMENT` / `RE_REVIEW` of **the phase that owns it** | continue that phase's fix loop from the Iteration log's last incomplete row — write the round's fix plan if it is missing, dispatch the fixes if it is not, re-review if they landed |
    | a round names a `fixplan` not in `agent-output/` | `FIX_PLAN` | write that round's fix plan |
+   | a phase has an unchecked task and no `[~]` anywhere | `IMPLEMENT` | dispatch **that phase's** next open task, in wave order. Not its `RV` — review may not begin while a task of the phase is out — and not a later phase |
    | every task of a phase `[x]`, its `RV` `[ ]` | `REVIEW` | **review that phase.** Not the next phase — this is the most important run there is to resume: fully implemented and entirely unreviewed |
    | every task `[x]`, `RV` `[x]`, no open blocking F-ID | `PASS` | close out, then the next phase's first task |
 

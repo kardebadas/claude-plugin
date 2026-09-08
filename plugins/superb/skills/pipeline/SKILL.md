@@ -608,7 +608,7 @@ digraph pipeline {
     "Stage 4 FIX_PLAN: one scoped fix plan for this round's blocking findings" [shape=box];
     "Stage 4 FIX_IMPLEMENT: fix agents, one per file cluster" [shape=box];
     "Stage 4 RE_REVIEW: sized from the fix diff (C=<n>)" [shape=box];
-    "CLOSE(review_gate): the gate that raised the findings goes [x]" [shape=box];
+    "CLOSE(review_gate): the gate that raised the findings goes [x]" [shape=diamond];
     "Stage 4 PASS: RV [x], close-out written and saved" [shape=box];
     "Stage 4b: joint integration review over a split's combined diff" [shape=box];
     "Stage 5: finishing-a-development-branch" [shape=doublecircle];

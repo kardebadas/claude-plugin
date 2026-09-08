@@ -1586,6 +1586,7 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
                     # and there is none, so nothing this file says about it can
                     # be checked against anything.
                     viol += 1
+                    # Mutants: "run tracker round precedes any review gate".
                     bad(f"{relpath(f)}:{lineno(pos)}: an appended round "
                         "precedes every `RV`/`RVJ` line in this file — a round "
                         "is appended UNDER the gate that raised its findings, "
@@ -2185,7 +2186,8 @@ print("\n== run artifacts are ignored ==")
 # Mutants: "gitignore drops the run-directory rule",
 #          "gitignore hides curated documentation too",
 #          "gitignore hides curated records behind a double star",
-#          "gitignore hides curated records behind a double-star glob".
+#          "gitignore hides curated records behind a double-star glob",
+#          "gitignore narrows to a single star with no slash".
 _gi = ROOT / ".gitignore"
 _gilines = [ln.strip() for ln in
             (_gi.read_text(encoding="utf-8") if _gi.exists() else "").split("\n")
@@ -2495,7 +2497,22 @@ def parse_phase_lanes(phases):
                 # `deps: **Phase 2**` names Phase 2, and reporting it as a
                 # phase the tracker lacks is a false FAIL with an unactionable
                 # remedy — both phases exist.
-                item = item.strip().strip("`*_ ")
+                #
+                # BALANCED PAIRS ONLY, AND NEVER DOWN TO NOTHING. A blanket
+                # `strip("`*_ ")` traded that false FAIL for a false NEGATIVE:
+                # `deps: *` and `deps: **` stripped to the empty string and
+                # were dropped in silence, and `deps: 1_` resolved to Phase 1.
+                # A silently discarded edge turns a real join into an ordinary
+                # phase and takes the whole join family out of play — a typo
+                # disabling the checks instead of failing them, which is
+                # exactly what the report below exists to prevent.
+                item = item.strip()
+                _core = item
+                for _mk in ("**", "__", "`", "*", "_"):
+                    while (_core.startswith(_mk) and _core.endswith(_mk)
+                           and len(_core) > 2 * len(_mk)):
+                        _core = _core[len(_mk):-len(_mk)].strip()
+                item = _core or item
                 if not item or item.lower() in ("none", "-", "\u2014"):
                     continue
                 tok = re.sub(r"^[Pp]hase\s+", "", item).strip()
@@ -2979,6 +2996,8 @@ if RUN_DIR is not None:
                 "nobody validates. REMEDY: one `· lane:` per heading")
         for _i2, _tok in _unresdeps:
             _untrusted = True
+            # Mutants: "a dep names a phase the tracker does not have",
+            #          "a dep item strips down to nothing".
             bad(f"{relpath(tracker)}: {_phs[_i2]['label']}'s `· deps:` names "
                 f"{_tok!r}, which matches no `## Phase` heading in this "
                 "tracker. A dependency this gate cannot resolve is an edge it "
@@ -3360,7 +3379,7 @@ if RUN_DIR is not None:
         # persisted fact belongs, and the whole point of allocating at GATE 2 is
         # that no choice is left.
         # Mutants: "join phase takes the wrong contributors lane",
-        #          "retired lane id is reused later in the run".
+        #          "retired lane id is reused after the join that consumed it".
         for _j2 in sorted(_joins):
             _want = _lanemap.get(_redu[_j2][0])
             if _want and _lanemap.get(_j2) != _want:
@@ -3434,7 +3453,9 @@ if RUN_DIR is not None:
                 return None, None
             return _idx.get(f"phase {g.group(1)}".lower()), g.group(1)
 
-        # Mutants: "unfinished lane says done",
+        # Mutants: "run tracker Current State has no lane line at all",
+        #          "a join is entered while a contributor still has open work",
+        #          "unfinished lane says done",
         #          "lane waits at a join that does not exist",
         #          "lane waits at a phase that is not a join",
         #          "lane waits while its own branch is unfinished",
@@ -3522,13 +3543,13 @@ if RUN_DIR is not None:
                                 f"phase assigned to lane {_lid} is a direct "
                                 "predecessor of it, and it is not that phase's "
                                 "own lane")
-                    elif (_waiting.get(_lid) != _ji
-                          and any(r[1] == "x" for r in _leading_rvj(_ji))):
-                        _why = (f"names {_phs[_ji]['label']}, whose leading "
-                                "`RVJ` is already `[x]` — the join has "
-                                "collapsed, so this lane is either the "
-                                "surviving one (which now RUNS that phase) or "
-                                "retired (which carries no line at all)")
+                    # NO SEPARATE "THE JOIN HAS COLLAPSED" BRANCH. It was
+                    # redundant with the checks below — a non-surviving lane
+                    # past a closed leading `RVJ` is in `_retired` and is
+                    # reported before reaching here, and the surviving lane is
+                    # caught by the last branch below — and no mutant could
+                    # isolate it, which by this repository's own rule makes it
+                    # a branch deletable on a green build.
                     else:
                         # MEASURED BEFORE THE JOIN, and only before it. The
                         # surviving lane OWNS the joining phase, so its own

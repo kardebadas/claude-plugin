@@ -44,7 +44,7 @@ run, on a round that is not the one in `run-ok`.
 - [x] RV — review fan-out · N=2 → 1 slice + 0 integration
       · reports p2-review-a.md · coverage p2-coverage.md → F-001, F-002
       → round 2: M=2 C=1 → 1 slice + 0 integration · fixplan p2-fixplan-r2.md
-        · reports p2-rr2-a.md · coverage p2-rr2-coverage.md → F-001 closed
+        · reports p2-rr2-a.md · coverage p2-rr2-coverage.md → F-001 closed, F-003, F-004
       → round 3: M=0 → no round · closures: F-003 withdrawn → duplicate of F-002,
         F-004 withdrawn → malformed → F-002 still open
 

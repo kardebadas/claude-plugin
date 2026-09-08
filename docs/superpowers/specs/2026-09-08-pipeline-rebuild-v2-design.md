@@ -116,6 +116,8 @@ The controller persists `[~]`, owner, and attempt before dispatch. Workers recei
 
 When a worker raises a question, the controller either cites an existing explicit answer or records/asks the user. Dependent dispatch/integration stops; independent running work may finish. The answer is persisted and affected plans are updated transparently before resume.
 
+`start_task` is first-start only (`[ ] → [~]`). An answered blocked task uses the distinct D-011 `resume_task` transition (`[?] → [~]`) with its blocked prior attempt, a distinct unused new attempt, new owner, and a decision reference that the helper verifies as resolved and applicable. Both paths share dependency, capacity, ownership, and typed-scope start guards and persist before dispatch. Resume preserves prior attempt/result/question/evidence references, rejects late prior-attempt results, and is idempotent for an identical already-applied transition. Session/context recovery reconciles the existing attempt and does not itself create a new one.
+
 ## Verification, review, and remediation
 
 Target projects retain explicit repository coverage requirements. If no coverage policy exists, planning asks whether the user wants a numeric threshold and its scope or behavior-focused tests without a number. Coverage never substitutes for meaningful assertions.

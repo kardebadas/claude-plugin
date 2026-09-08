@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import io
 import multiprocessing
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -17,7 +18,9 @@ from plugins.superb.skills.pipeline.scripts.pipeline_state import (
     PlanMetadataError,
     SchemaError,
     TrackerWriteError,
+    TransitionError,
     UpdateOutcomeUncertain,
+    complete_task,
     initialize_run,
     inspect_run,
     locked_tracker_update,
@@ -25,7 +28,11 @@ from plugins.superb.skills.pipeline.scripts.pipeline_state import (
     parse_phase_plan,
     parse_tracker,
     parse_worker_result,
+    record_task_integration,
+    record_task_question,
     render_tracker,
+    resume_task,
+    start_task,
     validate_run,
 )
 
@@ -493,6 +500,301 @@ class AtomicMutationTest(unittest.TestCase):
         fake = type("FakeMsvcrt", (), {"LK_NBLCK": 1, "LK_UNLCK": 2, "locking": staticmethod(lambda *args: None)})
         selected = pipeline_state.select_lock_impl(None, fake)
         self.assertEqual(selected[2], "Implemented; simulation-tested; native Windows verification pending.")
+
+
+class TaskTransitionTest(unittest.TestCase):
+    def git(self, repo: Path, *args: str) -> str:
+        return subprocess.run(
+            ("git", *args), cwd=repo, check=True, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ).stdout.strip()
+
+    def make_git_repo(self, root: Path) -> tuple[Path, str]:
+        repo = root / "repo"
+        repo.mkdir()
+        self.git(repo, "init", "-q")
+        self.git(repo, "config", "user.email", "pipeline@example.invalid")
+        self.git(repo, "config", "user.name", "Pipeline Test")
+        (repo / "base.txt").write_text("base\n", encoding="utf-8")
+        self.git(repo, "add", "base.txt")
+        self.git(repo, "commit", "-qm", "base")
+        base = self.git(repo, "rev-parse", "HEAD")
+        self.git(repo, "branch", "target")
+        return repo, base
+
+    def write_plan(self, root: Path, body: str) -> Path:
+        path = root / "phase.md"
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def source_plan(self, root: Path) -> Path:
+        return self.write_plan(
+            root,
+            """# Transition phase
+
+<!-- pipeline-v2-phase: id=99; deps=none; review_gate=final-only; review_reason=Mechanical verification only. -->
+
+### PX-01 — Source
+<!-- pipeline-v2-task: id=PX-01; deps=none; kind=source; batch=one; order=1; write_scope=file:src.txt; outputs=none -->
+
+### PX-02 — Dependent
+<!-- pipeline-v2-task: id=PX-02; deps=PX-01; kind=source; batch=two; order=1; write_scope=file:dep.txt; outputs=none -->
+""",
+        )
+
+    def artifact_plan(self, root: Path) -> Path:
+        return self.write_plan(
+            root,
+            """# Artifact phase
+
+<!-- pipeline-v2-phase: id=99; deps=none; review_gate=final-only; review_reason=Mechanical verification only. -->
+
+### PA-01 — Evidence
+<!-- pipeline-v2-task: id=PA-01; deps=none; kind=artifact; batch=evidence; order=1; write_scope=tree:evidence; outputs=evidence/result.md -->
+""",
+        )
+
+    def decisions(self, root: Path, text: str) -> Path:
+        path = root / "decisions.md"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def initialize(self, root: Path, plan: Path, decisions: Path, base: str, target: str = "target") -> Path:
+        run_dir = root / "run"
+        initialize_run(
+            run_dir,
+            run_id="transition-test",
+            base_commit=base,
+            target_branch=target,
+            worker_limit=3,
+            artifacts={
+                "spec": "spec.md", "master_plan": "master.md",
+                "phase_plans": str(plan), "decisions": str(decisions),
+                "findings": "findings.md",
+            },
+            approved_existing=(),
+        )
+        return run_dir
+
+    def resolved_decision(self, task: str = "PX-01", answer: str = "Use the recorded interface.") -> str:
+        return f"""# Decisions
+
+## D-100 — Resume
+
+- **Question:** Which interface applies?
+- **Answer:** {answer}
+- **Scope:** {task} and its current blocker.
+- **Status:** Resolved.
+"""
+
+    def block(self, run_dir: Path, attempt: str = "attempt-1"):
+        start_task(run_dir, task_id="PX-01", owner="worker-a", attempt=attempt)
+        return record_task_question(
+            run_dir, task_id="PX-01", attempt=attempt,
+            question_or_block_ref="D-100", reason="answer required",
+        )
+
+    def task(self, run_dir: Path, task_id: str = "PX-01"):
+        return next(task for task in validate_run(run_dir).tasks if task.id == task_id)
+
+    def test_start_task_accepts_initial_and_rejects_blocked_active_completed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, base = self.make_git_repo(root)
+            plan = self.source_plan(root)
+            decisions = self.decisions(root, self.resolved_decision())
+            run_dir = self.initialize(root, plan, decisions, base)
+
+            started = start_task(run_dir, task_id="PX-01", owner="worker-a", attempt="attempt-1")
+            self.assertEqual(next(task for task in started.tasks if task.id == "PX-01").state, "[~]")
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                start_task(run_dir, task_id="PX-01", owner="worker-a", attempt="attempt-1")
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+            with self.assertRaises(TransitionError):
+                start_task(run_dir, task_id="PX-01", owner="worker-b", attempt="attempt-2")
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_source_task_without_implementation_commit_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, base = self.make_git_repo(root)
+            plan = self.source_plan(root)
+            run_dir = self.initialize(root, plan, self.decisions(root, self.resolved_decision()), base)
+            start_task(run_dir, task_id="PX-01", owner="worker", attempt="attempt-1")
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                complete_task(
+                    run_dir, task_id="PX-01", attempt="attempt-1", phase_plan=plan,
+                    source_ref="HEAD", commits=(), artifacts=(), evidence=("tests.log",), repo_dir=repo,
+                )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+            record_task_question(run_dir, task_id="PX-01", attempt="attempt-1", question_or_block_ref="D-100", reason="blocked")
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                start_task(run_dir, task_id="PX-01", owner="worker-b", attempt="attempt-2")
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_resume_task_accepts_matching_blocked_attempt_and_applicable_resolved_decision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, base = self.make_git_repo(root)
+            run_dir = self.initialize(root, self.source_plan(root), self.decisions(root, self.resolved_decision()), base)
+            self.block(run_dir)
+
+            resumed = resume_task(
+                run_dir, task_id="PX-01", prior_attempt="attempt-1",
+                new_owner="worker-a", new_attempt="attempt-2", decision_ref="D-100",
+            )
+
+            task = next(task for task in resumed.tasks if task.id == "PX-01")
+            self.assertEqual((task.state, task.owner, task.attempt), ("[~]", "worker-a", "attempt-2"))
+            self.assertIn("attempt-1->attempt-2@D-100", task.checkpoints)
+            self.assertEqual(task.question, "resolved:D-100")
+
+    def test_resume_rejects_missing_unresolved_unrelated_or_conflicting_decision_unchanged(self):
+        cases = {
+            "missing": "# Decisions\n",
+            "unresolved": self.resolved_decision().replace("Resolved.", "Open."),
+            "unrelated": self.resolved_decision(task="PX-99"),
+            "conflicting": self.resolved_decision() + "\n- **Answer:** A conflicting answer.\n",
+            "generic approval": self.resolved_decision(answer="approved"),
+        }
+        for label, decision_text in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                _, base = self.make_git_repo(root)
+                decisions = self.decisions(root, self.resolved_decision())
+                run_dir = self.initialize(root, self.source_plan(root), decisions, base)
+                self.block(run_dir)
+                decisions.write_text(decision_text, encoding="utf-8")
+                before = (run_dir / "progress.md").read_bytes()
+                with self.assertRaises(TransitionError):
+                    resume_task(run_dir, task_id="PX-01", prior_attempt="attempt-1", new_owner="worker", new_attempt="attempt-2", decision_ref="D-100")
+                self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_identical_resume_replay_has_no_additional_effect_and_stale_request_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, base = self.make_git_repo(root)
+            run_dir = self.initialize(root, self.source_plan(root), self.decisions(root, self.resolved_decision()), base)
+            self.block(run_dir)
+            first = resume_task(run_dir, task_id="PX-01", prior_attempt="attempt-1", new_owner="worker", new_attempt="attempt-2", decision_ref="D-100")
+            first_bytes = (run_dir / "progress.md").read_bytes()
+            replay = resume_task(run_dir, task_id="PX-01", prior_attempt="attempt-1", new_owner="worker", new_attempt="attempt-2", decision_ref="D-100")
+            self.assertEqual(replay.revision, first.revision)
+            self.assertEqual((run_dir / "progress.md").read_bytes(), first_bytes)
+            with self.assertRaises(TransitionError):
+                resume_task(run_dir, task_id="PX-01", prior_attempt="attempt-1", new_owner="worker", new_attempt="attempt-3", decision_ref="D-100")
+            self.assertEqual((run_dir / "progress.md").read_bytes(), first_bytes)
+
+    def test_resume_rejects_completed_task_and_other_unresolved_task_decision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, base = self.make_git_repo(root)
+            plan = self.source_plan(root)
+            decisions = self.decisions(root, self.resolved_decision())
+            run_dir = self.initialize(root, plan, decisions, base)
+            self.block(run_dir)
+            decisions.write_text(
+                self.resolved_decision()
+                + "\n## D-101 — Other blocker\n\n"
+                + "- **Question:** Which behavior applies?\n"
+                + "- **Answer:** pending user response\n"
+                + "- **Scope:** PX-01 and its current blocker.\n"
+                + "- **Status:** Open.\n",
+                encoding="utf-8",
+            )
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                resume_task(
+                    run_dir, task_id="PX-01", prior_attempt="attempt-1",
+                    new_owner="worker", new_attempt="attempt-2", decision_ref="D-100",
+                )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+            decisions.write_text(self.resolved_decision(), encoding="utf-8")
+            resume_task(
+                run_dir, task_id="PX-01", prior_attempt="attempt-1",
+                new_owner="worker", new_attempt="attempt-2", decision_ref="D-100",
+            )
+            completed = complete_task(
+                run_dir, task_id="PX-01", attempt="attempt-2", phase_plan=plan,
+                source_ref="HEAD", commits=(base,), artifacts=(), evidence=("tests.log",), repo_dir=repo,
+            )
+            self.assertEqual(next(task for task in completed.tasks if task.id == "PX-01").state, "[x]")
+            completed_bytes = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                resume_task(
+                    run_dir, task_id="PX-01", prior_attempt="attempt-2",
+                    new_owner="worker", new_attempt="attempt-3", decision_ref="D-100",
+                )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), completed_bytes)
+
+    def test_late_prior_attempt_result_cannot_complete_resumed_task_and_recovery_does_not_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, base = self.make_git_repo(root)
+            run_dir = self.initialize(root, self.source_plan(root), self.decisions(root, self.resolved_decision()), base)
+            self.block(run_dir)
+            resume_task(run_dir, task_id="PX-01", prior_attempt="attempt-1", new_owner="worker", new_attempt="attempt-2", decision_ref="D-100")
+            revision = validate_run(run_dir).revision
+            self.assertEqual(validate_run(run_dir).revision, revision)
+            self.assertEqual(self.task(run_dir).attempt, "attempt-2")
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                complete_task(run_dir, task_id="PX-01", attempt="attempt-1", phase_plan=self.source_plan(root), source_ref="HEAD", commits=(base,), artifacts=(), evidence=("tests.log",), repo_dir=repo)
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_source_completion_and_complete_integration_ancestry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, base = self.make_git_repo(root)
+            plan = self.source_plan(root)
+            run_dir = self.initialize(root, plan, self.decisions(root, self.resolved_decision()), base)
+            self.git(repo, "checkout", "-qb", "worker")
+            (repo / "src.txt").write_text("worker\n", encoding="utf-8")
+            self.git(repo, "add", "src.txt")
+            self.git(repo, "commit", "-qm", "worker")
+            worker_commit = self.git(repo, "rev-parse", "HEAD")
+            start_task(run_dir, task_id="PX-01", owner="worker", attempt="attempt-1")
+            completed = complete_task(run_dir, task_id="PX-01", attempt="attempt-1", phase_plan=plan, source_ref="worker", commits=(worker_commit,), artifacts=(), evidence=("tests.log",), repo_dir=repo)
+            task = next(task for task in completed.tasks if task.id == "PX-01")
+            self.assertEqual((task.state, task.integration), ("[x]", "-"))
+            with self.assertRaises(TransitionError):
+                start_task(run_dir, task_id="PX-02", owner="dependent", attempt="dep-1")
+            self.git(repo, "checkout", "-q", "target")
+            (repo / "unrelated.txt").write_text("target only\n", encoding="utf-8")
+            self.git(repo, "add", "unrelated.txt")
+            self.git(repo, "commit", "-qm", "unrelated target")
+            unrelated = self.git(repo, "rev-parse", "HEAD")
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                record_task_integration(run_dir, task_id="PX-01", integration_commit=unrelated, verification=("integrated-tests.log",), repo_dir=repo)
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+            self.git(repo, "merge", "--no-ff", "-qm", "integrate worker", "worker")
+            integrated = self.git(repo, "rev-parse", "HEAD")
+            record_task_integration(run_dir, task_id="PX-01", integration_commit=integrated, verification=("integrated-tests.log",), repo_dir=repo)
+            started_dep = start_task(run_dir, task_id="PX-02", owner="dependent", attempt="dep-1")
+            self.assertEqual(next(task for task in started_dep.tasks if task.id == "PX-02").state, "[~]")
+
+    def test_artifact_task_requires_exact_outputs_and_evidence_without_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, base = self.make_git_repo(root)
+            plan = self.artifact_plan(root)
+            run_dir = self.initialize(root, plan, self.decisions(root, self.resolved_decision(task="PA-01")), base)
+            start_task(run_dir, task_id="PA-01", owner="controller", attempt="artifact-1")
+            (repo / "evidence").mkdir()
+            output = repo / "evidence/result.md"
+            output.write_text("evidence\n", encoding="utf-8")
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                complete_task(run_dir, task_id="PA-01", attempt="artifact-1", phase_plan=plan, source_ref=None, commits=(), artifacts=(Path("evidence/result.md"),), evidence=(), repo_dir=repo)
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+            completed = complete_task(run_dir, task_id="PA-01", attempt="artifact-1", phase_plan=plan, source_ref=None, commits=(), artifacts=(Path("evidence/result.md"),), evidence=("artifact-validation.log",), repo_dir=repo)
+            task = next(task for task in completed.tasks if task.id == "PA-01")
+            self.assertEqual((task.state, task.commits, task.integration), ("[x]", "-", "N/A"))
 
 
 if __name__ == "__main__":

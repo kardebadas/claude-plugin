@@ -13,6 +13,7 @@ import errno
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -70,6 +71,15 @@ class UpdateOutcomeUncertain(RuntimeError):
     def __init__(self, message: str, tracker: Tracker | None = None):
         self.tracker = tracker
         super().__init__(message)
+
+
+class TransitionError(ValueError):
+    """A requested controller transition is illegal for the current state."""
+
+
+class _AlreadyApplied(Exception):
+    def __init__(self, tracker: Tracker):
+        self.tracker = tracker
 
 
 @dataclass(frozen=True)
@@ -798,6 +808,7 @@ def locked_tracker_update(
     transition: Callable[[Tracker], Tracker],
     *,
     timeout_s: float,
+    replay_returns_current: bool = True,
 ) -> Tracker:
     """Validate and atomically apply one idempotent controller transition."""
     if not _TOKEN.fullmatch(transition_id):
@@ -805,7 +816,7 @@ def locked_tracker_update(
     run_dir = Path(run_dir)
     with _exclusive_lock(run_dir, timeout_s=timeout_s):
         current = validate_run(run_dir)
-        if current.last_transition == transition_id:
+        if current.last_transition == transition_id and replay_returns_current:
             return current
         proposed = transition(current)
         if not isinstance(proposed, Tracker):
@@ -817,6 +828,359 @@ def locked_tracker_update(
         reparsed = parse_tracker(canonical)
         _replace_tracker(run_dir, canonical, transition_id)
         return reparsed
+
+
+def _replace_task(tracker: Tracker, replacement: TaskRecord) -> Tracker:
+    return replace(
+        tracker,
+        tasks=tuple(replacement if task.id == replacement.id else task for task in tracker.tasks),
+    )
+
+
+def _task_record(tracker: Tracker, task_id: str) -> TaskRecord:
+    matches = [task for task in tracker.tasks if task.id == task_id]
+    if len(matches) != 1:
+        raise TransitionError(f"unknown task {task_id}")
+    return matches[0]
+
+
+def _project_root(run_dir: Path) -> Path:
+    for candidate in (Path(run_dir), *Path(run_dir).parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return Path.cwd()
+
+
+def _resolved_reference(run_dir: Path, value: str) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else _project_root(run_dir) / path
+
+
+def _planned_tasks(run_dir: Path, tracker: Tracker) -> dict[str, PlannedTask]:
+    paths = dict(tracker.run_fields)["phase_plans"].split(",")
+    tasks: dict[str, PlannedTask] = {}
+    for value in paths:
+        for task in parse_phase_plan(_resolved_reference(run_dir, value)):
+            if task.id in tasks:
+                raise TransitionError(f"duplicate planned task {task.id}")
+            tasks[task.id] = task
+    return tasks
+
+
+def _scope_parts(scope: str) -> tuple[str, PurePosixPath]:
+    kind, value = scope.split(":", 1)
+    return kind, PurePosixPath(value)
+
+
+def _scopes_overlap(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
+    for left_raw in left:
+        left_kind, left_path = _scope_parts(left_raw)
+        for right_raw in right:
+            right_kind, right_path = _scope_parts(right_raw)
+            if left_kind == right_kind == "file" and left_path == right_path:
+                return True
+            if left_kind == "tree" and (left_path == right_path or left_path in right_path.parents):
+                return True
+            if right_kind == "tree" and (right_path == left_path or right_path in left_path.parents):
+                return True
+    return False
+
+
+def _decision_sections(text: str) -> dict[str, list[str]]:
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in text.splitlines():
+        match = re.match(r"^## (D-[0-9]+)(?:\s|$)", line)
+        if match:
+            current = match.group(1)
+            if current in sections:
+                raise TransitionError(f"duplicate decision {current}")
+            sections[current] = []
+        elif current is not None and not line.startswith("## "):
+            sections[current].append(line)
+    return sections
+
+
+def _field_lines(lines: list[str], field: str) -> list[str]:
+    prefix = f"- **{field}:**"
+    return [line[len(prefix):].strip() for line in lines if line.startswith(prefix)]
+
+
+def _scope_names_task(scope: str, task_id: str) -> bool:
+    return re.search(rf"(?<![A-Za-z0-9._/-]){re.escape(task_id)}(?![A-Za-z0-9._/-])", scope) is not None
+
+
+def _validate_decision(run_dir: Path, tracker: Tracker, task: TaskRecord, decision_ref: str) -> None:
+    if task.question != decision_ref:
+        raise TransitionError("decision reference does not match the task's current blocker")
+    decisions_path = _resolved_reference(run_dir, dict(tracker.run_fields)["decisions"])
+    try:
+        text = decisions_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise TransitionError(f"cannot read recorded decisions at {decisions_path}: {exc}") from exc
+    sections = _decision_sections(text)
+    if decision_ref not in sections:
+        raise TransitionError(f"decision {decision_ref} is missing")
+    lines = sections[decision_ref]
+    answers = _field_lines(lines, "Answer")
+    statuses = _field_lines(lines, "Status")
+    scopes = _field_lines(lines, "Scope") + _field_lines(lines, "Affected task")
+    if len(answers) != 1 or len(statuses) != 1 or len(scopes) != 1:
+        raise TransitionError("decision evidence is missing, duplicated, or conflicting")
+    answer = answers[0].strip().rstrip(".")
+    if not answer or answer.casefold() in {"approved", "yes", "continue", "proceed", "go", "pending user response"}:
+        raise TransitionError("generic approval or an empty answer cannot resolve a blocker")
+    if statuses[0].strip().rstrip(".").casefold() != "resolved":
+        raise TransitionError("decision is not resolved")
+    if not _scope_names_task(scopes[0], task.id):
+        raise TransitionError("decision is unrelated to the blocked task")
+    for other_ref, other_lines in sections.items():
+        if other_ref == decision_ref:
+            continue
+        other_statuses = _field_lines(other_lines, "Status")
+        other_scopes = _field_lines(other_lines, "Scope") + _field_lines(other_lines, "Affected task")
+        if (
+            len(other_statuses) == 1
+            and other_statuses[0].strip().rstrip(".").casefold() in {"open", "pending", "blocked"}
+            and any(_scope_names_task(scope, task.id) for scope in other_scopes)
+        ):
+            raise TransitionError(f"unresolved decision {other_ref} still blocks {task.id}")
+
+
+def _validate_start_guards(run_dir: Path, tracker: Tracker, task_id: str) -> PlannedTask:
+    planned = _planned_tasks(run_dir, tracker)
+    if task_id not in planned:
+        raise TransitionError(f"task {task_id} is absent from approved phase plans")
+    target = planned[task_id]
+    records = {task.id: task for task in tracker.tasks}
+    for dependency in target.deps:
+        record = records[dependency]
+        ready = (
+            record.state == "[x]"
+            and ((record.kind == "source" and record.integration not in {"-", "N/A"}) or (record.kind == "artifact" and record.integration == "N/A"))
+        )
+        if not ready:
+            raise TransitionError(f"dependency {dependency} is not verified and integrated")
+    active = [task for task in tracker.tasks if task.state == "[~]" and task.id != task_id]
+    if len(active) >= tracker.worker_limit:
+        raise TransitionError("global worker limit is exhausted")
+    for task in active:
+        other = planned.get(task.id)
+        if other is not None and _scopes_overlap(target.write_scope, other.write_scope):
+            raise TransitionError(f"write scope conflicts with active task {task.id}")
+    return target
+
+
+def _append_history(value: str, entry: str) -> str:
+    return entry if value == "-" else f"{value},{entry}"
+
+
+def start_task(run_dir: Path, *, task_id: str, owner: str, attempt: str) -> Tracker:
+    """Persist the first `[ ] -> [~]` transition before dispatch."""
+    if not owner or not attempt or "|" in owner or "|" in attempt:
+        raise TransitionError("owner and attempt are required table-safe values")
+
+    def transition(tracker: Tracker) -> Tracker:
+        task = _task_record(tracker, task_id)
+        if task.state != "[ ]":
+            raise TransitionError("start_task handles first start only")
+        _validate_start_guards(Path(run_dir), tracker, task_id)
+        if any(attempt in value for value in (task.attempt, task.checkpoints, task.result)):
+            raise TransitionError("task attempt has already been used")
+        return _replace_task(
+            tracker,
+            replace(task, state="[~]", owner=owner, attempt=attempt, checkpoints=_append_history(task.checkpoints, f"started:{attempt}")),
+        )
+
+    return locked_tracker_update(
+        Path(run_dir),
+        f"start-{task_id}-{attempt}",
+        transition,
+        timeout_s=5.0,
+        replay_returns_current=False,
+    )
+
+
+def record_task_question(
+    run_dir: Path,
+    *,
+    task_id: str,
+    attempt: str,
+    question_or_block_ref: str,
+    reason: str,
+) -> Tracker:
+    if not question_or_block_ref or not reason or "|" in reason:
+        raise TransitionError("question reference and reason are required")
+
+    def transition(tracker: Tracker) -> Tracker:
+        task = _task_record(tracker, task_id)
+        if task.state != "[~]" or task.attempt != attempt:
+            raise TransitionError("only the current active attempt may be blocked")
+        checkpoint = f"blocked:{attempt}@{question_or_block_ref}"
+        return _replace_task(
+            tracker,
+            replace(task, state="[?]", checkpoints=_append_history(task.checkpoints, checkpoint), question=question_or_block_ref),
+        )
+
+    return locked_tracker_update(Path(run_dir), f"question-{task_id}-{attempt}-{question_or_block_ref}", transition, timeout_s=5.0)
+
+
+def resume_task(
+    run_dir: Path,
+    *,
+    task_id: str,
+    prior_attempt: str,
+    new_owner: str,
+    new_attempt: str,
+    decision_ref: str,
+) -> Tracker:
+    """Persist an answered `[?] -> [~]` transition before redispatch."""
+    if not all((prior_attempt, new_owner, new_attempt, decision_ref)) or "|" in new_owner:
+        raise TransitionError("resume identity fields are required")
+    marker = f"resumed:{prior_attempt}->{new_attempt}@{decision_ref}"
+
+    def transition(tracker: Tracker) -> Tracker:
+        task = _task_record(tracker, task_id)
+        if task.state == "[~]" and task.attempt == new_attempt and task.owner == new_owner and marker in task.checkpoints:
+            raise _AlreadyApplied(tracker)
+        if task.state != "[?]" or task.attempt != prior_attempt:
+            raise TransitionError("resume requires the matching blocked attempt")
+        if new_attempt == prior_attempt or any(new_attempt in value for value in (task.checkpoints, task.result)):
+            raise TransitionError("new attempt must be distinct and unused")
+        _validate_decision(Path(run_dir), tracker, task, decision_ref)
+        _validate_start_guards(Path(run_dir), tracker, task_id)
+        return _replace_task(
+            tracker,
+            replace(
+                task,
+                state="[~]",
+                owner=new_owner,
+                attempt=new_attempt,
+                checkpoints=_append_history(task.checkpoints, marker),
+                question=f"resolved:{decision_ref}",
+            ),
+        )
+
+    try:
+        return locked_tracker_update(Path(run_dir), f"resume-{task_id}-{prior_attempt}-{new_attempt}-{decision_ref}", transition, timeout_s=5.0)
+    except _AlreadyApplied as applied:
+        return applied.tracker
+
+
+def _git(repo_dir: Path, *args: str) -> bool:
+    completed = subprocess.run(
+        ("git", "-C", str(repo_dir), *args),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+def complete_task(
+    run_dir: Path,
+    *,
+    task_id: str,
+    attempt: str,
+    phase_plan: Path,
+    source_ref: str | None,
+    commits: tuple[str, ...],
+    artifacts: tuple[Path, ...],
+    evidence: tuple[str, ...],
+    repo_dir: Path,
+) -> Tracker:
+    planned = {task.id: task for task in parse_phase_plan(phase_plan)}
+    if task_id not in planned:
+        raise TransitionError("task is absent from the supplied approved phase plan")
+    definition = planned[task_id]
+
+    def transition(tracker: Tracker) -> Tracker:
+        task = _task_record(tracker, task_id)
+        if task.state != "[~]" or task.attempt != attempt:
+            raise TransitionError("result does not match the current active attempt")
+        if task.kind != definition.kind or not evidence:
+            raise TransitionError("task kind or completion evidence does not match the plan")
+        if task.kind == "source":
+            if source_ref is None or not commits or artifacts:
+                raise TransitionError("source completion requires source ref and commits only")
+            if not _git(repo_dir, "rev-parse", "--verify", source_ref):
+                raise TransitionError("source ref does not exist")
+            for commit in commits:
+                if not _COMMIT.fullmatch(commit) or not _git(repo_dir, "cat-file", "-e", f"{commit}^{{commit}}") or not _git(repo_dir, "merge-base", "--is-ancestor", commit, source_ref):
+                    raise TransitionError("implementation commit is invalid or absent from source ref")
+            replacement = replace(
+                task,
+                state="[x]",
+                result=_append_history(task.result, f"result:{attempt}"),
+                checkpoints=_append_history(task.checkpoints, f"completed:{attempt}"),
+                source_ref=source_ref,
+                commits=",".join(commits),
+                artifacts="-",
+                integration="-",
+                verification=_append_history(task.verification, ",".join(evidence)),
+            )
+        else:
+            if source_ref is not None or commits:
+                raise TransitionError("artifact completion cannot carry source provenance")
+            actual = []
+            for artifact in artifacts:
+                path = artifact if artifact.is_absolute() else Path(repo_dir) / artifact
+                try:
+                    actual.append(path.relative_to(repo_dir).as_posix())
+                except ValueError as exc:
+                    raise TransitionError("artifact is outside repository root") from exc
+                if not path.is_file():
+                    raise TransitionError(f"artifact is missing: {path}")
+            if tuple(actual) != definition.outputs:
+                raise TransitionError("artifact paths do not exactly match approved outputs")
+            replacement = replace(
+                task,
+                state="[x]",
+                result=_append_history(task.result, f"result:{attempt}"),
+                checkpoints=_append_history(task.checkpoints, f"completed:{attempt}"),
+                source_ref="-",
+                commits="-",
+                artifacts=",".join(actual),
+                integration="N/A",
+                verification=_append_history(task.verification, ",".join(evidence)),
+            )
+        return _replace_task(tracker, replacement)
+
+    return locked_tracker_update(Path(run_dir), f"complete-{task_id}-{attempt}", transition, timeout_s=5.0)
+
+
+def record_task_integration(
+    run_dir: Path,
+    *,
+    task_id: str,
+    integration_commit: str,
+    verification: tuple[str, ...],
+    repo_dir: Path,
+) -> Tracker:
+    if not verification or not _COMMIT.fullmatch(integration_commit):
+        raise TransitionError("integration commit and verification are required")
+
+    def transition(tracker: Tracker) -> Tracker:
+        task = _task_record(tracker, task_id)
+        if task.kind != "source" or task.state != "[x]" or task.commits == "-":
+            raise TransitionError("only a completed source task can be integrated")
+        if not _git(repo_dir, "cat-file", "-e", f"{integration_commit}^{{commit}}"):
+            raise TransitionError("integration commit does not exist")
+        for commit in task.commits.split(","):
+            if not _git(repo_dir, "merge-base", "--is-ancestor", commit, integration_commit):
+                raise TransitionError("integration commit does not contain every implementation commit")
+        if not _git(repo_dir, "merge-base", "--is-ancestor", integration_commit, tracker.target_branch):
+            raise TransitionError("integration commit is not contained by target branch")
+        return _replace_task(
+            tracker,
+            replace(
+                task,
+                integration=integration_commit,
+                verification=_append_history(task.verification, ",".join(verification)),
+            ),
+        )
+
+    return locked_tracker_update(Path(run_dir), f"integrate-{task_id}-{integration_commit}", transition, timeout_s=5.0)
 
 
 def _argument_parser() -> argparse.ArgumentParser:

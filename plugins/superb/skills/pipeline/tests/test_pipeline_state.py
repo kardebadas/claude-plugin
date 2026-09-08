@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import io
+import multiprocessing
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -11,10 +12,15 @@ from unittest import mock
 import plugins.superb.skills.pipeline.scripts.pipeline_state as pipeline_state
 from plugins.superb.skills.pipeline.scripts.pipeline_state import (
     LegacySchemaError,
+    LockBusyError,
+    LockUnavailableError,
     PlanMetadataError,
     SchemaError,
+    TrackerWriteError,
+    UpdateOutcomeUncertain,
     initialize_run,
     inspect_run,
+    locked_tracker_update,
     main,
     parse_phase_plan,
     parse_tracker,
@@ -26,6 +32,27 @@ from plugins.superb.skills.pipeline.scripts.pipeline_state import (
 
 REPOSITORY = Path(__file__).resolve().parents[5]
 FIXTURES = Path(__file__).with_name("fixtures")
+
+
+def _hold_pipeline_lock(run_dir: str, ready, release) -> None:
+    with pipeline_state._exclusive_lock(Path(run_dir), timeout_s=2.0):
+        ready.set()
+        release.wait(10)
+
+
+def _write_tracker_versions(run_dir: str, finished) -> None:
+    for number in range(12):
+        transition_id = f"reader-{number}"
+
+        def change(tracker, value=transition_id):
+            fields = tuple(
+                (key, value if key == "next_action" else current)
+                for key, current in tracker.current_fields
+            )
+            return dataclasses.replace(tracker, current_fields=fields)
+
+        locked_tracker_update(Path(run_dir), transition_id, change, timeout_s=2.0)
+    finished.set()
 
 
 class TrackerContractTest(unittest.TestCase):
@@ -349,6 +376,123 @@ class InitializationAndSchemaSafetyTest(unittest.TestCase):
                     self.assertNotEqual(main(["next", str(run_dir), "--phase-plan", str(FIXTURES / "phase-plan-valid.md")]), 0)
             self.assertEqual(self.snapshot(run_dir), before)
             self.assertEqual(inspect_run(run_dir)["run_id"], "2026-09-08-example")
+
+
+class AtomicMutationTest(unittest.TestCase):
+    def make_run(self, root: Path) -> Path:
+        run_dir = root / "run"
+        run_dir.mkdir()
+        (run_dir / "progress.md").write_bytes((FIXTURES / "valid-v2-progress.md").read_bytes())
+        return run_dir
+
+    def unchanged(self, tracker):
+        return tracker
+
+    def test_second_process_times_out_busy_without_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = self.make_run(Path(directory))
+            original = (run_dir / "progress.md").read_bytes()
+            context = multiprocessing.get_context("spawn")
+            ready, release = context.Event(), context.Event()
+            holder = context.Process(target=_hold_pipeline_lock, args=(str(run_dir), ready, release))
+            holder.start()
+            self.assertTrue(ready.wait(5), "lock holder did not become ready")
+            try:
+                with self.assertRaises(LockBusyError):
+                    locked_tracker_update(run_dir, "busy-attempt", self.unchanged, timeout_s=0.05)
+            finally:
+                release.set()
+                holder.join(5)
+            self.assertEqual(holder.exitcode, 0)
+            self.assertEqual((run_dir / "progress.md").read_bytes(), original)
+
+    def test_terminated_holder_releases_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = self.make_run(Path(directory))
+            context = multiprocessing.get_context("spawn")
+            ready, release = context.Event(), context.Event()
+            holder = context.Process(target=_hold_pipeline_lock, args=(str(run_dir), ready, release))
+            holder.start()
+            self.assertTrue(ready.wait(5), "lock holder did not become ready")
+            holder.terminate()
+            holder.join(5)
+            tracker = locked_tracker_update(run_dir, "after-termination", self.unchanged, timeout_s=1.0)
+            self.assertEqual(tracker.last_transition, "after-termination")
+
+    def test_temp_fsync_failure_preserves_old_tracker_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = self.make_run(Path(directory))
+            before = (run_dir / "progress.md").read_bytes()
+            with mock.patch.object(pipeline_state, "_sync_file", side_effect=OSError("fsync failed")):
+                with self.assertRaises(TrackerWriteError):
+                    locked_tracker_update(run_dir, "fsync-failure", self.unchanged, timeout_s=1.0)
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+            self.assertEqual(list(run_dir.glob(".progress.*.tmp")), [])
+
+    def test_replace_failure_preserves_old_tracker_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = self.make_run(Path(directory))
+            before = (run_dir / "progress.md").read_bytes()
+            with mock.patch.object(pipeline_state.os, "replace", side_effect=OSError("replace failed")):
+                with self.assertRaises(TrackerWriteError):
+                    locked_tracker_update(run_dir, "replace-failure", self.unchanged, timeout_s=1.0)
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_directory_sync_failure_reports_may_have_applied(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = self.make_run(Path(directory))
+            with mock.patch.object(pipeline_state, "_sync_directory", side_effect=OSError("directory sync failed")):
+                with self.assertRaises(UpdateOutcomeUncertain) as caught:
+                    locked_tracker_update(run_dir, "post-replace", self.unchanged, timeout_s=1.0)
+            self.assertIn("may have applied", str(caught.exception))
+            self.assertEqual(validate_run(run_dir).last_transition, "post-replace")
+
+    def test_retry_after_post_replace_failure_does_not_duplicate_completion_or_round(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = self.make_run(Path(directory))
+            calls = []
+
+            def change(tracker):
+                calls.append(tracker.revision)
+                return tracker
+
+            with mock.patch.object(pipeline_state, "_sync_directory", side_effect=OSError("directory sync failed")):
+                with self.assertRaises(UpdateOutcomeUncertain):
+                    locked_tracker_update(run_dir, "stable-operation-1", change, timeout_s=1.0)
+            result = locked_tracker_update(run_dir, "stable-operation-1", change, timeout_s=1.0)
+            self.assertEqual(calls, [7])
+            self.assertEqual(result.revision, 8)
+            self.assertEqual(result.last_transition, "stable-operation-1")
+
+    def test_atomic_reader_observes_only_complete_versions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = self.make_run(Path(directory))
+            context = multiprocessing.get_context("spawn")
+            finished = context.Event()
+            writer = context.Process(target=_write_tracker_versions, args=(str(run_dir), finished))
+            writer.start()
+            observations = 0
+            while not finished.wait(0.001):
+                parse_tracker((run_dir / "progress.md").read_text(encoding="utf-8"))
+                observations += 1
+            writer.join(5)
+            self.assertEqual(writer.exitcode, 0)
+            self.assertGreater(observations, 0)
+            self.assertEqual(validate_run(run_dir).revision, 19)
+
+    def test_missing_primitives_fail_without_unlocked_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = self.make_run(Path(directory))
+            before = (run_dir / "progress.md").read_bytes()
+            with mock.patch.object(pipeline_state, "fcntl", None), mock.patch.object(pipeline_state, "msvcrt", None):
+                with self.assertRaises(LockUnavailableError):
+                    locked_tracker_update(run_dir, "no-lock", self.unchanged, timeout_s=1.0)
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_windows_lock_selection_is_simulated_not_native_claim(self):
+        fake = type("FakeMsvcrt", (), {"LK_NBLCK": 1, "LK_UNLCK": 2, "locking": staticmethod(lambda *args: None)})
+        selected = pipeline_state.select_lock_impl(None, fake)
+        self.assertEqual(selected[2], "Implemented; simulation-tested; native Windows verification pending.")
 
 
 if __name__ == "__main__":

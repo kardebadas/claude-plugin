@@ -9,11 +9,27 @@ later Phase 1 tasks.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
+import os
 import re
 import sys
-from dataclasses import dataclass
+import tempfile
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
+from typing import Callable, Iterator
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - exercised by selection simulation
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - exercised by selection simulation
+    msvcrt = None
 
 SCHEMA = "pipeline-run/v2"
 _TRACKER_MARKER = f"<!-- {SCHEMA} -->"
@@ -34,6 +50,26 @@ class PlanMetadataError(ValueError):
 
 class LegacySchemaError(SchemaError):
     """A recognized Pipeline v1 tracker was supplied to v2."""
+
+
+class LockBusyError(RuntimeError):
+    """Another cooperating controller held the run-local lock to the deadline."""
+
+
+class LockUnavailableError(RuntimeError):
+    """The required OS-backed locking primitive could not be used."""
+
+
+class TrackerWriteError(RuntimeError):
+    """A tracker update failed before replacement; the old tracker remains."""
+
+
+class UpdateOutcomeUncertain(RuntimeError):
+    """Replacement occurred but a later synchronization operation failed."""
+
+    def __init__(self, message: str, tracker: Tracker | None = None):
+        self.tracker = tracker
+        super().__init__(message)
 
 
 @dataclass(frozen=True)
@@ -596,6 +632,191 @@ def inspect_run(run_dir: Path) -> dict[str, object]:
         "next_action": dict(tracker.current_fields)["next_action"],
         "task_counts": {state: sum(task.state == state for task in tracker.tasks) for state in sorted(_TASK_STATES)},
     }
+
+
+_POSIX_CONTENTION = {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}
+_WINDOWS_CONTENTION = {errno.EACCES, errno.EDEADLOCK}
+
+
+def select_lock_impl(fcntl_module, msvcrt_module):
+    """Select an inspected standard-library lock implementation.
+
+    The Windows path follows the repository's Craft implementation. It is
+    executable code but remains a simulation-only support claim in this Linux
+    environment until native Windows process tests exercise it.
+    """
+    if fcntl_module is not None and hasattr(fcntl_module, "flock"):
+        def acquire(fd: int) -> bool:
+            try:
+                fcntl_module.flock(fd, fcntl_module.LOCK_EX | fcntl_module.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in _POSIX_CONTENTION:
+                    return False
+                raise
+            return True
+
+        def release(fd: int) -> None:
+            fcntl_module.flock(fd, fcntl_module.LOCK_UN)
+
+        return acquire, release, "POSIX flock; native platform test required"
+    if msvcrt_module is not None and hasattr(msvcrt_module, "locking"):
+        def acquire(fd: int) -> bool:
+            os.lseek(fd, 0, os.SEEK_SET)
+            try:
+                msvcrt_module.locking(fd, msvcrt_module.LK_NBLCK, 1)
+            except OSError as exc:
+                if exc.errno in _WINDOWS_CONTENTION:
+                    return False
+                raise
+            return True
+
+        def release(fd: int) -> None:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt_module.locking(fd, msvcrt_module.LK_UNLCK, 1)
+
+        return acquire, release, "Implemented; simulation-tested; native Windows verification pending."
+    raise LockUnavailableError(
+        "no supported OS-backed lock primitive: fcntl.flock and msvcrt.locking are unavailable"
+    )
+
+
+@contextmanager
+def _exclusive_lock(run_dir: Path, *, timeout_s: float) -> Iterator[None]:
+    """Hold the stable run-local lock without ever unlinking its path."""
+    if timeout_s < 0:
+        raise LockUnavailableError("lock timeout must be nonnegative")
+    lock_path = Path(run_dir) / ".pipeline-state.lock"
+    try:
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as exc:
+        raise LockUnavailableError(f"cannot open run-local lock {lock_path}: {exc}") from exc
+    acquired = False
+    acquire = release = None
+    try:
+        if os.fstat(fd).st_size == 0:
+            os.write(fd, b"\0")
+            os.fsync(fd)
+        try:
+            acquire, release, _ = select_lock_impl(fcntl, msvcrt)
+        except LockUnavailableError:
+            raise
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                acquired = acquire(fd)
+            except OSError as exc:
+                raise LockUnavailableError(f"cannot acquire run-local lock {lock_path}: {exc}") from exc
+            if acquired:
+                break
+            if time.monotonic() >= deadline:
+                raise LockBusyError(f"run-local lock busy at {lock_path} after {timeout_s:.3f}s")
+            time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+        try:
+            descriptor = os.fstat(fd)
+            named = os.stat(lock_path)
+        except OSError as exc:
+            raise LockUnavailableError(f"cannot verify stable run-local lock {lock_path}: {exc}") from exc
+        if (descriptor.st_dev, descriptor.st_ino) != (named.st_dev, named.st_ino):
+            raise LockUnavailableError(f"run-local lock resource changed while acquiring {lock_path}")
+        yield
+    finally:
+        if acquired and release is not None:
+            try:
+                release(fd)
+            except OSError:
+                pass
+        os.close(fd)
+
+
+def _sync_file(handle) -> None:
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
+def _sync_directory(directory: Path) -> None:
+    if os.name == "nt":  # native semantics remain pending verification
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _with_transition_identity(tracker: Tracker, transition_id: str, revision: int) -> Tracker:
+    fields = tuple(
+        (key, str(revision) if key == "revision" else transition_id if key == "last_transition" else value)
+        for key, value in tracker.run_fields
+    )
+    return replace(tracker, run_fields=fields)
+
+
+def _replace_tracker(run_dir: Path, text: str, transition_id: str) -> None:
+    progress = run_dir / "progress.md"
+    descriptor = -1
+    temporary: str | None = None
+    replaced = False
+    try:
+        descriptor, temporary = tempfile.mkstemp(
+            dir=str(run_dir), prefix=".progress.", suffix=".tmp"
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            descriptor = -1
+            handle.write(text)
+            _sync_file(handle)
+        os.replace(temporary, progress)
+        replaced = True
+        temporary = None
+        _sync_directory(run_dir)
+    except OSError as exc:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if not replaced:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+            raise TrackerWriteError(
+                f"tracker update {transition_id} failed before replacement; old tracker preserved: {exc}"
+            ) from exc
+        observed = None
+        try:
+            observed = validate_run(run_dir)
+        except SchemaError:
+            pass
+        raise UpdateOutcomeUncertain(
+            f"tracker update {transition_id} may have applied after replacement; reconcile revision/transition identity before retry: {exc}",
+            observed,
+        ) from exc
+
+
+def locked_tracker_update(
+    run_dir: Path,
+    transition_id: str,
+    transition: Callable[[Tracker], Tracker],
+    *,
+    timeout_s: float,
+) -> Tracker:
+    """Validate and atomically apply one idempotent controller transition."""
+    if not _TOKEN.fullmatch(transition_id):
+        raise SchemaError("invalid transition identity")
+    run_dir = Path(run_dir)
+    with _exclusive_lock(run_dir, timeout_s=timeout_s):
+        current = validate_run(run_dir)
+        if current.last_transition == transition_id:
+            return current
+        proposed = transition(current)
+        if not isinstance(proposed, Tracker):
+            raise SchemaError("transition must return a Tracker")
+        if proposed.run_id != current.run_id or proposed.base_commit != current.base_commit or proposed.target_branch != current.target_branch:
+            raise SchemaError("transition cannot change run identity")
+        updated = _with_transition_identity(proposed, transition_id, current.revision + 1)
+        canonical = render_tracker(updated)
+        reparsed = parse_tracker(canonical)
+        _replace_tracker(run_dir, canonical, transition_id)
+        return reparsed
 
 
 def _argument_parser() -> argparse.ArgumentParser:

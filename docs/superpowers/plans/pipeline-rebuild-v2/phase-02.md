@@ -51,7 +51,7 @@ Every task has the Phase 1 helper's strict phase-plan metadata: Stable ID, Depen
 | plugins/superb/skills/pipeline/references/execution.md | TDD batches, dispatch, integration, phase verification | Create |
 | plugins/superb/skills/pipeline/references/persistence.md | Tracker/result ownership, status/resume/reconciliation | Create |
 | plugins/superb/skills/pipeline/references/review.md | Hybrid gates, findings, remediation, master gate | Create |
-| plugins/superb/skills/pipeline/templates/progress.md, worker-result.md | Strict tracker and result schema | Phase 1 owns creation; Phase 2 consumes/verifies only |
+| plugins/superb/skills/pipeline/templates/progress.md, worker-result.md, verification-evidence.md | Strict tracker, result, and code-state verification evidence schemas | Phase 1 owns creation; Phase 2 consumes/verifies only |
 | plugins/superb/skills/pipeline/templates/decisions.md | Question/answer record | Create |
 | plugins/superb/skills/pipeline/templates/findings.md, fix-plan.md | Finding dispositions and one gate-round plan | Rewrite |
 | plugins/superb/skills/pipeline/README.md | User-facing v2 operation/guarantees | Rewrite |
@@ -196,7 +196,7 @@ git commit -m "docs(pipeline): add v2 execution contract"
 **Stable ID:** P2-T05
 **Depends on:** P2-T01
 **Batch:** P2-persistence, order 1; may dispatch concurrently with P2-review
-**Write scope:** plugins/superb/skills/pipeline/references/persistence.md and plugins/superb/skills/pipeline/templates/decisions.md only; Phase 1 owns progress.md and worker-result.md
+**Write scope:** plugins/superb/skills/pipeline/references/persistence.md and plugins/superb/skills/pipeline/templates/decisions.md only; Phase 1 owns progress.md, worker-result.md, and verification-evidence.md
 **Applicable decisions:** D-003, D-004, D-008, D-009, D-014, D-015
 **Consumes:** Phase 1 exact helper/schema/CLI names; durable-artifact design; RED legacy/post-commit evidence
 **Produces:** one persistence authority, decisions template, and verification that Phase 1-owned progress/result templates remain aligned
@@ -213,6 +213,7 @@ python3.11 -m unittest discover -s plugins/superb/skills/pipeline/tests -v
 rg -n 'pipeline-run/v2|worker_limit|next eligible action|\[ \]|\[~\]|\[\?\]|\[x\]|final-only|required' plugins/superb/skills/pipeline/templates/progress.md
 rg -n 'Stable ID|Question|Answer|Sources|Status' plugins/superb/skills/pipeline/templates/decisions.md
 rg -n 'run|task|attempt|owner|DONE_WITH_CONCERNS|NEEDS_CONTEXT|PLAN_CONFLICT|BLOCKED|checkpoint|commit|evidence|question' plugins/superb/skills/pipeline/templates/worker-result.md
+rg -n 'pipeline-verification-evidence/v2|code_state|outcome|commands|PASS' plugins/superb/skills/pipeline/templates/verification-evidence.md
 ~~~
 
 Expected: helper suite passes and required strict-schema/result components are visible.

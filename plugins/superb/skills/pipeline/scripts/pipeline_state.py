@@ -223,6 +223,13 @@ class PhaseMetadata:
     review_reason: str
 
 
+@dataclass(frozen=True)
+class ReconciliationReport:
+    actions: tuple[str, ...]
+    questions: tuple[str, ...]
+    diagnostics: tuple[str, ...]
+
+
 _RUN_KEYS = ("run_id", "base_commit", "target_branch", "worker_limit", "spec", "master_plan", "phase_plans", "decisions", "findings", "revision", "last_transition")
 _CURRENT_KEYS = ("phase", "batch", "next_action")
 _RESULT_KEYS = ("run_id", "task_id", "attempt", "owner", "kind", "status", "source_ref", "commits", "artifacts", "tests", "evidence", "concerns", "question", "blocking_reason")
@@ -1849,6 +1856,101 @@ def evaluate_and_close_review_gate(
         return replace(_replace_gate(tracker, replacement), remediation=tuple(remediation_rows))
 
     return locked_tracker_update(Path(run_dir), f"evaluate-gate-{gate_id}-{hashlib.sha256('|'.join(verification).encode()).hexdigest()}", transition, timeout_s=5.0)
+
+
+def reconcile_run(
+    run_dir: Path,
+    *,
+    phase_plan: Path,
+    repo_dir: Path,
+) -> ReconciliationReport:
+    """Rebuild the next recovery action from authoritative files and Git evidence."""
+    run_dir = Path(run_dir)
+    repo_dir = Path(repo_dir)
+    tracker = validate_run(run_dir)
+    actions: list[str] = []
+    questions: list[str] = []
+    diagnostics: list[str] = []
+
+    approved_plan_paths = {
+        _resolved_reference(run_dir, value).resolve()
+        for value in dict(tracker.run_fields)["phase_plans"].split(",")
+    }
+    if Path(phase_plan).resolve() not in approved_plan_paths:
+        raise TransitionError("reconciliation phase plan is not approved for this run")
+    parse_phase_plan(phase_plan)
+
+    run_fields = dict(tracker.run_fields)
+    for field in ("spec", "master_plan", "decisions", "findings"):
+        path = _resolved_reference(run_dir, run_fields[field])
+        try:
+            path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            questions.append(f"unreadable-authoritative-artifact:{field}:{path}:{exc}")
+
+    parsed_results: list[tuple[Path, WorkerResult]] = []
+    output_dir = run_dir / "agent-output"
+    if output_dir.is_dir():
+        for path in sorted(item for item in output_dir.rglob("*") if item.is_file()):
+            try:
+                content = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                diagnostics.append(f"unreadable-result-candidate:{path}:{exc}")
+                continue
+            if not content.startswith(_RESULT_MARKER):
+                continue
+            try:
+                parsed_results.append((path, parse_worker_result(content)))
+            except SchemaError as exc:
+                diagnostics.append(f"partial-or-malformed-result:{path}:{exc}")
+
+    for task in tracker.tasks:
+        if task.state != "[~]":
+            continue
+        matches = [
+            (path, result)
+            for path, result in parsed_results
+            if result.run_id == tracker.run_id and result.task_id == task.id and result.attempt == task.attempt
+        ]
+        if len(matches) > 1:
+            questions.append(f"conflicting-results:{task.id}:{task.attempt}")
+            continue
+        if len(matches) == 1:
+            path, result = matches[0]
+            if result.owner != task.owner:
+                questions.append(f"result-owner-contradiction:{task.id}:{task.attempt}:{path}")
+                continue
+            try:
+                import_worker_result(run_dir, result_path=path, phase_plan=phase_plan, repo_dir=repo_dir)
+            except (EvidenceError, SchemaError, TransitionError) as exc:
+                questions.append(f"result-evidence-contradiction:{task.id}:{task.attempt}:{exc}")
+            else:
+                actions.append(f"imported:{task.id}:{task.attempt}")
+            continue
+        stale = [
+            path for path, result in parsed_results
+            if result.run_id == tracker.run_id and result.task_id == task.id
+        ]
+        if stale:
+            questions.append(f"superseded-or-conflicting-result:{task.id}:{task.attempt}:{','.join(str(path) for path in stale)}")
+        actions.append(f"await-or-check-live-owner:{task.id}:{task.attempt}:{task.owner}")
+
+    tracker = validate_run(run_dir)
+    for task in tracker.tasks:
+        if task.state == "[x]" and task.kind == "source":
+            if task.integration == "-":
+                actions.append(f"integration-pending:{task.id}")
+            elif not _dependency_ready(run_dir, tracker, task):
+                questions.append(f"integration-contradiction:{task.id}")
+        elif task.state == "[x]" and task.kind == "artifact" and not _dependency_ready(run_dir, tracker, task):
+            questions.append(f"artifact-evidence-contradiction:{task.id}")
+        elif task.state == "[?]":
+            actions.append(f"await-user-decision:{task.id}:{task.question}")
+    for row in tracker.remediation:
+        if row.state == "in_progress":
+            actions.append(f"resume-remediation:{row.gate}:{row.round_number}")
+
+    return ReconciliationReport(tuple(actions), tuple(questions), tuple(diagnostics))
 
 
 def _argument_parser() -> argparse.ArgumentParser:

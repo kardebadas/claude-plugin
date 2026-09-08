@@ -36,12 +36,14 @@ from plugins.superb.skills.pipeline.scripts.pipeline_state import (
     record_task_integration,
     record_task_question,
     record_phase_verification,
+    reconcile_run,
     open_review_gate,
     start_remediation_round,
     evaluate_and_close_review_gate,
     render_tracker,
     resume_task,
     reserve_tasks,
+    ReconciliationReport,
     start_task,
     validate_run,
     WorkerResult,
@@ -1387,6 +1389,8 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
             with self.assertRaises(TransitionError):
                 record_phase_verification(run_dir, phase_id="01", head=head, commands=("suite",), evidence=(f"suite:{head}",))
             self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             run_dir, _, head = self.make_run(root, phase_id="03", review_gate="final-only", reason="Final only.")
@@ -1458,6 +1462,79 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
             with self.assertRaises(TransitionError):
                 start_remediation_round(run_dir, gate_id="phase-01", round_number=4, finding_ids=("F-001",), fix_plan=str(fix_plan))
             self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+
+class ReconciliationTest(unittest.TestCase):
+    def prepare(self, root: Path) -> tuple[WorkerResultImportTest, Path, Path]:
+        helper = WorkerResultImportTest()
+        run_dir, plan, _ = helper.make_run(root)
+        (root / "spec.md").write_text("# Spec\n", encoding="utf-8")
+        (root / "master.md").write_text("# Master\n", encoding="utf-8")
+        (root / "findings.md").write_text("# Findings\n", encoding="utf-8")
+        return helper, run_dir, plan
+
+    def test_post_commit_source_result_reconciles_once_before_integration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            helper, run_dir, plan = self.prepare(root)
+            commit = helper.commit_source(root)
+            start_task(run_dir, task_id="PR-01", owner="worker-a", attempt="attempt-1")
+            helper.write_result(run_dir, "interrupted.md", helper.result_text(task_id="PR-01", attempt="attempt-1", owner="worker-a", source_ref="worker", commits=commit))
+            first = reconcile_run(run_dir, phase_plan=plan, repo_dir=root)
+            self.assertIsInstance(first, ReconciliationReport)
+            self.assertIn("imported:PR-01:attempt-1", first.actions)
+            revision = validate_run(run_dir).revision
+            second = reconcile_run(run_dir, phase_plan=plan, repo_dir=root)
+            self.assertEqual(validate_run(run_dir).revision, revision)
+            self.assertIn("integration-pending:PR-01", second.actions)
+
+    def test_artifact_result_reconciles_without_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            helper, run_dir, plan = self.prepare(root)
+            (root / "evidence").mkdir()
+            (root / "evidence/artifact.md").write_text("artifact\n", encoding="utf-8")
+            start_task(run_dir, task_id="PR-02", owner="worker-a", attempt="artifact-1")
+            helper.write_result(run_dir, "artifact-interrupted.md", helper.result_text(task_id="PR-02", attempt="artifact-1", owner="worker-a", kind="artifact", artifacts="evidence/artifact.md"))
+            report = reconcile_run(run_dir, phase_plan=plan, repo_dir=root)
+            task = next(task for task in validate_run(run_dir).tasks if task.id == "PR-02")
+            self.assertIn("imported:PR-02:artifact-1", report.actions)
+            self.assertEqual((task.state, task.integration, task.commits), ("[x]", "N/A", "-"))
+
+    def test_consistent_active_and_partial_evidence_are_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, run_dir, plan = self.prepare(root)
+            start_task(run_dir, task_id="PR-01", owner="worker-a", attempt="attempt-1")
+            partial = run_dir / "agent-output/partial.md"
+            partial.write_text("<!-- pipeline-worker-result/v2 -->\npartial", encoding="utf-8")
+            before = (run_dir / "progress.md").read_bytes()
+            report = reconcile_run(run_dir, phase_plan=plan, repo_dir=root)
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+            self.assertIn("await-or-check-live-owner:PR-01:attempt-1:worker-a", report.actions)
+            self.assertTrue(any("partial.md" in item for item in report.diagnostics))
+
+    def test_git_contradiction_and_interrupted_round_are_reported_without_reset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            helper, run_dir, plan = self.prepare(root)
+            commit = helper.commit_source(root)
+
+            def contradict(tracker):
+                task = next(task for task in tracker.tasks if task.id == "PR-01")
+                changed = dataclasses.replace(task, state="[x]", source_ref="worker", commits=commit, integration=tracker.base_commit, verification="tests")
+                gate = next(gate for gate in tracker.gates if gate.id == "master")
+                blocked_gate = dataclasses.replace(gate, state="blocked", findings="F-001")
+                round_row = next(row for row in tracker.remediation if row.gate == "master")
+                active_round = dataclasses.replace(round_row, state="in_progress", findings="F-001", fix_plan="fix.md")
+                return dataclasses.replace(tracker, tasks=tuple(changed if item.id == "PR-01" else item for item in tracker.tasks), gates=tuple(blocked_gate if item.id == "master" else item for item in tracker.gates), remediation=tuple(active_round if item.gate == "master" else item for item in tracker.remediation))
+
+            locked_tracker_update(run_dir, "contradict", contradict, timeout_s=1.0)
+            before = (run_dir / "progress.md").read_bytes()
+            report = reconcile_run(run_dir, phase_plan=plan, repo_dir=root)
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+            self.assertTrue(any("integration-contradiction:PR-01" in item for item in report.questions))
+            self.assertIn("resume-remediation:master:1", report.actions)
 
 
 if __name__ == "__main__":

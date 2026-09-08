@@ -1566,6 +1566,291 @@ def import_worker_result(
         return applied.tracker
 
 
+def _replace_phase(tracker: Tracker, replacement: PhaseRecord) -> Tracker:
+    return replace(
+        tracker,
+        phases=tuple(replacement if phase.id == replacement.id else phase for phase in tracker.phases),
+    )
+
+
+def _replace_gate(tracker: Tracker, replacement: GateRecord) -> Tracker:
+    return replace(
+        tracker,
+        gates=tuple(replacement if gate.id == replacement.id else gate for gate in tracker.gates),
+    )
+
+
+def _gate_record(tracker: Tracker, gate_id: str) -> GateRecord:
+    matches = [gate for gate in tracker.gates if gate.id == gate_id]
+    if len(matches) != 1:
+        raise TransitionError(f"unknown review gate {gate_id}")
+    return matches[0]
+
+
+def _phase_document_for(tracker: Tracker, run_dir: Path, phase_id: str) -> tuple[PhaseMetadata, tuple[PlannedTask, ...]]:
+    matches = []
+    for value in dict(tracker.run_fields)["phase_plans"].split(","):
+        document = _parse_phase_document(_resolved_reference(run_dir, value))
+        if document[0].id == phase_id:
+            matches.append(document)
+    if len(matches) != 1:
+        raise TransitionError(f"phase {phase_id} does not resolve to one approved plan")
+    return matches[0]
+
+
+def record_phase_verification(
+    run_dir: Path,
+    *,
+    phase_id: str,
+    head: str,
+    commands: tuple[str, ...],
+    evidence: tuple[str, ...],
+) -> Tracker:
+    if not commands or not evidence or not _COMMIT.fullmatch(head):
+        raise TransitionError("phase verification needs commands, evidence, and a full commit")
+    if not all(head in item for item in evidence):
+        raise TransitionError("phase verification evidence must identify the tested HEAD")
+
+    def transition(tracker: Tracker) -> Tracker:
+        metadata, planned = _phase_document_for(tracker, Path(run_dir), phase_id)
+        matches = [phase for phase in tracker.phases if phase.id == phase_id]
+        if len(matches) != 1:
+            raise TransitionError(f"unknown phase {phase_id}")
+        phase = matches[0]
+        if phase.review_gate != metadata.review_gate or phase.review_reason != metadata.review_reason:
+            raise TransitionError("phase review classification or reason conflicts with approved metadata")
+        records = {task.id: task for task in tracker.tasks}
+        if any(not _dependency_ready(Path(run_dir), tracker, records[item.id]) for item in planned):
+            raise TransitionError("every phase task must be verified and truthfully integrated")
+        repo_dir = _project_root(Path(run_dir))
+        if not _git(repo_dir, "cat-file", "-e", f"{head}^{{commit}}") or not _git(repo_dir, "merge-base", "--is-ancestor", head, tracker.target_branch):
+            raise TransitionError("phase verification HEAD is not on the target branch")
+        verification = f"head:{head};commands:{','.join(commands)};evidence:{','.join(evidence)}"
+        return _replace_phase(tracker, replace(phase, state="[x]", verification=verification))
+
+    return locked_tracker_update(Path(run_dir), f"verify-phase-{phase_id}-{head}", transition, timeout_s=5.0)
+
+
+def open_review_gate(
+    run_dir: Path,
+    *,
+    gate_id: str,
+    base: str,
+    head: str,
+    reviewer_assignments: tuple[str, ...],
+) -> Tracker:
+    if not _COMMIT.fullmatch(base) or not _COMMIT.fullmatch(head):
+        raise TransitionError("review base and HEAD must be full commits")
+    if len(reviewer_assignments) != len(set(reviewer_assignments)) or any(not _TOKEN.fullmatch(item) for item in reviewer_assignments):
+        raise TransitionError("reviewer assignments must be unique valid identifiers")
+
+    def transition(tracker: Tracker) -> Tracker:
+        gate = _gate_record(tracker, gate_id)
+        if gate.state != "pending":
+            raise TransitionError("only a pending review gate can be opened")
+        if gate.type == "phase":
+            phase = next((item for item in tracker.phases if item.id == gate.phase), None)
+            if phase is None or phase.review_gate != "required" or phase.state != "[x]" or len(reviewer_assignments) != 1:
+                raise TransitionError("required phase review needs one reviewer after mechanical verification")
+            _, planned = _phase_document_for(tracker, Path(run_dir), gate.phase)
+            owners = {next(task for task in tracker.tasks if task.id == item.id).owner for item in planned}
+            if reviewer_assignments[0] in owners:
+                raise TransitionError("phase reviewer must be independent from implementation owners")
+        else:
+            if len(reviewer_assignments) != 2 or any(phase.state != "[x]" for phase in tracker.phases):
+                raise TransitionError("master review needs two reviewers after all phases verify")
+            if any(item.type == "phase" and item.state != "accepted" for item in tracker.gates):
+                raise TransitionError("master review waits for every required phase gate")
+        repo_dir = _project_root(Path(run_dir))
+        if not _git(repo_dir, "merge-base", "--is-ancestor", base, head) or not _git(repo_dir, "merge-base", "--is-ancestor", head, tracker.target_branch):
+            raise TransitionError("review range is not an integrated target-branch range")
+        return _replace_gate(
+            tracker,
+            replace(gate, state="in_progress", base=base, head=head, assignments=",".join(reviewer_assignments)),
+        )
+
+    return locked_tracker_update(Path(run_dir), f"open-gate-{gate_id}-{head}", transition, timeout_s=5.0)
+
+
+_REVIEW_FIELDS = ("gate", "assignment", "base", "head", "findings")
+_FINDING_HEADER = ("ID", "Gate", "Severity", "Status", "Disposition", "Evidence", "Fix Commit", "Re-review")
+
+
+def _parse_review_report(path: Path) -> dict[str, str]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise TransitionError(f"review report is unreadable: {path}: {exc}") from exc
+    if not lines or lines[0] != "<!-- pipeline-review-report/v2 -->":
+        raise TransitionError("review report marker is missing")
+    values = dict(_key_values(lines[1:], _REVIEW_FIELDS, TransitionError))
+    return values
+
+
+def _parse_findings(path: Path) -> tuple[tuple[str, ...], ...]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise TransitionError(f"findings ledger is unreadable: {path}: {exc}") from exc
+    if not lines or lines[0] != "<!-- pipeline-findings/v2 -->":
+        raise TransitionError("findings ledger marker is missing")
+    content = [line for line in lines[1:] if line]
+    if len(content) < 2 or _cells(content[0], TransitionError) != _FINDING_HEADER:
+        raise TransitionError(f"expected findings table header: {_FINDING_HEADER!r}")
+    separator = _cells(content[1], TransitionError)
+    if len(separator) != len(_FINDING_HEADER) or any(value != "---" for value in separator):
+        raise TransitionError("invalid findings table separator")
+    rows = tuple(_cells(line, TransitionError) for line in content[2:])
+    if any(len(row) != len(_FINDING_HEADER) for row in rows):
+        raise TransitionError("finding rows must be complete")
+    ids = [row[0] for row in rows]
+    if len(ids) != len(set(ids)):
+        raise TransitionError("finding IDs must be unique")
+    return rows
+
+
+def start_remediation_round(
+    run_dir: Path,
+    *,
+    gate_id: str,
+    round_number: int,
+    finding_ids: tuple[str, ...],
+    fix_plan: str,
+) -> Tracker:
+    if round_number not in {1, 2, 3} or not finding_ids or len(finding_ids) != len(set(finding_ids)):
+        raise TransitionError("remediation round must be 1..3 with unique targeted findings")
+    if not Path(fix_plan).is_file():
+        raise TransitionError("remediation fix plan does not exist")
+
+    def transition(tracker: Tracker) -> Tracker:
+        gate = _gate_record(tracker, gate_id)
+        if gate.state != "blocked":
+            raise TransitionError("remediation requires a blocked gate")
+        gate_findings = set(_csv(gate.findings))
+        if not set(finding_ids).issubset(gate_findings):
+            raise TransitionError("remediation targets are not confirmed findings for this gate")
+        rows = list(tracker.remediation)
+        existing = next((row for row in rows if row.gate == gate_id and row.round_number == round_number), None)
+        if existing is not None and existing.state == "in_progress" and existing.findings == ",".join(finding_ids) and existing.fix_plan == fix_plan:
+            raise _AlreadyApplied(tracker)
+        if existing is not None and existing.state != "pending":
+            raise TransitionError("remediation round is already used or conflicting")
+        if round_number > 1:
+            prior = next((row for row in rows if row.gate == gate_id and row.round_number == round_number - 1), None)
+            if prior is None or prior.state != "complete":
+                raise TransitionError("prior remediation round is not complete")
+        replacement = RemediationRecord(gate_id, round_number, "in_progress", ",".join(finding_ids), fix_plan, "-", "-", "-")
+        if existing is None:
+            rows.append(replacement)
+        else:
+            rows[rows.index(existing)] = replacement
+        return replace(tracker, remediation=tuple(rows))
+
+    try:
+        return locked_tracker_update(Path(run_dir), f"remediate-{gate_id}-{round_number}", transition, timeout_s=5.0)
+    except _AlreadyApplied as applied:
+        return applied.tracker
+
+
+def evaluate_and_close_review_gate(
+    run_dir: Path,
+    *,
+    gate_id: str,
+    findings_path: Path,
+    report_paths: tuple[Path, ...],
+    verification: tuple[str, ...],
+    rereview_paths: tuple[Path, ...],
+) -> Tracker:
+    if not report_paths or not verification:
+        raise TransitionError("gate evaluation needs all reports and code-state verification")
+
+    def transition(tracker: Tracker) -> Tracker:
+        gate = _gate_record(tracker, gate_id)
+        if gate.state not in {"in_progress", "blocked"}:
+            raise TransitionError("gate is not open for evaluation")
+        reports = tuple(_parse_review_report(Path(path)) for path in report_paths)
+        expected_assignments = tuple(gate.assignments.split(","))
+        if tuple(sorted(report["assignment"] for report in reports)) != tuple(sorted(expected_assignments)):
+            raise TransitionError("required reviewer reports are missing, duplicated, or unexpected")
+        if any(report["gate"] != gate.id or report["base"] != gate.base or report["head"] != gate.head for report in reports):
+            raise TransitionError("review report belongs to a different gate or code state")
+        active_round = next(
+            (row for row in tracker.remediation if row.gate == gate.id and row.state == "in_progress"),
+            None,
+        )
+        rereviews = tuple(_parse_review_report(Path(path)) for path in rereview_paths)
+        reviewed_head = gate.head
+        if active_round is not None:
+            if not rereviews:
+                raise TransitionError("an active remediation round requires re-review evidence")
+            if tuple(sorted(report["assignment"] for report in rereviews)) != tuple(sorted(expected_assignments)):
+                raise TransitionError("re-review assignments do not match the gate")
+            rereview_heads = {report["head"] for report in rereviews}
+            if len(rereview_heads) != 1 or any(report["gate"] != gate.id for report in rereviews):
+                raise TransitionError("re-review reports disagree on gate or reviewed HEAD")
+            reviewed_head = next(iter(rereview_heads))
+            if any(report["base"] != gate.head for report in rereviews):
+                raise TransitionError("re-review base must be the prior reviewed HEAD")
+            repo_dir = _project_root(Path(run_dir))
+            if not _git(repo_dir, "merge-base", "--is-ancestor", gate.head, reviewed_head) or not _git(repo_dir, "merge-base", "--is-ancestor", reviewed_head, tracker.target_branch):
+                raise TransitionError("re-review code state is not integrated after the prior gate HEAD")
+        if not all(reviewed_head in item for item in verification):
+            raise TransitionError("gate verification does not identify the applicable reviewed HEAD")
+        rows = tuple(row for row in _parse_findings(Path(findings_path)) if row[1] == gate.id)
+        row_ids = {row[0] for row in rows}
+        report_ids = {finding for report in (*reports, *rereviews) for finding in _csv(report["findings"])}
+        if row_ids != report_ids:
+            raise TransitionError("review reports and findings ledger disagree")
+        blockers = [row for row in rows if row[2] in {"Critical", "Important"} and row[3] != "Resolved"]
+        invalid_minor = [
+            row for row in rows
+            if row[2] == "Minor"
+            and (row[4] not in {"Fixed", "Deferred", "Rejected"} or (row[4] in {"Deferred", "Rejected"} and row[5] == "-"))
+        ]
+        invalid_rows = [row for row in rows if row[2] not in {"Critical", "Important", "Minor"}]
+        fixed_commits = [row[6] for row in rows if row[4] == "Fixed" and row[6] != "-"]
+        rereview_ids = {finding for report in rereviews for finding in _csv(report["findings"])}
+        fixed_ids = {row[0] for row in rows if row[4] == "Fixed" and row[6] != "-"}
+        if fixed_commits and (not rereviews or not fixed_ids.issubset(rereview_ids)):
+            raise TransitionError("repository-changing review fixes require matching re-review evidence")
+        repo_dir = _project_root(Path(run_dir))
+        if any(not _COMMIT.fullmatch(commit) or not _git(repo_dir, "merge-base", "--is-ancestor", commit, reviewed_head) for commit in fixed_commits):
+            raise TransitionError("review fix commit is invalid or absent from the reviewed HEAD")
+        if invalid_rows or invalid_minor:
+            raise TransitionError("finding severity or Minor disposition is invalid")
+        questions = gate.questions
+        remediation_rows = list(tracker.remediation)
+        if active_round is not None:
+            targeted = set(active_round.findings.split(","))
+            open_blocker_ids = {row[0] for row in blockers}
+            progress = bool(targeted - open_blocker_ids)
+            if blockers and not progress:
+                questions = f"remediation-no-progress-round-{active_round.round_number}"
+            elif blockers and active_round.round_number == 3:
+                questions = "remediation-limit-reached-round-3"
+            completed_round = replace(
+                active_round,
+                state="complete",
+                commits=",".join(fixed_commits) or "-",
+                verification=",".join(verification),
+                re_review=",".join(str(Path(path)) for path in rereview_paths),
+            )
+            remediation_rows[remediation_rows.index(active_round)] = completed_round
+        state = "blocked" if blockers or questions != "-" else "accepted"
+        replacement = replace(
+            gate,
+            state=state,
+            head=reviewed_head,
+            reports=",".join(str(Path(path)) for path in report_paths),
+            verification=",".join(verification),
+            findings=",".join(sorted(row_ids)) or "-",
+            questions=questions,
+        )
+        return replace(_replace_gate(tracker, replacement), remediation=tuple(remediation_rows))
+
+    return locked_tracker_update(Path(run_dir), f"evaluate-gate-{gate_id}-{hashlib.sha256('|'.join(verification).encode()).hexdigest()}", transition, timeout_s=5.0)
+
+
 def _argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pipeline_state.py")
     commands = parser.add_subparsers(dest="command", required=True)

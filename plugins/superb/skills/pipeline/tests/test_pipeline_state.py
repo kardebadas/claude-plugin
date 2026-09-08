@@ -35,6 +35,10 @@ from plugins.superb.skills.pipeline.scripts.pipeline_state import (
     publish_worker_result,
     record_task_integration,
     record_task_question,
+    record_phase_verification,
+    open_review_gate,
+    start_remediation_round,
+    evaluate_and_close_review_gate,
     render_tracker,
     resume_task,
     reserve_tasks,
@@ -1289,6 +1293,171 @@ class WorkerResultImportTest(unittest.TestCase):
             with self.assertRaises(EvidenceError):
                 publish_worker_result(result_path, changed)
             self.assertEqual(result_path.read_bytes(), published)
+
+
+class PhaseGateAndRemediationTest(unittest.TestCase):
+    def git(self, repo: Path, *args: str) -> str:
+        return subprocess.run(("git", *args), cwd=repo, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.strip()
+
+    def make_run(self, root: Path, *, phase_id: str = "01", review_gate: str = "required", reason: str = "Phase-specific risk.") -> tuple[Path, Path, str]:
+        self.git(root, "init", "-q")
+        self.git(root, "config", "user.email", "pipeline@example.invalid")
+        self.git(root, "config", "user.name", "Pipeline Test")
+        (root / "base.txt").write_text("base\n", encoding="utf-8")
+        self.git(root, "add", "base.txt")
+        self.git(root, "commit", "-qm", "base")
+        head = self.git(root, "rev-parse", "HEAD")
+        self.git(root, "branch", "target")
+        plan = root / f"phase-{phase_id}.md"
+        plan.write_text(
+            f"""# Gate phase
+
+<!-- pipeline-v2-phase: id={phase_id}; deps=none; review_gate={review_gate}; review_reason={reason} -->
+
+### PG-01 — Source
+<!-- pipeline-v2-task: id=PG-01; deps=none; kind=source; batch=gate; order=1; write_scope=file:source.txt; outputs=none -->
+
+### PG-02 — Evidence
+<!-- pipeline-v2-task: id=PG-02; deps=none; kind=artifact; batch=evidence; order=2; write_scope=tree:evidence; outputs=evidence/report.md -->
+""",
+            encoding="utf-8",
+        )
+        decisions = root / "decisions.md"
+        decisions.write_text("# Decisions\n", encoding="utf-8")
+        findings = root / "findings.md"
+        findings.write_text("<!-- pipeline-findings/v2 -->\n| ID | Gate | Severity | Status | Disposition | Evidence | Fix Commit | Re-review |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n", encoding="utf-8")
+        run_dir = root / "run"
+        initialize_run(
+            run_dir, run_id="gate-test", base_commit=head, target_branch="target", worker_limit=3,
+            artifacts={"spec": "spec.md", "master_plan": "master.md", "phase_plans": str(plan), "decisions": str(decisions), "findings": str(findings)},
+            approved_existing=(),
+        )
+        (root / "evidence").mkdir()
+        (root / "evidence/report.md").write_text("verified\n", encoding="utf-8")
+
+        def complete_rows(tracker):
+            rows = []
+            for task in tracker.tasks:
+                if task.kind == "source":
+                    rows.append(dataclasses.replace(task, state="[x]", commits=head, source_ref="target", integration=head, verification=f"tested:{head}"))
+                else:
+                    rows.append(dataclasses.replace(task, state="[x]", artifacts="evidence/report.md", integration="N/A", verification=f"validated:{head}"))
+            return dataclasses.replace(tracker, tasks=tuple(rows), phases=tuple(dataclasses.replace(phase, state="[~]") for phase in tracker.phases))
+
+        locked_tracker_update(run_dir, "fixture-complete", complete_rows, timeout_s=1.0)
+        return run_dir, plan, head
+
+    def write_report(self, root: Path, name: str, *, gate: str, assignment: str, base: str, head: str, findings: str = "-") -> Path:
+        path = root / name
+        path.write_text(
+            f"""<!-- pipeline-review-report/v2 -->
+| Field | Value |
+| --- | --- |
+| gate | {gate} |
+| assignment | {assignment} |
+| base | {base} |
+| head | {head} |
+| findings | {findings} |
+""",
+            encoding="utf-8",
+        )
+        return path
+
+    def test_mixed_phase_verification_uses_its_own_required_reason(self):
+        for phase_id, reason in (("01", "Phase one risk."), ("02", "Different phase two risk.")):
+            with self.subTest(phase=phase_id), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                run_dir, _, head = self.make_run(root, phase_id=phase_id, reason=reason)
+                verified = record_phase_verification(run_dir, phase_id=phase_id, head=head, commands=("full suite",), evidence=(f"suite:{head}",))
+                phase = next(item for item in verified.phases if item.id == phase_id)
+                self.assertEqual((phase.state, phase.review_reason), ("[x]", reason))
+                opened = open_review_gate(run_dir, gate_id=f"phase-{phase_id}", base=head, head=head, reviewer_assignments=("reviewer-1",))
+                self.assertEqual(next(gate.state for gate in opened.gates if gate.id == f"phase-{phase_id}"), "in_progress")
+
+    def test_mismatched_reason_and_final_only_phase_cannot_open_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, _, head = self.make_run(root, reason="Approved reason.")
+            locked_tracker_update(
+                run_dir, "corrupt-reason",
+                lambda tracker: dataclasses.replace(tracker, phases=tuple(dataclasses.replace(phase, review_reason="Different reason.") for phase in tracker.phases)),
+                timeout_s=1.0,
+            )
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                record_phase_verification(run_dir, phase_id="01", head=head, commands=("suite",), evidence=(f"suite:{head}",))
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, _, head = self.make_run(root, phase_id="03", review_gate="final-only", reason="Final only.")
+            record_phase_verification(run_dir, phase_id="03", head=head, commands=("suite",), evidence=(f"suite:{head}",))
+            with self.assertRaises(TransitionError):
+                open_review_gate(run_dir, gate_id="phase-03", base=head, head=head, reviewer_assignments=("reviewer-1",))
+
+    def test_master_gate_requires_two_reviewers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, _, head = self.make_run(root, phase_id="03", review_gate="final-only", reason="Final only.")
+            record_phase_verification(run_dir, phase_id="03", head=head, commands=("suite",), evidence=(f"suite:{head}",))
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                open_review_gate(run_dir, gate_id="master", base=head, head=head, reviewer_assignments=("reviewer-a",))
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+            opened = open_review_gate(run_dir, gate_id="master", base=head, head=head, reviewer_assignments=("reviewer-a", "reviewer-b"))
+            self.assertEqual(next(gate.assignments for gate in opened.gates if gate.id == "master"), "reviewer-a,reviewer-b")
+
+    def test_gate_acceptance_requires_matching_reports_verification_and_no_blockers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, _, head = self.make_run(root)
+            record_phase_verification(run_dir, phase_id="01", head=head, commands=("suite",), evidence=(f"suite:{head}",))
+            open_review_gate(run_dir, gate_id="phase-01", base=head, head=head, reviewer_assignments=("reviewer-1",))
+            report = self.write_report(root, "review.md", gate="phase-01", assignment="reviewer-1", base=head, head=head)
+            findings = root / "findings.md"
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                evaluate_and_close_review_gate(run_dir, gate_id="phase-01", findings_path=findings, report_paths=(report,), verification=(), rereview_paths=())
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+            wrong_report = self.write_report(root, "wrong.md", gate="phase-01", assignment="reviewer-1", base=head, head="f" * 40)
+            with self.assertRaises(TransitionError):
+                evaluate_and_close_review_gate(run_dir, gate_id="phase-01", findings_path=findings, report_paths=(wrong_report,), verification=(f"reviewed:{head}",), rereview_paths=())
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+            accepted = evaluate_and_close_review_gate(run_dir, gate_id="phase-01", findings_path=findings, report_paths=(report,), verification=(f"reviewed:{head}",), rereview_paths=())
+            self.assertEqual(next(gate.state for gate in accepted.gates if gate.id == "phase-01"), "accepted")
+
+    def test_blockers_rounds_and_rereview_requirements_prevent_false_acceptance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, _, head = self.make_run(root)
+            record_phase_verification(run_dir, phase_id="01", head=head, commands=("suite",), evidence=(f"suite:{head}",))
+            open_review_gate(run_dir, gate_id="phase-01", base=head, head=head, reviewer_assignments=("reviewer-1",))
+            report = self.write_report(root, "review.md", gate="phase-01", assignment="reviewer-1", base=head, head=head, findings="F-001")
+            findings = root / "findings.md"
+            findings.write_text(
+                "<!-- pipeline-findings/v2 -->\n| ID | Gate | Severity | Status | Disposition | Evidence | Fix Commit | Re-review |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| F-001 | phase-01 | Important | Open | - | review.md | - | - |\n",
+                encoding="utf-8",
+            )
+            blocked = evaluate_and_close_review_gate(run_dir, gate_id="phase-01", findings_path=findings, report_paths=(report,), verification=(f"reviewed:{head}",), rereview_paths=())
+            self.assertEqual(next(gate.state for gate in blocked.gates if gate.id == "phase-01"), "blocked")
+            pending = next(row for row in blocked.remediation if row.gate == "phase-01" and row.round_number == 1)
+            self.assertEqual(pending.state, "pending")
+            fix_plan = root / "fix-plan.md"
+            fix_plan.write_text("# Fix plan\n", encoding="utf-8")
+            round_one = start_remediation_round(run_dir, gate_id="phase-01", round_number=1, finding_ids=("F-001",), fix_plan=str(fix_plan))
+            row = next(row for row in round_one.remediation if row.gate == "phase-01" and row.round_number == 1)
+            self.assertEqual((row.state, row.findings), ("in_progress", "F-001"))
+            rereview = self.write_report(root, "rereview.md", gate="phase-01", assignment="reviewer-1", base=head, head=head, findings="F-001")
+            stopped = evaluate_and_close_review_gate(
+                run_dir, gate_id="phase-01", findings_path=findings, report_paths=(report,),
+                verification=(f"rereviewed:{head}",), rereview_paths=(rereview,),
+            )
+            stopped_gate = next(gate for gate in stopped.gates if gate.id == "phase-01")
+            stopped_round = next(row for row in stopped.remediation if row.gate == "phase-01" and row.round_number == 1)
+            self.assertEqual((stopped_gate.state, stopped_gate.questions, stopped_round.state), ("blocked", "remediation-no-progress-round-1", "complete"))
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                start_remediation_round(run_dir, gate_id="phase-01", round_number=4, finding_ids=("F-001",), fix_plan=str(fix_plan))
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
 
 
 if __name__ == "__main__":

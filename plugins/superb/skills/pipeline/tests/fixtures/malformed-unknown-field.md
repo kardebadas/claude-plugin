@@ -4,41 +4,42 @@
 ## Run
 | Field | Value |
 | --- | --- |
-| run_id | <run_id> |
-| base_commit | <base_commit> |
-| target_branch | <target_branch> |
-| worker_limit | <worker_limit> |
-| spec | <spec_path> |
-| master_plan | <master_plan_path> |
-| phase_plans | <phase_plan_paths> |
-| decisions | <decisions_path> |
-| findings | <findings_path> |
+| run_id | malformed |
+| base_commit | 8348959d1b201a873c68512642a0eb8e5754eaa8 |
+| target_branch | feat/example |
+| worker_limit | 3 |
+| spec | docs/spec.md |
+| master_plan | docs/master.md |
+| phase_plans | docs/phase.md |
+| decisions | docs/decisions.md |
+| findings | docs/findings.md |
 | revision | 0 |
 | last_transition | initialized |
+| invented | forbidden |
 
 ## Current State
 | Field | Value |
 | --- | --- |
-| phase | <phase_id> |
-| batch | <batch_id> |
-| next_action | <next_action> |
+| phase | 01 |
+| batch | state-core |
+| next_action | P1-01 |
 
 ## Tasks
 | ID | Kind | State | Owner | Attempt | Result | Checkpoints | Source Ref | Commits | Artifacts | Integration | Verification | Question |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| <task_id> | source | [ ] | - | - | - | - | - | - | - | - | - | - |
+| P1-01 | source | [ ] | - | - | - | - | - | - | - | - | - | - |
 
 ## Phases
 | ID | State | Verification | Review Gate | Review Reason | Gate |
 | --- | --- | --- | --- | --- | --- |
-| <phase_id> | [ ] | - | <review_gate> | <review_reason> | <gate_id> |
+| 01 | [ ] | - | required | Required reason. | phase-01 |
 
 ## Gates
 | ID | Type | Phase | State | Base | Head | Assignments | Reports | Verification | Findings | Questions |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| <gate_id> | phase | <phase_id> | pending | - | - | - | - | - | <findings_path> | - |
+| phase-01 | phase | 01 | pending | - | - | requirements | - | - | docs/findings.md | - |
 
 ## Remediation
 | Gate | Round | State | Findings | Fix Plan | Commits | Verification | Re-review |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| <gate_id> | 1 | pending | - | - | - | - | - |
+| phase-01 | 1 | pending | - | - | - | - | - |

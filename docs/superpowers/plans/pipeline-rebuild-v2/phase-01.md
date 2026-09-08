@@ -30,7 +30,7 @@ This section applies only to implementation of Pipeline v2 in run `2026-09-08-pi
 1. Before P1-04 is green, the coding-session controller reads the approved design, master plan, this phase plan, decisions, and the existing sole rebuild `progress.md`; it uses the individual Superpowers skills directly. The controller manually records `[~]`, owner/attempt, result path, Git commit, and test evidence in that same tracker before/after work. It never calls an unimplemented parser, transition, readiness, or result-import API.
 2. P1-01 can therefore begin after its explicit plan dependencies are checked by the controller. The controller writes `[~]` in the existing tracker, performs the planned RED/GREEN cycle, commits the source, writes `agent-output/bootstrap-P1-01.md` with stable task/attempt/commit/test identity, verifies the commit and test output, and records `[x]`. P1-04/P1-05/P1-06 are not invoked.
 3. P1-02 and P1-03 follow the same file-backed checkpoint procedure. P1-02 implements ordinary future-run initialization; it does not initialize or overwrite this existing bootstrap tracker.
-4. After P1-04's parser, atomic replacement, and task-transition tests pass and its commit/evidence are manually recorded, the controller snapshots the old bootstrap text as immutable `agent-output/bootstrap-progress-snapshot.md`, renders one canonical v2 state for the same run/checkpoints, validates it with `parse_tracker`, acquires `.pipeline-state.lock`, and atomically replaces the same `progress.md`. The snapshot is evidence, not an editable tracker. No transitions/counters are replayed and no second live tracker exists.
+4. After the P1-01 tracker/result and phase-plan parsers, P1-03 atomic replacement, and P1-04 task transitions pass their targeted tests, the controller commits P1-04, writes `agent-output/bootstrap-P1-04.md`, verifies its commit and test evidence, and manually records P1-04 `[x]` in the same bootstrap tracker. It then snapshots that tracker text as immutable `agent-output/bootstrap-progress-snapshot.md`, renders one canonical v2 state for the same run/checkpoints, validates it with `parse_tracker`, acquires `.pipeline-state.lock`, and atomically replaces the same `progress.md`. The snapshot is evidence, not an editable tracker. No P1-06 import API is called, no transitions/counters are replayed, and no second live tracker exists.
 5. The controller admits P1-05 from the approved dependency graph and records its start with the now-tested transition API; readiness remains a manual plan check until P1-05 passes. P1-05 governs subsequent reservations, and P1-06 enables normal result import. Reconciliation verifies every adopted checkpoint against its immutable result, tests, and Git evidence.
 
 Ordinary `initialize_run` may create a tracker in a pre-created run directory only when `progress.md` is absent, every existing entry is one of the explicitly supplied approved artifact paths, and no schema-like or recognized v1 tracker exists. It never overwrites a tracker or unrelated artifact. Existing valid v2 is resumed; existing invalid/legacy/unknown state is rejected unchanged. This rule lets a user deliberately create plans/decisions before initialization without weakening D-003.
@@ -74,11 +74,11 @@ python3.11 -m py_compile plugins/superb/skills/pipeline/scripts/pipeline_state.p
 git diff --check
 ```
 
-### P1-01 — Define the strict v2 tracker and result contracts
+### P1-01 — Define the strict v2 tracker, result, and phase-plan contracts
 
 <!-- pipeline-v2-task: id=P1-01; deps=none; kind=source; batch=state-core; order=1; write_scope=file:plugins/superb/skills/pipeline/scripts/pipeline_state.py,file:plugins/superb/skills/pipeline/templates/progress.md,file:plugins/superb/skills/pipeline/templates/worker-result.md,file:plugins/superb/skills/pipeline/tests/test_pipeline_state.py,tree:plugins/superb/skills/pipeline/tests/fixtures; outputs=none -->
 
-**Objective / behavior:** Establish one human-readable, deterministic grammar that can round-trip without losing data. The tracker has: marker, run identity (`run_id`, `base_commit`, `target_branch`, `worker_limit`, artifact paths), revision/last-transition identity, current phase/batch/next eligible action, task table, phase table, gate table, and remediation table. A worker result names run/task/attempt/kind/status/checkpoints, source ref/commits or exact artifact paths, tests/evidence, and concerns-or-question. No parser accepts arbitrary Markdown, hidden fields, or unknown states.
+**Objective / behavior:** Establish the deterministic tracker/result grammars and the pure strict parser for approved phase-plan metadata. The tracker has: marker, run identity (`run_id`, `base_commit`, `target_branch`, `worker_limit`, artifact paths), revision/last-transition identity, current phase/batch/next eligible action, task table, phase table, gate table, and remediation table. A worker result names run/task/attempt/kind/status/checkpoints, source ref/commits or exact artifact paths, tests/evidence, and concerns-or-question. The phase-plan parser reads only the exact phase and task comments documented above. No parser accepts arbitrary Markdown, hidden fields, reordered/unknown metadata keys, or unknown states.
 
 **Files:** Create the helper/test/fixture paths from the map; rewrite `templates/progress.md`; create `templates/worker-result.md`.
 
@@ -87,34 +87,38 @@ git diff --check
 ```python
 SCHEMA = "pipeline-run/v2"
 class SchemaError(ValueError): ...
+class PlanMetadataError(ValueError): ...
 class Tracker: ...
 class WorkerResult: ...
+@dataclass(frozen=True)
+class PlannedTask: id: str; deps: tuple[str, ...]; kind: str; batch: str; order: int; write_scope: tuple[str, ...]; outputs: tuple[str, ...]
 def parse_tracker(text: str) -> Tracker: ...
 def render_tracker(tracker: Tracker) -> str: ...
 def parse_worker_result(text: str) -> WorkerResult: ...
+def parse_phase_plan(path: Path) -> tuple[PlannedTask, ...]: ...
 ```
 
 The tracker carries a monotonic revision and stable last-transition identity. The task implementation-status column is exactly one of `[ ]`, `[~]`, `[?]`, or `[x]`: respectively not dispatched, controller-persisted active attempt, an attempt carrying a question/block reference, and completion validated according to the plan-declared task kind. A `source` task records result/checkpoint, implementation commit(s), source ref, and tests; an `artifact` task records its expected artifact paths and validation evidence with integration `N/A`. Integration and verification are separate facts. Worker statuses are exactly the five vocabulary values in the execution-route header. The rendered tracker preserves the planned task/phase/gate/remediation rows and writes a terminal newline.
 
 **Applicable decisions:** D-003, D-004, D-005, D-006, D-008.
 
-**Acceptance:** A representative valid tracker and both source/artifact results parse, render, and parse identically; duplicate IDs, unknown/mismatched task kind, unknown key, invalid revision/transition identity, a status other than `[ ]`/`[~]`/`[?]`/`[x]`, missing required row, unsupported scope, or nonpositive `worker_limit` produces `SchemaError` with no write path invoked. The template itself is a valid minimally initialized v2 tracker after substituting its documented angle-bracket values.
+**Acceptance:** A representative valid tracker and both source/artifact results parse, render, and parse identically. A valid phase plan yields immutable `PlannedTask` values with exact ordered `id`, `deps`, `kind`, `batch`, `order`, `write_scope`, and `outputs`; duplicate/omitted/reordered/unknown keys, invalid dependency IDs, unsupported scope/kind/output combinations, or duplicate task IDs produce `PlanMetadataError`. Duplicate tracker IDs, unknown/mismatched task kind, unknown key, invalid revision/transition identity, a status other than `[ ]`/`[~]`/`[?]`/`[x]`, missing required row, or nonpositive `worker_limit` produces `SchemaError` with no write path invoked. The template itself is a valid minimally initialized v2 tracker after substituting its documented angle-bracket values. One integration test parses all four approved phase plans from their real repository paths with this parser so cross-file metadata drift fails Phase 1.
 
-- [ ] **RED — add precise contract tests and fixtures.** Add `test_valid_v2_round_trip_preserves_all_authoritative_rows`, `test_tracker_rejects_unknown_or_missing_required_fields`, `test_worker_result_requires_plan_declared_kind_attempt_and_evidence`, and `test_revision_and_last_transition_round_trip`. Use fixture names `valid-v2-progress.md`, `valid-source-worker-result.md`, `valid-artifact-worker-result.md`, `malformed-unknown-field.md`, and `malformed-worker-result.md`.
+- [ ] **RED — add precise contract tests and fixtures.** Add `test_valid_v2_round_trip_preserves_all_authoritative_rows`, `test_tracker_rejects_unknown_or_missing_required_fields`, `test_worker_result_requires_plan_declared_kind_attempt_and_evidence`, `test_revision_and_last_transition_round_trip`, `test_valid_phase_plan_metadata_parses_in_fixed_order`, `test_phase_plan_metadata_rejects_missing_reordered_or_ambiguous_fields`, and `test_all_four_approved_phase_plans_parse_with_real_helper`. The last test resolves and parses `phase-01.md` through `phase-04.md` from the repository rather than copying their comments into synthetic fixtures. Use fixture names `valid-v2-progress.md`, `valid-source-worker-result.md`, `valid-artifact-worker-result.md`, `malformed-unknown-field.md`, `malformed-worker-result.md`, `phase-plan-valid.md`, and `phase-plan-invalid-metadata.md`.
 
 - [ ] **RED check.**
 
-  Run: `python3.11 -m unittest plugins.superb.skills.pipeline.tests.test_pipeline_state.TrackerContractTest -v`
+  Run: `python3.11 -m unittest plugins.superb.skills.pipeline.tests.test_pipeline_state.TrackerContractTest plugins.superb.skills.pipeline.tests.test_pipeline_state.PlanMetadataContractTest -v`
 
-  Expected: FAIL because `pipeline_state` and its parser/contract symbols do not exist.
+  Expected: FAIL because `pipeline_state` and its tracker/result/phase-plan parser symbols do not exist.
 
-- [ ] **GREEN — implement the smallest strict parser and renderer.** Make the first non-comment schema line exactly `<!-- pipeline-run/v2 -->`; parse exact headings and pipe-table headers with fixed column names; refuse duplicate/extra/missing fields; use `dataclasses` and immutable parsed collections where practical. Add the two templates with a field legend that matches, rather than restates differently, the parser grammar.
+- [ ] **GREEN — implement the smallest strict parsers and renderer.** Make the first non-comment schema line exactly `<!-- pipeline-run/v2 -->`; parse exact headings and pipe-table headers with fixed column names; refuse duplicate/extra/missing fields; use `dataclasses` and immutable parsed collections where practical. Implement `parse_phase_plan` against only the fixed phase/task comment forms and metadata grammar above, including dependency and task-ID validation, without readiness/capacity evaluation. Add the two templates with a field legend that matches, rather than restates differently, the parser grammar.
 
 - [ ] **GREEN check.**
 
-  Run: `python3.11 -m unittest plugins.superb.skills.pipeline.tests.test_pipeline_state.TrackerContractTest -v`
+  Run: `python3.11 -m unittest plugins.superb.skills.pipeline.tests.test_pipeline_state.TrackerContractTest plugins.superb.skills.pipeline.tests.test_pipeline_state.PlanMetadataContractTest -v`
 
-  Expected: PASS; all malformed fixtures are rejected in-memory and the valid fixture round-trips byte-for-byte through canonical rendering.
+  Expected: PASS; malformed tracker/result/plan fixtures are rejected in-memory, the valid tracker round-trips byte-for-byte through canonical rendering, and all four real approved phase plans parse under the same metadata contract.
 
 - [ ] **Refactor / bootstrap checkpoint.** Keep parsing helpers private unless named above; add a fixture README that says fixture bytes are input evidence and rejection tests compare them before/after. Follow the explicit P1-01 bootstrap walkthrough above: commit the source, write `agent-output/bootstrap-P1-01.md`, verify it, and manually checkpoint the sole bootstrap tracker. Do not call P1-04/P1-05/P1-06 before they exist and do not ask for a task review.
 
@@ -216,7 +220,7 @@ The lock path is `<run-dir>/.pipeline-state.lock`; it is distinct from `progress
 
 **Files:** Modify helper/tests; add `valid-active-attempt-task.md` and `illegal-transition.md` fixtures.
 
-**Consumes:** P1-03 `locked_tracker_update`.
+**Consumes:** P1-01 `parse_phase_plan`/`PlannedTask` and P1-03 `locked_tracker_update`.
 
 **Interfaces produced:**
 
@@ -253,25 +257,21 @@ def record_task_integration(run_dir: Path, *, task_id: str, integration_commit: 
 
   Expected: PASS; all named illegal/stale paths leave exact original bytes.
 
-- [ ] **Task checkpoint.** After its targeted green test, commit P1-04 changes; publish/import P1-04’s checkpoint with the commit and evidence before `[x]`. Confirm task status vocabulary is not a review workflow: this task records task recovery checkpoints only, never a reviewer or a per-task gate.
+- [ ] **Task checkpoint and canonical adoption.** After its targeted green test, commit the P1-04 changes; write `agent-output/bootstrap-P1-04.md` with stable run/task/attempt/commit/test identity; verify the commit and test evidence; and manually checkpoint P1-04 `[x]` in the same authoritative bootstrap tracker. Then perform bootstrap step 4's validated, locked, atomic adoption of that tracker. Do not call P1-06's not-yet-implemented import API. Confirm task status vocabulary is not a review workflow: this task records task recovery checkpoints only, never a reviewer or a per-task gate.
 
-### P1-05 — Parse phase metadata and calculate safe batch readiness
+### P1-05 — Calculate safe batch readiness from parsed phase metadata
 
 <!-- pipeline-v2-task: id=P1-05; deps=P1-04; kind=source; batch=state-core; order=5; write_scope=file:plugins/superb/skills/pipeline/scripts/pipeline_state.py,file:plugins/superb/skills/pipeline/tests/test_pipeline_state.py,tree:plugins/superb/skills/pipeline/tests/fixtures; outputs=none -->
 
-**Objective / behavior:** Parse the fixed metadata contract at this plan’s top and return candidate tasks eligible for a batch. Eligibility requires: v2 state valid; phase-plan metadata valid; source dependencies proven integrated and artifact dependencies verified complete; no unanswered decision/question; matching planned batch/order; no typed-scope overlap with active/reserved work or another selected candidate; active workers below persisted `worker_limit`; and no active phase/gate conflict. Readiness output is advisory. Actual starts are serialized under the tracker lock and revalidate all conditions so stale output cannot authorize a dispatch.
+**Objective / behavior:** Consume P1-01's parsed metadata and return candidate tasks eligible for a batch. Eligibility requires: v2 state valid; phase-plan metadata valid; source dependencies proven integrated and artifact dependencies verified complete; no unanswered decision/question; matching planned batch/order; no typed-scope overlap with active/reserved work or another selected candidate; active workers below persisted `worker_limit`; and no active phase/gate conflict. Readiness output is advisory. Actual starts are serialized under the tracker lock and revalidate all conditions so stale output cannot authorize a dispatch.
 
-**Files:** Modify helper/tests; add `phase-plan-valid.md`, `phase-plan-invalid-metadata.md`, `phase-plan-write-conflict.md`, and `phase-plan-dependency-blocked.md` fixtures.
+**Files:** Modify helper/tests; add `phase-plan-write-conflict.md` and `phase-plan-dependency-blocked.md` fixtures. P1-01 owns the valid/invalid phase-plan parser fixtures and contract tests.
 
-**Consumes:** P1-04 tracker state APIs and phase-plan comment grammar.
+**Consumes:** P1-01 `parse_phase_plan`/`PlannedTask`; P1-04 tracker state APIs.
 
 **Interfaces produced:**
 
 ```python
-class PlanMetadataError(ValueError): ...
-@dataclass(frozen=True)
-class PlannedTask: id: str; deps: tuple[str, ...]; kind: str; batch: str; order: int; write_scope: tuple[str, ...]; outputs: tuple[str, ...]
-def parse_phase_plan(path: Path) -> tuple[PlannedTask, ...]: ...
 def next_eligible_actions(run_dir: Path, phase_plan: Path, *, capacity: int | None) -> tuple[PlannedTask, ...]: ...
 def reserve_tasks(run_dir: Path, phase_plan: Path, *, task_ids: tuple[str, ...],
                   owners: tuple[str, ...], attempts: tuple[str, ...], capacity: int | None) -> Tracker: ...
@@ -289,9 +289,9 @@ def reserve_tasks(run_dir: Path, phase_plan: Path, *, task_ids: tuple[str, ...],
 
   Run: `python3.11 -m unittest plugins.superb.skills.pipeline.tests.test_pipeline_state.SchedulerReadinessTest -v`
 
-  Expected: FAIL because phase-plan metadata parsing and readiness calculation are absent.
+  Expected: FAIL because readiness calculation and serialized reservation are absent; P1-01's phase-plan parser is already green.
 
-- [ ] **GREEN — implement strict typed scopes, advisory readiness, and serialized reservation.** Read only the fixed comment. Reject absolute/traversal/backslash/glob/empty forms. Compare `file:` equality, `tree:` ancestry, and tree/file containment over repository-relative POSIX components. Keep `next_eligible_actions` read-only. Under one lock, `reserve_tasks` re-reads state and rechecks questions, dependency evidence, pairwise selected scopes, active reservations, global capacity, owners, and attempts before atomically starting all or none.
+- [ ] **GREEN — implement advisory readiness and serialized reservation over P1-01 metadata.** Reuse `PlannedTask` without reparsing or accepting an alternate grammar. Compare validated `file:` equality, `tree:` ancestry, and tree/file containment over repository-relative POSIX components. Keep `next_eligible_actions` read-only. Under one lock, `reserve_tasks` re-reads state and rechecks questions, dependency evidence, pairwise selected scopes, active reservations, global capacity, owners, and attempts before atomically starting all or none.
 
 - [ ] **GREEN check.**
 
@@ -309,7 +309,7 @@ def reserve_tasks(run_dir: Path, phase_plan: Path, *, task_ids: tuple[str, ...],
 
 **Files:** Modify helper/result template/tests; add `valid-result-done.md`, `valid-result-needs-context.md`, `stale-result.md`, and `conflicting-result.md` fixtures.
 
-**Consumes:** P1-01 result parser, P1-03 atomic support, P1-04 transitions, P1-05 plan metadata.
+**Consumes:** P1-01 result/phase-plan parsers, P1-03 atomic support, P1-04 transitions, and P1-05 readiness/reservation state.
 
 **Interfaces produced:**
 
@@ -352,7 +352,7 @@ def import_worker_result(run_dir: Path, *, result_path: Path, phase_plan: Path,
 
 **Files:** Modify helper/tests; add `valid-required-gate.md`, `valid-final-only-gate.md`, and `remediation-round-three.md` fixtures.
 
-**Consumes:** P1-04/P1-06 task integration evidence and P1-05 phase metadata.
+**Consumes:** P1-01 phase metadata, P1-04/P1-06 task integration evidence, and P1-05 readiness/reservation state.
 
 **Interfaces produced:**
 

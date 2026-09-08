@@ -65,6 +65,7 @@
 7. Readiness uses typed scope overlap and is advisory; serialized reservation/start revalidates dependencies, questions, ownership, pairwise candidate conflicts, and capacity.
 8. Formal reviewer reports are stored in `agent-output/`; findings and dispositions live in `findings.md`; gate/round state and evidence references live in `progress.md`. Gate acceptance is computed from matching reports/code state, verification, blockers/questions, Minor dispositions, and re-review evidence—not accepted from a boolean flag.
 9. The final acceptance matrix uses the 20 numbered scenarios from the rebuild request as stable `A-01` through `A-20` mappings.
+10. `next_action` is a derived persisted summary refreshed atomically with every relevant transition, not permission by itself. `advance_phase(run_dir, *, completed_phase_id, next_phase_id)` is the sole explicit phase cursor transition and validates completed tasks/integration, phase verification, required review acceptance, questions, and the approved immediate successor/dependencies. The final phase routes to the mandatory master gate rather than a nonexistent successor or DONE.
 
 ## Phase sequence
 

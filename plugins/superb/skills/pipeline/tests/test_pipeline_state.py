@@ -1,17 +1,26 @@
 from __future__ import annotations
 
 import dataclasses
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
+import plugins.superb.skills.pipeline.scripts.pipeline_state as pipeline_state
 from plugins.superb.skills.pipeline.scripts.pipeline_state import (
+    LegacySchemaError,
     PlanMetadataError,
     SchemaError,
+    initialize_run,
+    inspect_run,
+    main,
     parse_phase_plan,
     parse_tracker,
     parse_worker_result,
     render_tracker,
+    validate_run,
 )
 
 
@@ -212,6 +221,134 @@ class PlanMetadataContractTest(unittest.TestCase):
         self.assertEqual(tuple(len(tasks) for tasks in parsed), (8, 8, 6, 8))
         self.assertEqual(parsed[0][0].id, "P1-01")
         self.assertEqual(parsed[3][-1].id, "P4-08")
+
+
+class InitializationAndSchemaSafetyTest(unittest.TestCase):
+    def snapshot(self, root: Path) -> dict[str, bytes]:
+        if not root.exists():
+            return {}
+        return {
+            str(path.relative_to(root)): path.read_bytes()
+            for path in sorted(root.rglob("*"))
+            if path.is_file()
+        }
+
+    def inputs(self, root: Path) -> tuple[dict[str, str], tuple[Path, ...]]:
+        phase = root / "phase.md"
+        phase.write_text((FIXTURES / "phase-plan-valid.md").read_text(), encoding="utf-8")
+        artifacts = {
+            "spec": "docs/spec.md",
+            "master_plan": "docs/master.md",
+            "phase_plans": str(phase),
+            "decisions": "docs/decisions.md",
+            "findings": "docs/findings.md",
+        }
+        return artifacts, ()
+
+    def initialize(self, run_dir: Path, artifacts: dict[str, str], approved: tuple[Path, ...] = ()):
+        return initialize_run(
+            run_dir,
+            run_id="2026-09-08-init-test",
+            base_commit="8348959d1b201a873c68512642a0eb8e5754eaa8",
+            target_branch="feat/init-test",
+            worker_limit=3,
+            artifacts=artifacts,
+            approved_existing=approved,
+        )
+
+    def test_initialize_new_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifacts, _ = self.inputs(root)
+            run_dir = root / "new-run"
+
+            tracker = self.initialize(run_dir, artifacts)
+
+            self.assertEqual(tracker.run_id, "2026-09-08-init-test")
+            self.assertEqual(validate_run(run_dir), tracker)
+            self.assertEqual(tuple(task.id for task in tracker.tasks), ("PX-01", "PX-02"))
+
+    def test_initialize_existing_approved_artifact_only_directory_preserves_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifacts, _ = self.inputs(root)
+            run_dir = root / "existing-run"
+            run_dir.mkdir()
+            decisions = run_dir / "decisions.md"
+            findings = run_dir / "findings.md"
+            decisions.write_text("decisions sentinel\n", encoding="utf-8")
+            findings.write_text("findings sentinel\n", encoding="utf-8")
+            before = {decisions: decisions.read_bytes(), findings: findings.read_bytes()}
+
+            self.initialize(run_dir, artifacts, (decisions, findings))
+
+            self.assertEqual({path: path.read_bytes() for path in before}, before)
+            self.assertTrue((run_dir / "progress.md").is_file())
+
+    def test_initialize_refuses_existing_tracker_or_unapproved_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifacts, _ = self.inputs(root)
+            for label, prepare in {
+                "tracker": lambda run: (run / "progress.md").write_text(
+                    (FIXTURES / "valid-v2-progress.md").read_text(), encoding="utf-8"
+                ),
+                "unapproved": lambda run: (run / "surprise.txt").write_text("sentinel", encoding="utf-8"),
+            }.items():
+                with self.subTest(label=label):
+                    run_dir = root / label
+                    run_dir.mkdir()
+                    prepare(run_dir)
+                    before = self.snapshot(run_dir)
+                    with self.assertRaises(SchemaError):
+                        self.initialize(run_dir, artifacts)
+                    self.assertEqual(self.snapshot(run_dir), before)
+
+    def test_legacy_v1_is_recognized_and_left_byte_identical(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "legacy-run"
+            run_dir.mkdir()
+            progress = run_dir / "progress.md"
+            progress.write_bytes((FIXTURES / "legacy-v1-progress.md").read_bytes())
+            before = self.snapshot(run_dir)
+
+            with self.assertRaises(LegacySchemaError) as caught:
+                validate_run(run_dir)
+
+            message = str(caught.exception)
+            self.assertIn(str(run_dir), message)
+            self.assertIn("v2 cannot resume this legacy format", message)
+            self.assertIn("no files were changed", message)
+            self.assertEqual(self.snapshot(run_dir), before)
+
+    def test_missing_malformed_and_unknown_schema_are_rejected_unchanged(self):
+        fixtures = ("missing-marker.md", "malformed-v2-progress.md", "unknown-schema.md")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for fixture in fixtures:
+                with self.subTest(fixture=fixture):
+                    run_dir = root / fixture
+                    run_dir.mkdir()
+                    (run_dir / "progress.md").write_bytes((FIXTURES / fixture).read_bytes())
+                    before = self.snapshot(run_dir)
+                    with self.assertRaises(SchemaError) as caught:
+                        validate_run(run_dir)
+                    self.assertIn("no files were changed", str(caught.exception))
+                    self.assertEqual(self.snapshot(run_dir), before)
+
+    def test_validate_inspect_and_next_cli_never_invoke_writer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "run"
+            run_dir.mkdir()
+            (run_dir / "progress.md").write_bytes((FIXTURES / "valid-v2-progress.md").read_bytes())
+            before = self.snapshot(run_dir)
+            with mock.patch.object(pipeline_state, "_write_initial_tracker", side_effect=AssertionError("writer called")):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    self.assertEqual(main(["validate", str(run_dir)]), 0)
+                    self.assertEqual(main(["inspect", str(run_dir)]), 0)
+                    self.assertNotEqual(main(["next", str(run_dir), "--phase-plan", str(FIXTURES / "phase-plan-valid.md")]), 0)
+            self.assertEqual(self.snapshot(run_dir), before)
+            self.assertEqual(inspect_run(run_dir)["run_id"], "2026-09-08-example")
 
 
 if __name__ == "__main__":

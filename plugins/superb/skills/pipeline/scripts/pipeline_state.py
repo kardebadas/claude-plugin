@@ -8,7 +8,10 @@ later Phase 1 tasks.
 
 from __future__ import annotations
 
+import argparse
+import json
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -27,6 +30,10 @@ class SchemaError(ValueError):
 
 class PlanMetadataError(ValueError):
     """A phase plan does not match the fixed v2 metadata contract."""
+
+
+class LegacySchemaError(SchemaError):
+    """A recognized Pipeline v1 tracker was supplied to v2."""
 
 
 @dataclass(frozen=True)
@@ -154,6 +161,14 @@ class PlannedTask:
     order: int
     write_scope: tuple[str, ...]
     outputs: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PhaseMetadata:
+    id: str
+    deps: tuple[str, ...]
+    review_gate: str
+    review_reason: str
 
 
 _RUN_KEYS = ("run_id", "base_commit", "target_branch", "worker_limit", "spec", "master_plan", "phase_plans", "decisions", "findings", "revision", "last_transition")
@@ -328,7 +343,7 @@ def _safe_relative(value: str) -> PurePosixPath:
     return path
 
 
-def parse_phase_plan(path: Path) -> tuple[PlannedTask, ...]:
+def _parse_phase_document(path: Path) -> tuple[PhaseMetadata, tuple[PlannedTask, ...]]:
     lines = Path(path).read_text(encoding="utf-8").splitlines()
     phase_lines = [line for line in lines if line.startswith("<!-- pipeline-v2-phase:")]
     if len(phase_lines) != 1 or _PHASE_METADATA.fullmatch(phase_lines[0]) is None:
@@ -337,6 +352,8 @@ def parse_phase_plan(path: Path) -> tuple[PlannedTask, ...]:
     assert phase is not None
     if phase.group(3) not in {"required", "final-only"} or not phase.group(4).strip():
         raise PlanMetadataError("invalid phase review metadata")
+    phase_deps = () if phase.group(2) == "none" else tuple(phase.group(2).split(","))
+    metadata = PhaseMetadata(phase.group(1), phase_deps, phase.group(3), phase.group(4))
     tasks = []
     for line in lines:
         if not line.startswith("<!-- pipeline-v2-task:"):
@@ -381,4 +398,267 @@ def parse_phase_plan(path: Path) -> tuple[PlannedTask, ...]:
     known = set(ids)
     if any(dependency not in known or dependency == task.id for task in tasks for dependency in task.deps):
         raise PlanMetadataError("unknown or self dependency")
-    return tuple(tasks)
+    return metadata, tuple(tasks)
+
+
+def parse_phase_plan(path: Path) -> tuple[PlannedTask, ...]:
+    """Return the immutable task definitions from one approved phase plan."""
+    return _parse_phase_document(path)[1]
+
+
+_LEGACY_TASK = re.compile(r"^- \[[ x~?]\] (?:T[0-9]+|RV|RVJ)\b")
+_ARTIFACT_KEYS = ("spec", "master_plan", "phase_plans", "decisions", "findings")
+
+
+def _diagnostic(run_dir: Path, detail: str) -> str:
+    return f"{run_dir}: {detail}; no files were changed"
+
+
+def _recognized_v1(text: str) -> bool:
+    return (
+        "# Pipeline — Progress Tracker" in text
+        and "## Current State" in text
+        and any(_LEGACY_TASK.match(line) for line in text.splitlines())
+    )
+
+
+def validate_run(run_dir: Path) -> Tracker:
+    """Read and validate a v2 run without mutating it."""
+    run_dir = Path(run_dir)
+    progress = run_dir / "progress.md"
+    if not progress.is_file():
+        raise SchemaError(_diagnostic(run_dir, "missing progress.md/schema information"))
+    try:
+        text = progress.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise SchemaError(_diagnostic(run_dir, f"unreadable progress.md ({exc})")) from exc
+    if _recognized_v1(text):
+        raise LegacySchemaError(
+            _diagnostic(
+                run_dir,
+                "v2 cannot resume this legacy format; continuing the old run requires "
+                "a compatible v1 version or an explicitly approved fresh v2 run",
+            )
+        )
+    first_line = text.splitlines()[0] if text.splitlines() else ""
+    if first_line != _TRACKER_MARKER:
+        if first_line.startswith("<!-- pipeline-run/"):
+            detail = f"unknown or unsupported schema marker {first_line!r}"
+        else:
+            detail = "missing v2 schema marker and state is not recognized v1"
+        raise SchemaError(_diagnostic(run_dir, detail))
+    try:
+        return parse_tracker(text)
+    except SchemaError as exc:
+        raise SchemaError(_diagnostic(run_dir, f"malformed v2 tracker ({exc})")) from exc
+
+
+def _write_initial_tracker(path: Path, text: str) -> None:
+    """Create, never replace, the first tracker; P1-03 adds atomic updates."""
+    with path.open("x", encoding="utf-8", newline="") as handle:
+        handle.write(text)
+        handle.flush()
+
+
+def _initial_tracker(
+    *,
+    run_id: str,
+    base_commit: str,
+    target_branch: str,
+    worker_limit: int,
+    artifacts: dict[str, str],
+) -> Tracker:
+    if tuple(artifacts) != _ARTIFACT_KEYS:
+        raise SchemaError(f"artifacts must contain exactly these ordered keys: {_ARTIFACT_KEYS!r}")
+    phase_paths = tuple(Path(item) for item in artifacts["phase_plans"].split(","))
+    if not phase_paths:
+        raise SchemaError("at least one phase plan is required")
+    phase_documents = tuple(_parse_phase_document(path) for path in phase_paths)
+    phase_ids = [metadata.id for metadata, _ in phase_documents]
+    if len(phase_ids) != len(set(phase_ids)):
+        raise SchemaError("phase IDs must be unique")
+    known_phases = set(phase_ids)
+    if any(dep not in known_phases for metadata, _ in phase_documents for dep in metadata.deps):
+        raise SchemaError("phase dependency is unknown")
+    tasks = tuple(
+        TaskRecord(task.id, task.kind, "[ ]", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-")
+        for _, planned in phase_documents
+        for task in planned
+    )
+    required_gates = tuple(
+        GateRecord(f"phase-{metadata.id}", "phase", metadata.id, "pending", "-", "-", "-", "-", "-", artifacts["findings"], "-")
+        for metadata, _ in phase_documents
+        if metadata.review_gate == "required"
+    )
+    master_gate = GateRecord("master", "master", "-", "pending", base_commit, "-", "-", "-", "-", artifacts["findings"], "-")
+    phases = tuple(
+        PhaseRecord(
+            metadata.id,
+            "[ ]",
+            "-",
+            metadata.review_gate,
+            metadata.review_reason,
+            f"phase-{metadata.id}" if metadata.review_gate == "required" else "-",
+        )
+        for metadata, _ in phase_documents
+    )
+    gates = required_gates + (master_gate,)
+    remediation = tuple(RemediationRecord(gate.id, 1, "pending", "-", "-", "-", "-", "-") for gate in gates)
+    first_metadata, first_tasks = phase_documents[0]
+    return Tracker(
+        tuple(
+            zip(
+                _RUN_KEYS,
+                (
+                    run_id,
+                    base_commit,
+                    target_branch,
+                    str(worker_limit),
+                    artifacts["spec"],
+                    artifacts["master_plan"],
+                    artifacts["phase_plans"],
+                    artifacts["decisions"],
+                    artifacts["findings"],
+                    "0",
+                    "initialized",
+                ),
+            )
+        ),
+        (("phase", first_metadata.id), ("batch", first_tasks[0].batch), ("next_action", first_tasks[0].id)),
+        tasks,
+        phases,
+        gates,
+        remediation,
+    )
+
+
+def initialize_run(
+    run_dir: Path,
+    *,
+    run_id: str,
+    base_commit: str,
+    target_branch: str,
+    worker_limit: int,
+    artifacts: dict[str, str],
+    approved_existing: tuple[Path, ...],
+) -> Tracker:
+    """Create a new v2 tracker without overwriting any existing state."""
+    run_dir = Path(run_dir)
+    tracker = _initial_tracker(
+        run_id=run_id,
+        base_commit=base_commit,
+        target_branch=target_branch,
+        worker_limit=worker_limit,
+        artifacts=artifacts,
+    )
+    text = render_tracker(tracker)
+    parse_tracker(text)
+    if run_dir.exists() and not run_dir.is_dir():
+        raise SchemaError(_diagnostic(run_dir, "run path exists and is not a directory"))
+    progress = run_dir / "progress.md"
+    if progress.exists():
+        try:
+            validate_run(run_dir)
+        except LegacySchemaError:
+            raise
+        except SchemaError as exc:
+            raise exc
+        raise SchemaError(_diagnostic(run_dir, "a valid v2 tracker already exists; use resume"))
+    approved = {Path(path).resolve() for path in approved_existing}
+    existing = {path.resolve() for path in run_dir.rglob("*")} if run_dir.exists() else set()
+    if existing != approved:
+        raise SchemaError(_diagnostic(run_dir, "existing entries do not exactly match approved_existing"))
+    for path in existing:
+        if path.is_file():
+            try:
+                contents = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise SchemaError(_diagnostic(run_dir, f"approved existing artifact is unreadable ({exc})")) from exc
+            if _recognized_v1(contents) or _TRACKER_MARKER in contents or "<!-- pipeline-run/" in contents:
+                raise SchemaError(_diagnostic(run_dir, f"approved path {path} contains tracker/schema-like state"))
+    run_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        _write_initial_tracker(progress, text)
+    except OSError as exc:
+        raise SchemaError(_diagnostic(run_dir, f"could not create progress.md ({exc})")) from exc
+    return validate_run(run_dir)
+
+
+def inspect_run(run_dir: Path) -> dict[str, object]:
+    """Return a read-only summary of validated v2 state."""
+    tracker = validate_run(run_dir)
+    return {
+        "run_id": tracker.run_id,
+        "target_branch": tracker.target_branch,
+        "worker_limit": tracker.worker_limit,
+        "revision": tracker.revision,
+        "phase": dict(tracker.current_fields)["phase"],
+        "next_action": dict(tracker.current_fields)["next_action"],
+        "task_counts": {state: sum(task.state == state for task in tracker.tasks) for state in sorted(_TASK_STATES)},
+    }
+
+
+def _argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="pipeline_state.py")
+    commands = parser.add_subparsers(dest="command", required=True)
+    for name in ("validate", "inspect"):
+        command = commands.add_parser(name)
+        command.add_argument("run_dir", type=Path)
+    next_command = commands.add_parser("next")
+    next_command.add_argument("run_dir", type=Path)
+    next_command.add_argument("--phase-plan", type=Path, required=True)
+    init = commands.add_parser("init")
+    init.add_argument("run_dir", type=Path)
+    init.add_argument("--run-id", required=True)
+    init.add_argument("--base-commit", required=True)
+    init.add_argument("--target-branch", required=True)
+    init.add_argument("--worker-limit", required=True, type=int)
+    init.add_argument("--spec", required=True)
+    init.add_argument("--master-plan", required=True)
+    init.add_argument("--phase-plans", required=True)
+    init.add_argument("--decisions", required=True)
+    init.add_argument("--findings", required=True)
+    init.add_argument("--approved-existing", action="append", default=[], type=Path)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _argument_parser().parse_args(argv)
+    try:
+        if args.command == "validate":
+            validate_run(args.run_dir)
+            print("valid pipeline-run/v2")
+            return 0
+        if args.command == "inspect":
+            print(json.dumps(inspect_run(args.run_dir), sort_keys=True))
+            return 0
+        if args.command == "next":
+            validate_run(args.run_dir)
+            parse_phase_plan(args.phase_plan)
+            print("next is read-only but scheduling is unavailable until P1-05", file=sys.stderr)
+            return 2
+        artifacts = {
+            "spec": args.spec,
+            "master_plan": args.master_plan,
+            "phase_plans": args.phase_plans,
+            "decisions": args.decisions,
+            "findings": args.findings,
+        }
+        initialize_run(
+            args.run_dir,
+            run_id=args.run_id,
+            base_commit=args.base_commit,
+            target_branch=args.target_branch,
+            worker_limit=args.worker_limit,
+            artifacts=artifacts,
+            approved_existing=tuple(args.approved_existing),
+        )
+        print(f"initialized {args.run_dir}")
+        return 0
+    except (SchemaError, PlanMetadataError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

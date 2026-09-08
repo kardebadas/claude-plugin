@@ -1,3 +1,10 @@
 __pycache__/
 *.pyc
 .craft/
+
+# Pipeline run directories are ephemeral execution state -- progress.md,
+# register.md, kit.md, findings.md, fix plans, agent-output/ -- and are never
+# committed. Loose curated records directly under runs/ ARE trackable, which is
+# why this pattern ends in `*/` and not `*`: `docs/superpowers/` would hide the
+# specs, plans and distilled records that are permanent documentation.
+docs/superpowers/runs/*/

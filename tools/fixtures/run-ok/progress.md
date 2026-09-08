@@ -11,9 +11,9 @@ second one checkable — while Phase 3 is a long record whose `reports` and
 start, which is what a real tracker's prose does and what the byte-capped
 reader this fixture replaced reported as a missing coverage file.
 
-**Every round here is sized by the regime its own key names**, and the two
-arithmetic arms read that: all four phases are unwaved `N=`, so `s` is
-`ceil(N/5)` — `N=1` takes 1, `N=7` takes 2, `N=8` takes 2, `N=9` takes 2 — and
+**Every round here is sized from its own task count**, and the two arithmetic
+arms read that: all four phases are `N=`, so `s` is `ceil(N/5)` — there is no
+wave regime and no exemption — `N=1` takes 1, `N=7` takes 2, `N=8` takes 2, `N=9` takes 2 — and
 `i` is 0 at one slice, while above one slice it is 1 with a named `boundary:`
 (Phases 2 and 3) or 0 with `no integration boundary` declared (Phase 4). An earlier version of this fixture declared
 `N=9 → 3 slice + 1 integration` and both gates passed it: the one regime the
@@ -46,8 +46,8 @@ real tracker does. Read this file as a linter input, not as a model of a run.
 
 It establishes, for every closed `RV`/`RVJ` round in the tracker: the
 declared `<s> slice + <i> integration` count equals the number of report
-files that round lists, with brace sets expanded; an unwaved `N=` round's `s`
-equals `ceil(N/5)`; `i` is 0 at one slice, and above one slice is either 1 with
+files that round lists, with brace sets expanded; every `N=` round's `s`
+equals `ceil(N/5)`, whatever its wave count; `i` is 0 at one slice, and above one slice is either 1 with
 a named `boundary:` or 0 with `no integration boundary` declared; an
 `RVJ` round declares `0 slice + 1 integration`; an `M=` re-review round
 declares a `C=<n>` cluster count and `s` equals it; the round names a
@@ -58,12 +58,12 @@ those rows carry the same range; and an `M=0 → no round` record carries its
 closure routes and no reviewer evidence. It also establishes that
 the tracker is readable and that at least one round is closed.
 
-**Outside the unwaved `N=` regime** it does not establish that the fan-out was
+**On an `M=` re-review round** it does not establish that the fan-out was
 **sized** correctly. It catches one half of that — an over-wide fan-out whose
 duplication is visible in the recorded ranges, two reviewers handed the same
-range — but the other half is not derivable from the tracker there: a waved
-phase's wave count is not on the line, and the rule for a re-review round is
-one reviewer per file cluster in the fix diff, whose input is the diff;
+range — but the other half is not derivable from the tracker there: the rule for
+a re-review round is one reviewer per file cluster in the fix diff, whose input
+is the diff;
 `C=<n>` puts the cluster count on the line, and the arm compares it against
 `s`, but `C` is written by whoever chose `s`, so a round declaring one reviewer
 over a seven-cluster diff writes `C=1` and passes here (measured), and one that
@@ -106,23 +106,22 @@ construction — no fix ran, so there was nothing to plan — and the two such
 records elsewhere in this tree are what keep that exemption exercised.
 
 ## Current State
-- **Phase:** done (fixture)
-- **Next action:** none; this run directory is a linter fixture
+- **Lane A:** done (fixture)
 - **Last updated:** 2026-09-05
 - **Run directory:** tools/fixtures/run-ok/
 
-## Phase 1 — fixture, single report file · deps: none
+## Phase 1 — fixture, single report file · deps: none · lane: A
 - [x] T1 — a task · W1 · deps none — `aaaaaaa`
 - [x] RV — review fan-out · N=1 → 1 slice + 0 integration
       · reports p1-review-a.md · coverage p1-coverage.md → no findings
 
-## Phase 2 — fixture, brace-expanded report set · deps: Phase 1
+## Phase 2 — fixture, brace-expanded report set · deps: Phase 1 · lane: A
 - [x] T2 — another task · W1 · deps T1 — `bbbbbbb`
 - [x] RV — review fan-out · N=8 → 2 slice + 1 integration
       · boundary: the T2 contract consumed by the orchestrator commit in slice b
       · reports p2-review-{a,b,int}.md · coverage p2-coverage.md → no findings
 
-## Phase 3 — fixture, a record longer than the old byte window · deps: Phase 2
+## Phase 3 — fixture, a record longer than the old byte window · deps: Phase 2 · lane: A
 - [x] T3 — a third task · W1 · deps T2 — `ccccccc`
 - [x] RV — review fan-out · N=9 → 2 slice + 1 integration
       · boundary: T3's helper consumed by the follow-up fix in slice b
@@ -141,7 +140,7 @@ records elsewhere in this tree are what keep that exemption exercised.
         → F-001 closed, F-002 closed
 - [x] T4 — file coverage p3-coverage.md into the phase ledger · W1 · deps T3 — `ddddddd`
 
-## Phase 4 — fixture, multi-slice with no integration boundary · deps: Phase 3
+## Phase 4 — fixture, multi-slice with no integration boundary · deps: Phase 3 · lane: A
 - [x] T5 — a fifth task · W1 · deps T4 — `eeeeeee`
 - [x] RV — review fan-out · N=7 → 2 slice + 0 integration
       · no integration boundary

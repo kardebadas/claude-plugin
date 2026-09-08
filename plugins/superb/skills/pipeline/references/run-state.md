@@ -16,8 +16,13 @@ is a cache of these files, never the other way round.
 copy, never edit in place. `kit.md` alone is filled in later, at GATE 2 from the
 approved plan, because it cannot name a run's gates before the plan does.
 
-Nothing under `docs/superpowers/` is ever `git add`ed — run state, specs and
-plans are deliberately local-only. **So the guard-rail counters belong on disk
+Nothing in the run directory — `docs/superpowers/runs/*/` — is ever `git add`ed;
+run state is deliberately local-only. This repository's root `.gitignore`
+carries `docs/superpowers/runs/*/`; in a project without that line the rule is
+yours to keep.
+Curated permanent specs, plans and loose `runs/*.md` records may be deliberately
+committed when they are repository documentation. **So the guard-rail counters
+belong on disk
 too:** `findings.md` carries the fix-loop iteration count and recursion depth,
 because a cap compared against a remembered number stops capping the moment the
 context is compacted. And anything that must outlive the run goes into the
@@ -50,7 +55,7 @@ one.
 - [x] RV — review fan-out · N=8 → 2 slice + 1 integration · boundary: the T3 contract consumed by T7 · reports p3-review-{a,b,int}.md · coverage p3-coverage.md → F-012, F-013
 - [x] RV — review fan-out · N=8 → 2 slice + 0 integration · no integration boundary · reports p5-review-{a,b}.md · coverage p5-coverage.md → no findings
 - [x] RV — review fan-out · N=3 → 1 slice + 0 integration · reports p2-review-a.md · coverage p2-coverage.md → no findings
-- [x] RV — review fan-out · N=12 waved → 2 slice + 1 integration · boundary: the T3 contract consumed by T7 · reports p4-review-{a,b,int}.md · coverage p4-coverage.md → F-021
+- [x] RV — review fan-out · N=12 W=4 → 3 slice + 1 integration · boundary: the T3 contract consumed by T7 · reports p4-review-{a,b,c,int}.md · coverage p4-coverage.md → F-021
 - [x] RV — review fan-out · WAIVED by user: "skip the code review on this one"
 - [ ] RVJ — joint integration review · split 4a+4b
 - [x] RVJ — joint integration review · lanes A+B (phases 5, 6) · N=17 → 0 slice + 1 integration · reports j-56-int.md · coverage j-56-coverage.md → no findings
@@ -59,7 +64,8 @@ one.
 `W<n>` is the task's wave and `deps` its in-phase dependencies, both copied
 from the GATE 2 plan (Rule 6, `parallel.md`). A `[~]` line in a multi-member
 wave also names the worktree branch the member runs in, so a cold start knows
-where to look for its commits. Phase headings carry `· deps: <phases>`.
+where to look for its commits. Phase headings carry `· deps: <phases>` and `· lane: <id>` — what a phase
+depends on, and which concurrent execution branch executes it.
 
 | Marker | Meaning |
 |--------|---------|
@@ -82,9 +88,9 @@ these fields, all paths relative to `agent-output/`:
 
 - `N=<tasks> → <s> slice + <i> integration` — `N` is on the line so the fan-out
   is re-derivable at closure rather than trusted from the step most likely to
-  have been skipped. An **unwaved** phase takes `s = ceil(N/5)`; a **waved** one
-  takes a slice per wave or adjacent wave-pair (write `waved` after `N`), which
-  may be more or fewer; an **`M=`** re-review **writes its cluster count on the
+  have been skipped. **Every `N=` phase takes `s = ceil(N/5)`**, and the wave
+  count never enters it — `W=<n>` may ride the line as implementation history
+  and is informational only; an **`M=`** re-review **writes its cluster count on the
   line as `C=<n>` and `s` must equal it** — `M=9 C=3 → 3 slice + 1 integration`
   (the cluster rule, and what declaring `C` does and does not establish, is in
   `fix-loop.md`'s *Re-review fan-out*); an **`RVJ`** is always
@@ -213,10 +219,21 @@ starts a new run** — if step 1 finds nothing, report that and stop.
    surfaced. If reconciliation raised questions — partial `[~]` work whose
    disposition the plan doesn't settle, unexplained commits — these are **user
    questions; wait for the answers**.
-6. **Resume derives the state from disk, in this precedence.** Read down; the
-   first row that matches is the state, and its action is the only valid next
-   action. This protocol changes how a run is re-entered, never what the run is
-   allowed to do.
+6. **Resume derives the state from disk, per lane, in this precedence.** Read
+   the `· lane:` assignments off the phase headings first — that mapping is
+   persisted precisely so a resumed run never has to infer it — then, **for
+   each active lane**, read down; the first row that matches is that lane's
+   state, and its action is the only valid next action **for that lane**. A run
+   with two active lanes has two states and two next actions, and taking one
+   lane's action as the run's is how a resumed run abandons the other. This
+   protocol changes how a run is re-entered, never what the run is allowed to
+   do.
+
+   **A resumed run never chooses a join survivor.** The joining phase's
+   `· lane:` already names it, from GATE 2. When the leading `RVJ` closes,
+   remove the other contributing lanes' Current State lines — they are retired,
+   and a retired id is never reused — and the surviving lane owns the joining
+   phase, which then owes its own `IMPLEMENT → RV → CLOSE(RV) → PASS`.
 
    | On disk | State | The only valid next action |
    | --- | --- | --- |
@@ -226,7 +243,10 @@ starts a new run** — if step 1 finds nothing, report that and stop.
    | a round names a `fixplan` not in `agent-output/` | `FIX_PLAN` | write that round's fix plan |
    | a phase has an unchecked task and no `[~]` anywhere | `IMPLEMENT` | dispatch **that phase's** next open task, in wave order. Not its `RV` — review may not begin while a task of the phase is out — and not a later phase |
    | every task of a phase `[x]`, its `RV` `[ ]` | `REVIEW` | **review that phase.** Not the next phase — this is the most important run there is to resume: fully implemented and entirely unreviewed |
-   | every task `[x]`, `RV` `[x]`, no open blocking F-ID | `PASS` | close out, then the next phase's first task |
+   | every phase of this lane `[x]`, its join's leading `RVJ` `[ ]`, another contributing lane unfinished | waiting at join | **nothing for this lane.** Write `waiting at join Phase <id>` and resume the lane that is unfinished |
+   | every contributing lane `PASS`, the join's leading `RVJ` `[ ]` | `RVJ` | the **surviving** lane — the one the joining phase's `· lane:` names, and no other — runs the leading `RVJ` |
+   | every task `[x]`, `RV` `[x]`, this phase's **trailing** `RVJ` `[ ]` | `RVJ` | run the split's joint review. **Not the next phase** — a trailing `RVJ` is an acceptance gate of its own, and `CLOSE(trailing RVJ)` is what advances the run |
+   | every task `[x]`, `RV` `[x]`, every `RVJ` on this phase `[x]`, no open blocking F-ID | `PASS` | close out, then the next phase's first task |
 
    **An open blocking F-ID outranks the tracker's next unchecked line.** A fix
    loop interrupted mid-round leaves `RV` `[x]` and every task `[x]`, so the

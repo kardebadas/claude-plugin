@@ -5,7 +5,7 @@
      remediation is a plan someone can check, not a sequence of reactions to
      whichever finding was read last. -->
 
-# Phase <n> — fix plan, round <r>
+# Phase <id> — fix plan, round <r>
 
 **Findings in scope:** <F-IDs, one per fix below; every blocking F-ID this
 round targets and nothing else>

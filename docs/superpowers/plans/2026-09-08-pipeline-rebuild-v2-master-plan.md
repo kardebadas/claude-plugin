@@ -1,0 +1,136 @@
+# Superb Pipeline v2 Rebuild Master Plan
+
+> **For agentic workers:** REQUIRED EXECUTION ROUTE: use the approved Pipeline v2 controller, multi-task implementation batches, phase verification, selected high-risk phase review, and mandatory final master review. Do not invoke `superpowers:subagent-driven-development` or `superpowers:executing-plans`; their task-bound review/handoff contracts conflict with the approved architecture. Plan checkboxes define work; live status exists only in the run's `progress.md`.
+
+**Goal:** Replace Superb Pipeline v1 with a compact, file-authoritative v2 orchestrator that escalates every unresolved decision, safely batches work, recovers from interruption, mechanically verifies every phase, reviews selected high-risk phases, and always runs a final master review.
+
+**Architecture:** A concise `SKILL.md` routes to four stage-specific references. A Python 3.11 standard-library helper owns strict `progress.md` validation, locking, atomic transitions, readiness, result import, and recovery. Repository validation combines focused unit/integration tests, v2 fixtures, named mutation tests, and real-agent pressure scenarios.
+
+**Tech Stack:** Markdown skills/templates, Python 3.11+ standard library and `unittest`, shell wrappers/mutation harness, Git/Git worktrees, installed Superpowers skills.
+
+**Spec:** `docs/superpowers/specs/2026-09-08-pipeline-rebuild-v2-design.md`
+
+## Global constraints
+
+- Rebuild base is `8348959d1b201a873c68512642a0eb8e5754eaa8`; target branch is `feat/pipeline-rebuild-v2` in `/tmp/claude-plugin-pipeline-rebuild-v2`.
+- Runtime decisions D-001 through D-010 in `docs/superpowers/runs/2026-09-08-pipeline-rebuild-v2/decisions.md` are binding.
+- This rebuild uses global `worker_limit = 3`; future runs require their own explicit persisted positive limit compatible with detected capacity.
+- Every worker prompt includes the zero-assumption contract and status vocabulary. Workers may not spawn untracked agents or edit `progress.md`.
+- Every phase contains at most 12 genuine tasks. A task is not automatically a worker boundary.
+- Tests precede implementation for testable code and skill behavior. Preserve current quality gates; add no numeric coverage threshold.
+- Every phase gets mechanical verification. Only explicitly required high-risk gates get a phase reviewer. Final master review always uses two complementary reviewers.
+- Critical/Important findings block. Every Minor has a recorded disposition. Each formal gate allows at most three remediation rounds under D-006.
+- V2 resumes only v2 state. Recognized v1, missing, malformed, unknown, and unsupported schemas are read-only failures.
+- Python helper scope is Python 3.11+, cooperating processes on one host, and local filesystem locking/replacement semantics. Native/simulated platform evidence is labeled exactly.
+- Final state is committed and clean on the feature branch. No push, PR, publish, or merge into `main`/`master`.
+
+## File structure map
+
+| Path | Responsibility | Planned action |
+| --- | --- | --- |
+| `plugins/superb/skills/pipeline/SKILL.md` | Compact invocation/control plane and stage router | Rewrite; target under 500 lines where practical |
+| `plugins/superb/skills/pipeline/references/planning.md` | Discovery, design/master/phase plan gates and question escalation | Create |
+| `plugins/superb/skills/pipeline/references/execution.md` | Batch selection, worker contract, TDD, integration, phase verification | Create from useful v1 execution rules |
+| `plugins/superb/skills/pipeline/references/persistence.md` | Tracker schema, decisions, worker results, resume/reconciliation | Create from useful v1 run-state rules |
+| `plugins/superb/skills/pipeline/references/review.md` | Hybrid review, severity, consolidation, remediation, master gate | Create from useful v1 fix/review rules |
+| `plugins/superb/skills/pipeline/scripts/pipeline_state.py` | Strict tracker CLI/module, lock/atomic writes, readiness, imports, recovery, gate transitions | Create |
+| `plugins/superb/skills/pipeline/templates/progress.md` | Canonical v2 tracker schema | Rewrite |
+| `plugins/superb/skills/pipeline/templates/decisions.md` | Stable questions/answers | Replace v1 register template |
+| `plugins/superb/skills/pipeline/templates/findings.md` | Critical/Important/Minor evidence and dispositions | Rewrite |
+| `plugins/superb/skills/pipeline/templates/fix-plan.md` | One scoped plan per gate remediation round | Rewrite |
+| `plugins/superb/skills/pipeline/templates/worker-result.md` | Atomic attempt/task checkpoint evidence | Create |
+| `plugins/superb/skills/pipeline/tests/test_pipeline_state.py` | Unit/integration/regression tests for helper | Create |
+| `plugins/superb/skills/pipeline/tests/fixtures/` | Valid v2, legacy v1, malformed/unknown, blocked/interrupted/review states | Create |
+| `plugins/superb/skills/pipeline/README.md` | User-facing v2 behavior and requirements | Rewrite |
+| `plugins/superb/skills/pipeline/references/{run-state,implement,parallel,fix-loop}.md` | V1 architecture | Delete after v2 replacements cover retained invariants |
+| `plugins/superb/skills/pipeline/templates/{register,implementer-prompt,kit}.md` | V1 artifacts superseded by v2 plans/result contract | Delete after replacement tests fail then pass |
+| `plugins/superb/skills/pipeline/scripts/task-brief` | V1 one-task extraction | Delete; v2 workers receive the phase-plan path plus assigned task IDs and batch order |
+| `tools/check-plugin.py` | Shared plugin validation plus focused v2 structural checks | Preserve shared checks; replace v1 semantic block |
+| `tools/check-plugin-mutants.sh` | No-op-aware mutation proof | Preserve shared mutants; replace v1-only mutants with v2 mutations |
+| `tools/fixtures/run-*` | V1 tracker fixtures | Replace with focused v2 fixtures or move canonical inputs under Pipeline tests |
+| `.github/workflows/checks.yml` | Repository CI | Replace v1 fixture invocations; add Pipeline unit/integration command |
+| `plugins/superb/skills/setup/{check-deps.sh,SKILL.md,README.md}` | Dependency reporting | Add narrowly scoped Python 3.11+ Pipeline requirement without changing Craft 3.9+ |
+| `README.md`, `plugins/superb/README.md` | Repository/plugin documentation | Update v2 flow, dependencies, commands, and guarantees |
+| `plugins/superb/.claude-plugin/plugin.json`, `plugins/superb/.codex-plugin/plugin.json` | Plugin package metadata | Set version `0.14.0`; update Pipeline descriptions only as needed |
+
+## Shared interfaces fixed before phase expansion
+
+1. `progress.md` is the sole mutable authority and begins with schema `pipeline-run/v2`.
+2. Phase plans expose strict task and batch metadata: stable ID, dependencies, write scope, commands, batch ID/order, review gate/reason.
+3. The helper CLI provides read-only `validate`, `inspect`, and `next`; controller transitions for task start/block/result import/integration, phase verification, review gate, and remediation rounds; and initialization that refuses existing directories.
+4. All mutating commands lock a separate run-local resource and atomically replace only the canonical tracker. Failed validation leaves bytes unchanged.
+5. Worker results identify run/task/attempt, status, checkpoints, commit(s), tests/evidence, concerns/questions, and are published through same-directory temporary replacement. Only the controller imports them.
+6. Formal reviewer reports are stored in `agent-output/`; findings and dispositions live in `findings.md`; gate/round state and evidence references live in `progress.md`.
+7. The final acceptance matrix uses the 20 numbered scenarios from the rebuild request as stable `A-01` through `A-20` mappings.
+
+## Phase sequence
+
+### Phase 1 — Durable state, recovery, and scheduling foundation
+
+- **Detailed plan:** `docs/superpowers/plans/pipeline-rebuild-v2/phase-01.md`
+- **Dependencies:** none after design/master interface approval.
+- **Outcome:** Tested Python helper, strict v2 tracker, result contract, legacy rejection, scheduler, gate/remediation state transitions, and recovery reconciliation.
+- **Implementation batching:** Prefer one coherent state-helper executor for shared parser/transition code; split only truly disjoint fixture/platform work. Task checkpoints remain individual.
+- **Mechanical verification:** Pipeline helper unit/integration suite; valid/invalid fixture CLI checks; real-process lock tests; Python 3.11 syntax/runtime check; targeted mutations; `git diff --check`.
+- **Review gate:** required.
+- **Reason:** This is the single source of execution truth and concurrency/recovery foundation consumed by every later phase; state corruption or unsafe readiness would repeat/skip work and invalidate all downstream gates.
+
+### Phase 2 — Compact skill orchestration and durable templates
+
+- **Detailed plan:** `docs/superpowers/plans/pipeline-rebuild-v2/phase-02.md`
+- **Dependencies:** Phase 1 verified and high-risk review accepted.
+- **Outcome:** New compact control plane, four stage references, v2 templates, zero-assumption worker/reviewer contracts, batch flow, hybrid review, bounded remediation, and final branch policy; v1 orchestration files removed.
+- **Implementation batching:** Run writing-skills RED controls before edits. Then use disjoint documentation batches only where interfaces are fixed; integrate and inspect cross-reference consistency before verification.
+- **Mechanical verification:** Skill/frontmatter validation; word/line and reference routing checks; stale v1/SDD/per-task-review scans; helper/template contract checks; deterministic scenario simulations; targeted mutations; `git diff --check`.
+- **Review gate:** required.
+- **Reason:** The instructions control user escalation, dispatch authority, destructive boundaries, and formal acceptance. A prose ambiguity can cause unauthorized decisions or false completion across every future run.
+
+### Phase 3 — Repository validation, packaging, and documentation
+
+- **Detailed plan:** `docs/superpowers/plans/pipeline-rebuild-v2/phase-03.md`
+- **Dependencies:** Phases 1 and 2 verified and their required reviews accepted.
+- **Outcome:** Shared plugin checks preserved, v1-only checks classified/removed, v2 fixtures/mutations wired to CI, setup reports the new Python requirement, user docs describe v2, and both manifests are `0.14.0`.
+- **Implementation batching:** Validation/mutation work is one coherent batch because both files share named invariants. Setup/docs/manifests may run as a disjoint batch if their write scopes remain separate.
+- **Mechanical verification:** Pipeline unit suite; default plugin gate; every v2 fixture gate; full no-op-aware mutation harness; JSON parsing; setup regression checks; CI command audit; repository documentation scans; `git diff --check`.
+- **Review gate:** final-only.
+
+### Phase 4 — Behavioral pressure, acceptance, and performance evidence
+
+- **Detailed plan:** `docs/superpowers/plans/pipeline-rebuild-v2/phase-04.md`
+- **Dependencies:** Phases 1–3 implemented, integrated, verified, and required gates accepted.
+- **Outcome:** Writing-skills RED/GREEN real-agent evidence, complete A-01–A-20 acceptance map, recovery/finish rehearsal, comparable measurements, limitation record, and master-review package.
+- **Implementation batching:** Fresh-context pressure samples may run concurrently up to the global limit; measurement and acceptance consolidation remain controller-owned.
+- **Mechanical verification:** Fresh full repository commands; acceptance-matrix completeness; artifact/path/state validation; performance comparison; Git/worktree/remote checks.
+- **Review gate:** final-only; the mandatory master gate immediately follows.
+
+## Mandatory final master gate
+
+After Phase 4 verification, record review base `8348959d1b201a873c68512642a0eb8e5754eaa8` and current integrated HEAD. Dispatch exactly two independent complementary reviewers under D-007. Collect both reports; validate/deduplicate all findings; ask unresolved questions; persist one scoped fix plan per remediation round; implement compatible fix batches with TDD; verify; and re-review the same master gate. Stop when D-005 acceptance passes or D-006 blocks/escalates. No ordinary fixes restart the full pipeline.
+
+## Commit strategy
+
+- Commit the approved design independently before plan expansion.
+- During implementation, commit coherent tested batches; tracker rows retain every task's result and commit evidence even when multiple tasks share a commit.
+- Formal review fixes use separate commits associated with their persisted round.
+- Commit curated plan/documentation artifacts. Never stage `docs/superpowers/runs/<run-id>/` runtime state.
+- Before each completion claim or phase/master advancement, run the exact fresh command that proves it.
+
+## Final verification commands planned
+
+These commands may be refined only by the approved phase plans when their files exist:
+
+```bash
+python3.11 -m unittest discover -s plugins/superb/skills/pipeline/tests -v
+./tools/check-plugin.sh
+./tools/check-plugin-mutants.sh
+python3 -m unittest discover -s plugins/superb/skills/craft/tests -v
+./tools/test-craftui.sh
+git diff --check
+git status --short --branch
+```
+
+Platform-specific tests unavailable locally are reported rather than claimed. Current local runtime has Python 3.11.2 only; native macOS and Windows evidence requires those environments.
+
+## Plan expansion and approval gate
+
+One writing-plans agent expands each phase. With `worker_limit = 3`, Phases 1–3 are expanded together because this master plan fixes their shared interfaces and each agent writes only its own phase-plan file; Phase 4 queues until a slot is free. The controller then checks task caps, dependencies, interfaces, TDD steps, exact commands, batching/write scopes, review classifications, and A-01–A-20 coverage. Implementation remains blocked until the user explicitly approves this master plan and all four detailed phase plans.

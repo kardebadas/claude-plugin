@@ -1464,6 +1464,269 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
             self.assertEqual((run_dir / "progress.md").read_bytes(), before)
 
 
+class PhaseAdvancementTest(unittest.TestCase):
+    def git(self, repo: Path, *args: str) -> str:
+        return subprocess.run(
+            ("git", *args), cwd=repo, check=True, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ).stdout.strip()
+
+    def make_run(
+        self,
+        root: Path,
+        *,
+        first_gate: str = "required",
+        phase_two_deps: str = "01",
+        phase_count: int = 2,
+    ) -> tuple[Path, tuple[Path, ...], str]:
+        self.git(root, "init", "-q")
+        self.git(root, "config", "user.email", "pipeline@example.invalid")
+        self.git(root, "config", "user.name", "Pipeline Test")
+        (root / "base.txt").write_text("base\n", encoding="utf-8")
+        self.git(root, "add", "base.txt")
+        self.git(root, "commit", "-qm", "base")
+        head = self.git(root, "rev-parse", "HEAD")
+        self.git(root, "branch", "target")
+        plans = []
+        phase_specs = [
+            ("01", "none", first_gate, "Foundational state risk.", "P1-A", "source", "file:source.txt", "none"),
+            ("02", phase_two_deps, "final-only", "Mechanical verification only.", "P2-A", "artifact", "file:evidence/two.md", "evidence/two.md"),
+            ("03", "01,02", "final-only", "Mechanical verification only.", "P3-A", "artifact", "file:evidence/three.md", "evidence/three.md"),
+        ]
+        for phase_id, deps, gate, reason, task_id, kind, scope, outputs in phase_specs[:phase_count]:
+            plan = root / f"phase-{phase_id}.md"
+            plan.write_text(
+                f"""# Phase {phase_id}
+
+<!-- pipeline-v2-phase: id={phase_id}; deps={deps}; review_gate={gate}; review_reason={reason} -->
+
+### {task_id} — Work
+<!-- pipeline-v2-task: id={task_id}; deps=none; kind={kind}; batch=phase-{phase_id}; order=1; write_scope={scope}; outputs={outputs} -->
+""",
+                encoding="utf-8",
+            )
+            plans.append(plan)
+        master = root / "master.md"
+        master.write_text(
+            "# Master\n\n" + "\n".join(f"- **Detailed plan:** `{plan}`" for plan in plans) + "\n",
+            encoding="utf-8",
+        )
+        (root / "decisions.md").write_text("# Decisions\n", encoding="utf-8")
+        (root / "findings.md").write_text(
+            "<!-- pipeline-findings/v2 -->\n"
+            "| ID | Gate | Severity | Status | Disposition | Evidence | Fix Commit | Re-review |\n"
+            "| --- | --- | --- | --- | --- | --- | --- | --- |\n",
+            encoding="utf-8",
+        )
+        run_dir = root / "run"
+        initialize_run(
+            run_dir,
+            run_id="advance-test",
+            base_commit=head,
+            target_branch="target",
+            worker_limit=3,
+            artifacts={
+                "spec": "spec.md",
+                "master_plan": str(master),
+                "phase_plans": ",".join(str(plan) for plan in plans),
+                "decisions": str(root / "decisions.md"),
+                "findings": str(root / "findings.md"),
+            },
+            approved_existing=(),
+        )
+        return run_dir, tuple(plans), head
+
+    def complete_first_source(self, root: Path, run_dir: Path, plan: Path) -> str:
+        started = start_task(run_dir, task_id="P1-A", owner="worker-a", attempt="attempt-1")
+        self.assertEqual(dict(started.current_fields)["next_action"], "continue-P1-A")
+        (root / "source.txt").write_text("implemented\n", encoding="utf-8")
+        self.git(root, "add", "source.txt")
+        self.git(root, "commit", "-qm", "implement source")
+        commit = self.git(root, "rev-parse", "HEAD")
+        completed = complete_task(
+            run_dir, task_id="P1-A", attempt="attempt-1", phase_plan=plan,
+            source_ref="HEAD", commits=(commit,), artifacts=(), evidence=(f"targeted:{commit}",),
+            repo_dir=root,
+        )
+        self.assertEqual(dict(completed.current_fields)["next_action"], "integrate-P1-A")
+        self.git(root, "branch", "-f", "target", commit)
+        integrated = record_task_integration(
+            run_dir, task_id="P1-A", integration_commit=commit,
+            verification=(f"integrated:{commit}",), repo_dir=root,
+        )
+        self.assertEqual(dict(integrated.current_fields)["next_action"], "verify-phase-01")
+        return commit
+
+    def accept_phase_gate(self, root: Path, run_dir: Path, head: str) -> None:
+        opened = open_review_gate(
+            run_dir, gate_id="phase-01", base=head, head=head,
+            reviewer_assignments=("reviewer-1",),
+        )
+        self.assertEqual(dict(opened.current_fields)["next_action"], "await-review-phase-01")
+        report = root / "review.md"
+        report.write_text(
+            "<!-- pipeline-review-report/v2 -->\n"
+            "| Field | Value |\n| --- | --- |\n"
+            f"| gate | phase-01 |\n| assignment | reviewer-1 |\n| base | {head} |\n"
+            f"| head | {head} |\n| findings | - |\n",
+            encoding="utf-8",
+        )
+        accepted = evaluate_and_close_review_gate(
+            run_dir, gate_id="phase-01", findings_path=root / "findings.md",
+            report_paths=(report,), verification=(f"reviewed:{head}",), rereview_paths=(),
+        )
+        self.assertEqual(dict(accepted.current_fields)["next_action"], "advance-phase-01")
+
+    def test_last_task_completion_derives_integration_then_verification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, plans, _ = self.make_run(root)
+            self.complete_first_source(root, run_dir, plans[0])
+
+    def test_block_and_answered_resume_refresh_the_derived_action(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, _, _ = self.make_run(root, first_gate="final-only")
+            start_task(run_dir, task_id="P1-A", owner="worker-a", attempt="attempt-1")
+            blocked = record_task_question(
+                run_dir, task_id="P1-A", attempt="attempt-1",
+                question_or_block_ref="D-100", reason="answer required",
+            )
+            self.assertEqual(dict(blocked.current_fields)["next_action"], "await-user-decision-P1-A")
+            (root / "decisions.md").write_text(
+                "# Decisions\n\n## D-100 — Answer\n\n"
+                "- **Question:** Which behavior applies?\n"
+                "- **Answer:** Use the explicitly recorded behavior.\n"
+                "- **Scope:** P1-A current blocker.\n"
+                "- **Status:** Resolved.\n",
+                encoding="utf-8",
+            )
+            resumed = resume_task(
+                run_dir, task_id="P1-A", prior_attempt="attempt-1",
+                new_owner="worker-a", new_attempt="attempt-2", decision_ref="D-100",
+            )
+            self.assertEqual(dict(resumed.current_fields)["next_action"], "continue-P1-A")
+
+    def test_failed_phase_verification_derives_repair_before_another_verification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, plans, _ = self.make_run(root, first_gate="final-only")
+            head = self.complete_first_source(root, run_dir, plans[0])
+
+            def fail_verification(tracker):
+                return dataclasses.replace(
+                    tracker,
+                    phases=tuple(
+                        dataclasses.replace(
+                            phase,
+                            state="[?]",
+                            verification=f"failed:phase-suite;head:{head}",
+                        ) if phase.id == "01" else phase
+                        for phase in tracker.phases
+                    ),
+                )
+
+            failed = locked_tracker_update(
+                run_dir, "fixture-failed-verification", fail_verification,
+                timeout_s=1.0, refresh_next_action=True,
+            )
+            self.assertEqual(dict(failed.current_fields)["next_action"], "repair-phase-01")
+
+    def test_required_review_blocks_then_accepted_gate_advances_and_replay_is_inert(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, plans, _ = self.make_run(root)
+            head = self.complete_first_source(root, run_dir, plans[0])
+            record_phase_verification(
+                run_dir, phase_id="01", head=head, commands=("suite",), evidence=(f"suite:{head}",),
+            )
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                pipeline_state.advance_phase(run_dir, completed_phase_id="01", next_phase_id="02")
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+            self.accept_phase_gate(root, run_dir, head)
+            advanced = pipeline_state.advance_phase(run_dir, completed_phase_id="01", next_phase_id="02")
+            self.assertEqual((dict(advanced.current_fields)["phase"], dict(advanced.current_fields)["next_action"]), ("02", "P2-A"))
+            accepted = (run_dir / "progress.md").read_bytes()
+            revision = advanced.revision
+            replayed = pipeline_state.advance_phase(run_dir, completed_phase_id="01", next_phase_id="02")
+            self.assertEqual((replayed.revision, (run_dir / "progress.md").read_bytes()), (revision, accepted))
+
+    def test_verified_final_only_phase_advances_without_phase_reviewer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, plans, _ = self.make_run(root, first_gate="final-only")
+            head = self.complete_first_source(root, run_dir, plans[0])
+            record_phase_verification(
+                run_dir, phase_id="01", head=head, commands=("suite",), evidence=(f"suite:{head}",),
+            )
+            advanced = pipeline_state.advance_phase(run_dir, completed_phase_id="01", next_phase_id="02")
+            self.assertEqual(dict(advanced.current_fields)["phase"], "02")
+            self.assertFalse(any(gate.id == "phase-01" for gate in advanced.gates))
+
+    def test_wrong_skipped_dependency_and_unresolved_question_fail_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, plans, _ = self.make_run(root, first_gate="final-only", phase_two_deps="01,03", phase_count=3)
+            head = self.complete_first_source(root, run_dir, plans[0])
+            record_phase_verification(
+                run_dir, phase_id="01", head=head, commands=("suite",), evidence=(f"suite:{head}",),
+            )
+            for completed, successor in (("02", "03"), ("01", "03"), ("01", "02")):
+                with self.subTest(completed=completed, successor=successor):
+                    before = (run_dir / "progress.md").read_bytes()
+                    with self.assertRaises(TransitionError):
+                        pipeline_state.advance_phase(run_dir, completed_phase_id=completed, next_phase_id=successor)
+                    self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, plans, _ = self.make_run(root, first_gate="final-only")
+            head = self.complete_first_source(root, run_dir, plans[0])
+            record_phase_verification(
+                run_dir, phase_id="01", head=head, commands=("suite",), evidence=(f"suite:{head}",),
+            )
+            locked_tracker_update(
+                run_dir, "fixture-question",
+                lambda tracker: dataclasses.replace(
+                    tracker,
+                    tasks=tuple(dataclasses.replace(task, question="D-900") if task.id == "P1-A" else task for task in tracker.tasks),
+                ),
+                timeout_s=1.0,
+            )
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                pipeline_state.advance_phase(run_dir, completed_phase_id="01", next_phase_id="02")
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_last_phase_routes_to_master_and_read_only_inspection_does_not_rewrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, plans, _ = self.make_run(root, first_gate="final-only", phase_count=1)
+            head = self.complete_first_source(root, run_dir, plans[0])
+            verified = record_phase_verification(
+                run_dir, phase_id="01", head=head, commands=("suite",), evidence=(f"suite:{head}",),
+            )
+            self.assertEqual(dict(verified.current_fields)["next_action"], "open-gate-master")
+            locked_tracker_update(
+                run_dir, "fixture-stale-action",
+                lambda tracker: dataclasses.replace(
+                    tracker,
+                    current_fields=tuple(
+                        (key, "P1-A" if key == "next_action" else value)
+                        for key, value in tracker.current_fields
+                    ),
+                ),
+                timeout_s=1.0,
+            )
+            before = (run_dir / "progress.md").read_bytes()
+            summary = inspect_run(run_dir)
+            self.assertEqual(summary["persisted_next_action"], "P1-A")
+            self.assertEqual(summary["derived_next_action"], "open-gate-master")
+            self.assertFalse(summary["next_action_consistent"])
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+
 class ReconciliationTest(unittest.TestCase):
     def prepare(self, root: Path) -> tuple[WorkerResultImportTest, Path, Path]:
         helper = WorkerResultImportTest()

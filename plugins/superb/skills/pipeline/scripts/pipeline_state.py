@@ -690,16 +690,29 @@ def initialize_run(
 
 def inspect_run(run_dir: Path) -> dict[str, object]:
     """Return a read-only summary of validated v2 state."""
+    run_dir = Path(run_dir)
     tracker = validate_run(run_dir)
-    return {
+    persisted_next_action = dict(tracker.current_fields)["next_action"]
+    diagnostic = "-"
+    try:
+        derived_next_action = derive_next_action(run_dir, tracker)
+    except (OSError, UnicodeError, PlanMetadataError, TransitionError) as exc:
+        derived_next_action = None
+        diagnostic = f"next action could not be derived: {exc}"
+    summary = {
         "run_id": tracker.run_id,
         "target_branch": tracker.target_branch,
         "worker_limit": tracker.worker_limit,
         "revision": tracker.revision,
         "phase": dict(tracker.current_fields)["phase"],
-        "next_action": dict(tracker.current_fields)["next_action"],
+        "next_action": persisted_next_action,
+        "persisted_next_action": persisted_next_action,
+        "derived_next_action": derived_next_action,
+        "next_action_consistent": persisted_next_action == derived_next_action,
+        "next_action_diagnostic": diagnostic,
         "task_counts": {state: sum(task.state == state for task in tracker.tasks) for state in sorted(_TASK_STATES)},
     }
+    return summary
 
 
 _POSIX_CONTENTION = {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}
@@ -867,6 +880,7 @@ def locked_tracker_update(
     *,
     timeout_s: float,
     replay_returns_current: bool = True,
+    refresh_next_action: bool = False,
 ) -> Tracker:
     """Validate and atomically apply one idempotent controller transition."""
     if not _TOKEN.fullmatch(transition_id):
@@ -881,6 +895,11 @@ def locked_tracker_update(
             raise SchemaError("transition must return a Tracker")
         if proposed.run_id != current.run_id or proposed.base_commit != current.base_commit or proposed.target_branch != current.target_branch:
             raise SchemaError("transition cannot change run identity")
+        if refresh_next_action:
+            proposed = _with_next_action(
+                proposed,
+                derive_next_action(run_dir, proposed),
+            )
         updated = _with_transition_identity(proposed, transition_id, current.revision + 1)
         canonical = render_tracker(updated)
         reparsed = parse_tracker(canonical)
@@ -1039,6 +1058,116 @@ def _dependency_ready(run_dir: Path, tracker: Tracker, task: TaskRecord) -> bool
     ) and _git(repo_dir, "merge-base", "--is-ancestor", task.integration, tracker.target_branch)
 
 
+def _with_next_action(tracker: Tracker, action: str) -> Tracker:
+    if not action or "|" in action or "\n" in action:
+        raise TransitionError("derived next action is not table-safe")
+    return replace(
+        tracker,
+        current_fields=tuple(
+            (key, action if key == "next_action" else value)
+            for key, value in tracker.current_fields
+        ),
+    )
+
+
+def _phase_documents(
+    run_dir: Path,
+    tracker: Tracker,
+) -> tuple[tuple[str, PhaseMetadata, tuple[PlannedTask, ...]], ...]:
+    documents = []
+    for raw_path in dict(tracker.run_fields)["phase_plans"].split(","):
+        metadata, tasks = _parse_phase_document(_resolved_reference(run_dir, raw_path))
+        documents.append((raw_path, metadata, tasks))
+    return tuple(documents)
+
+
+def _unresolved_task_question(task: TaskRecord) -> bool:
+    return task.question != "-" and not task.question.startswith("resolved:")
+
+
+def _gate_next_action(tracker: Tracker, gate: GateRecord) -> str:
+    if gate.state == "pending":
+        return f"open-gate-{gate.id}"
+    if gate.state == "in_progress":
+        return f"await-review-{gate.id}"
+    if gate.state == "accepted":
+        return "final-verification" if gate.type == "master" else f"advance-phase-{gate.phase}"
+    if gate.questions != "-":
+        return f"await-review-question-{gate.id}"
+    active_round = next(
+        (
+            row
+            for row in tracker.remediation
+            if row.gate == gate.id and row.state == "in_progress"
+        ),
+        None,
+    )
+    if active_round is not None:
+        return f"continue-remediation-{gate.id}-round-{active_round.round_number}"
+    return f"start-remediation-{gate.id}"
+
+
+def derive_next_action(run_dir: Path, tracker: Tracker) -> str:
+    """Derive the next permitted action from plans and authoritative tracker facts."""
+    run_dir = Path(run_dir)
+    phase_id = dict(tracker.current_fields)["phase"]
+    documents = _phase_documents(run_dir, tracker)
+    current = [document for document in documents if document[1].id == phase_id]
+    if len(current) != 1:
+        raise TransitionError(f"current phase {phase_id} does not resolve to one approved plan")
+    _, metadata, planned = current[0]
+    records = {task.id: task for task in tracker.tasks}
+
+    for definition in sorted(planned, key=lambda item: (item.order, item.id)):
+        task = records[definition.id]
+        if task.state == "[?]" or _unresolved_task_question(task):
+            return f"await-user-decision-{task.id}"
+    active = [records[item.id] for item in planned if records[item.id].state == "[~]"]
+    if active:
+        return f"continue-{sorted(active, key=lambda item: item.id)[0].id}"
+    for definition in sorted(planned, key=lambda item: (item.order, item.id)):
+        task = records[definition.id]
+        if task.state != "[x]":
+            continue
+        if task.kind == "source" and task.integration == "-":
+            return f"integrate-{task.id}"
+        if not _dependency_ready(run_dir, tracker, task):
+            return f"reconcile-{task.id}"
+
+    unstarted = [item for item in planned if records[item.id].state == "[ ]"]
+    if unstarted:
+        all_planned = _planned_tasks(run_dir, tracker)
+        all_active = [task for task in tracker.tasks if task.state == "[~]"]
+        if len(all_active) >= tracker.worker_limit:
+            return "wait-for-worker-capacity"
+        for definition in sorted(unstarted, key=lambda item: (item.order, item.id)):
+            if any(not _dependency_ready(run_dir, tracker, records[dep]) for dep in definition.deps):
+                continue
+            if any(
+                (other := all_planned.get(active_task.id)) is not None
+                and _scopes_overlap(definition.write_scope, other.write_scope)
+                for active_task in all_active
+            ):
+                continue
+            return definition.id
+        return "wait-for-task-dependencies"
+
+    phase = next((item for item in tracker.phases if item.id == phase_id), None)
+    if phase is None:
+        raise TransitionError(f"current phase {phase_id} is absent from tracker")
+    if phase.state == "[?]" and phase.verification.startswith("failed:"):
+        return f"repair-phase-{phase_id}"
+    if phase.state != "[x]" or phase.verification == "-":
+        return f"verify-phase-{phase_id}"
+    if metadata.review_gate == "required":
+        return _gate_next_action(tracker, _gate_record(tracker, f"phase-{phase_id}"))
+
+    phase_ids = [document[1].id for document in documents]
+    if phase_ids[-1] != phase_id:
+        return f"advance-phase-{phase_id}"
+    return _gate_next_action(tracker, _gate_record(tracker, "master"))
+
+
 def _scheduler_context(run_dir: Path, phase_plan: Path, capacity: int | None) -> tuple[Tracker, tuple[PlannedTask, ...], int]:
     if capacity is None:
         raise TransitionError("runtime capacity is unknown; obtain and record an explicit supported worker limit")
@@ -1176,7 +1305,8 @@ def reserve_tasks(
         return updated
 
     return locked_tracker_update(
-        Path(run_dir), transition_id, transition, timeout_s=5.0, replay_returns_current=False
+        Path(run_dir), transition_id, transition, timeout_s=5.0,
+        replay_returns_current=False, refresh_next_action=True,
     )
 
 
@@ -1207,6 +1337,7 @@ def start_task(run_dir: Path, *, task_id: str, owner: str, attempt: str) -> Trac
         transition,
         timeout_s=5.0,
         replay_returns_current=False,
+        refresh_next_action=True,
     )
 
 
@@ -1231,7 +1362,10 @@ def record_task_question(
             replace(task, state="[?]", checkpoints=_append_history(task.checkpoints, checkpoint), question=question_or_block_ref),
         )
 
-    return locked_tracker_update(Path(run_dir), f"question-{task_id}-{attempt}-{question_or_block_ref}", transition, timeout_s=5.0)
+    return locked_tracker_update(
+        Path(run_dir), f"question-{task_id}-{attempt}-{question_or_block_ref}",
+        transition, timeout_s=5.0, refresh_next_action=True,
+    )
 
 
 def resume_task(
@@ -1271,7 +1405,10 @@ def resume_task(
         )
 
     try:
-        return locked_tracker_update(Path(run_dir), f"resume-{task_id}-{prior_attempt}-{new_attempt}-{decision_ref}", transition, timeout_s=5.0)
+        return locked_tracker_update(
+            Path(run_dir), f"resume-{task_id}-{prior_attempt}-{new_attempt}-{decision_ref}",
+            transition, timeout_s=5.0, refresh_next_action=True,
+        )
     except _AlreadyApplied as applied:
         return applied.tracker
 
@@ -1355,7 +1492,10 @@ def complete_task(
             )
         return _replace_task(tracker, replacement)
 
-    return locked_tracker_update(Path(run_dir), f"complete-{task_id}-{attempt}", transition, timeout_s=5.0)
+    return locked_tracker_update(
+        Path(run_dir), f"complete-{task_id}-{attempt}", transition,
+        timeout_s=5.0, refresh_next_action=True,
+    )
 
 
 def record_task_integration(
@@ -1389,7 +1529,10 @@ def record_task_integration(
             ),
         )
 
-    return locked_tracker_update(Path(run_dir), f"integrate-{task_id}-{integration_commit}", transition, timeout_s=5.0)
+    return locked_tracker_update(
+        Path(run_dir), f"integrate-{task_id}-{integration_commit}", transition,
+        timeout_s=5.0, refresh_next_action=True,
+    )
 
 
 def publish_worker_result(path: Path, result: WorkerResult) -> None:
@@ -1568,7 +1711,10 @@ def import_worker_result(
         return _replace_task(tracker, replacement)
 
     try:
-        return locked_tracker_update(Path(run_dir), transition_id, transition, timeout_s=5.0)
+        return locked_tracker_update(
+            Path(run_dir), transition_id, transition,
+            timeout_s=5.0, refresh_next_action=True,
+        )
     except _AlreadyApplied as applied:
         return applied.tracker
 
@@ -1632,10 +1778,134 @@ def record_phase_verification(
         repo_dir = _project_root(Path(run_dir))
         if not _git(repo_dir, "cat-file", "-e", f"{head}^{{commit}}") or not _git(repo_dir, "merge-base", "--is-ancestor", head, tracker.target_branch):
             raise TransitionError("phase verification HEAD is not on the target branch")
+        if any(
+            records[item.id].kind == "source"
+            and not _git(repo_dir, "merge-base", "--is-ancestor", records[item.id].integration, head)
+            for item in planned
+        ):
+            raise TransitionError("phase verification HEAD does not contain every source integration")
         verification = f"head:{head};commands:{','.join(commands)};evidence:{','.join(evidence)}"
         return _replace_phase(tracker, replace(phase, state="[x]", verification=verification))
 
-    return locked_tracker_update(Path(run_dir), f"verify-phase-{phase_id}-{head}", transition, timeout_s=5.0)
+    return locked_tracker_update(
+        Path(run_dir), f"verify-phase-{phase_id}-{head}", transition,
+        timeout_s=5.0, refresh_next_action=True,
+    )
+
+
+def _phase_verification_head(phase: PhaseRecord) -> str | None:
+    match = re.search(r"(?:^|;)head:([0-9a-f]{40})(?:;|$)", phase.verification)
+    return match.group(1) if match else None
+
+
+def _approved_phase_sequence(
+    run_dir: Path,
+    tracker: Tracker,
+) -> tuple[tuple[str, PhaseMetadata, tuple[PlannedTask, ...]], ...]:
+    documents = _phase_documents(run_dir, tracker)
+    master_path = _resolved_reference(run_dir, dict(tracker.run_fields)["master_plan"])
+    try:
+        master = master_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise TransitionError(f"approved master plan is unreadable: {master_path}: {exc}") from exc
+    missing = [raw_path for raw_path, _, _ in documents if raw_path not in master]
+    if missing:
+        raise TransitionError(
+            "approved master plan does not reference every phase plan: " + ",".join(missing)
+        )
+    return documents
+
+
+def advance_phase(
+    run_dir: Path,
+    *,
+    completed_phase_id: str,
+    next_phase_id: str,
+) -> Tracker:
+    """Atomically advance one accepted phase to its approved immediate successor."""
+    if not _TOKEN.fullmatch(completed_phase_id) or not _TOKEN.fullmatch(next_phase_id):
+        raise TransitionError("phase advancement needs valid phase identities")
+    transition_id = f"advance-{completed_phase_id}-to-{next_phase_id}"
+
+    def transition(tracker: Tracker) -> Tracker:
+        current_phase_id = dict(tracker.current_fields)["phase"]
+        if current_phase_id != completed_phase_id:
+            raise TransitionError("completed_phase_id does not match the current phase")
+        documents = _approved_phase_sequence(Path(run_dir), tracker)
+        phase_ids = [metadata.id for _, metadata, _ in documents]
+        try:
+            current_index = phase_ids.index(completed_phase_id)
+        except ValueError as exc:
+            raise TransitionError("completed phase is absent from the approved master sequence") from exc
+        if current_index + 1 >= len(documents) or phase_ids[current_index + 1] != next_phase_id:
+            raise TransitionError("next phase is not the approved immediate successor")
+
+        _, completed_metadata, completed_tasks = documents[current_index]
+        _, next_metadata, next_tasks = documents[current_index + 1]
+        phase_records = {phase.id: phase for phase in tracker.phases}
+        completed_phase = phase_records.get(completed_phase_id)
+        if completed_phase is None or completed_phase.state != "[x]":
+            raise TransitionError("completed phase has not passed mechanical verification")
+        verification_head = _phase_verification_head(completed_phase)
+        if verification_head is None:
+            raise TransitionError("completed phase verification has no applicable code-state identity")
+        repo_dir = _project_root(Path(run_dir))
+        if not _git(repo_dir, "merge-base", "--is-ancestor", verification_head, tracker.target_branch):
+            raise TransitionError("completed phase verification is not on the target branch")
+
+        tasks = {task.id: task for task in tracker.tasks}
+        if any(not _dependency_ready(Path(run_dir), tracker, tasks[item.id]) for item in completed_tasks):
+            raise TransitionError("every completed-phase task needs truthful completion and integration evidence")
+        if any(
+            tasks[item.id].kind == "source"
+            and not _git(repo_dir, "merge-base", "--is-ancestor", tasks[item.id].integration, verification_head)
+            for item in completed_tasks
+        ):
+            raise TransitionError("phase verification does not cover every task integration")
+        if any(_unresolved_task_question(task) for task in tracker.tasks):
+            raise TransitionError("an unresolved task question prevents phase advancement")
+        if any(gate.questions != "-" for gate in tracker.gates):
+            raise TransitionError("an unresolved review question prevents phase advancement")
+        if any(row.state in {"in_progress", "blocked"} for row in tracker.remediation):
+            raise TransitionError("an unresolved remediation obligation prevents phase advancement")
+
+        if completed_metadata.review_gate == "required":
+            gate = _gate_record(tracker, f"phase-{completed_phase_id}")
+            if gate.state != "accepted":
+                raise TransitionError("required phase review has not been accepted")
+            if gate.head == "-" or not _git(repo_dir, "merge-base", "--is-ancestor", verification_head, gate.head):
+                raise TransitionError("required phase review does not cover the verified phase state")
+
+        for dependency in next_metadata.deps:
+            dependency_phase = phase_records.get(dependency)
+            if dependency_phase is None or dependency_phase.state != "[x]":
+                raise TransitionError(f"next phase dependency {dependency} is not verified")
+            if dependency_phase.review_gate == "required":
+                dependency_gate = _gate_record(tracker, f"phase-{dependency}")
+                if dependency_gate.state != "accepted":
+                    raise TransitionError(f"next phase dependency {dependency} has an unresolved review gate")
+
+        next_phase = phase_records.get(next_phase_id)
+        if next_phase is None or next_phase.state != "[ ]":
+            raise TransitionError("next phase is absent, already active, or already completed")
+        first_task = min(next_tasks, key=lambda item: (item.order, item.id))
+        updated_phases = tuple(
+            replace(phase, state="[~]") if phase.id == next_phase_id else phase
+            for phase in tracker.phases
+        )
+        updated_current = tuple(
+            (
+                key,
+                next_phase_id if key == "phase" else first_task.batch if key == "batch" else value,
+            )
+            for key, value in tracker.current_fields
+        )
+        return replace(tracker, current_fields=updated_current, phases=updated_phases)
+
+    return locked_tracker_update(
+        Path(run_dir), transition_id, transition,
+        timeout_s=5.0, refresh_next_action=True,
+    )
 
 
 def open_review_gate(
@@ -1676,7 +1946,10 @@ def open_review_gate(
             replace(gate, state="in_progress", base=base, head=head, assignments=",".join(reviewer_assignments)),
         )
 
-    return locked_tracker_update(Path(run_dir), f"open-gate-{gate_id}-{head}", transition, timeout_s=5.0)
+    return locked_tracker_update(
+        Path(run_dir), f"open-gate-{gate_id}-{head}", transition,
+        timeout_s=5.0, refresh_next_action=True,
+    )
 
 
 _REVIEW_FIELDS = ("gate", "assignment", "base", "head", "findings")
@@ -1754,7 +2027,10 @@ def start_remediation_round(
         return replace(tracker, remediation=tuple(rows))
 
     try:
-        return locked_tracker_update(Path(run_dir), f"remediate-{gate_id}-{round_number}", transition, timeout_s=5.0)
+        return locked_tracker_update(
+            Path(run_dir), f"remediate-{gate_id}-{round_number}", transition,
+            timeout_s=5.0, refresh_next_action=True,
+        )
     except _AlreadyApplied as applied:
         return applied.tracker
 
@@ -1855,7 +2131,11 @@ def evaluate_and_close_review_gate(
         )
         return replace(_replace_gate(tracker, replacement), remediation=tuple(remediation_rows))
 
-    return locked_tracker_update(Path(run_dir), f"evaluate-gate-{gate_id}-{hashlib.sha256('|'.join(verification).encode()).hexdigest()}", transition, timeout_s=5.0)
+    return locked_tracker_update(
+        Path(run_dir),
+        f"evaluate-gate-{gate_id}-{hashlib.sha256('|'.join(verification).encode()).hexdigest()}",
+        transition, timeout_s=5.0, refresh_next_action=True,
+    )
 
 
 def reconcile_run(

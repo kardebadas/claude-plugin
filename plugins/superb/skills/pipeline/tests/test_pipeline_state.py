@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import io
 import multiprocessing
 import subprocess
@@ -100,6 +101,10 @@ class TrackerContractTest(unittest.TestCase):
             "<base_commit>": "8348959d1b201a873c68512642a0eb8e5754eaa8",
             "<target_branch>": "feat/template-test",
             "<worker_limit>": "3",
+            "<filesystem_class>": "supported-local",
+            "<filesystem_type>": "ext4",
+            "<filesystem_fingerprint>": "a" * 64,
+            "<filesystem_ack>": "N/A",
             "<spec_path>": "docs/spec.md",
             "<master_plan_path>": "docs/master.md",
             "<phase_plan_paths>": "docs/phase-01.md",
@@ -259,6 +264,25 @@ class PlanMetadataContractTest(unittest.TestCase):
                     with self.assertRaises(PlanMetadataError):
                         parse_phase_plan(path)
 
+    def test_phase_and_task_metadata_must_be_adjacent_to_their_headings(self):
+        valid = self.fixture_path("phase-plan-valid.md").read_text(encoding="utf-8")
+        cases = {
+            "detached phase": valid.replace(
+                "<!-- pipeline-v2-phase: id=99; deps=none; review_gate=final-only; review_reason=Mechanical verification is sufficient before the master gate. -->",
+                "## Detached metadata\n\n<!-- pipeline-v2-phase: id=99; deps=none; review_gate=final-only; review_reason=Mechanical verification is sufficient before the master gate. -->",
+            ),
+            "detached task": valid.replace(
+                "### PX-01 — Source task\n<!-- pipeline-v2-task:",
+                "### PX-01 — Source task\nIntervening prose.\n<!-- pipeline-v2-task:",
+            ),
+        }
+        for label, source in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "phase.md"
+                path.write_text(source, encoding="utf-8")
+                with self.assertRaises(PlanMetadataError):
+                    parse_phase_plan(path)
+
     def test_all_four_approved_phase_plans_parse_with_real_helper(self):
         plan_dir = REPOSITORY / "docs/superpowers/plans/pipeline-rebuild-v2"
 
@@ -385,9 +409,20 @@ class InitializationAndSchemaSafetyTest(unittest.TestCase):
                     self.assertIn("no files were changed", str(caught.exception))
                     self.assertEqual(self.snapshot(run_dir), before)
 
+    def test_mutation_preflight_rejects_malformed_state_without_creating_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "malformed"
+            run_dir.mkdir()
+            (run_dir / "progress.md").write_bytes((FIXTURES / "malformed-v2-progress.md").read_bytes())
+            before = self.snapshot(run_dir)
+            with self.assertRaises(SchemaError):
+                start_task(run_dir, task_id="P1-01", owner="worker", attempt="attempt-1")
+            self.assertEqual(self.snapshot(run_dir), before)
+            self.assertFalse((run_dir / ".pipeline-state.lock").exists())
+
     def test_validate_inspect_and_next_cli_never_invoke_writer(self):
         with tempfile.TemporaryDirectory() as directory:
-            run_dir = Path(directory) / "run"
+            run_dir = Path(directory) / "2026-09-08-pipeline-rebuild-v2"
             run_dir.mkdir()
             (run_dir / "progress.md").write_bytes((FIXTURES / "valid-v2-progress.md").read_bytes())
             before = self.snapshot(run_dir)
@@ -404,7 +439,10 @@ class AtomicMutationTest(unittest.TestCase):
     def make_run(self, root: Path) -> Path:
         run_dir = root / "run"
         run_dir.mkdir()
-        (run_dir / "progress.md").write_bytes((FIXTURES / "valid-v2-progress.md").read_bytes())
+        info = pipeline_state.classify_filesystem(run_dir)
+        text = (FIXTURES / "valid-v2-progress.md").read_text(encoding="utf-8")
+        text = text.replace("a" * 64, info.fingerprint, 1)
+        (run_dir / "progress.md").write_text(text, encoding="utf-8")
         return run_dir
 
     def unchanged(self, tracker):
@@ -789,9 +827,29 @@ class TaskTransitionTest(unittest.TestCase):
             self.assertEqual((run_dir / "progress.md").read_bytes(), before)
             self.git(repo, "merge", "--no-ff", "-qm", "integrate worker", "worker")
             integrated = self.git(repo, "rev-parse", "HEAD")
-            record_task_integration(run_dir, task_id="PX-01", integration_commit=integrated, verification=("integrated-tests.log",), repo_dir=repo)
+            with self.assertRaises(TransitionError):
+                record_task_integration(run_dir, task_id="PX-01", integration_commit=integrated, verification=("integrated-tests.log",), repo_dir=repo)
+            record_task_integration(run_dir, task_id="PX-01", integration_commit=integrated, verification=(f"integrated:{integrated}",), repo_dir=repo)
             started_dep = start_task(run_dir, task_id="PX-02", owner="dependent", attempt="dep-1")
             self.assertEqual(next(task for task in started_dep.tasks if task.id == "PX-02").state, "[~]")
+
+    def test_completion_rejects_unapproved_alternate_phase_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, base = self.make_git_repo(root)
+            approved = self.source_plan(root)
+            run_dir = self.initialize(root, approved, self.decisions(root, self.resolved_decision()), base)
+            start_task(run_dir, task_id="PX-01", owner="worker", attempt="attempt-1")
+            forged = root / "forged.md"
+            forged.write_text(approved.read_text(encoding="utf-8"), encoding="utf-8")
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                complete_task(
+                    run_dir, task_id="PX-01", attempt="attempt-1", phase_plan=forged,
+                    source_ref="target", commits=(base,), artifacts=(),
+                    evidence=(f"tests:{base}",), repo_dir=repo,
+                )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
 
     def test_artifact_task_requires_exact_outputs_and_evidence_without_commit(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1373,7 +1431,7 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
                 verified = record_phase_verification(run_dir, phase_id=phase_id, head=head, commands=("full suite",), evidence=(f"suite:{head}",))
                 phase = next(item for item in verified.phases if item.id == phase_id)
                 self.assertEqual((phase.state, phase.review_reason), ("[x]", reason))
-                opened = open_review_gate(run_dir, gate_id=f"phase-{phase_id}", base=head, head=head, reviewer_assignments=("reviewer-1",))
+                opened = open_review_gate(run_dir, gate_id=f"phase-{phase_id}", base=head, head=head, reviewer_assignments=("reviewer-1",), capacity=3)
                 self.assertEqual(next(gate.state for gate in opened.gates if gate.id == f"phase-{phase_id}"), "in_progress")
 
     def test_mismatched_reason_and_final_only_phase_cannot_open_review(self):
@@ -1396,7 +1454,7 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
             run_dir, _, head = self.make_run(root, phase_id="03", review_gate="final-only", reason="Final only.")
             record_phase_verification(run_dir, phase_id="03", head=head, commands=("suite",), evidence=(f"suite:{head}",))
             with self.assertRaises(TransitionError):
-                open_review_gate(run_dir, gate_id="phase-03", base=head, head=head, reviewer_assignments=("reviewer-1",))
+                open_review_gate(run_dir, gate_id="phase-03", base=head, head=head, reviewer_assignments=("reviewer-1",), capacity=3)
 
     def test_master_gate_requires_two_reviewers(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1405,9 +1463,9 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
             record_phase_verification(run_dir, phase_id="03", head=head, commands=("suite",), evidence=(f"suite:{head}",))
             before = (run_dir / "progress.md").read_bytes()
             with self.assertRaises(TransitionError):
-                open_review_gate(run_dir, gate_id="master", base=head, head=head, reviewer_assignments=("reviewer-a",))
+                open_review_gate(run_dir, gate_id="master", base=head, head=head, reviewer_assignments=("reviewer-a",), capacity=3)
             self.assertEqual((run_dir / "progress.md").read_bytes(), before)
-            opened = open_review_gate(run_dir, gate_id="master", base=head, head=head, reviewer_assignments=("reviewer-a", "reviewer-b"))
+            opened = open_review_gate(run_dir, gate_id="master", base=head, head=head, reviewer_assignments=("reviewer-a", "reviewer-b"), capacity=3)
             self.assertEqual(next(gate.assignments for gate in opened.gates if gate.id == "master"), "reviewer-a,reviewer-b")
 
     def test_gate_acceptance_requires_matching_reports_verification_and_no_blockers(self):
@@ -1415,7 +1473,7 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
             root = Path(directory)
             run_dir, _, head = self.make_run(root)
             record_phase_verification(run_dir, phase_id="01", head=head, commands=("suite",), evidence=(f"suite:{head}",))
-            open_review_gate(run_dir, gate_id="phase-01", base=head, head=head, reviewer_assignments=("reviewer-1",))
+            open_review_gate(run_dir, gate_id="phase-01", base=head, head=head, reviewer_assignments=("reviewer-1",), capacity=3)
             report = self.write_report(root, "review.md", gate="phase-01", assignment="reviewer-1", base=head, head=head)
             findings = root / "findings.md"
             before = (run_dir / "progress.md").read_bytes()
@@ -1429,12 +1487,44 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
             accepted = evaluate_and_close_review_gate(run_dir, gate_id="phase-01", findings_path=findings, report_paths=(report,), verification=(f"reviewed:{head}",), rereview_paths=())
             self.assertEqual(next(gate.state for gate in accepted.gates if gate.id == "phase-01"), "accepted")
 
+    def test_gate_rejects_alternate_ledger_and_bare_resolved_blocker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, _, head = self.make_run(root)
+            record_phase_verification(run_dir, phase_id="01", head=head, commands=("suite",), evidence=(f"suite:{head}",))
+            open_review_gate(run_dir, gate_id="phase-01", base=head, head=head, reviewer_assignments=("reviewer-1",), capacity=3)
+            report = self.write_report(root, "review.md", gate="phase-01", assignment="reviewer-1", base=head, head=head, findings="F-001")
+            alternate = root / "alternate-findings.md"
+            alternate.write_text(
+                "<!-- pipeline-findings/v2 -->\n"
+                "| ID | Gate | Severity | Status | Disposition | Evidence | Fix Commit | Re-review |\n"
+                "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                "| F-001 | phase-01 | Critical | Resolved | - | - | - | - |\n",
+                encoding="utf-8",
+            )
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                evaluate_and_close_review_gate(
+                    run_dir, gate_id="phase-01", findings_path=alternate,
+                    report_paths=(report,), verification=(f"reviewed:{head}",), rereview_paths=(),
+                )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+            authoritative = root / "findings.md"
+            authoritative.write_bytes(alternate.read_bytes())
+            with self.assertRaises(TransitionError):
+                evaluate_and_close_review_gate(
+                    run_dir, gate_id="phase-01", findings_path=authoritative,
+                    report_paths=(report,), verification=(f"reviewed:{head}",), rereview_paths=(),
+                )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
     def test_blockers_rounds_and_rereview_requirements_prevent_false_acceptance(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             run_dir, _, head = self.make_run(root)
             record_phase_verification(run_dir, phase_id="01", head=head, commands=("suite",), evidence=(f"suite:{head}",))
-            open_review_gate(run_dir, gate_id="phase-01", base=head, head=head, reviewer_assignments=("reviewer-1",))
+            open_review_gate(run_dir, gate_id="phase-01", base=head, head=head, reviewer_assignments=("reviewer-1",), capacity=3)
             report = self.write_report(root, "review.md", gate="phase-01", assignment="reviewer-1", base=head, head=head, findings="F-001")
             findings = root / "findings.md"
             findings.write_text(
@@ -1447,9 +1537,17 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
             self.assertEqual(pending.state, "pending")
             fix_plan = root / "fix-plan.md"
             fix_plan.write_text("# Fix plan\n", encoding="utf-8")
-            round_one = start_remediation_round(run_dir, gate_id="phase-01", round_number=1, finding_ids=("F-001",), fix_plan=str(fix_plan))
+            round_one = start_remediation_round(
+                run_dir, gate_id="phase-01", round_number=1, finding_ids=("F-001",),
+                fix_plan=str(fix_plan), fixer_assignments=("fixer-1",), capacity=3,
+            )
             row = next(row for row in round_one.remediation if row.gate == "phase-01" and row.round_number == 1)
-            self.assertEqual((row.state, row.findings), ("in_progress", "F-001"))
+            self.assertEqual((row.state, row.findings), ("fixing", "F-001"))
+            pipeline_state.record_remediation_fixes(
+                run_dir, gate_id="phase-01", round_number=1, fix_head=head,
+                commits=(head,), verification=(f"fixed-and-tested:{head}",),
+                capacity=3, repo_dir=root,
+            )
             rereview = self.write_report(root, "rereview.md", gate="phase-01", assignment="reviewer-1", base=head, head=head, findings="F-001")
             stopped = evaluate_and_close_review_gate(
                 run_dir, gate_id="phase-01", findings_path=findings, report_paths=(report,),
@@ -1460,8 +1558,114 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
             self.assertEqual((stopped_gate.state, stopped_gate.questions, stopped_round.state), ("blocked", "remediation-no-progress-round-1", "complete"))
             before = (run_dir / "progress.md").read_bytes()
             with self.assertRaises(TransitionError):
-                start_remediation_round(run_dir, gate_id="phase-01", round_number=4, finding_ids=("F-001",), fix_plan=str(fix_plan))
+                start_remediation_round(
+                    run_dir, gate_id="phase-01", round_number=2, finding_ids=("F-001",),
+                    fix_plan=str(fix_plan), fixer_assignments=("fixer-1",), capacity=3,
+                )
             self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+            with self.assertRaises(TransitionError):
+                start_remediation_round(
+                    run_dir, gate_id="phase-01", round_number=4, finding_ids=("F-001",),
+                    fix_plan=str(fix_plan), fixer_assignments=("fixer-1",), capacity=3,
+                )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_fixed_blocker_requires_fix_release_and_matching_clean_rereview(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, _, reviewed_head = self.make_run(root)
+            record_phase_verification(
+                run_dir, phase_id="01", head=reviewed_head,
+                commands=("suite",), evidence=(f"suite:{reviewed_head}",),
+            )
+            open_review_gate(
+                run_dir, gate_id="phase-01", base=reviewed_head, head=reviewed_head,
+                reviewer_assignments=("reviewer-1",), capacity=3,
+            )
+            initial = self.write_report(
+                root, "review.md", gate="phase-01", assignment="reviewer-1",
+                base=reviewed_head, head=reviewed_head, findings="F-001",
+            )
+            findings = root / "findings.md"
+            findings.write_text(
+                "<!-- pipeline-findings/v2 -->\n"
+                "| ID | Gate | Severity | Status | Disposition | Evidence | Fix Commit | Re-review |\n"
+                "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                "| F-001 | phase-01 | Important | Open | - | review.md | - | - |\n",
+                encoding="utf-8",
+            )
+            evaluate_and_close_review_gate(
+                run_dir, gate_id="phase-01", findings_path=findings,
+                report_paths=(initial,), verification=(f"reviewed:{reviewed_head}",), rereview_paths=(),
+            )
+            fix_plan = root / "fix-plan.md"
+            fix_plan.write_text("# Fix plan\n", encoding="utf-8")
+            started = start_remediation_round(
+                run_dir, gate_id="phase-01", round_number=1, finding_ids=("F-001",),
+                fix_plan=str(fix_plan), fixer_assignments=("fixer-1",), capacity=3,
+            )
+            self.assertEqual(pipeline_state._active_worker_ids(started), {"fixer-1"})
+            (root / "fix.txt").write_text("fixed\n", encoding="utf-8")
+            self.git(root, "add", "fix.txt")
+            self.git(root, "commit", "-qm", "fix finding")
+            fix_head = self.git(root, "rev-parse", "HEAD")
+            self.git(root, "branch", "-f", "target", fix_head)
+            released = pipeline_state.record_remediation_fixes(
+                run_dir, gate_id="phase-01", round_number=1, fix_head=fix_head,
+                commits=(fix_head,), verification=(f"fix-suite:{fix_head}",),
+                capacity=3, repo_dir=root,
+            )
+            round_row = next(row for row in released.remediation if row.gate == "phase-01" and row.round_number == 1)
+            self.assertEqual((round_row.state, round_row.fixers, round_row.released_fixers), ("re_reviewing", "-", "fixer-1"))
+            self.assertEqual(pipeline_state._active_worker_ids(released), {"reviewer-1"})
+            rereview = self.write_report(
+                root, "rereview.md", gate="phase-01", assignment="reviewer-1",
+                base=reviewed_head, head=fix_head, findings="F-001",
+            )
+            findings.write_text(
+                "<!-- pipeline-findings/v2 -->\n"
+                "| ID | Gate | Severity | Status | Disposition | Evidence | Fix Commit | Re-review |\n"
+                "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                f"| F-001 | phase-01 | Important | Resolved | Fixed | fix-suite:{fix_head} | {fix_head} | {rereview} |\n",
+                encoding="utf-8",
+            )
+            accepted = evaluate_and_close_review_gate(
+                run_dir, gate_id="phase-01", findings_path=findings,
+                report_paths=(initial,), verification=(f"rereviewed:{fix_head}",),
+                rereview_paths=(rereview,),
+            )
+            self.assertEqual(next(gate.state for gate in accepted.gates if gate.id == "phase-01"), "accepted")
+            self.assertEqual(pipeline_state._active_worker_ids(accepted), set())
+
+    def test_gate_questions_clear_only_from_applicable_resolved_decisions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, _, _ = self.make_run(root)
+            locked_tracker_update(
+                run_dir, "fixture-gate-question",
+                lambda tracker: dataclasses.replace(
+                    tracker,
+                    gates=tuple(
+                        dataclasses.replace(gate, state="blocked", findings="F-001", questions="D-100")
+                        if gate.id == "phase-01" else gate
+                        for gate in tracker.gates
+                    ),
+                ),
+                timeout_s=1.0,
+            )
+            decisions = root / "decisions.md"
+            decisions.write_text(
+                "# Decisions\n\n## D-100 — Gate answer\n\n"
+                "- **Question:** Which remediation behavior applies?\n"
+                "- **Answer:** Use the explicit reviewed fix contract.\n"
+                "- **Affected work:** F-001 in phase-01.\n"
+                "- **Status:** Resolved.\n",
+                encoding="utf-8",
+            )
+            resolved = pipeline_state.resolve_gate_questions(
+                run_dir, gate_id="phase-01", decision_refs=("D-100",),
+            )
+            self.assertEqual(next(gate.questions for gate in resolved.gates if gate.id == "phase-01"), "-")
 
 
 class PhaseAdvancementTest(unittest.TestCase):
@@ -1560,7 +1764,7 @@ class PhaseAdvancementTest(unittest.TestCase):
     def accept_phase_gate(self, root: Path, run_dir: Path, head: str) -> None:
         opened = open_review_gate(
             run_dir, gate_id="phase-01", base=head, head=head,
-            reviewer_assignments=("reviewer-1",),
+            reviewer_assignments=("reviewer-1",), capacity=3,
         )
         self.assertEqual(dict(opened.current_fields)["next_action"], "await-review-phase-01")
         report = root / "review.md"
@@ -1582,6 +1786,15 @@ class PhaseAdvancementTest(unittest.TestCase):
             root = Path(directory)
             run_dir, plans, _ = self.make_run(root)
             self.complete_first_source(root, run_dir, plans[0])
+
+    def test_direct_start_cannot_bypass_the_current_phase(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, _, _ = self.make_run(root, first_gate="final-only")
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                start_task(run_dir, task_id="P2-A", owner="worker", attempt="future-1")
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
 
     def test_block_and_answered_resume_refresh_the_derived_action(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1789,7 +2002,7 @@ class ReconciliationTest(unittest.TestCase):
                 gate = next(gate for gate in tracker.gates if gate.id == "master")
                 blocked_gate = dataclasses.replace(gate, state="blocked", findings="F-001")
                 round_row = next(row for row in tracker.remediation if row.gate == "master")
-                active_round = dataclasses.replace(round_row, state="in_progress", findings="F-001", fix_plan="fix.md")
+                active_round = dataclasses.replace(round_row, state="fixing", fixers="fixer-1", findings="F-001", fix_plan="fix.md")
                 return dataclasses.replace(tracker, tasks=tuple(changed if item.id == "PR-01" else item for item in tracker.tasks), gates=tuple(blocked_gate if item.id == "master" else item for item in tracker.gates), remediation=tuple(active_round if item.gate == "master" else item for item in tracker.remediation))
 
             locked_tracker_update(run_dir, "contradict", contradict, timeout_s=1.0)
@@ -1798,6 +2011,179 @@ class ReconciliationTest(unittest.TestCase):
             self.assertEqual((run_dir / "progress.md").read_bytes(), before)
             self.assertTrue(any("integration-contradiction:PR-01" in item for item in report.questions))
             self.assertIn("resume-remediation:master:1", report.actions)
+
+
+class PhaseOneReviewRegressionTest(unittest.TestCase):
+    def test_known_unsupported_filesystem_rejects_mutation_before_lock_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "run"
+            run_dir.mkdir()
+            (run_dir / "progress.md").write_bytes((FIXTURES / "valid-v2-progress.md").read_bytes())
+            before = {path.name: path.read_bytes() for path in run_dir.iterdir() if path.is_file()}
+            unsupported = pipeline_state.FilesystemInfo(
+                classification="unsupported", fs_type="nfs", fingerprint="f" * 64,
+            )
+            with mock.patch.object(pipeline_state, "classify_filesystem", return_value=unsupported):
+                with self.assertRaises(pipeline_state.FilesystemSuitabilityError):
+                    locked_tracker_update(run_dir, "unsupported-fs", lambda tracker: tracker, timeout_s=1.0)
+            self.assertEqual(
+                {path.name: path.read_bytes() for path in run_dir.iterdir() if path.is_file()},
+                before,
+            )
+            self.assertFalse((run_dir / ".pipeline-state.lock").exists())
+
+    def test_explicit_pre_release_adoption_is_strict_atomic_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "2026-09-08-pipeline-rebuild-v2"
+            run_dir.mkdir()
+            source = (FIXTURES / "pre-adoption-v2-progress.md").read_bytes()
+            (run_dir / "progress.md").write_bytes(source)
+            digest = hashlib.sha256(source).hexdigest()
+            supported = pipeline_state.FilesystemInfo(
+                classification="supported-local", fs_type="ext4", fingerprint="a" * 64,
+            )
+            with mock.patch.object(pipeline_state, "classify_filesystem", return_value=supported):
+                adopted = pipeline_state.adopt_pre_release_tracker(
+                    run_dir,
+                    expected_run_id="2026-09-08-pipeline-rebuild-v2",
+                    expected_revision=7,
+                    expected_sha256=digest,
+                    adoption_id="adopt-example-r2",
+                    active_fixers={},
+                )
+                first = (run_dir / "progress.md").read_bytes()
+                replay = pipeline_state.adopt_pre_release_tracker(
+                    run_dir,
+                    expected_run_id="2026-09-08-pipeline-rebuild-v2",
+                    expected_revision=7,
+                    expected_sha256=digest,
+                    adoption_id="adopt-example-r2",
+                    active_fixers={},
+                )
+            self.assertEqual(adopted.revision, 8)
+            self.assertEqual(dict(adopted.run_fields)["tracker_format"], "2")
+            self.assertEqual(replay, adopted)
+            self.assertEqual((run_dir / "progress.md").read_bytes(), first)
+            self.assertTrue((run_dir / "agent-output/adopt-example-r2-receipt.md").is_file())
+            with self.assertRaises((SchemaError, TransitionError)):
+                pipeline_state.adopt_pre_release_tracker(
+                    run_dir,
+                    expected_run_id="2026-09-08-pipeline-rebuild-v2",
+                    expected_revision=7,
+                    expected_sha256="b" * 64,
+                    adoption_id="conflicting-adoption",
+                    active_fixers={},
+                )
+
+    def test_adoption_pre_replacement_failure_preserves_old_tracker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "2026-09-08-pipeline-rebuild-v2"
+            run_dir.mkdir()
+            source = (FIXTURES / "pre-adoption-v2-progress.md").read_bytes()
+            (run_dir / "progress.md").write_bytes(source)
+            supported = pipeline_state.FilesystemInfo("supported-local", "ext4", "a" * 64)
+            with mock.patch.object(pipeline_state, "classify_filesystem", return_value=supported), mock.patch.object(
+                pipeline_state, "_sync_file", side_effect=OSError("injected before replace")
+            ):
+                with self.assertRaises(TrackerWriteError):
+                    pipeline_state.adopt_pre_release_tracker(
+                        run_dir,
+                        expected_run_id="2026-09-08-pipeline-rebuild-v2",
+                        expected_revision=7,
+                        expected_sha256=hashlib.sha256(source).hexdigest(),
+                        adoption_id="adopt-failure",
+                        active_fixers={},
+                    )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), source)
+
+    def test_adoption_post_replace_uncertainty_reconciles_without_second_transition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "2026-09-08-pipeline-rebuild-v2"
+            run_dir.mkdir()
+            source = (FIXTURES / "pre-adoption-v2-progress.md").read_bytes()
+            (run_dir / "progress.md").write_bytes(source)
+            digest = hashlib.sha256(source).hexdigest()
+            supported = pipeline_state.FilesystemInfo("supported-local", "ext4", "a" * 64)
+            with mock.patch.object(pipeline_state, "classify_filesystem", return_value=supported), mock.patch.object(
+                pipeline_state, "_sync_directory", side_effect=[None, OSError("after replace")]
+            ):
+                with self.assertRaises(UpdateOutcomeUncertain) as caught:
+                    pipeline_state.adopt_pre_release_tracker(
+                        run_dir,
+                        expected_run_id="2026-09-08-pipeline-rebuild-v2", expected_revision=7,
+                        expected_sha256=digest, adoption_id="adopt-uncertain",
+                        active_fixers={},
+                    )
+            applied = caught.exception.tracker
+            self.assertIsNotNone(applied)
+            self.assertEqual(applied.revision, 8)
+            first = (run_dir / "progress.md").read_bytes()
+            with mock.patch.object(pipeline_state, "classify_filesystem", return_value=supported):
+                replay = pipeline_state.adopt_pre_release_tracker(
+                    run_dir,
+                    expected_run_id="2026-09-08-pipeline-rebuild-v2", expected_revision=7,
+                    expected_sha256=digest, adoption_id="adopt-uncertain",
+                    active_fixers={},
+                )
+            self.assertEqual(replay.revision, 8)
+            self.assertEqual((run_dir / "progress.md").read_bytes(), first)
+
+    def test_old_pre_adoption_format_is_not_accepted_by_ordinary_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "run"
+            run_dir.mkdir()
+            source = (FIXTURES / "pre-adoption-v2-progress.md").read_bytes()
+            (run_dir / "progress.md").write_bytes(source)
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(SchemaError):
+                validate_run(run_dir)
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_unknown_filesystem_requires_fingerprint_bound_acknowledgement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            helper = InitializationAndSchemaSafetyTest()
+            artifacts, _ = helper.inputs(root)
+            unknown = pipeline_state.FilesystemInfo("unknown", "mysteryfs", "c" * 64)
+            run_dir = root / "unknown-run"
+            with mock.patch.object(pipeline_state, "classify_filesystem", return_value=unknown):
+                with self.assertRaises(pipeline_state.FilesystemSuitabilityError):
+                    helper.initialize(run_dir, artifacts)
+                self.assertFalse(run_dir.exists())
+                initialized = initialize_run(
+                    run_dir,
+                    run_id="2026-09-08-init-test",
+                    base_commit="8348959d1b201a873c68512642a0eb8e5754eaa8",
+                    target_branch="feat/init-test", worker_limit=3, artifacts=artifacts,
+                    approved_existing=(), filesystem_acknowledgement="D-900@" + "c" * 64,
+                )
+            self.assertEqual(dict(initialized.run_fields)["filesystem_ack"], "D-900@" + "c" * 64)
+
+    def test_platform_classifier_paths_are_explicitly_selected_in_simulation(self):
+        for system, helper_name, fs_type in (
+            ("Darwin", "_macos_filesystem", "apfs"),
+            ("Windows", "_windows_filesystem", "ntfs"),
+        ):
+            with self.subTest(system=system), mock.patch.object(pipeline_state.platform, "system", return_value=system), mock.patch.object(
+                pipeline_state, helper_name, return_value=(fs_type, "d" * 64)
+            ):
+                info = pipeline_state.classify_filesystem(Path("/tmp"))
+                self.assertEqual((info.classification, info.fs_type), ("supported-local", fs_type))
+
+    def test_gate_and_fixer_reservations_share_the_global_worker_ceiling(self):
+        helper = PhaseGateAndRemediationTest()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, _, head = helper.make_run(root)
+            record_phase_verification(run_dir, phase_id="01", head=head, commands=("suite",), evidence=(f"suite:{head}",))
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                open_review_gate(
+                    run_dir, gate_id="phase-01", base=head, head=head,
+                    reviewer_assignments=("reviewer-1",), capacity=0,
+                )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
 
 
 if __name__ == "__main__":

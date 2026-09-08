@@ -13,7 +13,7 @@
 ## Global constraints
 
 - Rebuild base is `8348959d1b201a873c68512642a0eb8e5754eaa8`; target branch is `feat/pipeline-rebuild-v2` in `/tmp/claude-plugin-pipeline-rebuild-v2`.
-- Runtime decisions D-001 through D-010 in `docs/superpowers/runs/2026-09-08-pipeline-rebuild-v2/decisions.md` are binding.
+- Runtime decisions D-001 through D-017 in `docs/superpowers/runs/2026-09-08-pipeline-rebuild-v2/decisions.md` are binding. D-017 is a one-time pre-release adoption for this exact rebuild run, not an ordinary future resume/migration path.
 - This rebuild uses global `worker_limit = 3`; future runs require their own explicit persisted positive limit compatible with detected capacity.
 - Every worker prompt includes the zero-assumption contract and status vocabulary. Workers may not spawn untracked agents or edit `progress.md`.
 - Every phase contains at most 12 genuine tasks. A task is not automatically a worker boundary.
@@ -22,7 +22,7 @@
 - Critical/Important findings block. Every Minor has a recorded disposition. Each formal gate allows at most three remediation rounds under D-006.
 - V2 resumes only v2 state. Recognized v1, missing, malformed, unknown, and unsupported schemas are read-only failures.
 - This rebuild alone uses the bounded bootstrap in the design/Phase 1: individual Superpowers skills plus the existing sole `progress.md` until the tested v2 primitives can validate and atomically adopt its checkpoints. Neither Pipeline version orchestrates its replacement.
-- Python helper scope is Python 3.11+, cooperating processes on one host, and local filesystem locking/replacement semantics. Native/simulated platform evidence is labeled exactly.
+- Python helper scope is Python 3.11+, cooperating processes on one host, and classified local filesystem locking/replacement semantics. Known network/distributed filesystems are rejected; unknown mount/volume types need a fingerprint-bound explicit acknowledgement. Native/simulated platform evidence is labeled exactly.
 - Final state is committed and clean on the feature branch. No push, PR, publish, or merge into `main`/`master`.
 
 ## File structure map

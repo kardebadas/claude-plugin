@@ -4,16 +4,10 @@
 ## Run
 | Field | Value |
 | --- | --- |
-| run_id | 2026-09-08-example |
-| tracker_format | 2 |
-| schema_adoption | none |
+| run_id | 2026-09-08-pipeline-rebuild-v2 |
 | base_commit | 8348959d1b201a873c68512642a0eb8e5754eaa8 |
 | target_branch | feat/example |
 | worker_limit | 3 |
-| filesystem_class | supported-local |
-| filesystem_type | ext4 |
-| filesystem_fingerprint | aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa |
-| filesystem_ack | N/A |
 | spec | docs/superpowers/specs/example-design.md |
 | master_plan | docs/superpowers/plans/example-master-plan.md |
 | phase_plans | docs/superpowers/plans/example/phase-01.md,docs/superpowers/plans/example/phase-02.md |
@@ -48,6 +42,6 @@
 | master | master | - | pending | 8348959d1b201a873c68512642a0eb8e5754eaa8 | - | requirements,reliability | - | - | findings.md | - |
 
 ## Remediation
-| Gate | Round | State | Fixers | Released Fixers | Findings | Fix Plan | Commits | Verification | Re-review |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| phase-01 | 1 | complete | - | fixer-1 | F-001 | fix-plan-phase-01-r1.md | abcdef0123456789abcdef0123456789abcdef01 | phase-01-r1-tests.txt | agent-output/phase-01-r1-review.md |
+| Gate | Round | State | Findings | Fix Plan | Commits | Verification | Re-review |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| phase-01 | 1 | complete | F-001 | fix-plan-phase-01-r1.md | abcdef0123456789abcdef0123456789abcdef01 | phase-01-r1-tests.txt | agent-output/phase-01-r1-review.md |

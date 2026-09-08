@@ -197,11 +197,11 @@ git commit -m "docs(pipeline): add v2 execution contract"
 **Depends on:** P2-T01
 **Batch:** P2-persistence, order 1; may dispatch concurrently with P2-review
 **Write scope:** plugins/superb/skills/pipeline/references/persistence.md and plugins/superb/skills/pipeline/templates/decisions.md only; Phase 1 owns progress.md and worker-result.md
-**Applicable decisions:** D-003, D-004, D-008, D-009
+**Applicable decisions:** D-003, D-004, D-008, D-009, D-014, D-015
 **Consumes:** Phase 1 exact helper/schema/CLI names; durable-artifact design; RED legacy/post-commit evidence
 **Produces:** one persistence authority, decisions template, and verification that Phase 1-owned progress/result templates remain aligned
 
-**Acceptance behavior:** All commands validate before write. Controller mutation is lock → read → validate → transition → validate → same-directory temporary write/flush/fsync → atomic replace → directory sync where supported → unlock; no unlocked fallback, stale-lock deletion, truncation, or reinitialization. Distinguish lock failures, pre-replacement failures that preserve the old tracker, and post-replacement synchronization uncertainty that may have applied; the latter re-reads revision/transition identity and never blindly repeats. Status is read-only. Resume is file-first reconciliation of plans, decisions, findings/fix plan, Git/worktree evidence, and every in-progress attempt, including source/artifact evidence and complete integration ancestry. V1 recognition uses actual v1 grammar and emits unchanged/no-dispatch diagnostics. Consume and verify Phase 1's progress/result schemas, including kind, revision/transition identity, source commits versus artifact paths, and `N/A` integration. Create decisions.md with stable question/answer/source/status. State D-009's limits without claiming power-loss durability.
+**Acceptance behavior:** All commands perform read-only schema and filesystem-suitability preflight before lock creation, then lock → re-read/revalidate → transition → validate → same-directory temporary write/flush/fsync → atomic replace → directory sync where supported → unlock; no unlocked fallback, stale-lock deletion, truncation, or reinitialization. Distinguish lock failures, pre-replacement failures that preserve the old tracker, and post-replacement synchronization uncertainty that may have applied; the latter re-reads revision/transition identity and never blindly repeats. Status is read-only. Resume is file-first reconciliation of plans, decisions, findings/fix plan, Git/worktree evidence, and every in-progress attempt, including source/artifact evidence and complete integration ancestry. V1 and the first pre-release tracker format are read-only-incompatible in ordinary resume. Consume and verify Phase 1's progress/result schemas, including tracker format/adoption identity, filesystem fingerprint/acknowledgement, kind, revision/transition identity, source commits versus artifact paths, role-specific active/released assignments, and `N/A` integration. Create decisions.md with stable question/answer/source/status. State D-009/D-015 limits without claiming power-loss durability.
 
 - [ ] **Step 1:** Compare Phase 1 integrated helper/test schema with design. Any mismatch is PLAN_CONFLICT with citations; do not write aliases or a second schema.
 - [ ] **Step 2:** Create decisions.md using exact helper field/status spellings; inspect but do not modify Phase 1-owned progress.md and worker-result.md. Workers receive no transition authority.
@@ -231,7 +231,7 @@ git commit -m "docs(pipeline): add v2 persistence contract"
 **Depends on:** P2-T01
 **Batch:** P2-review, order 1; may dispatch concurrently with P2-persistence
 **Write scope:** plugins/superb/skills/pipeline/references/review.md, plugins/superb/skills/pipeline/templates/findings.md, plugins/superb/skills/pipeline/templates/fix-plan.md only
-**Applicable decisions:** D-005, D-006, D-007, D-008
+**Applicable decisions:** D-004, D-005, D-006, D-007, D-008, D-014
 **Consumes:** Phase 1 gate/remediation fields; planned review classification/reason; P2-T01 gate control
 **Produces:** one review authority plus findings/fix-plan templates
 

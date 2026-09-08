@@ -14,9 +14,9 @@
 
 ## Global constraints
 
-- Design/master-plan decisions D-001 through D-010 in `docs/superpowers/runs/2026-09-08-pipeline-rebuild-v2/decisions.md` are binding; there are no open decisions at plan time.
+- Design/master-plan decisions D-001 through D-017 in `docs/superpowers/runs/2026-09-08-pipeline-rebuild-v2/decisions.md` are binding. D-017 applies only to adoption of this exact active pre-release rebuild tracker.
 - `progress.md` is the sole mutable authority. Plans, decisions, findings, fix plans, worker results, Git state, and reviewer reports are evidence/references, never a second tracker.
-- The schema marker is exactly `pipeline-run/v2`; v1 recognition uses its legacy heading/current-state/RV/RVJ grammar, not marker absence alone, and every incompatible schema failure is read-only.
+- The protocol marker is exactly `pipeline-run/v2`; the tracker also requires strict format revision, schema-adoption identity, and filesystem identity fields. V1 recognition uses its legacy heading/current-state/RV/RVJ grammar, not marker absence alone, and every incompatible schema failure is read-only.
 - Python helper support is Python 3.11+, cooperating local processes on one host and local filesystems. Do not claim native Windows proof before it exists; label its path exactly as D-009 requires.
 - Worker limit for this rebuild is the persisted positive integer `3`; capacity, dependency, state, planned ordering, and write-scope conflicts all constrain eligibility.
 - All testable behavior follows red-green-refactor. Preserve existing gates and add no numeric coverage target.
@@ -78,7 +78,7 @@ git diff --check
 
 <!-- pipeline-v2-task: id=P1-01; deps=none; kind=source; batch=state-core; order=1; write_scope=file:plugins/superb/skills/pipeline/scripts/pipeline_state.py,file:plugins/superb/skills/pipeline/templates/progress.md,file:plugins/superb/skills/pipeline/templates/worker-result.md,file:plugins/superb/skills/pipeline/tests/test_pipeline_state.py,tree:plugins/superb/skills/pipeline/tests/fixtures; outputs=none -->
 
-**Objective / behavior:** Establish the deterministic tracker/result grammars and the pure strict parser for approved phase-plan metadata. The tracker has: marker, run identity (`run_id`, `base_commit`, `target_branch`, `worker_limit`, artifact paths), revision/last-transition identity, current phase/batch/next eligible action, task table, phase table, gate table, and remediation table. A worker result names the controller-assigned run/task/attempt/owner, plan-declared kind, status/checkpoints, source ref/commits or exact artifact paths, tests/evidence, and concerns-or-question. The phase-plan parser reads only the exact phase and task comments documented above. No parser accepts arbitrary Markdown, hidden fields, reordered/unknown metadata keys, or unknown states.
+**Objective / behavior:** Establish the deterministic tracker/result grammars and the pure strict parser for approved phase-plan metadata. The tracker has: protocol marker, required tracker-format revision and schema-adoption identity, run identity (`run_id`, `base_commit`, `target_branch`, `worker_limit`, filesystem identity/acknowledgement, artifact paths), revision/last-transition identity, current phase/batch/next eligible action, task table, phase table, gate table, and remediation table with active/released fixer ownership. A worker result names the controller-assigned run/task/attempt/owner, plan-declared kind, status/checkpoints, source ref/commits or exact artifact paths, tests/evidence, and concerns-or-question. The phase-plan parser reads the single phase comment from the document header and each task comment only when its preceding nonempty line is that task's heading. No parser accepts detached arbitrary Markdown, hidden fields, reordered/unknown metadata keys, or unknown states.
 
 **Files:** Create the helper/test/fixture paths from the map; rewrite `templates/progress.md`; create `templates/worker-result.md`.
 
@@ -171,7 +171,7 @@ CLI forms are `init RUN_DIR --run-id ID --base-commit SHA --target-branch BRANCH
 
 <!-- pipeline-v2-task: id=P1-03; deps=P1-02; kind=source; batch=state-core; order=3; write_scope=file:plugins/superb/skills/pipeline/scripts/pipeline_state.py,file:plugins/superb/skills/pipeline/tests/test_pipeline_state.py; outputs=none -->
 
-**Objective / behavior:** Protect every mutation with a stable separate run-local lock, then read → validate → transition → validate → same-directory temporary write → flush/fsync → atomic replace → directory sync where supported → unlock. Never unlock by deleting the lock path; never fall back to an unlocked write. Reuse the repository’s Craft `session.py` distinction between POSIX `flock` and `msvcrt.locking`, adapting it rather than copying an unexamined platform assumption.
+**Objective / behavior:** Before creating/acquiring a lock, read and validate the schema and D-015 filesystem suitability. Then protect every mutation with a stable separate run-local lock and re-read/revalidate → transition → validate → same-directory temporary write → flush/fsync → atomic replace → directory sync where supported → unlock. Known network/distributed types fail; unknown types require a D-ID acknowledgement bound to the current mount/volume fingerprint. Never create a lock beside incompatible state, unlock by deleting the lock path, or fall back to an unlocked write. Reuse the repository’s Craft `session.py` distinction between POSIX `flock` and `msvcrt.locking`, adapting it rather than copying an unexamined platform assumption.
 
 **Files:** Modify helper/tests only.
 
@@ -184,15 +184,24 @@ class LockBusyError(RuntimeError): ...
 class LockUnavailableError(RuntimeError): ...
 class TrackerWriteError(RuntimeError): ...
 class UpdateOutcomeUncertain(RuntimeError): ...
+class FilesystemSuitabilityError(RuntimeError): ...
+@dataclass(frozen=True)
+class FilesystemInfo: classification: str; fs_type: str; fingerprint: str
+def classify_filesystem(path: Path) -> FilesystemInfo: ...
 def locked_tracker_update(run_dir: Path, transition_id: str,
                           transition: Callable[[Tracker], Tracker], *, timeout_s: float) -> Tracker: ...
+def adopt_pre_release_tracker(run_dir: Path, *, expected_run_id: str,
+                              expected_revision: int, expected_sha256: str,
+                              adoption_id: str,
+                              active_fixers: dict[str, tuple[str, ...]],
+                              filesystem_acknowledgement: str | None = None) -> Tracker: ...
 ```
 
 The lock path is `<run-dir>/.pipeline-state.lock`; it is distinct from `progress.md`. Contention waits only to the supplied bounded deadline and reports busy. The Windows branch is included only after using the inspected Craft implementation’s primitive selection and is documented/tested as “Implemented; simulation-tested; native Windows verification pending” until native evidence exists.
 
-**Applicable decisions:** D-008, D-009.
+**Applicable decisions:** D-008, D-009, D-014, D-015, D-017.
 
-**Acceptance:** Real separate processes serialize competing updates; a terminated holder releases the OS lock; lock acquisition failure is distinct from write failure. Temporary-write/fsync/replacement failures before successful replacement preserve the complete old tracker. A directory-sync or later failure after successful replacement reports `UpdateOutcomeUncertain`, never claims unchanged state, and re-reads the tracker by transition ID/revision. Retry returns the already-applied state or safely applies once; it never completes a task or increments a remediation round twice. A reader sees a complete old or new document, never a partial one; missing primitives fail diagnostically with no unlocked write; no test removes another process’s lock file.
+**Acceptance:** Real separate processes serialize competing updates; a terminated holder releases the OS lock; lock acquisition failure is distinct from write failure. Malformed/legacy/unknown trackers and known-unsupported or unacknowledged-unknown filesystems fail before lock creation. Temporary-write/fsync/replacement failures before successful replacement preserve the complete old tracker. A directory-sync or later failure after successful replacement reports `UpdateOutcomeUncertain`, never claims unchanged state, and re-reads the tracker by transition ID/revision. Retry returns the already-applied state or safely applies once; it never completes a task or increments a remediation round twice. A reader sees a complete old or new document, never a partial one; missing primitives fail diagnostically with no unlocked write; no test removes another process’s lock file. D-017 adoption is tested first on a byte-identical copy, is exact-run/revision/hash/id gated, preserves all rows, and ordinary resume rejects the pre-adoption format.
 
 - [ ] **RED — add real-process and stage-aware fault-injection tests.** Add `test_second_process_times_out_busy_without_writing`, `test_terminated_holder_releases_lock`, `test_temp_fsync_failure_preserves_old_tracker_bytes`, `test_replace_failure_preserves_old_tracker_bytes`, `test_directory_sync_failure_reports_may_have_applied`, `test_retry_after_post_replace_failure_does_not_duplicate_completion_or_round`, and `test_atomic_reader_observes_only_complete_versions`. Coordinate children with `multiprocessing` events/queues and a deadline, never fixed sleeps.
 
@@ -360,7 +369,7 @@ def import_worker_result(run_dir: Path, *, result_path: Path, phase_plan: Path,
 
 <!-- pipeline-v2-task: id=P1-07; deps=P1-05,P1-06; kind=source; batch=state-core; order=7; write_scope=file:plugins/superb/skills/pipeline/scripts/pipeline_state.py,file:plugins/superb/skills/pipeline/tests/test_pipeline_state.py,tree:plugins/superb/skills/pipeline/tests/fixtures; outputs=none -->
 
-**Objective / behavior:** Make phase completion mechanical before formal review. A phase may be verified only when every source task satisfies complete integration ancestry, every artifact task has verified completion and truthful `N/A` integration, and its planned suite passed on the recorded integrated HEAD. Validate each phase's `final-only`/`required` classification and reason against that phase's own approved metadata. Persist gate base/HEAD, assignments/reports, evidence-derived acceptance state, open findings/questions, and immutable remediation identity. Required review starts only after mechanical verification; remediation starts at round one after initial round zero and cannot exceed three rounds.
+**Objective / behavior:** Make phase completion mechanical before formal review. A phase may be verified only when every source task satisfies complete integration ancestry with commit-bound verification, every artifact task has verified completion and truthful `N/A` integration, and its planned suite passed on the recorded integrated HEAD. Validate each phase's `final-only`/`required` classification and reason against that phase's own approved metadata. Persist gate base/HEAD, assignments/reports, evidence-derived acceptance state, open findings/questions, active/released role ownership, and immutable remediation identity. Required review starts only after mechanical verification; remediation starts at round one after initial round zero and cannot exceed three rounds.
 
 **Files:** Modify helper/tests; add `valid-required-gate.md`, `valid-final-only-gate.md`, and `remediation-round-three.md` fixtures.
 
@@ -372,18 +381,25 @@ def import_worker_result(run_dir: Path, *, result_path: Path, phase_plan: Path,
 def record_phase_verification(run_dir: Path, *, phase_id: str, head: str,
                               commands: tuple[str, ...], evidence: tuple[str, ...]) -> Tracker: ...
 def open_review_gate(run_dir: Path, *, gate_id: str, base: str, head: str,
-                     reviewer_assignments: tuple[str, ...]) -> Tracker: ...
+                     reviewer_assignments: tuple[str, ...], capacity: int | None) -> Tracker: ...
+def resolve_gate_questions(run_dir: Path, *, gate_id: str,
+                           decision_refs: tuple[str, ...]) -> Tracker: ...
 def start_remediation_round(run_dir: Path, *, gate_id: str, round_number: int,
-                            finding_ids: tuple[str, ...], fix_plan: str) -> Tracker: ...
+                            finding_ids: tuple[str, ...], fix_plan: str,
+                            fixer_assignments: tuple[str, ...], capacity: int | None) -> Tracker: ...
+def record_remediation_fixes(run_dir: Path, *, gate_id: str, round_number: int,
+                             fix_head: str, commits: tuple[str, ...],
+                             verification: tuple[str, ...], capacity: int | None,
+                             repo_dir: Path) -> Tracker: ...
 def evaluate_and_close_review_gate(run_dir: Path, *, gate_id: str,
                                    findings_path: Path, report_paths: tuple[Path, ...],
                                    verification: tuple[str, ...],
                                    rereview_paths: tuple[Path, ...]) -> Tracker: ...
 ```
 
-**Applicable decisions:** D-005, D-006, D-007, D-008.
+**Applicable decisions:** D-004, D-005, D-006, D-007, D-008, D-014, D-015, D-017.
 
-**Acceptance:** Failed/missing verification cannot open a gate; `final-only` cannot dispatch a phase reviewer; Phase 1 and Phase 2 each accept their different approved required reasons while missing/mismatched reasons fail; the master gate uses its own type and exactly two assignments. Closure is derived from reports/findings/evidence, not `accepted=True` or an empty list: reports must identify the correct gate/base/HEAD and required scope, verification must cover that state, confirmed Critical/Important and unresolved acceptance questions block, every Minor has a valid disposition, and every repository-changing fix has matching re-review evidence. Round zero costs no allowance; parallel fixes share one round; D-006 stop rules remain.
+**Acceptance:** Failed/missing verification cannot open a gate; `final-only` cannot dispatch a phase reviewer; Phase 1 and Phase 2 each accept their different approved required reasons while missing/mismatched reasons fail; the master gate uses its own type and exactly two assignments. Reviewer and fixer reservations share the global worker ceiling and preserve released ownership. Closure reads only the tracker-authoritative findings path and is derived from reports/findings/evidence, not `accepted=True`, an empty list, or bare `Resolved`: reports must identify the correct gate/base/HEAD and required scope, verification must cover that state, confirmed Critical/Important and unresolved acceptance questions block, every resolved blocker has an evidence-backed Fixed/Rejected disposition, every Minor has a valid disposition, and every repository-changing fix has matching commit/re-review evidence. Round zero costs no allowance; parallel fixes share one round; D-006 stop rules remain.
 
 - [ ] **RED — add positive/negative gate/remediation tests.** Include `test_mixed_source_and_artifact_phase_can_verify_without_fabricated_commit`, `test_phase_one_accepts_its_approved_reason`, `test_phase_two_accepts_its_different_approved_reason`, `test_missing_or_mismatched_required_reason_fails`, `test_final_only_phase_cannot_open_phase_review`, `test_master_gate_requires_two_matching_reviewers`, `test_caller_boolean_or_empty_findings_cannot_prove_acceptance`, `test_wrong_gate_or_reviewed_head_report_is_rejected`, `test_missing_verification_or_unresolved_question_blocks_closure`, `test_confirmed_blocker_blocks_closure`, `test_repository_fix_without_matching_rereview_blocks_closure`, `test_initial_review_is_round_zero`, `test_parallel_fix_results_share_one_round`, and `test_round_three_blocker_refuses_acceptance`.
 

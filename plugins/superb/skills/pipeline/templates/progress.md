@@ -5,9 +5,15 @@
 | Field | Value |
 | --- | --- |
 | run_id | <run_id> |
+| tracker_format | 2 |
+| schema_adoption | none |
 | base_commit | <base_commit> |
 | target_branch | <target_branch> |
 | worker_limit | <worker_limit> |
+| filesystem_class | <filesystem_class> |
+| filesystem_type | <filesystem_type> |
+| filesystem_fingerprint | <filesystem_fingerprint> |
+| filesystem_ack | <filesystem_ack> |
 | spec | <spec_path> |
 | master_plan | <master_plan_path> |
 | phase_plans | <phase_plan_paths> |
@@ -39,6 +45,6 @@
 | <gate_id> | phase | <phase_id> | pending | - | - | - | - | - | <findings_path> | - |
 
 ## Remediation
-| Gate | Round | State | Findings | Fix Plan | Commits | Verification | Re-review |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| <gate_id> | 1 | pending | - | - | - | - | - |
+| Gate | Round | State | Fixers | Released Fixers | Findings | Fix Plan | Commits | Verification | Re-review |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| <gate_id> | 1 | pending | - | - | - | - | - | - | - |

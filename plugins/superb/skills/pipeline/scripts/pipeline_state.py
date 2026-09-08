@@ -13,6 +13,7 @@ import errno
 import hashlib
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -34,6 +35,7 @@ except ImportError:  # pragma: no cover - exercised by selection simulation
     msvcrt = None
 
 SCHEMA = "pipeline-run/v2"
+_PRE_RELEASE_ADOPTION_RUN_ID = "2026-09-08-pipeline-rebuild-v2"
 _TRACKER_MARKER = f"<!-- {SCHEMA} -->"
 _RESULT_MARKER = "<!-- pipeline-worker-result/v2 -->"
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
@@ -80,6 +82,10 @@ class TransitionError(ValueError):
 
 class EvidenceError(ValueError):
     """Worker evidence is missing, stale, conflicting, or assignment-inconsistent."""
+
+
+class FilesystemSuitabilityError(RuntimeError):
+    """The tracker filesystem is known unsupported or lacks required approval."""
 
 
 class _AlreadyApplied(Exception):
@@ -134,6 +140,8 @@ class RemediationRecord:
     gate: str
     round_number: int
     state: str
+    fixers: str
+    released_fixers: str
     findings: str
     fix_plan: str
     commits: str
@@ -230,13 +238,30 @@ class ReconciliationReport:
     diagnostics: tuple[str, ...]
 
 
-_RUN_KEYS = ("run_id", "base_commit", "target_branch", "worker_limit", "spec", "master_plan", "phase_plans", "decisions", "findings", "revision", "last_transition")
+@dataclass(frozen=True)
+class FilesystemInfo:
+    classification: str
+    fs_type: str
+    fingerprint: str
+
+
+_RUN_KEYS = (
+    "run_id", "tracker_format", "schema_adoption", "base_commit", "target_branch",
+    "worker_limit", "filesystem_class", "filesystem_type", "filesystem_fingerprint",
+    "filesystem_ack", "spec", "master_plan", "phase_plans", "decisions", "findings",
+    "revision", "last_transition",
+)
+_PRE_ADOPTION_RUN_KEYS = (
+    "run_id", "base_commit", "target_branch", "worker_limit", "spec", "master_plan",
+    "phase_plans", "decisions", "findings", "revision", "last_transition",
+)
 _CURRENT_KEYS = ("phase", "batch", "next_action")
 _RESULT_KEYS = ("run_id", "task_id", "attempt", "owner", "kind", "status", "source_ref", "commits", "artifacts", "tests", "evidence", "concerns", "question", "blocking_reason")
 _TASK_HEADER = ("ID", "Kind", "State", "Owner", "Attempt", "Result", "Checkpoints", "Source Ref", "Commits", "Artifacts", "Integration", "Verification", "Question")
 _PHASE_HEADER = ("ID", "State", "Verification", "Review Gate", "Review Reason", "Gate")
 _GATE_HEADER = ("ID", "Type", "Phase", "State", "Base", "Head", "Assignments", "Reports", "Verification", "Findings", "Questions")
-_REMEDIATION_HEADER = ("Gate", "Round", "State", "Findings", "Fix Plan", "Commits", "Verification", "Re-review")
+_REMEDIATION_HEADER = ("Gate", "Round", "State", "Fixers", "Released Fixers", "Findings", "Fix Plan", "Commits", "Verification", "Re-review")
+_PRE_ADOPTION_REMEDIATION_HEADER = ("Gate", "Round", "State", "Findings", "Fix Plan", "Commits", "Verification", "Re-review")
 _CHECKPOINT_HEADER = ("ID", "Status", "Evidence")
 
 
@@ -304,6 +329,22 @@ def parse_tracker(text: str) -> Tracker:
     run = dict(run_fields)
     if not _TOKEN.fullmatch(run["run_id"]) or not _COMMIT.fullmatch(run["base_commit"]):
         raise SchemaError("invalid run identity")
+    if run["tracker_format"] != "2":
+        raise SchemaError("unsupported tracker_format")
+    if run["schema_adoption"] != "none" and not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._/-]*@[0-9a-f]{64}", run["schema_adoption"]
+    ):
+        raise SchemaError("invalid schema_adoption identity")
+    if run["filesystem_class"] not in {"supported-local", "unknown"}:
+        raise SchemaError("invalid or unsupported filesystem classification")
+    if not run["filesystem_type"] or not re.fullmatch(r"[A-Za-z0-9._+-]+", run["filesystem_type"]):
+        raise SchemaError("invalid filesystem type")
+    if not re.fullmatch(r"[0-9a-f]{64}", run["filesystem_fingerprint"]):
+        raise SchemaError("invalid filesystem fingerprint")
+    if run["filesystem_class"] == "supported-local" and run["filesystem_ack"] != "N/A":
+        raise SchemaError("supported local filesystem uses filesystem_ack=N/A")
+    if run["filesystem_class"] == "unknown" and not run["filesystem_ack"].endswith("@" + run["filesystem_fingerprint"]):
+        raise SchemaError("unknown filesystem needs a fingerprint-bound acknowledgement")
     try:
         if int(run["worker_limit"]) <= 0 or int(run["revision"]) < 0:
             raise ValueError
@@ -332,17 +373,34 @@ def parse_tracker(text: str) -> Tracker:
             raise SchemaError("artifact task cannot carry source provenance")
         if task.kind == "artifact" and task.state == "[x]" and (task.artifacts == "-" or task.integration != "N/A"):
             raise SchemaError("completed artifact task needs artifacts and N/A integration")
+        if task.state == "[~]" and (task.owner == "-" or task.attempt == "-"):
+            raise SchemaError("active task needs owner and attempt")
     for phase in phases:
         if phase.state not in _TASK_STATES or phase.review_gate not in {"required", "final-only"}:
             raise SchemaError("invalid phase state or review gate")
         if phase.review_gate == "required" and phase.review_reason == "-":
             raise SchemaError("required phase review needs a reason")
     for gate in gates:
-        if gate.type not in {"phase", "master"} or gate.state not in {"pending", "in_progress", "blocked", "accepted"}:
+        if gate.type not in {"phase", "master"} or gate.state not in {"pending", "in_progress", "re_reviewing", "blocked", "accepted"}:
             raise SchemaError("invalid gate type or state")
-    if any(row.state not in {"pending", "in_progress", "blocked", "complete"} for row in remediation):
+        if gate.state in {"in_progress", "re_reviewing"} and gate.assignments == "-":
+            raise SchemaError("active review gate needs reviewer assignments")
+        if any(not _TOKEN.fullmatch(value) for value in _csv(gate.assignments)):
+            raise SchemaError("invalid reviewer assignment identity")
+    if any(row.state not in {"pending", "fixing", "re_reviewing", "blocked", "complete"} for row in remediation):
         raise SchemaError("invalid remediation state")
-    return Tracker(run_fields, current_fields, tasks, phases, gates, remediation)
+    for row in remediation:
+        if row.state == "fixing" and row.fixers == "-":
+            raise SchemaError("fixing remediation needs active fixers")
+        if row.state != "fixing" and row.fixers != "-":
+            raise SchemaError("only fixing remediation may carry active fixers")
+        for value in (*_csv(row.fixers), *_csv(row.released_fixers)):
+            if not _TOKEN.fullmatch(value):
+                raise SchemaError("invalid remediation worker identity")
+    tracker = Tracker(run_fields, current_fields, tasks, phases, gates, remediation)
+    if len(_active_worker_ids(tracker)) > tracker.worker_limit:
+        raise SchemaError("active worker identities exceed the global worker limit")
+    return tracker
 
 
 def _row(values: tuple[object, ...]) -> str:
@@ -357,7 +415,13 @@ def render_tracker(tracker: Tracker) -> str:
     task_rows = tuple(tuple(getattr(row, field) for field in TaskRecord.__dataclass_fields__) for row in tracker.tasks)
     phase_rows = tuple(tuple(getattr(row, field) for field in PhaseRecord.__dataclass_fields__) for row in tracker.phases)
     gate_rows = tuple(tuple(getattr(row, field) for field in GateRecord.__dataclass_fields__) for row in tracker.gates)
-    remediation_rows = tuple((row.gate, row.round_number, row.state, row.findings, row.fix_plan, row.commits, row.verification, row.re_review) for row in tracker.remediation)
+    remediation_rows = tuple(
+        (
+            row.gate, row.round_number, row.state, row.fixers, row.released_fixers,
+            row.findings, row.fix_plan, row.commits, row.verification, row.re_review,
+        )
+        for row in tracker.remediation
+    )
     blocks = [
         [_TRACKER_MARKER, "# Pipeline v2 — Progress Tracker"],
         ["## Run", *_render_table(("Field", "Value"), tracker.run_fields)],
@@ -449,23 +513,31 @@ def _safe_relative(value: str) -> PurePosixPath:
 
 def _parse_phase_document(path: Path) -> tuple[PhaseMetadata, tuple[PlannedTask, ...]]:
     lines = Path(path).read_text(encoding="utf-8").splitlines()
-    phase_lines = [line for line in lines if line.startswith("<!-- pipeline-v2-phase:")]
-    if len(phase_lines) != 1 or _PHASE_METADATA.fullmatch(phase_lines[0]) is None:
+    phase_indexes = [index for index, line in enumerate(lines) if line.startswith("<!-- pipeline-v2-phase:")]
+    if len(phase_indexes) != 1:
         raise PlanMetadataError("phase plan needs one valid ordered phase metadata comment")
-    phase = _PHASE_METADATA.fullmatch(phase_lines[0])
+    phase_index = phase_indexes[0]
+    phase = _PHASE_METADATA.fullmatch(lines[phase_index])
+    first_nonempty = next((line for line in lines if line.strip()), "")
+    first_section = next((index for index, line in enumerate(lines) if line.startswith("## ")), len(lines))
+    if phase is None or not re.fullmatch(r"# [^#].+", first_nonempty) or phase_index >= first_section:
+        raise PlanMetadataError("phase metadata must be in the document header before the first section")
     assert phase is not None
     if phase.group(3) not in {"required", "final-only"} or not phase.group(4).strip():
         raise PlanMetadataError("invalid phase review metadata")
     phase_deps = () if phase.group(2) == "none" else tuple(phase.group(2).split(","))
     metadata = PhaseMetadata(phase.group(1), phase_deps, phase.group(3), phase.group(4))
     tasks = []
-    for line in lines:
+    for index, line in enumerate(lines):
         if not line.startswith("<!-- pipeline-v2-task:"):
             continue
         match = _TASK_METADATA.fullmatch(line)
         if match is None:
             raise PlanMetadataError("task metadata keys are missing, unknown, or reordered")
         task_id, deps_raw, kind, batch, order_raw, scopes_raw, outputs_raw = match.groups()
+        previous_task = next((candidate for candidate in reversed(lines[:index]) if candidate.strip()), "")
+        if not re.fullmatch(rf"#{{2,6}} .*\b{re.escape(task_id)}\b.*", previous_task):
+            raise PlanMetadataError(f"task metadata for {task_id} must immediately follow its task heading")
         if kind not in {"source", "artifact"} or not _TOKEN.fullmatch(task_id) or not _TOKEN.fullmatch(batch):
             raise PlanMetadataError("invalid task id, kind, or batch")
         try:
@@ -512,6 +584,14 @@ def parse_phase_plan(path: Path) -> tuple[PlannedTask, ...]:
 
 _LEGACY_TASK = re.compile(r"^- \[[ x~?]\] (?:T[0-9]+|RV|RVJ)\b")
 _ARTIFACT_KEYS = ("spec", "master_plan", "phase_plans", "decisions", "findings")
+_SUPPORTED_LOCAL_FILESYSTEMS = {
+    "apfs", "btrfs", "ext2", "ext3", "ext4", "hfs", "hfsplus", "overlay",
+    "tmpfs", "ufs", "xfs", "zfs",
+}
+_UNSUPPORTED_FILESYSTEMS = {
+    "9p", "afs", "ceph", "cifs", "fuse.sshfs", "glusterfs", "lustre", "nfs",
+    "nfs4", "smb", "smbfs",
+}
 
 
 def _diagnostic(run_dir: Path, detail: str) -> str:
@@ -524,6 +604,133 @@ def _recognized_v1(text: str) -> bool:
         and "## Current State" in text
         and any(_LEGACY_TASK.match(line) for line in text.splitlines())
     )
+
+
+def _existing_path(path: Path) -> Path:
+    candidate = Path(path).resolve(strict=False)
+    while not candidate.exists() and candidate != candidate.parent:
+        candidate = candidate.parent
+    if not candidate.exists():
+        raise FilesystemSuitabilityError(f"cannot identify an existing filesystem anchor for {path}")
+    return candidate
+
+
+def _decode_mountinfo(value: str) -> str:
+    return re.sub(
+        r"\\([0-7]{3})",
+        lambda match: chr(int(match.group(1), 8)),
+        value,
+    )
+
+
+def _filesystem_fingerprint(*parts: object) -> str:
+    return hashlib.sha256("\0".join(str(part) for part in parts).encode("utf-8")).hexdigest()
+
+
+def _linux_filesystem(path: Path) -> tuple[str, str]:
+    try:
+        lines = Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise FilesystemSuitabilityError(f"cannot read /proc/self/mountinfo: {exc}") from exc
+    resolved = _existing_path(path)
+    matches: list[tuple[int, str, str, str]] = []
+    for line in lines:
+        fields = line.split()
+        try:
+            separator = fields.index("-")
+            mount_point = Path(_decode_mountinfo(fields[4])).resolve(strict=False)
+            fs_type = fields[separator + 1].casefold()
+            source = _decode_mountinfo(fields[separator + 2])
+        except (ValueError, IndexError):
+            continue
+        if resolved == mount_point or mount_point in resolved.parents:
+            matches.append((len(mount_point.parts), mount_point.as_posix(), fs_type, source))
+    if not matches:
+        raise FilesystemSuitabilityError(f"no mountinfo entry contains {resolved}")
+    _, mount_point, fs_type, source = max(matches)
+    return fs_type, _filesystem_fingerprint("linux", os.stat(resolved).st_dev, mount_point, fs_type, source)
+
+
+def _macos_filesystem(path: Path) -> tuple[str, str]:
+    resolved = _existing_path(path)
+    completed = subprocess.run(
+        ("/usr/bin/stat", "-f", "%T", str(resolved)),
+        check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    if completed.returncode != 0 or not completed.stdout.strip():
+        raise FilesystemSuitabilityError(f"macOS filesystem probe failed: {completed.stderr.strip()}")
+    fs_type = completed.stdout.strip().casefold()
+    return fs_type, _filesystem_fingerprint("darwin", os.stat(resolved).st_dev, fs_type)
+
+
+def _windows_filesystem(path: Path) -> tuple[str, str]:  # pragma: no cover - simulation tested
+    import ctypes
+    from ctypes import wintypes
+
+    resolved = str(_existing_path(path))
+    if resolved.startswith("\\\\"):
+        return "remote", _filesystem_fingerprint("windows", resolved)
+    volume = Path(resolved).anchor
+    drive_type = ctypes.windll.kernel32.GetDriveTypeW(wintypes.LPCWSTR(volume))
+    if drive_type == 4:  # DRIVE_REMOTE
+        return "remote", _filesystem_fingerprint("windows", volume, drive_type)
+    fs_name = ctypes.create_unicode_buffer(256)
+    if not ctypes.windll.kernel32.GetVolumeInformationW(
+        wintypes.LPCWSTR(volume), None, 0, None, None, None, fs_name, len(fs_name)
+    ):
+        raise FilesystemSuitabilityError("Windows GetVolumeInformationW failed")
+    fs_type = fs_name.value.casefold()
+    return fs_type, _filesystem_fingerprint("windows", volume.casefold(), drive_type, fs_type)
+
+
+def classify_filesystem(path: Path) -> FilesystemInfo:
+    """Classify the containing mount/volume without mutating it."""
+    system = platform.system()
+    try:
+        if system == "Linux":
+            fs_type, fingerprint = _linux_filesystem(path)
+        elif system == "Darwin":
+            fs_type, fingerprint = _macos_filesystem(path)
+        elif system == "Windows":
+            fs_type, fingerprint = _windows_filesystem(path)
+        else:
+            return FilesystemInfo("unknown", system.casefold() or "unknown", _filesystem_fingerprint(system, _existing_path(path)))
+    except FilesystemSuitabilityError:
+        return FilesystemInfo("unknown", "probe-failed", _filesystem_fingerprint(system, _existing_path(path)))
+    if fs_type in _UNSUPPORTED_FILESYSTEMS or fs_type == "remote":
+        classification = "unsupported"
+    elif fs_type in _SUPPORTED_LOCAL_FILESYSTEMS or (system == "Windows" and fs_type in {"ntfs", "refs"}):
+        classification = "supported-local"
+    else:
+        classification = "unknown"
+    return FilesystemInfo(classification, fs_type, fingerprint)
+
+
+def _filesystem_ack(info: FilesystemInfo, acknowledgement: str | None) -> str:
+    if info.classification == "unsupported":
+        raise FilesystemSuitabilityError(f"filesystem {info.fs_type} is known unsupported for tracker mutation")
+    if info.classification == "supported-local":
+        if acknowledgement not in {None, "N/A"}:
+            raise FilesystemSuitabilityError("supported local filesystem does not accept an override acknowledgement")
+        return "N/A"
+    if not acknowledgement or acknowledgement != acknowledgement.strip() or "|" in acknowledgement:
+        raise FilesystemSuitabilityError(
+            f"filesystem {info.fs_type} suitability is unknown; an explicit fingerprint-bound acknowledgement is required"
+        )
+    if not re.fullmatch(rf"D-[0-9]+@{re.escape(info.fingerprint)}", acknowledgement):
+        raise FilesystemSuitabilityError("filesystem acknowledgement is not bound to the current mount/volume fingerprint")
+    return acknowledgement
+
+
+def _validate_tracker_filesystem(run_dir: Path, tracker: Tracker) -> FilesystemInfo:
+    info = classify_filesystem(run_dir)
+    recorded = dict(tracker.run_fields)
+    _filesystem_ack(info, recorded["filesystem_ack"])
+    if (
+        recorded["filesystem_class"], recorded["filesystem_type"], recorded["filesystem_fingerprint"]
+    ) != (info.classification, info.fs_type, info.fingerprint):
+        raise FilesystemSuitabilityError("tracker filesystem identity changed; explicit reconciliation is required")
+    return info
 
 
 def validate_run(run_dir: Path) -> Tracker:
@@ -571,6 +778,8 @@ def _initial_tracker(
     target_branch: str,
     worker_limit: int,
     artifacts: dict[str, str],
+    filesystem: FilesystemInfo,
+    filesystem_ack: str,
 ) -> Tracker:
     if tuple(artifacts) != _ARTIFACT_KEYS:
         raise SchemaError(f"artifacts must contain exactly these ordered keys: {_ARTIFACT_KEYS!r}")
@@ -607,7 +816,7 @@ def _initial_tracker(
         for metadata, _ in phase_documents
     )
     gates = required_gates + (master_gate,)
-    remediation = tuple(RemediationRecord(gate.id, 1, "pending", "-", "-", "-", "-", "-") for gate in gates)
+    remediation = tuple(RemediationRecord(gate.id, 1, "pending", "-", "-", "-", "-", "-", "-", "-") for gate in gates)
     first_metadata, first_tasks = phase_documents[0]
     return Tracker(
         tuple(
@@ -615,9 +824,15 @@ def _initial_tracker(
                 _RUN_KEYS,
                 (
                     run_id,
+                    "2",
+                    "none",
                     base_commit,
                     target_branch,
                     str(worker_limit),
+                    filesystem.classification,
+                    filesystem.fs_type,
+                    filesystem.fingerprint,
+                    filesystem_ack,
                     artifacts["spec"],
                     artifacts["master_plan"],
                     artifacts["phase_plans"],
@@ -645,15 +860,20 @@ def initialize_run(
     worker_limit: int,
     artifacts: dict[str, str],
     approved_existing: tuple[Path, ...],
+    filesystem_acknowledgement: str | None = None,
 ) -> Tracker:
     """Create a new v2 tracker without overwriting any existing state."""
     run_dir = Path(run_dir)
+    filesystem = classify_filesystem(run_dir)
+    filesystem_ack = _filesystem_ack(filesystem, filesystem_acknowledgement)
     tracker = _initial_tracker(
         run_id=run_id,
         base_commit=base_commit,
         target_branch=target_branch,
         worker_limit=worker_limit,
         artifacts=artifacts,
+        filesystem=filesystem,
+        filesystem_ack=filesystem_ack,
     )
     text = render_tracker(tracker)
     parse_tracker(text)
@@ -886,8 +1106,11 @@ def locked_tracker_update(
     if not _TOKEN.fullmatch(transition_id):
         raise SchemaError("invalid transition identity")
     run_dir = Path(run_dir)
+    preflight = validate_run(run_dir)
+    _validate_tracker_filesystem(run_dir, preflight)
     with _exclusive_lock(run_dir, timeout_s=timeout_s):
         current = validate_run(run_dir)
+        _validate_tracker_filesystem(run_dir, current)
         if current.last_transition == transition_id and replay_returns_current:
             return current
         proposed = transition(current)
@@ -905,6 +1128,189 @@ def locked_tracker_update(
         reparsed = parse_tracker(canonical)
         _replace_tracker(run_dir, canonical, transition_id)
         return reparsed
+
+
+def _parse_pre_adoption_tracker(text: str) -> tuple[
+    tuple[tuple[str, str], ...], tuple[tuple[str, str], ...], tuple[TaskRecord, ...],
+    tuple[PhaseRecord, ...], tuple[GateRecord, ...], tuple[tuple[str, ...], ...],
+]:
+    """Frozen parser for the exact first pre-release v2 tracker format."""
+    headings = ("## Run", "## Current State", "## Tasks", "## Phases", "## Gates", "## Remediation")
+    sections = _sections(text, _TRACKER_MARKER, "# Pipeline v2 — Progress Tracker", headings, SchemaError)
+    run_fields = _key_values(sections["## Run"], _PRE_ADOPTION_RUN_KEYS, SchemaError)
+    current_fields = _key_values(sections["## Current State"], _CURRENT_KEYS, SchemaError)
+    run = dict(run_fields)
+    if not _TOKEN.fullmatch(run["run_id"]) or not _COMMIT.fullmatch(run["base_commit"]):
+        raise SchemaError("invalid pre-adoption run identity")
+    try:
+        if int(run["worker_limit"]) <= 0 or int(run["revision"]) < 0:
+            raise ValueError
+    except ValueError as exc:
+        raise SchemaError("invalid pre-adoption numeric field") from exc
+    if not _TOKEN.fullmatch(run["last_transition"]):
+        raise SchemaError("invalid pre-adoption transition identity")
+    tasks = tuple(TaskRecord(*row) for row in _table(sections["## Tasks"], _TASK_HEADER, SchemaError))
+    phases = tuple(PhaseRecord(*row) for row in _table(sections["## Phases"], _PHASE_HEADER, SchemaError))
+    gates = tuple(GateRecord(*row) for row in _table(sections["## Gates"], _GATE_HEADER, SchemaError))
+    remediation = _table(sections["## Remediation"], _PRE_ADOPTION_REMEDIATION_HEADER, SchemaError)
+    for collection, attribute in ((tasks, "id"), (phases, "id"), (gates, "id")):
+        _unique(collection, attribute, SchemaError)
+    round_ids: list[tuple[str, int]] = []
+    for row in remediation:
+        try:
+            number = int(row[1])
+        except ValueError as exc:
+            raise SchemaError("invalid pre-adoption remediation round") from exc
+        round_ids.append((row[0], number))
+        if number <= 0 or row[2] not in {"pending", "in_progress", "blocked", "complete"}:
+            raise SchemaError("invalid pre-adoption remediation state")
+    if len(round_ids) != len(set(round_ids)):
+        raise SchemaError("duplicate pre-adoption remediation round")
+    if any(task.kind not in {"source", "artifact"} or task.state not in _TASK_STATES for task in tasks):
+        raise SchemaError("invalid pre-adoption task")
+    if any(phase.state not in _TASK_STATES or phase.review_gate not in {"required", "final-only"} for phase in phases):
+        raise SchemaError("invalid pre-adoption phase")
+    if any(gate.type not in {"phase", "master"} or gate.state not in {"pending", "in_progress", "blocked", "accepted"} for gate in gates):
+        raise SchemaError("invalid pre-adoption gate")
+    return run_fields, current_fields, tasks, phases, gates, remediation
+
+
+def _publish_immutable(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(content)
+            _sync_file(handle)
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if path.read_bytes() != content:
+                raise EvidenceError(f"immutable adoption artifact conflicts with existing file: {path}")
+        _sync_directory(path.parent)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def adopt_pre_release_tracker(
+    run_dir: Path,
+    *,
+    expected_run_id: str,
+    expected_revision: int,
+    expected_sha256: str,
+    adoption_id: str,
+    active_fixers: dict[str, tuple[str, ...]],
+    filesystem_acknowledgement: str | None = None,
+) -> Tracker:
+    """Explicitly adopt the one deployed pre-release v2 format; never called by resume."""
+    if not _TOKEN.fullmatch(adoption_id) or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise SchemaError("invalid adoption identity or expected digest")
+    run_dir = Path(run_dir).resolve()
+    if expected_run_id != _PRE_RELEASE_ADOPTION_RUN_ID or run_dir.name != _PRE_RELEASE_ADOPTION_RUN_ID:
+        raise SchemaError("pre-release schema adoption is restricted to the identified Pipeline v2 rebuild run")
+    progress = run_dir / "progress.md"
+    try:
+        source = progress.read_bytes()
+    except OSError as exc:
+        raise SchemaError(_diagnostic(run_dir, f"cannot read adoption source ({exc})")) from exc
+    adoption_value = f"{adoption_id}@{expected_sha256}"
+    try:
+        current_new = parse_tracker(source.decode("utf-8"))
+    except (SchemaError, UnicodeError):
+        current_new = None
+    if current_new is not None:
+        fields = dict(current_new.run_fields)
+        if current_new.run_id == expected_run_id and fields["schema_adoption"] == adoption_value:
+            return current_new
+        raise SchemaError("tracker is already in the strict format with a different adoption identity")
+    if hashlib.sha256(source).hexdigest() != expected_sha256:
+        raise SchemaError("pre-adoption tracker digest does not match the expected source bytes")
+    decoded = source.decode("utf-8")
+    old_run, current_fields, tasks, phases, gates, old_remediation = _parse_pre_adoption_tracker(decoded)
+    old = dict(old_run)
+    if old["run_id"] != expected_run_id or int(old["revision"]) != expected_revision:
+        raise SchemaError("pre-adoption run identity or revision does not match")
+    if any(task.state == "[~]" for task in tasks) or any(gate.state == "in_progress" for gate in gates):
+        raise TransitionError("pre-release adoption requires a quiescent task/reviewer state")
+    filesystem = classify_filesystem(run_dir)
+    filesystem_ack = _filesystem_ack(filesystem, filesystem_acknowledgement)
+    mapped: list[RemediationRecord] = []
+    active_gates: set[str] = set()
+    for row in old_remediation:
+        gate, number_raw, state, findings, fix_plan, commits, verification, re_review = row
+        fixers = active_fixers.get(gate, ())
+        if state == "in_progress":
+            if not fixers or len(fixers) != len(set(fixers)) or any(not _TOKEN.fullmatch(owner) for owner in fixers):
+                raise TransitionError(f"active remediation {gate} needs verified fixer ownership for adoption")
+            active_gates.add(gate)
+            mapped_state = "fixing"
+            active_value = ",".join(fixers)
+        else:
+            if fixers:
+                raise TransitionError(f"inactive remediation {gate} cannot gain active fixers during adoption")
+            mapped_state = state
+            active_value = "-"
+        mapped.append(
+            RemediationRecord(
+                gate, int(number_raw), mapped_state, active_value, "-", findings,
+                fix_plan, commits, verification, re_review,
+            )
+        )
+    if set(active_fixers) != active_gates:
+        raise TransitionError("active fixer mapping does not exactly match active remediation rows")
+    run_values = (
+        old["run_id"], "2", adoption_value, old["base_commit"], old["target_branch"],
+        old["worker_limit"], filesystem.classification, filesystem.fs_type,
+        filesystem.fingerprint, filesystem_ack, old["spec"], old["master_plan"],
+        old["phase_plans"], old["decisions"], old["findings"], str(expected_revision + 1),
+        adoption_id,
+    )
+    adopted = Tracker(tuple(zip(_RUN_KEYS, run_values)), current_fields, tasks, phases, gates, tuple(mapped))
+    canonical = render_tracker(adopted)
+    installed = parse_tracker(canonical)
+    snapshot_path = run_dir / "agent-output" / f"{adoption_id}-snapshot.md"
+    receipt_path = run_dir / "agent-output" / f"{adoption_id}-receipt.md"
+    with _exclusive_lock(run_dir, timeout_s=5.0):
+        observed = progress.read_bytes()
+        if observed != source:
+            raise TransitionError("pre-adoption tracker changed before the adoption lock was acquired")
+        _parse_pre_adoption_tracker(observed.decode("utf-8"))
+        try:
+            _publish_immutable(snapshot_path, source)
+        except OSError as exc:
+            raise TrackerWriteError(f"schema adoption failed before replacement; old tracker preserved: {exc}") from exc
+        _replace_tracker(run_dir, canonical, adoption_id)
+        reread = validate_run(run_dir)
+        if reread != installed:
+            raise UpdateOutcomeUncertain("adopted tracker did not re-read as the validated target", reread)
+        receipt = (
+            "# Pipeline v2 tracker adoption receipt\n\n"
+            f"- run_id: {expected_run_id}\n"
+            f"- adoption_id: {adoption_id}\n"
+            f"- old_revision: {expected_revision}\n"
+            f"- new_revision: {reread.revision}\n"
+            f"- old_sha256: {expected_sha256}\n"
+            f"- new_sha256: {hashlib.sha256(canonical.encode('utf-8')).hexdigest()}\n"
+            f"- tasks_preserved: {len(tasks)}\n"
+            f"- gates_preserved: {len(gates)}\n"
+            f"- remediation_rows_preserved: {len(mapped)}\n"
+        ).encode("utf-8")
+        try:
+            _publish_immutable(receipt_path, receipt)
+        except (OSError, EvidenceError) as exc:
+            raise UpdateOutcomeUncertain(
+                f"schema adoption applied but receipt publication failed: {exc}", reread,
+            ) from exc
+        return reread
 
 
 def _replace_task(tracker: Tracker, replacement: TaskRecord) -> Tracker:
@@ -942,6 +1348,27 @@ def _planned_tasks(run_dir: Path, tracker: Tracker) -> dict[str, PlannedTask]:
                 raise TransitionError(f"duplicate planned task {task.id}")
             tasks[task.id] = task
     return tasks
+
+
+def _approved_task_definition(
+    run_dir: Path,
+    tracker: Tracker,
+    phase_plan: Path,
+    task_id: str,
+) -> PlannedTask:
+    approved_paths = {
+        _resolved_reference(run_dir, value).resolve()
+        for value in dict(tracker.run_fields)["phase_plans"].split(",")
+    }
+    supplied = Path(phase_plan).resolve()
+    if supplied not in approved_paths:
+        raise TransitionError("phase plan is not one of the run's authoritative approved plans")
+    supplied_tasks = {task.id: task for task in parse_phase_plan(supplied)}
+    authoritative = _planned_tasks(run_dir, tracker)
+    definition = supplied_tasks.get(task_id)
+    if definition is None or authoritative.get(task_id) != definition:
+        raise TransitionError("task metadata does not match the authoritative approved plans")
+    return definition
 
 
 def _scope_parts(scope: str) -> tuple[str, PurePosixPath]:
@@ -1025,17 +1452,24 @@ def _validate_decision(run_dir: Path, tracker: Tracker, task: TaskRecord, decisi
 
 
 def _validate_start_guards(run_dir: Path, tracker: Tracker, task_id: str) -> PlannedTask:
+    current_phase = dict(tracker.current_fields)["phase"]
+    _, current_tasks = _phase_document_for(tracker, run_dir, current_phase)
     planned = _planned_tasks(run_dir, tracker)
-    if task_id not in planned:
-        raise TransitionError(f"task {task_id} is absent from approved phase plans")
+    current_ids = {task.id for task in current_tasks}
+    if task_id not in current_ids:
+        raise TransitionError(f"task {task_id} is not part of the authoritative current phase {current_phase}")
     target = planned[task_id]
+    if any(gate.state in {"in_progress", "re_reviewing", "blocked"} for gate in tracker.gates):
+        raise TransitionError("an unresolved review gate prevents implementation dispatch")
+    if any(row.state in {"fixing", "re_reviewing", "blocked"} for row in tracker.remediation):
+        raise TransitionError("an unresolved remediation obligation prevents implementation dispatch")
     records = {task.id: task for task in tracker.tasks}
     for dependency in target.deps:
         record = records[dependency]
         if not _dependency_ready(Path(run_dir), tracker, record):
             raise TransitionError(f"dependency {dependency} is not verified and integrated")
     active = [task for task in tracker.tasks if task.state == "[~]" and task.id != task_id]
-    if len(active) >= tracker.worker_limit:
+    if len(_active_worker_ids(tracker)) >= tracker.worker_limit:
         raise TransitionError("global worker limit is exhausted")
     for task in active:
         other = planned.get(task.id)
@@ -1052,10 +1486,39 @@ def _dependency_ready(run_dir: Path, tracker: Tracker, task: TaskRecord) -> bool
     if task.integration in {"-", "N/A"} or task.commits == "-":
         return False
     repo_dir = _project_root(run_dir)
-    return all(
+    return task.integration in task.verification and all(
         _git(repo_dir, "merge-base", "--is-ancestor", commit, task.integration)
         for commit in task.commits.split(",")
     ) and _git(repo_dir, "merge-base", "--is-ancestor", task.integration, tracker.target_branch)
+
+
+def _active_worker_ids(tracker: Tracker) -> set[str]:
+    workers = {task.owner for task in tracker.tasks if task.state == "[~]" and task.owner != "-"}
+    for gate in tracker.gates:
+        if gate.state in {"in_progress", "re_reviewing"}:
+            workers.update(_csv(gate.assignments))
+    for row in tracker.remediation:
+        if row.state == "fixing":
+            workers.update(_csv(row.fixers))
+    workers.discard("-")
+    return workers
+
+
+def _validate_worker_capacity(
+    tracker: Tracker,
+    additions: tuple[str, ...],
+    capacity: int | None,
+) -> None:
+    if capacity is None or isinstance(capacity, bool) or capacity <= 0:
+        raise TransitionError("runtime capacity must be an established positive integer")
+    if tracker.worker_limit > capacity:
+        raise TransitionError(
+            f"recorded worker_limit {tracker.worker_limit} exceeds detected runtime capacity {capacity}"
+        )
+    if any(not _TOKEN.fullmatch(owner) for owner in additions):
+        raise TransitionError("worker assignment is not a valid identifier")
+    if len(_active_worker_ids(tracker) | set(additions)) > min(tracker.worker_limit, capacity):
+        raise TransitionError("global worker limit or runtime capacity is exhausted")
 
 
 def _with_next_action(tracker: Tracker, action: str) -> Tracker:
@@ -1090,6 +1553,8 @@ def _gate_next_action(tracker: Tracker, gate: GateRecord) -> str:
         return f"open-gate-{gate.id}"
     if gate.state == "in_progress":
         return f"await-review-{gate.id}"
+    if gate.state == "re_reviewing":
+        return f"await-re-review-{gate.id}"
     if gate.state == "accepted":
         return "final-verification" if gate.type == "master" else f"advance-phase-{gate.phase}"
     if gate.questions != "-":
@@ -1098,12 +1563,13 @@ def _gate_next_action(tracker: Tracker, gate: GateRecord) -> str:
         (
             row
             for row in tracker.remediation
-            if row.gate == gate.id and row.state == "in_progress"
+            if row.gate == gate.id and row.state in {"fixing", "re_reviewing"}
         ),
         None,
     )
     if active_round is not None:
-        return f"continue-remediation-{gate.id}-round-{active_round.round_number}"
+        verb = "continue-fixes" if active_round.state == "fixing" else "await-re-review"
+        return f"{verb}-{gate.id}-round-{active_round.round_number}"
     return f"start-remediation-{gate.id}"
 
 
@@ -1169,15 +1635,9 @@ def derive_next_action(run_dir: Path, tracker: Tracker) -> str:
 
 
 def _scheduler_context(run_dir: Path, phase_plan: Path, capacity: int | None) -> tuple[Tracker, tuple[PlannedTask, ...], int]:
-    if capacity is None:
-        raise TransitionError("runtime capacity is unknown; obtain and record an explicit supported worker limit")
-    if isinstance(capacity, bool) or capacity <= 0:
-        raise TransitionError("runtime capacity must be a positive integer")
     tracker = validate_run(run_dir)
-    if tracker.worker_limit > capacity:
-        raise TransitionError(
-            f"recorded worker_limit {tracker.worker_limit} exceeds detected runtime capacity {capacity}"
-        )
+    _validate_worker_capacity(tracker, (), capacity)
+    assert capacity is not None
     approved_paths = {
         _resolved_reference(run_dir, value).resolve()
         for value in dict(tracker.run_fields)["phase_plans"].split(",")
@@ -1191,10 +1651,11 @@ def _scheduler_context(run_dir: Path, phase_plan: Path, capacity: int | None) ->
     authoritative = _planned_tasks(run_dir, tracker)
     if any(authoritative.get(task.id) != task for task in planned):
         raise TransitionError("phase plan task metadata conflicts with the run's approved plans")
-    if any(gate.state in {"in_progress", "blocked"} for gate in tracker.gates):
+    if any(gate.state in {"in_progress", "re_reviewing", "blocked"} for gate in tracker.gates):
         raise TransitionError("an unresolved review gate prevents implementation dispatch")
-    active = sum(task.state == "[~]" for task in tracker.tasks)
-    return tracker, planned, tracker.worker_limit - active
+    if any(row.state in {"fixing", "re_reviewing", "blocked"} for row in tracker.remediation):
+        raise TransitionError("an unresolved remediation obligation prevents implementation dispatch")
+    return tracker, planned, min(tracker.worker_limit, capacity) - len(_active_worker_ids(tracker))
 
 
 def next_eligible_actions(
@@ -1253,8 +1714,7 @@ def reserve_tasks(
         tracker, planned, available = _scheduler_context(Path(run_dir), Path(phase_plan), capacity)
         if tracker != current:
             raise TransitionError("tracker changed while the reservation lock was held")
-        if len(task_ids) > available:
-            raise TransitionError("reservation exceeds the global worker limit or available capacity")
+        _validate_worker_capacity(tracker, owners, capacity)
         by_id = {task.id: task for task in planned}
         records = {task.id: task for task in tracker.tasks}
         try:
@@ -1324,6 +1784,8 @@ def start_task(run_dir: Path, *, task_id: str, owner: str, attempt: str) -> Trac
         if task.state != "[ ]":
             raise TransitionError("start_task handles first start only")
         _validate_start_guards(Path(run_dir), tracker, task_id)
+        if len(_active_worker_ids(tracker) | {owner}) > tracker.worker_limit:
+            raise TransitionError("global worker limit is exhausted")
         if any(attempt in value for value in (task.attempt, task.checkpoints, task.result)):
             raise TransitionError("task attempt has already been used")
         return _replace_task(
@@ -1392,6 +1854,8 @@ def resume_task(
             raise TransitionError("new attempt must be distinct and unused")
         _validate_decision(Path(run_dir), tracker, task, decision_ref)
         _validate_start_guards(Path(run_dir), tracker, task_id)
+        if len(_active_worker_ids(tracker) | {new_owner}) > tracker.worker_limit:
+            raise TransitionError("global worker limit is exhausted")
         return _replace_task(
             tracker,
             replace(
@@ -1435,12 +1899,8 @@ def complete_task(
     evidence: tuple[str, ...],
     repo_dir: Path,
 ) -> Tracker:
-    planned = {task.id: task for task in parse_phase_plan(phase_plan)}
-    if task_id not in planned:
-        raise TransitionError("task is absent from the supplied approved phase plan")
-    definition = planned[task_id]
-
     def transition(tracker: Tracker) -> Tracker:
+        definition = _approved_task_definition(Path(run_dir), tracker, Path(phase_plan), task_id)
         task = _task_record(tracker, task_id)
         if task.state != "[~]" or task.attempt != attempt:
             raise TransitionError("result does not match the current active attempt")
@@ -1508,6 +1968,8 @@ def record_task_integration(
 ) -> Tracker:
     if not verification or not _COMMIT.fullmatch(integration_commit):
         raise TransitionError("integration commit and verification are required")
+    if not any(integration_commit in item for item in verification):
+        raise TransitionError("integration verification must identify the integration commit")
 
     def transition(tracker: Tracker) -> Tracker:
         task = _task_record(tracker, task_id)
@@ -1649,10 +2111,11 @@ def import_worker_result(
         allowed_checkpoint_evidence = set(result.evidence) | set(result.artifacts)
         if any(checkpoint.evidence not in allowed_checkpoint_evidence for checkpoint in result.checkpoints):
             raise EvidenceError("worker checkpoint refers to undeclared evidence")
-        approved = {planned.id: planned for planned in parse_phase_plan(phase_plan)}
-        authoritative = _planned_tasks(Path(run_dir), tracker)
-        definition = approved.get(task.id)
-        if definition is None or authoritative.get(task.id) != definition or result.kind != task.kind or result.kind != definition.kind:
+        try:
+            definition = _approved_task_definition(Path(run_dir), tracker, Path(phase_plan), task.id)
+        except (TransitionError, PlanMetadataError) as exc:
+            raise EvidenceError(str(exc)) from exc
+        if result.kind != task.kind or result.kind != definition.kind:
             raise EvidenceError("result kind/task metadata does not match the approved plan")
         verification = _append_history(task.verification, f"tests:{result.tests}")
         verification = _append_history(verification, f"evidence:{','.join(result.evidence)}")
@@ -1866,7 +2329,7 @@ def advance_phase(
             raise TransitionError("an unresolved task question prevents phase advancement")
         if any(gate.questions != "-" for gate in tracker.gates):
             raise TransitionError("an unresolved review question prevents phase advancement")
-        if any(row.state in {"in_progress", "blocked"} for row in tracker.remediation):
+        if any(row.state in {"fixing", "re_reviewing", "blocked"} for row in tracker.remediation):
             raise TransitionError("an unresolved remediation obligation prevents phase advancement")
 
         if completed_metadata.review_gate == "required":
@@ -1915,6 +2378,7 @@ def open_review_gate(
     base: str,
     head: str,
     reviewer_assignments: tuple[str, ...],
+    capacity: int | None = None,
 ) -> Tracker:
     if not _COMMIT.fullmatch(base) or not _COMMIT.fullmatch(head):
         raise TransitionError("review base and HEAD must be full commits")
@@ -1938,6 +2402,7 @@ def open_review_gate(
                 raise TransitionError("master review needs two reviewers after all phases verify")
             if any(item.type == "phase" and item.state != "accepted" for item in tracker.gates):
                 raise TransitionError("master review waits for every required phase gate")
+        _validate_worker_capacity(tracker, reviewer_assignments, capacity)
         repo_dir = _project_root(Path(run_dir))
         if not _git(repo_dir, "merge-base", "--is-ancestor", base, head) or not _git(repo_dir, "merge-base", "--is-ancestor", head, tracker.target_branch):
             raise TransitionError("review range is not an integrated target-branch range")
@@ -1989,6 +2454,71 @@ def _parse_findings(path: Path) -> tuple[tuple[str, ...], ...]:
     return rows
 
 
+def _resolved_decision_for_terms(
+    run_dir: Path,
+    tracker: Tracker,
+    decision_ref: str,
+    terms: set[str],
+) -> None:
+    decisions_path = _resolved_reference(run_dir, dict(tracker.run_fields)["decisions"])
+    try:
+        sections = _decision_sections(decisions_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError) as exc:
+        raise TransitionError(f"cannot read recorded decisions at {decisions_path}: {exc}") from exc
+    lines = sections.get(decision_ref)
+    if lines is None:
+        raise TransitionError(f"decision {decision_ref} is missing")
+    answers = _field_lines(lines, "Answer")
+    statuses = _field_lines(lines, "Status")
+    scopes = _field_lines(lines, "Scope") + _field_lines(lines, "Affected task") + _field_lines(lines, "Affected work")
+    if len(answers) != 1 or len(statuses) != 1 or not scopes:
+        raise TransitionError("decision evidence is missing, duplicated, or conflicting")
+    answer = answers[0].strip().rstrip(".")
+    if not answer or answer.casefold() in {"approved", "yes", "continue", "proceed", "go", "pending user response"}:
+        raise TransitionError("generic approval or an empty answer cannot resolve a review blocker")
+    if statuses[0].strip().rstrip(".").casefold() != "resolved":
+        raise TransitionError("decision is not resolved")
+    folded_scopes = " ".join(scopes).casefold()
+    if not any(term.casefold() in folded_scopes for term in terms):
+        raise TransitionError("decision is unrelated to the current review blocker")
+    for other_ref, other_lines in sections.items():
+        if other_ref == decision_ref:
+            continue
+        other_status = _field_lines(other_lines, "Status")
+        other_scopes = _field_lines(other_lines, "Scope") + _field_lines(other_lines, "Affected task") + _field_lines(other_lines, "Affected work")
+        if (
+            len(other_status) == 1
+            and other_status[0].strip().rstrip(".").casefold() in {"open", "pending", "blocked"}
+            and any(term.casefold() in " ".join(other_scopes).casefold() for term in terms)
+        ):
+            raise TransitionError(f"unresolved decision {other_ref} still blocks review acceptance")
+
+
+def resolve_gate_questions(
+    run_dir: Path,
+    *,
+    gate_id: str,
+    decision_refs: tuple[str, ...],
+) -> Tracker:
+    """Clear only current gate questions backed by applicable explicit decisions."""
+    if not decision_refs or len(decision_refs) != len(set(decision_refs)):
+        raise TransitionError("gate question resolution needs unique decision references")
+
+    def transition(tracker: Tracker) -> Tracker:
+        gate = _gate_record(tracker, gate_id)
+        if set(_csv(gate.questions)) != set(decision_refs):
+            raise TransitionError("decision references do not exactly match the current gate questions")
+        terms = {gate.id, gate.phase, *_csv(gate.findings)}
+        for decision_ref in decision_refs:
+            _resolved_decision_for_terms(Path(run_dir), tracker, decision_ref, terms)
+        return _replace_gate(tracker, replace(gate, questions="-"))
+
+    return locked_tracker_update(
+        Path(run_dir), f"resolve-gate-{gate_id}-{'-'.join(sorted(decision_refs))}",
+        transition, timeout_s=5.0, refresh_next_action=True,
+    )
+
+
 def start_remediation_round(
     run_dir: Path,
     *,
@@ -1996,8 +2526,16 @@ def start_remediation_round(
     round_number: int,
     finding_ids: tuple[str, ...],
     fix_plan: str,
+    fixer_assignments: tuple[str, ...] = (),
+    capacity: int | None = None,
 ) -> Tracker:
-    if round_number not in {1, 2, 3} or not finding_ids or len(finding_ids) != len(set(finding_ids)):
+    if (
+        round_number not in {1, 2, 3}
+        or not finding_ids
+        or len(finding_ids) != len(set(finding_ids))
+        or not fixer_assignments
+        or len(fixer_assignments) != len(set(fixer_assignments))
+    ):
         raise TransitionError("remediation round must be 1..3 with unique targeted findings")
     if not Path(fix_plan).is_file():
         raise TransitionError("remediation fix plan does not exist")
@@ -2006,12 +2544,15 @@ def start_remediation_round(
         gate = _gate_record(tracker, gate_id)
         if gate.state != "blocked":
             raise TransitionError("remediation requires a blocked gate")
+        if gate.questions != "-":
+            raise TransitionError("an unresolved gate question prevents remediation dispatch")
+        _validate_worker_capacity(tracker, fixer_assignments, capacity)
         gate_findings = set(_csv(gate.findings))
         if not set(finding_ids).issubset(gate_findings):
             raise TransitionError("remediation targets are not confirmed findings for this gate")
         rows = list(tracker.remediation)
         existing = next((row for row in rows if row.gate == gate_id and row.round_number == round_number), None)
-        if existing is not None and existing.state == "in_progress" and existing.findings == ",".join(finding_ids) and existing.fix_plan == fix_plan:
+        if existing is not None and existing.state == "fixing" and existing.findings == ",".join(finding_ids) and existing.fix_plan == fix_plan and existing.fixers == ",".join(fixer_assignments):
             raise _AlreadyApplied(tracker)
         if existing is not None and existing.state != "pending":
             raise TransitionError("remediation round is already used or conflicting")
@@ -2019,7 +2560,10 @@ def start_remediation_round(
             prior = next((row for row in rows if row.gate == gate_id and row.round_number == round_number - 1), None)
             if prior is None or prior.state != "complete":
                 raise TransitionError("prior remediation round is not complete")
-        replacement = RemediationRecord(gate_id, round_number, "in_progress", ",".join(finding_ids), fix_plan, "-", "-", "-")
+        replacement = RemediationRecord(
+            gate_id, round_number, "fixing", ",".join(fixer_assignments), "-",
+            ",".join(finding_ids), fix_plan, "-", "-", "-",
+        )
         if existing is None:
             rows.append(replacement)
         else:
@@ -2033,6 +2577,64 @@ def start_remediation_round(
         )
     except _AlreadyApplied as applied:
         return applied.tracker
+
+
+def record_remediation_fixes(
+    run_dir: Path,
+    *,
+    gate_id: str,
+    round_number: int,
+    fix_head: str,
+    commits: tuple[str, ...],
+    verification: tuple[str, ...],
+    capacity: int | None,
+    repo_dir: Path,
+) -> Tracker:
+    """Release fixers and reserve the existing independent reviewers for re-review."""
+    if not _COMMIT.fullmatch(fix_head) or not commits or not verification:
+        raise TransitionError("fix integration needs a HEAD, commits, and verification")
+    if not all(fix_head in item for item in verification):
+        raise TransitionError("fix verification must identify the integrated fix HEAD")
+
+    def transition(tracker: Tracker) -> Tracker:
+        gate = _gate_record(tracker, gate_id)
+        row = next(
+            (item for item in tracker.remediation if item.gate == gate_id and item.round_number == round_number),
+            None,
+        )
+        if row is None or row.state != "fixing" or row.fixers == "-":
+            raise TransitionError("only an active fixing round can move to re-review")
+        if gate.state != "blocked" or gate.questions != "-":
+            raise TransitionError("gate is not eligible for re-review")
+        if not _git(Path(repo_dir), "cat-file", "-e", f"{fix_head}^{{commit}}") or not _git(Path(repo_dir), "merge-base", "--is-ancestor", fix_head, tracker.target_branch):
+            raise TransitionError("fix HEAD is not integrated on the target branch")
+        if any(
+            not _COMMIT.fullmatch(commit)
+            or not _git(Path(repo_dir), "merge-base", "--is-ancestor", commit, fix_head)
+            for commit in commits
+        ):
+            raise TransitionError("fix commit is invalid or absent from the integrated fix HEAD")
+        released = _append_history(row.released_fixers, row.fixers)
+        updated_row = replace(
+            row,
+            state="re_reviewing",
+            fixers="-",
+            released_fixers=released,
+            commits=",".join(commits),
+            verification=",".join(verification),
+        )
+        interim = replace(
+            tracker,
+            remediation=tuple(updated_row if item is row else item for item in tracker.remediation),
+        )
+        assignments = _csv(gate.assignments)
+        _validate_worker_capacity(interim, assignments, capacity)
+        return _replace_gate(interim, replace(gate, state="re_reviewing"))
+
+    return locked_tracker_update(
+        Path(run_dir), f"fixes-{gate_id}-{round_number}-{fix_head}", transition,
+        timeout_s=5.0, refresh_next_action=True,
+    )
 
 
 def evaluate_and_close_review_gate(
@@ -2049,8 +2651,13 @@ def evaluate_and_close_review_gate(
 
     def transition(tracker: Tracker) -> Tracker:
         gate = _gate_record(tracker, gate_id)
-        if gate.state not in {"in_progress", "blocked"}:
+        if gate.state not in {"in_progress", "re_reviewing"}:
             raise TransitionError("gate is not open for evaluation")
+        authoritative_findings = _resolved_reference(
+            Path(run_dir), dict(tracker.run_fields)["findings"]
+        ).resolve()
+        if Path(findings_path).resolve() != authoritative_findings:
+            raise TransitionError("findings ledger is not the run's authoritative findings artifact")
         reports = tuple(_parse_review_report(Path(path)) for path in report_paths)
         expected_assignments = tuple(gate.assignments.split(","))
         if tuple(sorted(report["assignment"] for report in reports)) != tuple(sorted(expected_assignments)):
@@ -2058,7 +2665,7 @@ def evaluate_and_close_review_gate(
         if any(report["gate"] != gate.id or report["base"] != gate.base or report["head"] != gate.head for report in reports):
             raise TransitionError("review report belongs to a different gate or code state")
         active_round = next(
-            (row for row in tracker.remediation if row.gate == gate.id and row.state == "in_progress"),
+            (row for row in tracker.remediation if row.gate == gate.id and row.state == "re_reviewing"),
             None,
         )
         rereviews = tuple(_parse_review_report(Path(path)) for path in rereview_paths)
@@ -2079,18 +2686,38 @@ def evaluate_and_close_review_gate(
                 raise TransitionError("re-review code state is not integrated after the prior gate HEAD")
         if not all(reviewed_head in item for item in verification):
             raise TransitionError("gate verification does not identify the applicable reviewed HEAD")
-        rows = tuple(row for row in _parse_findings(Path(findings_path)) if row[1] == gate.id)
+        rows = tuple(row for row in _parse_findings(authoritative_findings) if row[1] == gate.id)
         row_ids = {row[0] for row in rows}
         report_ids = {finding for report in (*reports, *rereviews) for finding in _csv(report["findings"])}
         if row_ids != report_ids:
             raise TransitionError("review reports and findings ledger disagree")
-        blockers = [row for row in rows if row[2] in {"Critical", "Important"} and row[3] != "Resolved"]
-        invalid_minor = [
-            row for row in rows
-            if row[2] == "Minor"
-            and (row[4] not in {"Fixed", "Deferred", "Rejected"} or (row[4] in {"Deferred", "Rejected"} and row[5] == "-"))
-        ]
-        invalid_rows = [row for row in rows if row[2] not in {"Critical", "Important", "Minor"}]
+        invalid_rows: list[tuple[str, ...]] = []
+        blockers: list[tuple[str, ...]] = []
+        for row in rows:
+            _, _, severity, status, disposition, evidence, fix_commit, re_review = row
+            if severity not in {"Critical", "Important", "Minor"} or status not in {"Open", "Resolved"}:
+                invalid_rows.append(row)
+                continue
+            if severity in {"Critical", "Important"}:
+                if status == "Open":
+                    blockers.append(row)
+                    if disposition != "-" or fix_commit != "-" or re_review != "-":
+                        invalid_rows.append(row)
+                elif disposition == "Fixed":
+                    if evidence == "-" or fix_commit == "-" or re_review == "-":
+                        invalid_rows.append(row)
+                elif disposition == "Rejected":
+                    if evidence == "-" or fix_commit != "-":
+                        invalid_rows.append(row)
+                else:
+                    invalid_rows.append(row)
+            else:
+                if status != "Resolved" or disposition not in {"Fixed", "Deferred", "Rejected"} or evidence == "-":
+                    invalid_rows.append(row)
+                if disposition == "Fixed" and (fix_commit == "-" or re_review == "-"):
+                    invalid_rows.append(row)
+                if disposition in {"Deferred", "Rejected"} and fix_commit != "-":
+                    invalid_rows.append(row)
         fixed_commits = [row[6] for row in rows if row[4] == "Fixed" and row[6] != "-"]
         rereview_ids = {finding for report in rereviews for finding in _csv(report["findings"])}
         fixed_ids = {row[0] for row in rows if row[4] == "Fixed" and row[6] != "-"}
@@ -2099,8 +2726,8 @@ def evaluate_and_close_review_gate(
         repo_dir = _project_root(Path(run_dir))
         if any(not _COMMIT.fullmatch(commit) or not _git(repo_dir, "merge-base", "--is-ancestor", commit, reviewed_head) for commit in fixed_commits):
             raise TransitionError("review fix commit is invalid or absent from the reviewed HEAD")
-        if invalid_rows or invalid_minor:
-            raise TransitionError("finding severity or Minor disposition is invalid")
+        if invalid_rows:
+            raise TransitionError("finding status, severity, disposition, or evidence is invalid")
         questions = gate.questions
         remediation_rows = list(tracker.remediation)
         if active_round is not None:
@@ -2114,8 +2741,6 @@ def evaluate_and_close_review_gate(
             completed_round = replace(
                 active_round,
                 state="complete",
-                commits=",".join(fixed_commits) or "-",
-                verification=",".join(verification),
                 re_review=",".join(str(Path(path)) for path in rereview_paths),
             )
             remediation_rows[remediation_rows.index(active_round)] = completed_round
@@ -2227,7 +2852,7 @@ def reconcile_run(
         elif task.state == "[?]":
             actions.append(f"await-user-decision:{task.id}:{task.question}")
     for row in tracker.remediation:
-        if row.state == "in_progress":
+        if row.state in {"fixing", "re_reviewing"}:
             actions.append(f"resume-remediation:{row.gate}:{row.round_number}")
 
     return ReconciliationReport(tuple(actions), tuple(questions), tuple(diagnostics))
@@ -2255,6 +2880,7 @@ def _argument_parser() -> argparse.ArgumentParser:
     init.add_argument("--decisions", required=True)
     init.add_argument("--findings", required=True)
     init.add_argument("--approved-existing", action="append", default=[], type=Path)
+    init.add_argument("--filesystem-acknowledgement")
     return parser
 
 
@@ -2287,10 +2913,14 @@ def main(argv: list[str] | None = None) -> int:
             worker_limit=args.worker_limit,
             artifacts=artifacts,
             approved_existing=tuple(args.approved_existing),
+            filesystem_acknowledgement=args.filesystem_acknowledgement,
         )
         print(f"initialized {args.run_dir}")
         return 0
-    except (SchemaError, PlanMetadataError, TransitionError) as exc:
+    except (
+        SchemaError, PlanMetadataError, TransitionError, FilesystemSuitabilityError,
+        LockBusyError, LockUnavailableError, TrackerWriteError, UpdateOutcomeUncertain,
+    ) as exc:
         print(str(exc), file=sys.stderr)
         return 2
 

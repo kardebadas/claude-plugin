@@ -1310,7 +1310,9 @@ pinrt = re.compile(r"\bpinned by\b")
 def parse_closures(body):
     """Every F-ID in an `M=0` record's closures list, with its route's verdict.
 
-    Returns `(ok_ids, problems)`, `problems` being `(fid, offending text)`.
+    Returns `(ok_ids, problems, duplicates)`, `problems` being
+    `(fid, offending text)` and `duplicates` being `(fid, count)` for every
+    finding listed more than once in the closure population.
 
     EVERY F-ID IS VALIDATED INDEPENDENTLY. The old check was one
     `route.search(body)` — "is there at least one legal route ANYWHERE in this
@@ -1333,12 +1335,15 @@ def parse_closures(body):
     if m:
         seg = seg[:m.start()]
     ok_ids, probs, spans = [], [], []
+    closure_counts = {}
     for m in re.finditer(r"F-\d+", seg):
         if any(a <= m.start() < b for a, b in spans):
             continue
+        fid = m.group(0)
         g = CLOSURE_OK.match(seg, m.start())
         if g:
-            ok_ids.append(m.group(0))
+            closure_counts[fid] = closure_counts.get(fid, 0) + 1
+            ok_ids.append(fid)
             spans.append((g.start(), g.end()))
         elif re.search(r"(?:->|→)\s*$", seg[:m.start()]):
             # THE OUTCOME SLOT IN ITS OTHER FORM. A round may end
@@ -1354,8 +1359,11 @@ def parse_closures(body):
             # diagnosis — the one this rule exists to deliver.
             tail = seg[m.end():m.end() + 60].lstrip(" ,")
             tail = tail.split(",")[0].strip(" ·|")
+            closure_counts[fid] = closure_counts.get(fid, 0) + 1
             probs.append((m.group(0), tail[:40]))
-    return ok_ids, probs
+    duplicates = [(fid, count) for fid, count in closure_counts.items()
+                  if count > 1]
+    return ok_ids, probs, duplicates
 outc  = re.compile(r"(?:->|→)\s*(?:no findings\b|F-\d+)")
 
 
@@ -1445,6 +1453,26 @@ def cov_rows(text):
             continue
         out.setdefault(k, v)
     return out
+
+
+_COVERAGE_VERDICT = re.compile(r"COVERED:\s+(\d+)/(\d+)\s+commits")
+
+
+def coverage_verdict(text):
+    """Return the terminal ``COVERED: n/n commits`` counts, if valid.
+
+    The coverage contract makes this verdict the last nonblank line. The
+    counts are intentionally not reconstructed from git here: the artifact's
+    table and log remain the existing evidence, while this check makes the
+    required final claim present, terminal, and internally complete.
+    """
+    nonblank = [line.strip() for line in text.splitlines() if line.strip()]
+    if not nonblank:
+        return None
+    verdict = _COVERAGE_VERDICT.fullmatch(nonblank[-1])
+    if verdict is None:
+        return None
+    return int(verdict.group(1)), int(verdict.group(2))
 
 def relpath(p):
     """Repo-relative when the path is in the repo, absolute when it is not.
@@ -1619,11 +1647,16 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
                                  "plan and no plan to name")
                 if decl.search(body):
                     probs.append("declares reviewer counts as well as `no round`")
-                _okids, _badids = parse_closures(body)
+                _okids, _badids, _duplicates = parse_closures(body)
                 if not _okids and not _badids:
                     probs.append("names no closure route — every F-ID needs "
                                  "`user-ruled false positive` or `withdrawn "
                                  "→ <reason>` after it")
+                for _fid, _count in _duplicates:
+                    probs.append(
+                        f"{_fid} appears {_count} times in this `M=0` closure "
+                        "record; each finding must have exactly one "
+                        "zero-change closure route")
                 for _fid, _tail in _badids:
                     if re.match(r"deleted\b", _tail, re.I):
                         probs.append(
@@ -1943,7 +1976,7 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
             # while the same round's report names were checked against the
             # directory, leaving an asymmetry that was neither closed nor
             # written down. The two fields carry the same kind of evidence and
-            # are owed the same test.
+            # are owed the same existence and readability test.
             # `agent_output`-gated for the reason the report loop is: the
             # skill's worked examples name illustrative files nobody wrote.
             # Its mutant is cited with the other run-mode ones, below.
@@ -1951,7 +1984,9 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
                 c = cov.search(rec)
                 if c:
                     cnm = c.group(0).split()[-1]
-                    if not (agent_output / cnm).exists():
+                    cpath = agent_output / cnm
+                    coverage_readable = False
+                    if not cpath.exists():
                         viol += 1
                         bad(f"{where}: coverage file {cnm!r} is named on a "
                             f"closed round but is not in "
@@ -1960,6 +1995,34 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
                             "inside some slice, so a name with nothing behind "
                             "it is a coverage judgement no later reader can "
                             "re-open")
+                    else:
+                        ctext, cerr = read(cpath)
+                        if cerr:
+                            viol += 1
+                            bad(f"{where}: coverage file {cnm!r} exists but "
+                                f"cannot be read: {cerr} — the round's "
+                                "coverage evidence cannot be checked. "
+                                "REMEDY: make the file readable and run "
+                                "again")
+                        else:
+                            coverage_readable = True
+                            verdict = coverage_verdict(ctext)
+                            if verdict is None:
+                                viol += 1
+                                bad(f"{where}: coverage file {cnm!r} does not "
+                                    "end with a valid `COVERED: <n>/<n> "
+                                    "commits` verdict — the final nonblank "
+                                    "line must be that terminal coverage "
+                                    "claim. REMEDY: append the assignment "
+                                    "table's complete `COVERED: n/n commits` "
+                                    "verdict")
+                            elif verdict[0] != verdict[1]:
+                                viol += 1
+                                bad(f"{where}: coverage file {cnm!r} claims "
+                                    f"`COVERED: {verdict[0]}/{verdict[1]} "
+                                    "commits` — covered and total commits "
+                                    "must be equal. REMEDY: correct the "
+                                    "terminal coverage verdict")
                     # TWO SLICE REVIEWERS OVER ONE RANGE, WHICH IS THE
                     # OVER-FAN-OUT THE SKILL FORBIDS IN PROSE AND NOTHING
                     # CHECKED. The prohibition has two homes:
@@ -2028,19 +2091,7 @@ def lint_review_lines(paths, agent_output=None, bullet_bounded=False):
                     #          "run tracker's coverage table loses a slice's row",
                     #          "run tracker's integration range collapses onto a slice's",
                     #          "run tracker's coverage file is unreadable".
-                    elif nslice >= 2 and r:
-                        ctext, cerr = read(agent_output / cnm)
-                        if cerr:
-                            viol += 1
-                            bad(f"{where}: coverage file {cnm!r} exists but "
-                                f"cannot be read: {cerr} — the round's slice "
-                                "ranges are in that file and nowhere else, so "
-                                "nothing here is a statement about whether "
-                                "two of its reviewers were handed the same "
-                                "diff, and in particular not that they were "
-                                "not. REMEDY: make the file readable and run "
-                                "again")
-                        else:
+                    if coverage_readable and nslice >= 2 and r:
                             rows = cov_rows(ctext)
                             byrng, norow = {}, []
                             for nm in expand_braces(r.group(1)):
@@ -2368,8 +2419,9 @@ else:
 #     cluster count and its slice count equals it; the round names a `coverage`
 #     file; every report file it names, and the coverage file it names, exist in
 #     `<dir>/agent-output/`; on a round declaring two or more slices, that
-#     coverage file is readable, every report the round names has a row of its
-#     own in it, and no two of those rows carry the same range; and an
+#     coverage file is readable and ends with an equal-count terminal
+#     `COVERED: n/n commits` verdict, every report the round names has a row of
+#     its own in it, and no two of those rows carry the same range; and an
 #     `M=0 → no round` record carries its closure routes and no reviewer
 #     evidence. Plus: the tracker is readable, and at least one round is closed.
 #   IT DOES NOT ESTABLISH that the fan-out was SIZED correctly ON AN `M=`
@@ -2386,14 +2438,18 @@ else:
 #     over-wide round whose reviewers were handed genuinely distinct ranges,
 #     since nothing in the tracker says what the clusters were. Any prose
 #     saying more than that is a claim this mode cannot hold up.
-#   IT ALSO DOES NOT establish that a named report or coverage file says
-#     anything — existence is checked, content is not, so `COVERED: <n>/<n>`
-#     is unread here — or that the round happened when it says.
+#   IT DOES NOT establish that the coverage table's ranges match git history
+#     or that the round happened when it says. It does establish the required
+#     terminal `COVERED: n/n commits` verdict without attempting to reconstruct
+#     the counts from git history.
 # The coverage-table arm's own mutants are cited at that arm, with the argument
 # for including the integration row; they are run-mode mutants like these.
 # Mutants: "run tracker over-declares reviewers",
 #          "run tracker cites a report file that is not in agent-output",
 #          "run tracker cites a coverage file that is not in agent-output",
+#          "run tracker coverage loses its terminal verdict",
+#          "run tracker coverage verdict has unequal counts",
+#          "run tracker coverage has text after its verdict",
 #          "run tracker round loses its coverage field",
 #          "long run-tracker round loses its coverage field",
 #          "run tracker loses one brace-expanded report file",

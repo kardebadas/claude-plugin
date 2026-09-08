@@ -21,8 +21,8 @@ F-ID rather than `no findings`** — `→ F-002 still open`, which is what the
 iteration log records for that iteration too. That is the second legal outcome
 form, and it is here because a closures parser that stops only at
 `→ no findings` reads this one as a closure with no route: the round's own
-result reported as a bad route. Both withdrawals state their reason, and
-neither names a commit.
+result reported as a bad route. Both closure routes are explicit, and neither
+names a commit.
 
 Round 2 is a **planned** round — it names its `fixplan` file, present in
 `agent-output/` — so the fix-plan arm has a second conforming input over a real
@@ -44,9 +44,9 @@ run, on a round that is not the one in `run-ok`.
 - [x] RV — review fan-out · N=2 → 1 slice + 0 integration
       · reports p2-review-a.md · coverage p2-coverage.md → F-001, F-002
       → round 2: M=2 C=1 → 1 slice + 0 integration · fixplan p2-fixplan-r2.md
-        · reports p2-rr2-a.md · coverage p2-rr2-coverage.md → F-001 closed, F-003, F-004
-      → round 3: M=0 → no round · closures: F-003 withdrawn → duplicate of F-002,
-        F-004 withdrawn → malformed → F-002 still open
+        · reports p2-rr2-a.md · coverage p2-rr2-coverage.md → F-001 closed, F-004, F-005
+      → round 3: M=0 → no round · closures: F-004 user-ruled false positive,
+        F-005 withdrawn → malformed → F-002 still open
 
 ## Phase 3 — fixture, not started · deps: Phase 2 · lane: A
 - [ ] T4 — a task · W1 · deps T3

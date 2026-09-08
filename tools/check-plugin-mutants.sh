@@ -360,6 +360,39 @@ else
   grep -qF "notes p1-coverage.md" "$f" || echo "mutant is a no-op: the coverage field was not renamed"
   grep -qF "reports p1-review-a.md" "$f" || echo "mutant is a no-op: it took the reports field too, so a kill could come from the reviewer-count arm instead"
 fi'
+
+run_mutant "run tracker coverage loses its terminal verdict" '
+enable_run_dir tools/fixtures/run-ok || exit 0
+f=tools/fixtures/run-ok/agent-output/p1-coverage.md
+if ! grep -qF -- "COVERED: 1/1 commits" "$f"; then
+  echo "mutant is a no-op: the fixture has no conforming p1 terminal verdict"
+else
+  sed -i "/^COVERED: /d" "$f"
+  grep -qF -- "COVERED:" "$f" && echo "mutant is a no-op: a terminal verdict survived"
+  grep -qF -- "| p1-review-a.md |" "$f" || echo "mutant is a no-op: the coverage table went too"
+fi'
+
+run_mutant "run tracker coverage verdict has unequal counts" '
+enable_run_dir tools/fixtures/run-ok || exit 0
+f=tools/fixtures/run-ok/agent-output/p1-coverage.md
+if ! grep -qF -- "COVERED: 1/1 commits" "$f"; then
+  echo "mutant is a no-op: the fixture has no conforming p1 terminal verdict"
+else
+  sed -i "s|COVERED: 1/1 commits|COVERED: 0/1 commits|" "$f"
+  grep -qF -- "COVERED: 0/1 commits" "$f" || echo "mutant is a no-op: the unequal verdict was not written"
+  grep -qF -- "| p1-review-a.md |" "$f" || echo "mutant is a no-op: the coverage table went too"
+fi'
+
+run_mutant "run tracker coverage has text after its verdict" '
+enable_run_dir tools/fixtures/run-ok || exit 0
+f=tools/fixtures/run-ok/agent-output/p1-coverage.md
+if ! grep -qF -- "COVERED: 1/1 commits" "$f"; then
+  echo "mutant is a no-op: the fixture has no conforming p1 terminal verdict"
+else
+  printf "additional text after verdict\n" >> "$f"
+  tail -n 1 "$f" | grep -qF -- "additional text after verdict" || echo "mutant is a no-op: trailing text was not appended"
+  grep -qF -- "| p1-review-a.md |" "$f" || echo "mutant is a no-op: the coverage table went too"
+fi'
 # THE RECORD BOUNDARY, and the one mutation that can see it. A run record used
 # to end at 400 flattened characters — a window calibrated on the skill's terse
 # worked examples — so a conforming round whose `coverage` field sat past that
@@ -2293,13 +2326,33 @@ else
   grep -qF -- "F-019 withdrawn" "$f" && echo "mutant is a no-op: the route survived"
 fi'
 
+run_mutant "M=0 duplicate F-ID uses two legal routes" '
+f=plugins/superb/skills/pipeline/references/fix-loop.md
+if [ "$(grep -cF -- "F-019 withdrawn → duplicate of F-011" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the worked M=0 record is not in the expected shape"
+else
+  sed -i "s|F-019 withdrawn → duplicate of F-011|F-019 withdrawn → duplicate of F-011, F-019 withdrawn → malformed|" "$f"
+  grep -qF -- "F-019 withdrawn → malformed" "$f" || echo "mutant is a no-op: the second legal route was not added"
+  grep -qF -- "F-018 user-ruled false positive" "$f" || echo "mutant is a no-op: the other legal F-ID went too"
+fi'
+
+run_mutant "M=0 duplicate F-ID repeats one legal route" '
+f=plugins/superb/skills/pipeline/references/fix-loop.md
+if [ "$(grep -cF -- "F-019 withdrawn → duplicate of F-011" "$f")" != 1 ]; then
+  echo "mutant is a no-op: the worked M=0 record is not in the expected shape"
+else
+  sed -i "s|F-019 withdrawn → duplicate of F-011|F-019 withdrawn → duplicate of F-011, F-019 withdrawn → duplicate of F-011|" "$f"
+  [ "$(grep -oF -- "F-019 withdrawn → duplicate of F-011" "$f" | wc -l)" = 2 ] || echo "mutant is a no-op: the duplicate route was not written twice"
+  grep -qF -- "F-018 user-ruled false positive" "$f" || echo "mutant is a no-op: the other legal F-ID went too"
+fi'
+
 run_mutant "run ledger withdrawn row names a fix commit" '
 enable_run_dir tools/fixtures/run-fixloop || exit 0
 f=tools/fixtures/run-fixloop/findings.md
-if [ "$(grep -c -- "| withdrawn | withdrawn → duplicate of F-002 |" "$f")" != 1 ]; then
+if [ "$(grep -c -- "| F-005 | Major | 2 |.*| withdrawn | withdrawn → malformed |" "$f")" != 1 ]; then
   echo "mutant is a no-op: the withdrawn row is not in the expected shape"
 else
-  sed -i "s#| withdrawn | withdrawn → duplicate of F-002 |#| withdrawn | fix \`9c3a1f7\` |#" "$f"
+  sed -i "s#| withdrawn | withdrawn → malformed |#| withdrawn | fix \`9c3a1f7\` |#" "$f"
   grep -qF -- "9c3a1f7" "$f" || echo "mutant is a no-op: the hash was not written"
 fi'
 

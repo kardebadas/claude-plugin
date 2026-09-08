@@ -1,6 +1,6 @@
 # Superb Pipeline v2 Rebuild Master Plan
 
-> **For agentic workers:** REQUIRED EXECUTION ROUTE: use the approved Pipeline v2 controller, multi-task implementation batches, phase verification, selected high-risk phase review, and mandatory final master review. Do not invoke `superpowers:subagent-driven-development` or `superpowers:executing-plans`; their task-bound review/handoff contracts conflict with the approved architecture. Plan checkboxes define work; live status exists only in the run's `progress.md`.
+> **For agentic workers:** REQUIRED EXECUTION ROUTE: during the bounded Phase 1 bootstrap, the coding-session controller follows this approved plan with individual Superpowers skills and the sole file-backed tracker; neither Pipeline version orchestrates the rebuild. After each tested v2 capability becomes available, use it only as specified in Phase 1. Subsequent work uses approved multi-task batches, phase verification, selected high-risk phase review, and mandatory final master review. Do not invoke `superpowers:subagent-driven-development` or `superpowers:executing-plans`; their task-bound review/handoff contracts conflict with the approved architecture.
 
 **Goal:** Replace Superb Pipeline v1 with a compact, file-authoritative v2 orchestrator that escalates every unresolved decision, safely batches work, recovers from interruption, mechanically verifies every phase, reviews selected high-risk phases, and always runs a final master review.
 
@@ -21,6 +21,7 @@
 - Every phase gets mechanical verification. Only explicitly required high-risk gates get a phase reviewer. Final master review always uses two complementary reviewers.
 - Critical/Important findings block. Every Minor has a recorded disposition. Each formal gate allows at most three remediation rounds under D-006.
 - V2 resumes only v2 state. Recognized v1, missing, malformed, unknown, and unsupported schemas are read-only failures.
+- This rebuild alone uses the bounded bootstrap in the design/Phase 1: individual Superpowers skills plus the existing sole `progress.md` until the tested v2 primitives can validate and atomically adopt its checkpoints. Neither Pipeline version orchestrates its replacement.
 - Python helper scope is Python 3.11+, cooperating processes on one host, and local filesystem locking/replacement semantics. Native/simulated platform evidence is labeled exactly.
 - Final state is committed and clean on the feature branch. No push, PR, publish, or merge into `main`/`master`.
 
@@ -55,13 +56,15 @@
 
 ## Shared interfaces fixed before phase expansion
 
-1. `progress.md` is the sole mutable authority and begins with schema `pipeline-run/v2`.
-2. Phase plans expose strict task and batch metadata: stable ID, dependencies, write scope, commands, batch ID/order, review gate/reason.
-3. The helper CLI provides read-only `validate`, `inspect`, and `next`; controller transitions for task start/block/result import/integration, phase verification, review gate, and remediation rounds; and initialization that refuses existing directories.
-4. All mutating commands lock a separate run-local resource and atomically replace only the canonical tracker. Failed validation leaves bytes unchanged.
-5. Worker results identify run/task/attempt, status, checkpoints, commit(s), tests/evidence, concerns/questions, and are published through same-directory temporary replacement. Only the controller imports them.
-6. Formal reviewer reports are stored in `agent-output/`; findings and dispositions live in `findings.md`; gate/round state and evidence references live in `progress.md`.
-7. The final acceptance matrix uses the 20 numbered scenarios from the rebuild request as stable `A-01` through `A-20` mappings.
+1. `progress.md` is the sole mutable authority; ordinary v2 trackers begin with schema `pipeline-run/v2` and carry revision/last-transition identity. The rebuild bootstrap converts its same tracker in place once, never creates a competing tracker.
+2. Phase plans expose strict task and batch metadata: stable ID, dependencies, plan-declared `source`/`artifact` kind, typed `file:`/`tree:` write scopes, exact artifact outputs (`outputs=none` for source), commands, batch ID/order, review gate/reason.
+3. The helper CLI provides read-only `validate`, `inspect`, and `next`; controller transitions for task reservation/start/block/result import/integration, phase verification, review gate, and remediation rounds. Ordinary initialization may populate an existing artifact-only run directory only when `progress.md` is absent and every existing path is explicitly approved; it never overwrites any tracker or unrelated file.
+4. All mutating commands lock a separate run-local resource and atomically replace only the canonical tracker. Failures before replacement preserve the old tracker; failures after replacement report uncertain application and reconcile the stable transition identity without duplicate effects.
+5. Worker results identify run/task/attempt/kind, status, checkpoints, source commits or artifact paths, tests/evidence, concerns/questions, and are published through same-directory temporary replacement. Only the controller imports them, and the declared kind must match the approved phase task.
+6. Source-task integration requires every implementation commit to be an ancestor of the integration commit and that integration commit to be an ancestor of the target branch; artifact tasks record verified completion and `N/A` integration. Rewritten-history modes are not planned.
+7. Readiness uses typed scope overlap and is advisory; serialized reservation/start revalidates dependencies, questions, ownership, pairwise candidate conflicts, and capacity.
+8. Formal reviewer reports are stored in `agent-output/`; findings and dispositions live in `findings.md`; gate/round state and evidence references live in `progress.md`. Gate acceptance is computed from matching reports/code state, verification, blockers/questions, Minor dispositions, and re-review evidence—not accepted from a boolean flag.
+9. The final acceptance matrix uses the 20 numbered scenarios from the rebuild request as stable `A-01` through `A-20` mappings.
 
 ## Phase sequence
 
@@ -70,7 +73,7 @@
 - **Detailed plan:** `docs/superpowers/plans/pipeline-rebuild-v2/phase-01.md`
 - **Dependencies:** none after design/master interface approval.
 - **Outcome:** Tested Python helper, strict v2 tracker, result contract, legacy rejection, scheduler, gate/remediation state transitions, and recovery reconciliation.
-- **Implementation batching:** Prefer one coherent state-helper executor for shared parser/transition code; split only truly disjoint fixture/platform work. Task checkpoints remain individual.
+- **Implementation batching:** Use the explicit rebuild bootstrap through P1-04; then adopt the same tracker into validated v2 format. Prefer one coherent state-helper executor for shared parser/transition code; split only truly disjoint fixture/platform work. Task checkpoints remain individual.
 - **Mechanical verification:** Pipeline helper unit/integration suite; valid/invalid fixture CLI checks; real-process lock tests; Python 3.11 syntax/runtime check; targeted mutations; `git diff --check`.
 - **Review gate:** required.
 - **Reason:** This is the single source of execution truth and concurrency/recovery foundation consumed by every later phase; state corruption or unsafe readiness would repeat/skip work and invalidate all downstream gates.
@@ -90,7 +93,7 @@
 - **Detailed plan:** `docs/superpowers/plans/pipeline-rebuild-v2/phase-03.md`
 - **Dependencies:** Phases 1 and 2 verified and their required reviews accepted.
 - **Outcome:** Shared plugin checks preserved, v1-only checks classified/removed, v2 fixtures/mutations wired to CI, setup reports the new Python requirement, user docs describe v2, and both manifests are `0.14.0`.
-- **Implementation batching:** Validation/mutation work is one coherent batch because both files share named invariants. Setup/docs/manifests may run as a disjoint batch if their write scopes remain separate.
+- **Implementation batching:** Cycle-free order is P3-T01 targeted validator work → P3-T03 CI → P3-T06 manifests → P3-T02 mutation baseline/harness. P3-T04 setup and P3-T05 docs may run independently where typed scopes remain disjoint. The strict complete release gate runs only after its prerequisites land.
 - **Mechanical verification:** Pipeline unit suite; default plugin gate; every v2 fixture gate; full no-op-aware mutation harness; JSON parsing; setup regression checks; CI command audit; repository documentation scans; `git diff --check`.
 - **Review gate:** final-only.
 
@@ -98,19 +101,19 @@
 
 - **Detailed plan:** `docs/superpowers/plans/pipeline-rebuild-v2/phase-04.md`
 - **Dependencies:** Phases 1–3 implemented, integrated, verified, and required gates accepted.
-- **Outcome:** Writing-skills RED/GREEN real-agent evidence, complete A-01–A-20 acceptance map, recovery/finish rehearsal, comparable measurements, limitation record, and master-review package.
+- **Outcome:** Writing-skills RED/GREEN real-agent evidence, complete A-01–A-20 acceptance map, recovery/finish rehearsal, comparable measurements, limitation record, and a prepared master-review package. Only after all Phase 4 tasks finish does the controller validate phase prerequisites, record Phase 4 verified, and dispatch the master gate.
 - **Implementation batching:** Fresh-context pressure samples may run concurrently up to the global limit; measurement and acceptance consolidation remain controller-owned.
 - **Mechanical verification:** Fresh full repository commands; acceptance-matrix completeness; artifact/path/state validation; performance comparison; Git/worktree/remote checks.
 - **Review gate:** final-only; the mandatory master gate immediately follows.
 
 ## Mandatory final master gate
 
-After Phase 4 verification, record review base `8348959d1b201a873c68512642a0eb8e5754eaa8` and current integrated HEAD. Dispatch exactly two independent complementary reviewers under D-007. Collect both reports; validate/deduplicate all findings; ask unresolved questions; persist one scoped fix plan per remediation round; implement compatible fix batches with TDD; verify; and re-review the same master gate. Stop when D-005 acceptance passes or D-006 blocks/escalates. No ordinary fixes restart the full pipeline.
+After Phase 4 verification, record review base `8348959d1b201a873c68512642a0eb8e5754eaa8` and current integrated HEAD. Dispatch exactly two independent complementary reviewers under D-007. Collect both reports; validate/deduplicate all findings; ask unresolved questions; persist one scoped fix plan per remediation round; implement compatible fix batches with TDD; verify; and re-review the same master gate. After any fix, compare affected automated/pressure evidence's recorded HEAD and input/instruction digests with the new code state; rerun only evidence affected by the change. If an actual-agent rerun would exceed the approved campaign budget, keep the gate unresolved and ask for authorization. Stop when D-005 acceptance passes or D-006 blocks/escalates. No ordinary fixes restart the full pipeline.
 
 ## Commit strategy
 
 - Commit the approved design independently before plan expansion.
-- During implementation, commit coherent tested batches; tracker rows retain every task's result and commit evidence even when multiple tasks share a commit.
+- During implementation, source tasks commit coherent tested changes and retain their result/commit/integration evidence. Plan-declared artifact tasks retain exact artifact/attempt/validation evidence with integration `N/A`; they never create empty commits or stage ignored run files.
 - Formal review fixes use separate commits associated with their persisted round.
 - Commit curated plan/documentation artifacts. Never stage `docs/superpowers/runs/<run-id>/` runtime state.
 - Before each completion claim or phase/master advancement, run the exact fresh command that proves it.
@@ -130,6 +133,16 @@ git status --short --branch
 ```
 
 Platform-specific tests unavailable locally are reported rather than claimed. Current local runtime has Python 3.11.2 only; native macOS and Windows evidence requires those environments.
+
+## Corrected whole-plan execution order
+
+1. Bootstrap P1-01 through P1-04 directly from approved files and the sole rebuild tracker; atomically adopt that same tracker into canonical v2 after P1-04 passes.
+2. Use tested transitions for P1-05, tested reservations after P1-05, and normal result import after P1-06. Complete Phase 1, verify, then pass its required gate.
+3. Complete Phase 2's artifact/source tasks under their distinct evidence contracts, verify active routes without rejecting legacy fixtures/detectors/prohibitions, then pass its required gate.
+4. Execute Phase 3 without a cycle: P3-T01 → P3-T03 → P3-T06 → P3-T02, with P3-T04/P3-T05 scheduled only where current capacity/scopes allow; run the strict integrated release gate after all prerequisites exist.
+5. Execute P4-01 through P4-08. P4-06 collects verification evidence but does not close the phase; after P4-08, validate all source/artifact completions and evidence freshness, record Phase 4 verified, then open the mandatory two-reviewer master gate.
+
+At every start/resume, source dependencies use complete Git ancestry proof, artifact dependencies use verified completion, typed scopes are checked pairwise during serialized reservation, phase reasons come from the applicable plan metadata, and post-replacement uncertainty reconciles transition identity before retry.
 
 ## Plan expansion and approval gate
 

@@ -27,12 +27,12 @@
 
 | ID | Batch | Depends on | Write scope | Batch compatibility |
 | --- | --- | --- | --- | --- |
-| P3-T01 | P3-validation | phase IDs 01,02 | tools/check-plugin.py; tools/check-plugin.sh | Must precede P3-T02 and P3-T03; same executor as P3-T02. |
-| P3-T02 | P3-validation | P3-T01 | tools/check-plugin-mutants.sh | Shares named invariants with P3-T01; never parallel with it. |
-| P3-T03 | P3-ci | P3-T01, P3-T02 | .github/workflows/checks.yml | Runs after validation batch; disjoint write scope. |
+| P3-T01 | P3-validation | phase IDs 01,02 | tools/check-plugin.py; tools/check-plugin.sh | Implements validator against controlled prerequisites; full release gate is intentionally still red in the worktree. |
+| P3-T02 | P3-validation | P3-T01, P3-T03, P3-T06 | tools/check-plugin-mutants.sh | Runs only after CI/manifests make the complete clean baseline conforming. |
+| P3-T03 | P3-ci | P3-T01 | .github/workflows/checks.yml | Owns only workflow edits and a task-local workflow audit; does not edit P3-T01 files. |
 | P3-T04 | P3-setup | phase IDs 01,02 | plugins/superb/skills/setup/check-deps.sh, SKILL.md, README.md | May run in parallel with P3-T05/P3-T06. |
 | P3-T05 | P3-docs | phase IDs 01,02 | README.md; plugins/superb/README.md | May run with P3-T04/P3-T06; integrate before phase verification. |
-| P3-T06 | P3-package | P3-T01; phase ID 02 | both plugin.json manifests | May run with P3-T04/P3-T05; P3-T01 makes its version check meaningful. |
+| P3-T06 | P3-package | P3-T03; phase ID 02 | both plugin.json manifests | Lands the final structural prerequisite; complete release baseline runs here before P3-T02. |
 
 The phase comment owns cross-phase dependencies 01,02. Each task comment therefore lists only same-phase task IDs (or none) in its required deps field; no task metadata invents a pseudo task ID for a phase.
 
@@ -49,7 +49,7 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
 | plugins/superb/.claude-plugin/plugin.json; plugins/superb/.codex-plugin/plugin.json | Exact approved 0.14.0 version and V2-aligned Pipeline wording. |
 
 ### Task P3-T01: Replace V1 Pipeline validation with a narrow V2 release gate
-<!-- pipeline-v2-task: id=P3-T01; deps=none; batch=P3-validation; order=1; write_scope=tools/check-plugin.py,tools/check-plugin.sh -->
+<!-- pipeline-v2-task: id=P3-T01; deps=none; kind=source; batch=P3-validation; order=1; write_scope=file:tools/check-plugin.py,file:tools/check-plugin.sh; outputs=none -->
 
 **Files:**
 
@@ -61,7 +61,7 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
 
 - Consumes Phase 1: plugins/superb/skills/pipeline/scripts/pipeline_state.py, tests/test_pipeline_state.py, tests/fixtures/.
 - Consumes Phase 2: SKILL.md, README.md, references/planning.md, references/execution.md, references/persistence.md, references/review.md, and templates/progress.md, decisions.md, findings.md, fix-plan.md, worker-result.md.
-- Produces default-only ./tools/check-plugin.sh: exit 0 only after shared checks, V2 release inventory, V2 template marker, exact manifest version, and exact CI-command audit pass.
+- Produces default-only ./tools/check-plugin.sh: exit 0 only after shared checks, V2 release inventory, V2 template marker, exact manifest version, and exact CI-command audit pass. P3-T01 proves its new predicates against a controlled throwaway conforming tree; it does not require the live tree to pass before P3-T03/P3-T06 land.
 - Produces no duplicate tracker parser, --run mode, V1 fixture validation, reviewer arithmetic, or task-brief dependency.
 
 **Acceptance behavior:**
@@ -97,11 +97,51 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
 
   Keep the strict argument guard and shared sections. First move the existing narrow .gitignore validation intact into the retained shared area; then delete V1 Pipeline semantic blocks as a unit and add only inventory, marker, exact-version, and CI-command checks. Phase 1 remains the authority for malformed schema, transitions, locks, scheduling, results, and fixtures.
 
-- [ ] **Step 4: Run GREEN and read-only proof**
+- [ ] **Step 4: Run task-local GREEN against controlled prerequisites and retain live RED**
 
   Run: ./tools/check-plugin.sh
 
-  Expected: check-plugin: PASS.
+  Expected: nonzero only for the still-unimplemented P3-T03 CI and/or P3-T06 manifest prerequisites; a different failure blocks P3-T01.
+
+  Run the gate in a guarded throwaway conforming copy:
+
+  ```bash
+  task_tmp=$(mktemp -d)
+  cp -a . "$task_tmp/repo"
+  python3.11 - "$task_tmp/repo" <<'PY'
+  import json
+  import sys
+  from pathlib import Path
+
+  root = Path(sys.argv[1])
+  for relative in ("plugins/superb/.claude-plugin/plugin.json", "plugins/superb/.codex-plugin/plugin.json"):
+      path = root / relative
+      data = json.loads(path.read_text(encoding="utf-8"))
+      if data.get("version") != "0.13.0":
+          raise SystemExit(f"no-op guard failed: {relative} baseline version")
+      data["version"] = "0.14.0"
+      path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+  workflow = root / ".github/workflows/checks.yml"
+  text = workflow.read_text(encoding="utf-8")
+  start = "      # `--run` is a second mode"
+  end = "      - run: ./tools/check-plugin-mutants.sh"
+  if text.count(start) != 1 or text.count(end) != 1:
+      raise SystemExit("no-op guard failed: v1 CI block")
+  replacement = (
+      "      - uses: actions/setup-python@v5\n"
+      "        with:\n"
+      "          python-version: '3.11'\n"
+      "      - run: python -m unittest discover -s plugins/superb/skills/pipeline/tests -v\n"
+  )
+  workflow.write_text(text[:text.index(start)] + replacement + text[text.index(end):], encoding="utf-8")
+  PY
+  (cd "$task_tmp/repo" && ./tools/check-plugin.sh)
+  task_status=$?
+  rm -rf "$task_tmp"
+  test "$task_status" -eq 0
+  ```
+
+  Expected: `check-plugin: PASS` in the controlled copy, proving P3-T01's predicates without editing live P3-T03/P3-T06 files. The live failure remains expected until their tasks integrate.
 
   Run: before=$(git hash-object tools/fixtures/run-ok/progress.md); ./tools/check-plugin.sh --run tools/fixtures/run-ok >/tmp/p3-t01.out 2>&1; rc=$?; after=$(git hash-object tools/fixtures/run-ok/progress.md); test "$rc" -eq 2 && test "$before" = "$after" && rg -F "unknown argument '--run'" /tmp/p3-t01.out
 
@@ -113,7 +153,7 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
       git commit -m "test(pipeline): validate v2 release structure"
 
 ### Task P3-T02: Replace V1 mutations with no-op-aware V2 mutations
-<!-- pipeline-v2-task: id=P3-T02; deps=P3-T01; batch=P3-validation; order=2; write_scope=tools/check-plugin-mutants.sh -->
+<!-- pipeline-v2-task: id=P3-T02; deps=P3-T01,P3-T03,P3-T06; kind=source; batch=P3-validation; order=2; write_scope=file:tools/check-plugin-mutants.sh; outputs=none -->
 
 **Files:**
 
@@ -121,7 +161,7 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
 
 **Interfaces:**
 
-- Consumes P3-T01's default structural gate.
+- Consumes P3-T01's validator plus integrated P3-T03 CI and P3-T06 manifests; its clean live baseline must now pass before mutation.
 - Produces ./tools/check-plugin-mutants.sh exit 0 only if the clean baseline passes, every mutation changed its target and was killed, and there are zero SURVIVED/NO-OP results.
 - Required V2 mutant names and targets: remove pipeline_state.py; change pipeline-run/v2; remove references/execution.md; set one manifest to 0.13.0; remove actions/setup-python@v5; remove the exact Pipeline CI command; insert retired check-plugin.sh --run into CI.
 
@@ -131,7 +171,9 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
 - Delete all V1 fixture baseline, helper, and mutation logic, because Phase 1 fixture tests preserve V2 behavior.
 - Each new mutation guards its anchor, announces mutant is a no-op if absent, and replaces the target with a deliberately different value.
 
-- [ ] **Step 1: Write failing V2 mutation cases**
+- [ ] **Step 1: Write a failing desired-inventory audit, then the V2 mutation cases**
+
+  Before editing, require all seven planned mutation names/anchors in `tools/check-plugin-mutants.sh`; this task-local audit must fail because the old v1 families do not implement them. Do not use the old harness's successful v1 run as RED evidence.
 
   Example marker mutation:
 
@@ -141,11 +183,15 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
         sed -i "s/pipeline-run\/v2/pipeline-run\/broken/" "$f"
       '
 
-- [ ] **Step 2: Run RED**
+- [ ] **Step 2: Run RED after confirming the complete clean baseline**
 
-  Run: ./tools/check-plugin-mutants.sh
+  Run: ./tools/check-plugin.sh
 
-  Expected: nonzero until V1 families are removed and all seven V2 mutations are killable; no PASS claim from a V1 fixture baseline.
+  Expected: PASS because P3-T03 and P3-T06 are dependencies.
+
+  Run the seven-name/anchor inventory audit from Step 1.
+
+  Expected: nonzero until all seven V2 mutations exist. The old mutation harness may still pass its obsolete tests, but that is not this task's GREEN evidence.
 
 - [ ] **Step 3: Implement the V2 mutation set**
 
@@ -167,7 +213,7 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
       git commit -m "test(pipeline): mutate v2 validation invariants"
 
 ### Task P3-T03: Wire V2 tests and gates into CI
-<!-- pipeline-v2-task: id=P3-T03; deps=P3-T01,P3-T02; batch=P3-ci; order=1; write_scope=.github/workflows/checks.yml -->
+<!-- pipeline-v2-task: id=P3-T03; deps=P3-T01; kind=source; batch=P3-ci; order=1; write_scope=file:.github/workflows/checks.yml; outputs=none -->
 
 **Files:**
 
@@ -183,11 +229,11 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
 
 - In the existing plugin job, provision Python with actions/setup-python@v5 and python-version: '3.11' before the Pipeline suite. Replace six V1 fixture --run workflow steps with the exact provisioned-interpreter command. Its valid/invalid/legacy/schema/transition/scheduler/recovery/gate fixtures are owned by the suite.
 - Keep the shared plugin gate, mutant harness, craft brief job, Craft UI job, Craft python3 commands, and browser installation/assertion behavior.
-- P3-T01's audit fails if the exact suite command is absent or --run remains.
+- P3-T01's already-implemented audit fails if the exact suite command is absent or --run remains. P3-T03 does not edit that audit.
 
-- [ ] **Step 1: Write the command audit**
+- [ ] **Step 1: Run the existing command audit as RED**
 
-  Add P3-T01 checks for the exact provisioned-interpreter suite command and the absence of check-plugin.sh --run.
+  Run P3-T01's gate and separately inspect only `.github/workflows/checks.yml` for the exact provisioned-interpreter suite command and absence of `check-plugin.sh --run`. Do not edit `tools/check-plugin.py` or `tools/check-plugin.sh` in this task.
 
 - [ ] **Step 2: Run RED**
 
@@ -206,9 +252,13 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
 
 - [ ] **Step 4: Run GREEN**
 
-  Run: python3.11 -m unittest discover -s plugins/superb/skills/pipeline/tests -v && ./tools/check-plugin.sh && ./tools/check-plugin-mutants.sh
+  Run: python3.11 -m unittest discover -s plugins/superb/skills/pipeline/tests -v
 
-  Expected: all pass. The local command remains the master plan's explicit python3.11 final-verification command; CI's distinct python command is safe only because actions/setup-python@v5 provisions 3.11 first. This is no cross-file plan conflict and does not authorize a master-plan edit.
+  Expected: Pipeline tests pass. Do not require the complete plugin gate yet: P3-T06's version prerequisite is deliberately still pending, and P3-T02's mutation harness follows it.
+
+  Run: rg -n -F 'uses: actions/setup-python@v5' .github/workflows/checks.yml && rg -n -F "python-version: '3.11'" .github/workflows/checks.yml && test "$(rg -c -F 'python -m unittest discover -s plugins/superb/skills/pipeline/tests -v' .github/workflows/checks.yml)" -eq 1
+
+  Expected: success; task-local CI ownership is verified without calling a later task's release baseline.
 
   Run: ! rg -n 'check-plugin\.sh --run|run-(ok|open-rv|fixloop|rvj-fix|lanes|leading-rvj-fix)' .github/workflows/checks.yml
 
@@ -220,7 +270,7 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
       git commit -m "ci: run pipeline v2 validation suite"
 
 ### Task P3-T04: Report Pipeline Python 3.11+ without changing Craft support
-<!-- pipeline-v2-task: id=P3-T04; deps=none; batch=P3-setup; order=1; write_scope=plugins/superb/skills/setup/check-deps.sh,plugins/superb/skills/setup/SKILL.md,plugins/superb/skills/setup/README.md -->
+<!-- pipeline-v2-task: id=P3-T04; deps=none; kind=source; batch=P3-setup; order=1; write_scope=file:plugins/superb/skills/setup/check-deps.sh,file:plugins/superb/skills/setup/SKILL.md,file:plugins/superb/skills/setup/README.md; outputs=none -->
 
 **Files:**
 
@@ -275,7 +325,7 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
       git commit -m "docs(setup): report pipeline python requirement"
 
 ### Task P3-T05: Update user documentation to the V2 contract
-<!-- pipeline-v2-task: id=P3-T05; deps=none; batch=P3-docs; order=1; write_scope=README.md,plugins/superb/README.md -->
+<!-- pipeline-v2-task: id=P3-T05; deps=none; kind=source; batch=P3-docs; order=1; write_scope=file:README.md,file:plugins/superb/README.md; outputs=none -->
 
 **Files:**
 
@@ -309,9 +359,9 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
 
 - [ ] **Step 4: Run GREEN**
 
-  Run: rg -n 'pipeline-run/v2|Python 3\.11\+|final-only|master review|worker_limit' README.md plugins/superb/README.md && ! rg -n '/review|fix-mode|RVJ|ceil\(N/5\)|references/(implement|fix-loop|parallel|run-state)\.md' README.md plugins/superb/README.md && ./tools/check-plugin.sh
+  Run: rg -n 'pipeline-run/v2|Python 3\.11\+|final-only|master review|worker_limit' README.md plugins/superb/README.md && ! rg -n '/review|fix-mode|RVJ|ceil\(N/5\)|references/(implement|fix-loop|parallel|run-state)\.md' README.md plugins/superb/README.md
 
-  Expected: all succeed and shared namespace/document checks still pass.
+  Expected: task-local documentation assertions succeed. Do not require the complete release gate here because this task has no dependency on P3-T03/P3-T06/P3-T02; the strict gate remains in the phase verification after all tasks integrate.
 
 - [ ] **Step 5: Commit**
 
@@ -319,7 +369,7 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
       git commit -m "docs(pipeline): describe v2 workflow"
 
 ### Task P3-T06: Ship the approved package version
-<!-- pipeline-v2-task: id=P3-T06; deps=P3-T01; batch=P3-package; order=1; write_scope=plugins/superb/.claude-plugin/plugin.json,plugins/superb/.codex-plugin/plugin.json -->
+<!-- pipeline-v2-task: id=P3-T06; deps=P3-T03; kind=source; batch=P3-package; order=1; write_scope=file:plugins/superb/.claude-plugin/plugin.json,file:plugins/superb/.codex-plugin/plugin.json; outputs=none -->
 
 **Files:**
 
@@ -330,7 +380,7 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
 **Interfaces:**
 
 - Produces identical JSON string "version": "0.14.0" in both manifests.
-- Consumes P3-T01 exact-version check and the approved V2 description language from the design/Phase 2; it has no dependency on the disjoint root-documentation task.
+- Consumes P3-T01 exact-version check, integrated P3-T03 CI prerequisite, and the approved V2 description language from the design/Phase 2; it has no dependency on the disjoint root-documentation task.
 - Does not change plugin name, author, Codex skills path, marketplace source/name, or cachebuster metadata.
 
 **Acceptance behavior:**
@@ -352,13 +402,13 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
 
       "version": "0.14.0"
 
-  Refresh only Pipeline-related text required to align with P3-T05.
+  Refresh only Pipeline-related text required to align with the approved design and integrated Phase 2 wording; do not depend on or edit P3-T05 files.
 
 - [ ] **Step 4: Run GREEN and no-unrelated-change proof**
 
   Run: python3 -m json.tool plugins/superb/.claude-plugin/plugin.json >/dev/null && python3 -m json.tool plugins/superb/.codex-plugin/plugin.json >/dev/null && ./tools/check-plugin.sh
 
-  Expected: both parse and default gate passes.
+  Expected: both parse and the complete default release gate passes now that CI and manifest prerequisites are integrated. This establishes the clean baseline consumed by P3-T02.
 
   Run: ! git diff -- plugins/superb/.claude-plugin/plugin.json plugins/superb/.codex-plugin/plugin.json | rg '^[+-].*0\.13\.0\+codex'
 
@@ -370,6 +420,14 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
       git commit -m "chore(superb): release pipeline v2 metadata"
 
 ## Phase integration and mechanical verification
+
+The executable dependency chain is:
+
+1. P3-T01 implements/tests validator predicates in a controlled throwaway conforming tree; the live full gate remains red only for named later prerequisites.
+2. P3-T03, depending on P3-T01, edits only `checks.yml` and uses task-local CI/Pipeline-suite checks.
+3. P3-T06, depending on P3-T03, updates both manifests and establishes the first complete live `check-plugin.sh` baseline.
+4. P3-T02, depending on P3-T01/P3-T03/P3-T06, replaces the mutation inventory and runs it against that conforming baseline.
+5. P3-T04/P3-T05 may run alongside compatible parts of this chain, subject to the global limit and typed-scope reservation. All six source tasks must satisfy complete integration ancestry before the phase suite.
 
 After every task is integrated on feat/pipeline-rebuild-v2, run:
 

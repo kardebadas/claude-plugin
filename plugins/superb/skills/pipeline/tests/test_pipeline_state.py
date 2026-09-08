@@ -24,6 +24,7 @@ from plugins.superb.skills.pipeline.scripts.pipeline_state import (
     initialize_run,
     inspect_run,
     locked_tracker_update,
+    next_eligible_actions,
     main,
     parse_phase_plan,
     parse_tracker,
@@ -32,6 +33,7 @@ from plugins.superb.skills.pipeline.scripts.pipeline_state import (
     record_task_question,
     render_tracker,
     resume_task,
+    reserve_tasks,
     start_task,
     validate_run,
 )
@@ -751,7 +753,7 @@ class TaskTransitionTest(unittest.TestCase):
             root = Path(directory)
             repo, base = self.make_git_repo(root)
             plan = self.source_plan(root)
-            run_dir = self.initialize(root, plan, self.decisions(root, self.resolved_decision()), base)
+            run_dir = self.initialize(repo, plan, self.decisions(root, self.resolved_decision()), base)
             self.git(repo, "checkout", "-qb", "worker")
             (repo / "src.txt").write_text("worker\n", encoding="utf-8")
             self.git(repo, "add", "src.txt")
@@ -795,6 +797,207 @@ class TaskTransitionTest(unittest.TestCase):
             completed = complete_task(run_dir, task_id="PA-01", attempt="artifact-1", phase_plan=plan, source_ref=None, commits=(), artifacts=(Path("evidence/result.md"),), evidence=("artifact-validation.log",), repo_dir=repo)
             task = next(task for task in completed.tasks if task.id == "PA-01")
             self.assertEqual((task.state, task.commits, task.integration), ("[x]", "-", "N/A"))
+
+
+class SchedulerReadinessTest(unittest.TestCase):
+    def git(self, repo: Path, *args: str) -> str:
+        return subprocess.run(
+            ("git", *args), cwd=repo, check=True, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ).stdout.strip()
+
+    def write_plan(self, root: Path, tasks: tuple[str, ...]) -> Path:
+        path = root / "phase.md"
+        body = [
+            "# Scheduler phase",
+            "",
+            "<!-- pipeline-v2-phase: id=77; deps=none; review_gate=final-only; review_reason=Mechanical verification only. -->",
+            "",
+        ]
+        for heading, metadata in zip((f"### PS-{i:02d} — Task" for i in range(1, len(tasks) + 1)), tasks):
+            body.extend((heading, metadata, ""))
+        path.write_text("\n".join(body), encoding="utf-8")
+        return path
+
+    def task(self, task_id: str, *, deps: str = "none", batch: str = "batch", order: int = 1, scope: str | None = None) -> str:
+        scope = scope or f"file:{task_id.lower()}.txt"
+        return (
+            f"<!-- pipeline-v2-task: id={task_id}; deps={deps}; kind=source; "
+            f"batch={batch}; order={order}; write_scope={scope}; outputs=none -->"
+        )
+
+    def initialize(self, root: Path, plan: Path, *, worker_limit: int = 3) -> Path:
+        decisions = root / "decisions.md"
+        decisions.write_text("# Decisions\n", encoding="utf-8")
+        run_dir = root / "run"
+        initialize_run(
+            run_dir,
+            run_id="scheduler-test",
+            base_commit="a" * 40,
+            target_branch="target",
+            worker_limit=worker_limit,
+            artifacts={
+                "spec": "spec.md", "master_plan": "master.md",
+                "phase_plans": str(plan), "decisions": str(decisions), "findings": "findings.md",
+            },
+            approved_existing=(),
+        )
+        return run_dir
+
+    def test_independent_exact_file_scopes_can_reserve_together_and_limit_is_global(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = self.write_plan(root, tuple(self.task(f"PS-{i:02d}", batch=f"b{i}") for i in range(1, 4)))
+            run_dir = self.initialize(root, plan, worker_limit=2)
+            ready = next_eligible_actions(run_dir, plan, capacity=2)
+            self.assertEqual(tuple(task.id for task in ready), ("PS-01", "PS-02"))
+            reserved = reserve_tasks(
+                run_dir, plan, task_ids=("PS-01", "PS-02"), owners=("worker-1", "worker-2"),
+                attempts=("attempt-1", "attempt-2"), capacity=2,
+            )
+            self.assertEqual(sum(task.state == "[~]" for task in reserved.tasks), 2)
+            self.assertEqual(next_eligible_actions(run_dir, plan, capacity=2), ())
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                reserve_tasks(
+                    run_dir, plan, task_ids=("PS-03",), owners=("worker-3",),
+                    attempts=("attempt-3",), capacity=2,
+                )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_identical_and_tree_child_scopes_conflict(self):
+        cases = (
+            ("file:shared.txt", "file:shared.txt"),
+            ("tree:shared", "file:shared/child.txt"),
+            ("tree:shared", "tree:shared/nested"),
+        )
+        for left, right in cases:
+            with self.subTest(left=left, right=right), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                plan = self.write_plan(
+                    root,
+                    (
+                        self.task("PS-01", batch="a", scope=left),
+                        self.task("PS-02", batch="b", scope=right),
+                    ),
+                )
+                run_dir = self.initialize(root, plan)
+                self.assertEqual(tuple(task.id for task in next_eligible_actions(run_dir, plan, capacity=3)), ("PS-01",))
+                before = (run_dir / "progress.md").read_bytes()
+                with self.assertRaises(TransitionError):
+                    reserve_tasks(
+                        run_dir, plan, task_ids=("PS-01", "PS-02"),
+                        owners=("worker-1", "worker-2"), attempts=("a-1", "a-2"), capacity=3,
+                    )
+                self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_stale_readiness_is_revalidated_for_state_and_consumed_capacity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = self.write_plan(root, tuple(self.task(f"PS-{i:02d}", batch=f"b{i}") for i in range(1, 4)))
+            run_dir = self.initialize(root, plan, worker_limit=2)
+            stale = next_eligible_actions(run_dir, plan, capacity=2)
+            self.assertEqual(tuple(task.id for task in stale), ("PS-01", "PS-02"))
+            start_task(run_dir, task_id="PS-03", owner="worker-3", attempt="attempt-3")
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                reserve_tasks(
+                    run_dir, plan, task_ids=tuple(task.id for task in stale),
+                    owners=("worker-1", "worker-2"), attempts=("attempt-1", "attempt-2"), capacity=2,
+                )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+            start_task(run_dir, task_id="PS-01", owner="worker-1", attempt="attempt-1")
+            record_task_question(
+                run_dir, task_id="PS-01", attempt="attempt-1",
+                question_or_block_ref="D-200", reason="needs user decision",
+            )
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                reserve_tasks(
+                    run_dir, plan, task_ids=("PS-01",), owners=("worker-1",),
+                    attempts=("attempt-4",), capacity=2,
+                )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_dependency_and_unknown_capacity_block_readiness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = self.write_plan(
+                root,
+                (
+                    self.task("PS-01", batch="a"),
+                    self.task("PS-02", deps="PS-01", batch="b"),
+                ),
+            )
+            run_dir = self.initialize(root, plan)
+            with self.assertRaisesRegex(TransitionError, "capacity"):
+                next_eligible_actions(run_dir, plan, capacity=None)
+            with self.assertRaisesRegex(TransitionError, "capacity"):
+                next_eligible_actions(run_dir, plan, capacity=2)
+            self.assertEqual(tuple(task.id for task in next_eligible_actions(run_dir, plan, capacity=3)), ("PS-01",))
+
+    def test_queued_dependency_becomes_eligible_after_capacity_and_integration_are_available(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.git(root, "init", "-q")
+            self.git(root, "config", "user.email", "pipeline@example.invalid")
+            self.git(root, "config", "user.name", "Pipeline Test")
+            (root / "base.txt").write_text("base\n", encoding="utf-8")
+            self.git(root, "add", "base.txt")
+            self.git(root, "commit", "-qm", "base")
+            self.git(root, "branch", "target")
+            plan = self.write_plan(
+                root,
+                (
+                    self.task("PS-01", batch="a", scope="file:ps-01.txt"),
+                    self.task("PS-02", deps="PS-01", batch="b", scope="file:ps-02.txt"),
+                ),
+            )
+            run_dir = self.initialize(root, plan, worker_limit=1)
+            reserve_tasks(
+                run_dir, plan, task_ids=("PS-01",), owners=("worker-1",),
+                attempts=("attempt-1",), capacity=1,
+            )
+            self.assertEqual(next_eligible_actions(run_dir, plan, capacity=1), ())
+            self.git(root, "checkout", "-q", "target")
+            (root / "ps-01.txt").write_text("implemented\n", encoding="utf-8")
+            self.git(root, "add", "ps-01.txt")
+            self.git(root, "commit", "-qm", "implement PS-01")
+            commit = self.git(root, "rev-parse", "HEAD")
+            complete_task(
+                run_dir, task_id="PS-01", attempt="attempt-1", phase_plan=plan,
+                source_ref="target", commits=(commit,), artifacts=(), evidence=("task-tests",), repo_dir=root,
+            )
+            record_task_integration(
+                run_dir, task_id="PS-01", integration_commit=commit,
+                verification=(f"integrated:{commit}",), repo_dir=root,
+            )
+            self.assertEqual(
+                tuple(task.id for task in next_eligible_actions(run_dir, plan, capacity=1)),
+                ("PS-02",),
+            )
+
+    def test_reservation_rejects_unknown_duplicate_or_partial_identity_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = self.write_plan(root, (self.task("PS-01"), self.task("PS-02", batch="two")))
+            run_dir = self.initialize(root, plan)
+            cases = (
+                (("PS-99",), ("worker",), ("attempt",)),
+                (("PS-01", "PS-01"), ("worker-1", "worker-2"), ("a-1", "a-2")),
+                (("PS-01", "PS-02"), ("worker",), ("a-1", "a-2")),
+                (("PS-01", "PS-02"), ("worker-1", "worker-2"), ("same", "same")),
+            )
+            for task_ids, owners, attempts in cases:
+                with self.subTest(task_ids=task_ids, owners=owners, attempts=attempts):
+                    before = (run_dir / "progress.md").read_bytes()
+                    with self.assertRaises(TransitionError):
+                        reserve_tasks(
+                            run_dir, plan, task_ids=task_ids, owners=owners,
+                            attempts=attempts, capacity=3,
+                        )
+                    self.assertEqual((run_dir / "progress.md").read_bytes(), before)
 
 
 if __name__ == "__main__":

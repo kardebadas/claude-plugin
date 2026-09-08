@@ -955,11 +955,7 @@ def _validate_start_guards(run_dir: Path, tracker: Tracker, task_id: str) -> Pla
     records = {task.id: task for task in tracker.tasks}
     for dependency in target.deps:
         record = records[dependency]
-        ready = (
-            record.state == "[x]"
-            and ((record.kind == "source" and record.integration not in {"-", "N/A"}) or (record.kind == "artifact" and record.integration == "N/A"))
-        )
-        if not ready:
+        if not _dependency_ready(Path(run_dir), tracker, record):
             raise TransitionError(f"dependency {dependency} is not verified and integrated")
     active = [task for task in tracker.tasks if task.state == "[~]" and task.id != task_id]
     if len(active) >= tracker.worker_limit:
@@ -969,6 +965,161 @@ def _validate_start_guards(run_dir: Path, tracker: Tracker, task_id: str) -> Pla
         if other is not None and _scopes_overlap(target.write_scope, other.write_scope):
             raise TransitionError(f"write scope conflicts with active task {task.id}")
     return target
+
+
+def _dependency_ready(run_dir: Path, tracker: Tracker, task: TaskRecord) -> bool:
+    if task.state != "[x]" or task.verification == "-":
+        return False
+    if task.kind == "artifact":
+        return task.integration == "N/A" and task.artifacts != "-"
+    if task.integration in {"-", "N/A"} or task.commits == "-":
+        return False
+    repo_dir = _project_root(run_dir)
+    return all(
+        _git(repo_dir, "merge-base", "--is-ancestor", commit, task.integration)
+        for commit in task.commits.split(",")
+    ) and _git(repo_dir, "merge-base", "--is-ancestor", task.integration, tracker.target_branch)
+
+
+def _scheduler_context(run_dir: Path, phase_plan: Path, capacity: int | None) -> tuple[Tracker, tuple[PlannedTask, ...], int]:
+    if capacity is None:
+        raise TransitionError("runtime capacity is unknown; obtain and record an explicit supported worker limit")
+    if isinstance(capacity, bool) or capacity <= 0:
+        raise TransitionError("runtime capacity must be a positive integer")
+    tracker = validate_run(run_dir)
+    if tracker.worker_limit > capacity:
+        raise TransitionError(
+            f"recorded worker_limit {tracker.worker_limit} exceeds detected runtime capacity {capacity}"
+        )
+    approved_paths = {
+        _resolved_reference(run_dir, value).resolve()
+        for value in dict(tracker.run_fields)["phase_plans"].split(",")
+    }
+    supplied_path = Path(phase_plan).resolve()
+    if supplied_path not in approved_paths:
+        raise TransitionError("phase plan is not one of the run's approved phase plans")
+    metadata, planned = _parse_phase_document(supplied_path)
+    if dict(tracker.current_fields)["phase"] != metadata.id:
+        raise TransitionError("phase plan does not match the active phase")
+    authoritative = _planned_tasks(run_dir, tracker)
+    if any(authoritative.get(task.id) != task for task in planned):
+        raise TransitionError("phase plan task metadata conflicts with the run's approved plans")
+    if any(gate.state in {"in_progress", "blocked"} for gate in tracker.gates):
+        raise TransitionError("an unresolved review gate prevents implementation dispatch")
+    active = sum(task.state == "[~]" for task in tracker.tasks)
+    return tracker, planned, tracker.worker_limit - active
+
+
+def next_eligible_actions(
+    run_dir: Path,
+    phase_plan: Path,
+    *,
+    capacity: int | None,
+) -> tuple[PlannedTask, ...]:
+    """Return an advisory, conflict-free subset; reservation must revalidate it."""
+    tracker, planned, available = _scheduler_context(Path(run_dir), Path(phase_plan), capacity)
+    if available <= 0:
+        return ()
+    records = {task.id: task for task in tracker.tasks}
+    active = tuple(task for task in tracker.tasks if task.state == "[~]")
+    authoritative = _planned_tasks(Path(run_dir), tracker)
+    selected: list[PlannedTask] = []
+    for candidate in sorted(planned, key=lambda item: (item.order, item.id)):
+        record = records[candidate.id]
+        if record.state != "[ ]" or record.question != "-":
+            continue
+        if any(not _dependency_ready(Path(run_dir), tracker, records[dependency]) for dependency in candidate.deps):
+            continue
+        if any(
+            active_plan is not None and _scopes_overlap(candidate.write_scope, active_plan.write_scope)
+            for active_record in active
+            for active_plan in (authoritative.get(active_record.id),)
+        ):
+            continue
+        if any(_scopes_overlap(candidate.write_scope, other.write_scope) for other in selected):
+            continue
+        selected.append(candidate)
+        if len(selected) == available:
+            break
+    return tuple(selected)
+
+
+def reserve_tasks(
+    run_dir: Path,
+    phase_plan: Path,
+    *,
+    task_ids: tuple[str, ...],
+    owners: tuple[str, ...],
+    attempts: tuple[str, ...],
+    capacity: int | None,
+) -> Tracker:
+    """Atomically reserve a currently ready, pairwise-independent task set."""
+    if not task_ids or len(task_ids) != len(owners) or len(task_ids) != len(attempts):
+        raise TransitionError("task, owner, and attempt identities must be nonempty and aligned")
+    if len(task_ids) != len(set(task_ids)) or len(attempts) != len(set(attempts)):
+        raise TransitionError("task and attempt identities must be unique within a reservation")
+    if any(not _TOKEN.fullmatch(value) for value in (*owners, *attempts)):
+        raise TransitionError("owner and attempt identities must be valid tokens")
+    transition_id = "reserve-" + "-".join(f"{task}-{attempt}" for task, attempt in zip(task_ids, attempts))
+
+    def transition(current: Tracker) -> Tracker:
+        tracker, planned, available = _scheduler_context(Path(run_dir), Path(phase_plan), capacity)
+        if tracker != current:
+            raise TransitionError("tracker changed while the reservation lock was held")
+        if len(task_ids) > available:
+            raise TransitionError("reservation exceeds the global worker limit or available capacity")
+        by_id = {task.id: task for task in planned}
+        records = {task.id: task for task in tracker.tasks}
+        try:
+            selected = tuple(by_id[task_id] for task_id in task_ids)
+        except KeyError as exc:
+            raise TransitionError(f"unknown task in reservation: {exc.args[0]}") from exc
+        if any(records[item.id].state != "[ ]" or records[item.id].question != "-" for item in selected):
+            raise TransitionError("every reserved task must still be unstarted and unblocked")
+        if any(
+            not _dependency_ready(Path(run_dir), tracker, records[dependency])
+            for item in selected
+            for dependency in item.deps
+        ):
+            raise TransitionError("a reserved task dependency is not verified and integrated")
+        authoritative = _planned_tasks(Path(run_dir), tracker)
+        active_plans = tuple(
+            authoritative.get(record.id)
+            for record in tracker.tasks
+            if record.state == "[~]"
+        )
+        if any(
+            active_plan is not None and _scopes_overlap(item.write_scope, active_plan.write_scope)
+            for item in selected
+            for active_plan in active_plans
+        ):
+            raise TransitionError("a reserved task conflicts with active write ownership")
+        if any(
+            _scopes_overlap(left.write_scope, right.write_scope)
+            for index, left in enumerate(selected)
+            for right in selected[index + 1:]
+        ):
+            raise TransitionError("reserved tasks have conflicting write scopes")
+        updated = tracker
+        for item, owner, attempt in zip(selected, owners, attempts):
+            record = _task_record(updated, item.id)
+            if any(attempt in value for value in (record.attempt, record.checkpoints, record.result)):
+                raise TransitionError("task attempt has already been used")
+            updated = _replace_task(
+                updated,
+                replace(
+                    record,
+                    state="[~]",
+                    owner=owner,
+                    attempt=attempt,
+                    checkpoints=_append_history(record.checkpoints, f"started:{attempt}"),
+                ),
+            )
+        return updated
+
+    return locked_tracker_update(
+        Path(run_dir), transition_id, transition, timeout_s=5.0, replay_returns_current=False
+    )
 
 
 def _append_history(value: str, entry: str) -> str:
@@ -1192,6 +1343,7 @@ def _argument_parser() -> argparse.ArgumentParser:
     next_command = commands.add_parser("next")
     next_command.add_argument("run_dir", type=Path)
     next_command.add_argument("--phase-plan", type=Path, required=True)
+    next_command.add_argument("--capacity", type=int)
     init = commands.add_parser("init")
     init.add_argument("run_dir", type=Path)
     init.add_argument("--run-id", required=True)
@@ -1218,10 +1370,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(inspect_run(args.run_dir), sort_keys=True))
             return 0
         if args.command == "next":
-            validate_run(args.run_dir)
-            parse_phase_plan(args.phase_plan)
-            print("next is read-only but scheduling is unavailable until P1-05", file=sys.stderr)
-            return 2
+            ready = next_eligible_actions(args.run_dir, args.phase_plan, capacity=args.capacity)
+            print(json.dumps({"eligible": [task.id for task in ready]}, sort_keys=True))
+            return 0
         artifacts = {
             "spec": args.spec,
             "master_plan": args.master_plan,
@@ -1240,7 +1391,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"initialized {args.run_dir}")
         return 0
-    except (SchemaError, PlanMetadataError) as exc:
+    except (SchemaError, PlanMetadataError, TransitionError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
 

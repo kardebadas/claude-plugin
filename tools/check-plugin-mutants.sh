@@ -2645,6 +2645,8 @@ f=tools/fixtures/run-leading-rvj-fix/progress.md
 if ! grep -qF -- "- [x] T3 — a task · W1 · deps T1 — \`ccccccc\`" "$f"; then
   echo "mutant is a no-op: Phase 3 is not closed to begin with"
 else
+  grep -qF -- "- [ ] T4 — a task · W1 · deps T2, T3" "$f" || { echo "mutant is a no-op: Phase 4s task line moved, so the shared mutation cannot run"; exit 0; }
+  grep -qF -- "- **Lane A:** Phase 4 — T4" "$f" || { echo "mutant is a no-op: Lane As line moved, so the shared mutation cannot run"; exit 0; }
   _reopen_contributor
   # Lane B keeps a line naming its own open phase, so the missing-lane arm stays
   # quiet and the premature-review report is the ONLY one left.
@@ -2664,6 +2666,8 @@ else
   # keyed on the tick alone dropped it out of every advancement check, so a
   # phase never implemented and never reviewed read as done. Revert the
   # `not _unfin` guard and this mutant survives.
+  grep -qF -- "- [ ] T4 — a task · W1 · deps T2, T3" "$f" || { echo "mutant is a no-op: Phase 4s task line moved, so the shared mutation cannot run"; exit 0; }
+  grep -qF -- "- **Lane A:** Phase 4 — T4" "$f" || { echo "mutant is a no-op: Lane As line moved, so the shared mutation cannot run"; exit 0; }
   _reopen_contributor
   grep -qF -- "- [ ] T3 — a task" "$f" || echo "mutant is a no-op: Phase 3 was not reopened"
   grep -qF -- "- **Lane B:**" "$f" && echo "mutant is a no-op: Lane B has a line, so this is not the vanishing-lane shape"
@@ -2765,6 +2769,10 @@ L[j:j+1] = ["- [x] RV — review fan-out · N=1 → 1 slice + 0 integration",
             "      · reports p3-review-a.md · coverage p3-coverage.md → no findings"]
 k = L.index("- **Lane B:** Phase 3 — T3")
 L[k] = "- **Lane B:** done"
+# Lane A is the SURVIVOR and every contributor has now passed, so its own
+# legal value stops being `waiting at join` and becomes the gate it owes.
+# Without this the mutant kills through the Lane A line instead of the Lane B one.
+L[L.index("- **Lane A:** waiting at join Phase 4")] = "- **Lane A:** Phase 4 \u2014 RVJ"
 p.write_text("\n".join(L))
 EOF
   printf "fixture\n" > tools/fixtures/run-lanes/agent-output/p3-review-a.md
@@ -2781,6 +2789,25 @@ if ! grep -qF -- "- **Lane B:** Phase 3 — T3" "$f"; then
 else
   sed -i "s|^- \*\*Lane B:\*\* Phase 3 — T3$|- **Lane B:** Phase 31 — T3|" "$f"
   grep -qF -- "- **Lane B:** Phase 31 — T3" "$f" || echo "mutant is a no-op: the phase id was not changed"
+fi'
+
+run_mutant "gitignore hides curated records behind a double star" '
+if ! grep -qxF -- "docs/superpowers/runs/*/" .gitignore; then
+  echo "mutant is a no-op: the ignore rule is not present to widen"
+else
+  # `runs/**` matches FILES as well as directories -- measured with
+  # git check-ignore -- so it hides the loose curated records while looking
+  # like the narrow rule. It must be refused, not blessed.
+  sed -i "s|^docs/superpowers/runs/\*/$|docs/superpowers/runs/**|" .gitignore
+  grep -qxF -- "docs/superpowers/runs/**" .gitignore || echo "mutant is a no-op: the pattern was not widened"
+fi'
+
+run_mutant "gitignore hides curated records behind a double-star glob" '
+if ! grep -qxF -- "docs/superpowers/runs/*/" .gitignore; then
+  echo "mutant is a no-op: the ignore rule is not present to widen"
+else
+  sed -i "s|^docs/superpowers/runs/\*/$|docs/superpowers/runs/**/*|" .gitignore
+  grep -qxF -- "docs/superpowers/runs/**/*" .gitignore || echo "mutant is a no-op: the pattern was not widened"
 fi'
 
 echo

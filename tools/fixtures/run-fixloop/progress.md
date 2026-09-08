@@ -16,6 +16,14 @@ the only fixture with a `findings.md`, which is why `tools/fixtures/run-ok`'s
 pass line says the ledger half went unchecked there: an absent ledger must never
 read as an empty one.
 
+Round 3 is the fixture's `M=0 → no round` record, and its **outcome names an
+F-ID rather than `no findings`** — `→ F-002 still open`, which is what the
+iteration log records for that iteration too. That is the second legal outcome
+form, and it is here because a closures parser that stops only at
+`→ no findings` reads this one as a closure with no route: the round's own
+result reported as a bad route. Both withdrawals state their reason, and
+neither names a commit.
+
 Round 2 is a **planned** round — it names its `fixplan` file, present in
 `agent-output/` — so the fix-plan arm has a second conforming input over a real
 run, on a round that is not the one in `run-ok`.

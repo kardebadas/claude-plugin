@@ -608,6 +608,7 @@ digraph pipeline {
     "Stage 4 FIX_PLAN: one scoped fix plan for this round's blocking findings" [shape=box];
     "Stage 4 FIX_IMPLEMENT: fix agents, one per file cluster" [shape=box];
     "Stage 4 RE_REVIEW: sized from the fix diff (C=<n>)" [shape=box];
+    "CLOSE(review_gate): the gate that raised the findings goes [x]" [shape=box];
     "Stage 4 PASS: RV [x], close-out written and saved" [shape=box];
     "Stage 4b: joint integration review over a split's combined diff" [shape=box];
     "Stage 5: finishing-a-development-branch" [shape=doublecircle];
@@ -623,7 +624,7 @@ digraph pipeline {
     "GATE 2: approve expanded plan (register must be empty)" -> "Stage 4 IMPLEMENT: every task in the phase, waves of tasks (ambiguity -> ask)" [label="approved"];
     "Stage 4 IMPLEMENT: every task in the phase, waves of tasks (ambiguity -> ask)" -> "Stage 4 REVIEW: RV fan-out over the whole phase diff (all reviewers return first)" [label="every task [x] + gates green"];
     "Stage 4 REVIEW: RV fan-out over the whole phase diff (all reviewers return first)" -> "Stage 4 DECIDE: consolidate, dedup, F-IDs, tiers";
-    "Stage 4 DECIDE: consolidate, dedup, F-IDs, tiers" -> "Stage 4 PASS: RV [x], close-out written and saved" [label="no blocking findings"];
+    "Stage 4 DECIDE: consolidate, dedup, F-IDs, tiers" -> "CLOSE(review_gate): the gate that raised the findings goes [x]" [label="no blocking findings"];
     "Stage 4 DECIDE: consolidate, dedup, F-IDs, tiers" -> "Stage 4 FIX_PLAN: one scoped fix plan for this round's blocking findings" [label="blocking findings"];
     "Stage 4 FIX_PLAN: one scoped fix plan for this round's blocking findings" -> "Stage 4 FIX_IMPLEMENT: fix agents, one per file cluster";
     "Stage 4 FIX_IMPLEMENT: fix agents, one per file cluster" -> "Stage 4 RE_REVIEW: sized from the fix diff (C=<n>)";
@@ -790,7 +791,7 @@ execution and the unit of acceptance, and the run stays inside it until it
 passes.
 
 ```
-IMPLEMENT ─► REVIEW ─► DECIDE ─┬─ no blocking findings ──────────────► PASS ─► NEXT_PHASE
+IMPLEMENT ─► REVIEW ─► DECIDE ─┬─ no blocking findings ─────► CLOSE(review_gate)
                                │                                        ▲
                                └─ blocking findings                     │
                                     ▼                                   │
@@ -798,8 +799,9 @@ IMPLEMENT ─► REVIEW ─► DECIDE ─┬─ no blocking findings ───�
                                     ▲                                   │
                                     └──────── blocking findings remain ─┘
 
-CLOSE(review_gate) is the clean terminal of that loop, and PASS above is what it
-unlocks ONLY when the gate was this phase's own RV:
+CLOSE(review_gate) is the clean terminal of BOTH paths — a first round that
+raised nothing and a re-review that came back clean close the same way. What it
+unlocks depends on which gate closed:
 
     CLOSE(RV)           ─► phase PASS ─► NEXT_PHASE
     CLOSE(trailing RVJ) ─► NEXT_PHASE

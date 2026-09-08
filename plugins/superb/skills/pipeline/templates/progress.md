@@ -59,7 +59,8 @@ Current State grammar:
   join -- has exactly one line. A lane retired by a closed leading RVJ has none.
 
 Phase headings:
-  ## Phase <n> — <name> · deps: <phases, or none> · lane: <id>
+  ## Phase <id> — <name> · deps: <phases, or none> · lane: <id>
+  <id> is whatever the plan calls the phase -- `2`, `3a`, `A2`, `B1`.
   `· deps:` says whether a phase MAY execute; `· lane:` says which concurrent
   execution branch executes it. The mapping is written at GATE 2 and never
   recomputed, so `phase -> lane` survives compaction and resume without
@@ -76,7 +77,9 @@ Phase headings:
   the phase still owes IMPLEMENT -> RV -> CLOSE(RV) -> PASS on its own tasks.
   A Rule 3 split forks: its siblings take their own lanes and its TRAILING RVJ
   reviews them as a unit. What happens to those lanes depends on what follows.
-  If a later phase depends on two or more of the siblings, that phase IS a lane
+  If a later phase depends IMMEDIATELY on two or more of the siblings -- a dep
+  another dep already reaches is redundant and is not a branch arriving --
+  that phase IS a lane
   join -- it carries a LEADING RVJ of its own and collapses the lanes onto the
   surviving one, exactly as any join does; the trailing RVJ reviewed the split,
   the leading one reviews the merge into the phase that consumes it. If nothing

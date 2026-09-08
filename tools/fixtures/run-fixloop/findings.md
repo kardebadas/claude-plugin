@@ -31,7 +31,7 @@ withdrawn, because a commit is owed a fix plan and a re-review. Neither row is
 | Iter | Scope | Depth | Targeted F-IDs | Open after re-review | At |
 | ---- | ----- | ----- | -------------- | -------------------- | -- |
 | 1 | Phase 2 | 1 | F-001, F-002 | F-002 | 2026-09-07 10:00 |
-| 2 | Phase 2 | 1 | F-003, F-004 | none | 2026-09-07 10:30 |
+| 2 | Phase 2 | 1 | F-003, F-004 | F-002 | 2026-09-07 10:30 |
 
 ## Deferred Minor findings
 

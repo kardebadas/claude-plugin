@@ -2183,7 +2183,9 @@ print("\n== run artifacts are ignored ==")
 # history it must not touch. Git ignores only what is untracked, so the rule
 # stops the NEXT run committing its artifacts while the grandfathered files stay.
 # Mutants: "gitignore drops the run-directory rule",
-#          "gitignore hides curated documentation too".
+#          "gitignore hides curated documentation too",
+#          "gitignore hides curated records behind a double star",
+#          "gitignore hides curated records behind a double-star glob".
 _gi = ROOT / ".gitignore"
 _gilines = [ln.strip() for ln in
             (_gi.read_text(encoding="utf-8") if _gi.exists() else "").split("\n")
@@ -2191,7 +2193,19 @@ _gilines = [ln.strip() for ln in
 # MATCHED BY SHAPE, not by one literal. `/docs/superpowers/runs/*/` and
 # `docs/superpowers/runs/**/` are the same rule to git, and an arm that accepts
 # only one spelling fails a repository that wrote another.
-if any(re.fullmatch(r"/?docs/superpowers/runs/\*{1,2}/(?:\*{1,2})?", ln)
+# THE FIRST SEGMENT MUST BE `*`, NOT `**`. Widening this to accept `**` in
+# either position blessed `docs/superpowers/runs/**/*`, which git matches
+# against FILES as well as directories — so the loose curated records the arm
+# below exists to protect were hidden, and both arms printed an affirmative
+# over it. `runs/*/` and `runs/*/**` are the narrow spellings; `runs/**`,
+# `runs/**/` and `runs/**/*` are not.
+# MEASURED AGAINST GIT, not guessed. A trailing `/` makes a pattern
+# directory-only, and a `*/` first segment restricts it to one directory level's
+# contents; either way the loose curated records stay trackable. What is NOT
+# narrow is a `**` first segment with no trailing slash — `runs/**` and
+# `runs/**/*` both match FILES, so they hide the very records the second arm
+# exists to protect. Verified with `git check-ignore` on all five spellings.
+if any(re.fullmatch(r"/?docs/superpowers/runs/(?:\*{1,2}/|\*/\*{1,2})", ln)
        for ln in _gilines):
     ok("`.gitignore` covers pipeline run directories")
 else:
@@ -2209,10 +2223,10 @@ else:
 _wide = [ln for ln in _gilines
          if re.match(r"^/?docs/superpowers/?$", ln)
          or re.fullmatch(r"/?docs/superpowers/\*{1,2}/?", ln)
-         # `runs/**` WITHOUT THE TRAILING SLASH matches files as well as
-         # directories, so it hides the loose curated records too. It is
-         # the wide pattern that looks narrow.
-         or re.fullmatch(r"/?docs/superpowers/runs/\*{1,2}", ln)
+         # `runs/**` IN ANY FORM matches files as well as directories, so it
+         # hides the loose curated records too. It is the wide pattern that
+         # looks narrow, and all three of its spellings are named here.
+         or re.fullmatch(r"/?docs/superpowers/runs/\*\*(?:/\*{1,2})?", ln)
          or re.match(r"^/?docs/superpowers/runs/?$", ln)
          or re.match(r"^/?docs/superpowers/runs/\*$", ln)]
 if _wide:
@@ -2476,7 +2490,12 @@ def parse_phase_lanes(phases):
             # — `deps: none (root phase)`, `deps: n/a` — into one report per
             # word, each naming a word as a phase.
             for item in m.group(1).split(","):
-                item = item.strip().strip("`")
+                # EMPHASIS IS NOT PART OF THE ID, for the same reason
+                # `- [x] **RVJ**` is still a closed gate: a tracker written
+                # `deps: **Phase 2**` names Phase 2, and reporting it as a
+                # phase the tracker lacks is a false FAIL with an unactionable
+                # remedy — both phases exist.
+                item = item.strip().strip("`*_ ")
                 if not item or item.lower() in ("none", "-", "\u2014"):
                     continue
                 tok = re.sub(r"^[Pp]hase\s+", "", item).strip()
@@ -3503,7 +3522,7 @@ if RUN_DIR is not None:
                                 f"phase assigned to lane {_lid} is a direct "
                                 "predecessor of it, and it is not that phase's "
                                 "own lane")
-                    elif (_lid not in _waiting
+                    elif (_waiting.get(_lid) != _ji
                           and any(r[1] == "x" for r in _leading_rvj(_ji))):
                         _why = (f"names {_phs[_ji]['label']}, whose leading "
                                 "`RVJ` is already `[x]` — the join has "

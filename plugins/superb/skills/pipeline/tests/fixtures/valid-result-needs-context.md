@@ -4,22 +4,22 @@
 ## Result
 | Field | Value |
 | --- | --- |
-| run_id | malformed |
-| task_id | P1-01 |
+| run_id | fixture-run |
+| task_id | PF-01 |
 | attempt | attempt-001 |
 | owner | worker-1 |
 | kind | source |
-| status | MAYBE |
-| source_ref | refs/heads/feat/example |
-| commits | 0123456789abcdef0123456789abcdef01234567 |
+| status | NEEDS_CONTEXT |
+| source_ref | - |
+| commits | - |
 | artifacts | - |
-| tests | test command |
-| evidence | evidence.log |
+| tests | preflight inspection |
+| evidence | agent-output/preflight.log |
 | concerns | - |
-| question | - |
+| question | D-900 |
 | blocking_reason | - |
 
 ## Checkpoints
 | ID | Status | Evidence |
 | --- | --- | --- |
-| green | complete | evidence.log |
+| preflight | blocked | agent-output/preflight.log |

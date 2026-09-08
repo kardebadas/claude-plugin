@@ -7,6 +7,7 @@
 | run_id | 2026-09-08-example |
 | task_id | P1-01 |
 | attempt | attempt-001 |
+| owner | worker-1 |
 | kind | source |
 | status | DONE |
 | source_ref | refs/heads/feat/example |

@@ -7,6 +7,7 @@
 | run_id | <run_id> |
 | task_id | <task_id> |
 | attempt | <attempt_id> |
+| owner | <controller_assigned_owner> |
 | kind | <source_or_artifact> |
 | status | <worker_status> |
 | source_ref | <source_ref_or_dash> |

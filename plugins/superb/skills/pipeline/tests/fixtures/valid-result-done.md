@@ -4,17 +4,17 @@
 ## Result
 | Field | Value |
 | --- | --- |
-| run_id | malformed |
-| task_id | P1-01 |
+| run_id | fixture-run |
+| task_id | PF-01 |
 | attempt | attempt-001 |
 | owner | worker-1 |
 | kind | source |
-| status | MAYBE |
-| source_ref | refs/heads/feat/example |
+| status | DONE |
+| source_ref | refs/heads/fixture |
 | commits | 0123456789abcdef0123456789abcdef01234567 |
 | artifacts | - |
-| tests | test command |
-| evidence | evidence.log |
+| tests | targeted test |
+| evidence | agent-output/test.log |
 | concerns | - |
 | question | - |
 | blocking_reason | - |
@@ -22,4 +22,4 @@
 ## Checkpoints
 | ID | Status | Evidence |
 | --- | --- | --- |
-| green | complete | evidence.log |
+| tested | complete | agent-output/test.log |

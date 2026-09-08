@@ -7,6 +7,7 @@
 | run_id | 2026-09-08-example |
 | task_id | P2-T01 |
 | attempt | attempt-002 |
+| owner | worker-2 |
 | kind | artifact |
 | status | DONE_WITH_CONCERNS |
 | source_ref | - |

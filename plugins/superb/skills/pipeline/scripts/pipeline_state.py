@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import hashlib
 import json
 import os
 import re
@@ -75,6 +76,10 @@ class UpdateOutcomeUncertain(RuntimeError):
 
 class TransitionError(ValueError):
     """A requested controller transition is illegal for the current state."""
+
+
+class EvidenceError(ValueError):
+    """Worker evidence is missing, stale, conflicting, or assignment-inconsistent."""
 
 
 class _AlreadyApplied(Exception):
@@ -185,6 +190,7 @@ class WorkerResult:
     run_id: str
     task_id: str
     attempt: str
+    owner: str
     kind: str
     status: str
     source_ref: str
@@ -219,7 +225,7 @@ class PhaseMetadata:
 
 _RUN_KEYS = ("run_id", "base_commit", "target_branch", "worker_limit", "spec", "master_plan", "phase_plans", "decisions", "findings", "revision", "last_transition")
 _CURRENT_KEYS = ("phase", "batch", "next_action")
-_RESULT_KEYS = ("run_id", "task_id", "attempt", "kind", "status", "source_ref", "commits", "artifacts", "tests", "evidence", "concerns", "question", "blocking_reason")
+_RESULT_KEYS = ("run_id", "task_id", "attempt", "owner", "kind", "status", "source_ref", "commits", "artifacts", "tests", "evidence", "concerns", "question", "blocking_reason")
 _TASK_HEADER = ("ID", "Kind", "State", "Owner", "Attempt", "Result", "Checkpoints", "Source Ref", "Commits", "Artifacts", "Integration", "Verification", "Question")
 _PHASE_HEADER = ("ID", "State", "Verification", "Review Gate", "Review Reason", "Gate")
 _GATE_HEADER = ("ID", "Type", "Phase", "State", "Base", "Head", "Assignments", "Reports", "Verification", "Findings", "Questions")
@@ -366,16 +372,61 @@ def parse_worker_result(text: str) -> WorkerResult:
     commits, artifacts, evidence = _csv(values["commits"]), _csv(values["artifacts"]), _csv(values["evidence"])
     if values["kind"] not in {"source", "artifact"} or values["status"] not in _WORKER_STATUSES:
         raise SchemaError("invalid worker kind or status")
-    if values["attempt"] == "-" or values["tests"] == "-" or not evidence:
-        raise SchemaError("worker result needs attempt, tests, and evidence")
+    if any(not _TOKEN.fullmatch(values[key]) for key in ("run_id", "task_id", "attempt", "owner")):
+        raise SchemaError("worker result needs valid run, task, attempt, and owner identities")
+    if values["tests"] == "-" or not evidence:
+        raise SchemaError("worker result needs tests and evidence")
     if any(checkpoint.status not in {"complete", "in_progress", "blocked"} or checkpoint.evidence == "-" for checkpoint in checkpoints):
         raise SchemaError("invalid worker checkpoint")
-    if values["kind"] == "source":
+    completed = values["status"] in {"DONE", "DONE_WITH_CONCERNS"}
+    if completed and values["kind"] == "source":
         if values["source_ref"] == "-" or not commits or artifacts or any(not _COMMIT.fullmatch(commit) for commit in commits):
-            raise SchemaError("source result needs source ref and commits only")
-    elif values["source_ref"] != "-" or commits or not artifacts:
-        raise SchemaError("artifact result needs artifacts and no source provenance")
-    return WorkerResult(values["run_id"], values["task_id"], values["attempt"], values["kind"], values["status"], values["source_ref"], commits, artifacts, values["tests"], evidence, values["concerns"], values["question"], values["blocking_reason"], checkpoints)
+            raise SchemaError("completed source result needs source ref and commits only")
+    elif completed and (values["source_ref"] != "-" or commits or not artifacts):
+        raise SchemaError("completed artifact result needs artifacts and no source provenance")
+    elif not completed and values["kind"] == "source" and (values["source_ref"] != "-" or commits or artifacts):
+        raise SchemaError("unfinished source result cannot claim completed provenance")
+    elif not completed and values["kind"] == "artifact" and (values["source_ref"] != "-" or commits):
+        raise SchemaError("unfinished artifact result cannot carry source provenance")
+    if not completed and (values["question"] == "-" or not _TOKEN.fullmatch(values["question"])):
+        raise SchemaError("blocked worker status needs a stable question reference")
+    if values["status"] == "BLOCKED" and values["blocking_reason"] == "-":
+        raise SchemaError("BLOCKED result needs a blocking reason")
+    return WorkerResult(values["run_id"], values["task_id"], values["attempt"], values["owner"], values["kind"], values["status"], values["source_ref"], commits, artifacts, values["tests"], evidence, values["concerns"], values["question"], values["blocking_reason"], checkpoints)
+
+
+def render_worker_result(result: WorkerResult) -> str:
+    values = (
+        result.run_id,
+        result.task_id,
+        result.attempt,
+        result.owner,
+        result.kind,
+        result.status,
+        result.source_ref,
+        ",".join(result.commits) or "-",
+        ",".join(result.artifacts) or "-",
+        result.tests,
+        ",".join(result.evidence) or "-",
+        result.concerns,
+        result.question,
+        result.blocking_reason,
+    )
+    blocks = [
+        [_RESULT_MARKER, "# Pipeline v2 — Worker Result"],
+        ["## Result", *_render_table(("Field", "Value"), tuple(zip(_RESULT_KEYS, values)))],
+        [
+            "## Checkpoints",
+            *_render_table(
+                _CHECKPOINT_HEADER,
+                tuple((checkpoint.id, checkpoint.status, checkpoint.evidence) for checkpoint in result.checkpoints),
+            ),
+        ],
+    ]
+    text = "\n\n".join("\n".join(block) for block in blocks) + "\n"
+    if parse_worker_result(text) != result:
+        raise SchemaError("worker result cannot be rendered canonically")
+    return text
 
 
 _PHASE_METADATA = re.compile(r"<!-- pipeline-v2-phase: id=([^;]+); deps=([^;]+); review_gate=([^;]+); review_reason=(.+) -->\Z")
@@ -1332,6 +1383,187 @@ def record_task_integration(
         )
 
     return locked_tracker_update(Path(run_dir), f"integrate-{task_id}-{integration_commit}", transition, timeout_s=5.0)
+
+
+def publish_worker_result(path: Path, result: WorkerResult) -> None:
+    """Publish an immutable result without exposing partially written content."""
+    path = Path(path)
+    canonical = render_worker_result(result).encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if path.read_bytes() == canonical:
+            return
+        raise EvidenceError(f"worker result already exists with conflicting content: {path}")
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(temporary_name)
+    published = False
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(canonical)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+            published = True
+        except FileExistsError:
+            if path.read_bytes() == canonical:
+                return
+            raise EvidenceError(f"worker result was concurrently published with conflicting content: {path}")
+        _sync_directory(path.parent)
+    except EvidenceError:
+        raise
+    except OSError as exc:
+        qualifier = "may already be published" if published else "was not published"
+        raise EvidenceError(f"worker result publication failed ({qualifier}): {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _result_identity(result_path: Path, content: bytes, repo_dir: Path) -> tuple[str, str]:
+    try:
+        relative = result_path.resolve().relative_to(repo_dir.resolve()).as_posix()
+    except ValueError as exc:
+        raise EvidenceError("worker result is outside the repository root") from exc
+    if any(character in relative for character in ",|#"):
+        raise EvidenceError("worker result path contains an unsupported identity delimiter")
+    digest = hashlib.sha256(content).hexdigest()
+    return f"{relative}#sha256={digest}", relative
+
+
+def _result_checkpoints(task: TaskRecord, result: WorkerResult) -> str:
+    value = task.checkpoints
+    for checkpoint in result.checkpoints:
+        value = _append_history(
+            value,
+            f"worker:{result.attempt}:{checkpoint.id}:{checkpoint.status}@{checkpoint.evidence}",
+        )
+    return value
+
+
+def import_worker_result(
+    run_dir: Path,
+    *,
+    result_path: Path,
+    phase_plan: Path,
+    repo_dir: Path,
+) -> Tracker:
+    """Validate an immutable result against its active assignment and import once."""
+    result_path = Path(result_path)
+    repo_dir = Path(repo_dir)
+    try:
+        initial_content = result_path.read_bytes()
+        initial_result = parse_worker_result(initial_content.decode("utf-8"))
+    except (OSError, UnicodeError) as exc:
+        raise EvidenceError(f"worker result is unreadable: {result_path}: {exc}") from exc
+    identity, relative_path = _result_identity(result_path, initial_content, repo_dir)
+    digest = identity.rsplit("=", 1)[1]
+    transition_id = f"import-{initial_result.task_id}-{initial_result.attempt}-{digest}"
+
+    def transition(tracker: Tracker) -> Tracker:
+        try:
+            current_content = result_path.read_bytes()
+            result = parse_worker_result(current_content.decode("utf-8"))
+        except (OSError, UnicodeError) as exc:
+            raise EvidenceError(f"worker result became unreadable during import: {exc}") from exc
+        current_identity, current_relative = _result_identity(result_path, current_content, repo_dir)
+        if current_identity != identity or current_relative != relative_path or result != initial_result:
+            raise EvidenceError("worker result changed while import was being validated")
+        try:
+            task = _task_record(tracker, result.task_id)
+        except TransitionError as exc:
+            raise EvidenceError(str(exc)) from exc
+        accepted = () if task.result == "-" else tuple(task.result.split(","))
+        if identity in accepted:
+            raise _AlreadyApplied(tracker)
+        if any(entry.split("#sha256=", 1)[0] == relative_path for entry in accepted):
+            raise EvidenceError("accepted result path now has conflicting content")
+        if result.run_id != tracker.run_id or result.task_id != task.id:
+            raise EvidenceError("result run/task identity does not match the tracker")
+        if task.state != "[~]" or result.attempt != task.attempt:
+            raise EvidenceError("result attempt is not the current active attempt")
+        if result.owner != task.owner:
+            raise EvidenceError("result owner does not match the controller-assigned owner")
+        for evidence_path in result.evidence:
+            try:
+                safe_evidence = _safe_relative(evidence_path)
+            except PlanMetadataError as exc:
+                raise EvidenceError(f"worker evidence path is unsafe: {evidence_path}") from exc
+            if not (Path(run_dir) / safe_evidence).is_file():
+                raise EvidenceError(f"worker evidence is missing: {evidence_path}")
+        allowed_checkpoint_evidence = set(result.evidence) | set(result.artifacts)
+        if any(checkpoint.evidence not in allowed_checkpoint_evidence for checkpoint in result.checkpoints):
+            raise EvidenceError("worker checkpoint refers to undeclared evidence")
+        approved = {planned.id: planned for planned in parse_phase_plan(phase_plan)}
+        authoritative = _planned_tasks(Path(run_dir), tracker)
+        definition = approved.get(task.id)
+        if definition is None or authoritative.get(task.id) != definition or result.kind != task.kind or result.kind != definition.kind:
+            raise EvidenceError("result kind/task metadata does not match the approved plan")
+        verification = _append_history(task.verification, f"tests:{result.tests}")
+        verification = _append_history(verification, f"evidence:{','.join(result.evidence)}")
+        checkpoints = _result_checkpoints(task, result)
+        result_history = _append_history(task.result, identity)
+        if result.status in {"DONE", "DONE_WITH_CONCERNS"}:
+            if result.kind == "source":
+                if not _git(repo_dir, "rev-parse", "--verify", result.source_ref):
+                    raise EvidenceError("worker source ref does not exist")
+                if any(
+                    not _git(repo_dir, "cat-file", "-e", f"{commit}^{{commit}}")
+                    or not _git(repo_dir, "merge-base", "--is-ancestor", commit, result.source_ref)
+                    for commit in result.commits
+                ):
+                    raise EvidenceError("worker commit is invalid or absent from its source ref")
+                replacement = replace(
+                    task,
+                    state="[x]",
+                    result=result_history,
+                    checkpoints=_append_history(checkpoints, f"completed:{result.attempt}"),
+                    source_ref=result.source_ref,
+                    commits=",".join(result.commits),
+                    artifacts="-",
+                    integration="-",
+                    verification=verification,
+                )
+            else:
+                actual = tuple(result.artifacts)
+                if actual != definition.outputs:
+                    raise EvidenceError("artifact result does not name the exact approved outputs")
+                for output in actual:
+                    if not (repo_dir / output).is_file():
+                        raise EvidenceError(f"artifact output is missing: {output}")
+                replacement = replace(
+                    task,
+                    state="[x]",
+                    result=result_history,
+                    checkpoints=_append_history(checkpoints, f"completed:{result.attempt}"),
+                    source_ref="-",
+                    commits="-",
+                    artifacts=",".join(actual),
+                    integration="N/A",
+                    verification=verification,
+                )
+        else:
+            if result.status == "BLOCKED" and result.blocking_reason == "-":
+                raise EvidenceError("BLOCKED result needs a blocking reason")
+            replacement = replace(
+                task,
+                state="[?]",
+                result=result_history,
+                checkpoints=_append_history(checkpoints, f"blocked:{result.attempt}@{result.question}"),
+                verification=verification,
+                question=result.question,
+            )
+        return _replace_task(tracker, replacement)
+
+    try:
+        return locked_tracker_update(Path(run_dir), transition_id, transition, timeout_s=5.0)
+    except _AlreadyApplied as applied:
+        return applied.tracker
 
 
 def _argument_parser() -> argparse.ArgumentParser:

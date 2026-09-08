@@ -12,6 +12,8 @@ from unittest import mock
 
 import plugins.superb.skills.pipeline.scripts.pipeline_state as pipeline_state
 from plugins.superb.skills.pipeline.scripts.pipeline_state import (
+    Checkpoint,
+    EvidenceError,
     LegacySchemaError,
     LockBusyError,
     LockUnavailableError,
@@ -22,6 +24,7 @@ from plugins.superb.skills.pipeline.scripts.pipeline_state import (
     UpdateOutcomeUncertain,
     complete_task,
     initialize_run,
+    import_worker_result,
     inspect_run,
     locked_tracker_update,
     next_eligible_actions,
@@ -29,6 +32,7 @@ from plugins.superb.skills.pipeline.scripts.pipeline_state import (
     parse_phase_plan,
     parse_tracker,
     parse_worker_result,
+    publish_worker_result,
     record_task_integration,
     record_task_question,
     render_tracker,
@@ -36,6 +40,7 @@ from plugins.superb.skills.pipeline.scripts.pipeline_state import (
     reserve_tasks,
     start_task,
     validate_run,
+    WorkerResult,
 )
 
 
@@ -151,6 +156,7 @@ class TrackerContractTest(unittest.TestCase):
         )
 
         self.assertEqual(source_result.kind, "source")
+        self.assertEqual(source_result.owner, "worker-1")
         self.assertEqual(source_result.commits, ("0123456789abcdef0123456789abcdef01234567",))
         self.assertEqual(source_result.artifacts, ())
         self.assertEqual(artifact_result.kind, "artifact")
@@ -163,6 +169,7 @@ class TrackerContractTest(unittest.TestCase):
             "malformed fixture": malformed,
             "missing kind": source.replace("| kind | source |\n", ""),
             "missing attempt": source.replace("| attempt | attempt-001 |", "| attempt | - |"),
+            "missing owner": source.replace("| owner | worker-1 |\n", ""),
             "missing evidence": source.replace("| evidence | red.log,green.log |", "| evidence | - |"),
             "source missing commit": source.replace(
                 "| commits | 0123456789abcdef0123456789abcdef01234567 |",
@@ -998,6 +1005,290 @@ class SchedulerReadinessTest(unittest.TestCase):
                             attempts=attempts, capacity=3,
                         )
                     self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+
+class WorkerResultImportTest(unittest.TestCase):
+    def test_named_result_fixtures_have_strict_owner_and_status_contract(self):
+        done = parse_worker_result((FIXTURES / "valid-result-done.md").read_text(encoding="utf-8"))
+        blocked = parse_worker_result((FIXTURES / "valid-result-needs-context.md").read_text(encoding="utf-8"))
+        stale = parse_worker_result((FIXTURES / "stale-result.md").read_text(encoding="utf-8"))
+        conflicting = parse_worker_result((FIXTURES / "conflicting-result.md").read_text(encoding="utf-8"))
+        self.assertEqual((done.owner, done.status), ("worker-1", "DONE"))
+        self.assertEqual((blocked.owner, blocked.status, blocked.question), ("worker-1", "NEEDS_CONTEXT", "D-900"))
+        self.assertNotEqual(stale.attempt, done.attempt)
+        self.assertNotEqual(conflicting.owner, done.owner)
+
+    def git(self, repo: Path, *args: str) -> str:
+        return subprocess.run(
+            ("git", *args), cwd=repo, check=True, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ).stdout.strip()
+
+    def make_run(self, root: Path) -> tuple[Path, Path, str]:
+        self.git(root, "init", "-q")
+        self.git(root, "config", "user.email", "pipeline@example.invalid")
+        self.git(root, "config", "user.name", "Pipeline Test")
+        (root / "base.txt").write_text("base\n", encoding="utf-8")
+        self.git(root, "add", "base.txt")
+        self.git(root, "commit", "-qm", "base")
+        base = self.git(root, "rev-parse", "HEAD")
+        self.git(root, "branch", "target")
+        plan = root / "phase.md"
+        plan.write_text(
+            """# Result phase
+
+<!-- pipeline-v2-phase: id=88; deps=none; review_gate=final-only; review_reason=Mechanical verification only. -->
+
+### PR-01 — Source
+<!-- pipeline-v2-task: id=PR-01; deps=none; kind=source; batch=source; order=1; write_scope=file:source.txt; outputs=none -->
+
+### PR-02 — Artifact
+<!-- pipeline-v2-task: id=PR-02; deps=none; kind=artifact; batch=artifact; order=2; write_scope=tree:evidence; outputs=evidence/artifact.md -->
+""",
+            encoding="utf-8",
+        )
+        decisions = root / "decisions.md"
+        decisions.write_text("# Decisions\n", encoding="utf-8")
+        run_dir = root / "run"
+        initialize_run(
+            run_dir, run_id="result-test", base_commit=base, target_branch="target", worker_limit=3,
+            artifacts={
+                "spec": "spec.md", "master_plan": "master.md", "phase_plans": str(plan),
+                "decisions": str(decisions), "findings": "findings.md",
+            },
+            approved_existing=(),
+        )
+        (run_dir / "agent-output").mkdir()
+        (run_dir / "agent-output/test.log").write_text("targeted tests passed\n", encoding="utf-8")
+        return run_dir, plan, base
+
+    def commit_source(self, root: Path) -> str:
+        self.git(root, "checkout", "-qb", "worker")
+        (root / "source.txt").write_text("implemented\n", encoding="utf-8")
+        self.git(root, "add", "source.txt")
+        self.git(root, "commit", "-qm", "source result")
+        return self.git(root, "rev-parse", "HEAD")
+
+    def result_text(
+        self, *, task_id: str, attempt: str, owner: str, kind: str = "source",
+        status: str = "DONE", source_ref: str = "-", commits: str = "-",
+        artifacts: str = "-", question: str = "-", blocking_reason: str = "-",
+    ) -> str:
+        return f"""<!-- pipeline-worker-result/v2 -->
+# Pipeline v2 — Worker Result
+
+## Result
+| Field | Value |
+| --- | --- |
+| run_id | result-test |
+| task_id | {task_id} |
+| attempt | {attempt} |
+| owner | {owner} |
+| kind | {kind} |
+| status | {status} |
+| source_ref | {source_ref} |
+| commits | {commits} |
+| artifacts | {artifacts} |
+| tests | targeted tests |
+| evidence | agent-output/test.log |
+| concerns | - |
+| question | {question} |
+| blocking_reason | {blocking_reason} |
+
+## Checkpoints
+| ID | Status | Evidence |
+| --- | --- | --- |
+| tested | complete | agent-output/test.log |
+"""
+
+    def write_result(self, run_dir: Path, name: str, text: str) -> Path:
+        path = run_dir / "agent-output" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_matching_source_and_artifact_result_owner_imports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, plan, _ = self.make_run(root)
+            commit = self.commit_source(root)
+            start_task(run_dir, task_id="PR-01", owner="worker-a", attempt="source-1")
+            source_path = self.write_result(
+                run_dir, "source.md",
+                self.result_text(
+                    task_id="PR-01", attempt="source-1", owner="worker-a",
+                    source_ref="worker", commits=commit,
+                ),
+            )
+            imported = import_worker_result(run_dir, result_path=source_path, phase_plan=plan, repo_dir=root)
+            source = next(task for task in imported.tasks if task.id == "PR-01")
+            self.assertEqual((source.state, source.owner, source.commits), ("[x]", "worker-a", commit))
+
+            (root / "evidence").mkdir()
+            (root / "evidence/artifact.md").write_text("evidence\n", encoding="utf-8")
+            start_task(run_dir, task_id="PR-02", owner="worker-a", attempt="artifact-1")
+            artifact_path = self.write_result(
+                run_dir, "artifact.md",
+                self.result_text(
+                    task_id="PR-02", attempt="artifact-1", owner="worker-a", kind="artifact",
+                    artifacts="evidence/artifact.md",
+                ),
+            )
+            imported = import_worker_result(run_dir, result_path=artifact_path, phase_plan=plan, repo_dir=root)
+            artifact = next(task for task in imported.tasks if task.id == "PR-02")
+            self.assertEqual((artifact.state, artifact.owner, artifact.integration), ("[x]", "worker-a", "N/A"))
+
+    def test_matching_needs_context_and_blocked_result_owner_imports(self):
+        for status in ("NEEDS_CONTEXT", "PLAN_CONFLICT", "BLOCKED"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                run_dir, plan, _ = self.make_run(root)
+                start_task(run_dir, task_id="PR-01", owner="worker-a", attempt="attempt-1")
+                result_path = self.write_result(
+                    run_dir, f"{status.lower()}.md",
+                    self.result_text(
+                        task_id="PR-01", attempt="attempt-1", owner="worker-a", status=status,
+                        question="D-301", blocking_reason="blocked by user choice" if status == "BLOCKED" else "-",
+                    ),
+                )
+                imported = import_worker_result(run_dir, result_path=result_path, phase_plan=plan, repo_dir=root)
+                task = next(task for task in imported.tasks if task.id == "PR-01")
+                self.assertEqual((task.state, task.owner, task.attempt, task.question), ("[?]", "worker-a", "attempt-1", "D-301"))
+
+    def test_kind_commit_artifact_and_evidence_conflicts_are_rejected_unchanged(self):
+        cases = ("kind", "source-ref", "artifact", "evidence")
+        for label in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                run_dir, plan, _ = self.make_run(root)
+                if label == "artifact":
+                    start_task(run_dir, task_id="PR-02", owner="worker-a", attempt="attempt-1")
+                    text = self.result_text(
+                        task_id="PR-02", attempt="attempt-1", owner="worker-a", kind="artifact",
+                        artifacts="evidence/artifact.md",
+                    )
+                else:
+                    commit = self.commit_source(root)
+                    start_task(run_dir, task_id="PR-01", owner="worker-a", attempt="attempt-1")
+                    text = self.result_text(
+                        task_id="PR-01", attempt="attempt-1", owner="worker-a",
+                        source_ref="target" if label == "source-ref" else "worker", commits=commit,
+                    )
+                    if label == "kind":
+                        text = text.replace("| kind | source |", "| kind | artifact |").replace(
+                            f"| source_ref | worker |\n| commits | {commit} |\n| artifacts | - |",
+                            "| source_ref | - |\n| commits | - |\n| artifacts | evidence/artifact.md |",
+                        )
+                if label == "evidence":
+                    text = text.replace("agent-output/test.log", "agent-output/missing.log")
+                result_path = self.write_result(run_dir, f"{label}.md", text)
+                before = (run_dir / "progress.md").read_bytes()
+                with self.assertRaises((EvidenceError, SchemaError)):
+                    import_worker_result(run_dir, result_path=result_path, phase_plan=plan, repo_dir=root)
+                self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_missing_empty_or_wrong_owner_rejects_without_tracker_change(self):
+        cases = {
+            "missing": lambda text: text.replace("| owner | worker-a |\n", ""),
+            "empty": lambda text: text.replace("| owner | worker-a |", "| owner | - |"),
+            "wrong": lambda text: text.replace("| owner | worker-a |", "| owner | worker-b |"),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                run_dir, plan, _ = self.make_run(root)
+                commit = self.commit_source(root)
+                start_task(run_dir, task_id="PR-01", owner="worker-a", attempt="attempt-1")
+                text = self.result_text(
+                    task_id="PR-01", attempt="attempt-1", owner="worker-a",
+                    source_ref="worker", commits=commit,
+                )
+                result_path = self.write_result(run_dir, "result.md", mutate(text))
+                before = (run_dir / "progress.md").read_bytes()
+                with self.assertRaises((SchemaError, EvidenceError)):
+                    import_worker_result(run_dir, result_path=result_path, phase_plan=plan, repo_dir=root)
+                self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_same_owner_superseded_attempt_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, plan, _ = self.make_run(root)
+            commit = self.commit_source(root)
+            start_task(run_dir, task_id="PR-01", owner="worker-a", attempt="attempt-1")
+            record_task_question(
+                run_dir, task_id="PR-01", attempt="attempt-1",
+                question_or_block_ref="D-300", reason="requires answer",
+            )
+            (root / "decisions.md").write_text(
+                """# Decisions
+
+## D-300 — Answer
+
+- **Question:** Which behavior?
+- **Answer:** Use the explicitly recorded behavior.
+- **Scope:** PR-01 current blocker.
+- **Status:** Resolved.
+""",
+                encoding="utf-8",
+            )
+            resume_task(
+                run_dir, task_id="PR-01", prior_attempt="attempt-1",
+                new_owner="worker-a", new_attempt="attempt-2", decision_ref="D-300",
+            )
+            stale_path = self.write_result(
+                run_dir, "stale.md",
+                self.result_text(
+                    task_id="PR-01", attempt="attempt-1", owner="worker-a",
+                    source_ref="worker", commits=commit,
+                ),
+            )
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(EvidenceError):
+                import_worker_result(run_dir, result_path=stale_path, phase_plan=plan, repo_dir=root)
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_identical_accepted_replay_is_noop_but_altered_owner_conflicts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, plan, _ = self.make_run(root)
+            commit = self.commit_source(root)
+            start_task(run_dir, task_id="PR-01", owner="worker-a", attempt="attempt-1")
+            text = self.result_text(
+                task_id="PR-01", attempt="attempt-1", owner="worker-a",
+                source_ref="worker", commits=commit,
+            )
+            result_path = self.write_result(run_dir, "result.md", text)
+            first = import_worker_result(run_dir, result_path=result_path, phase_plan=plan, repo_dir=root)
+            accepted = (run_dir / "progress.md").read_bytes()
+            replay = import_worker_result(run_dir, result_path=result_path, phase_plan=plan, repo_dir=root)
+            self.assertEqual((replay.revision, (run_dir / "progress.md").read_bytes()), (first.revision, accepted))
+            result_path.write_text(text.replace("| owner | worker-a |", "| owner | worker-b |"), encoding="utf-8")
+            with self.assertRaises(EvidenceError):
+                import_worker_result(run_dir, result_path=result_path, phase_plan=plan, repo_dir=root)
+            self.assertEqual((run_dir / "progress.md").read_bytes(), accepted)
+
+    def test_publish_is_atomic_immutable_and_never_touches_tracker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, _, _ = self.make_run(root)
+            result_path = run_dir / "agent-output/result.md"
+            result = WorkerResult(
+                run_id="result-test", task_id="PR-01", attempt="attempt-1", owner="worker-a",
+                kind="source", status="DONE", source_ref="worker", commits=("a" * 40,), artifacts=(),
+                tests="targeted tests", evidence=("agent-output/test.log",), concerns="-", question="-",
+                blocking_reason="-", checkpoints=(Checkpoint("tested", "complete", "agent-output/test.log"),),
+            )
+            tracker_before = (run_dir / "progress.md").read_bytes()
+            publish_worker_result(result_path, result)
+            published = result_path.read_bytes()
+            self.assertEqual(parse_worker_result(published.decode("utf-8")), result)
+            self.assertEqual((run_dir / "progress.md").read_bytes(), tracker_before)
+            publish_worker_result(result_path, result)
+            self.assertEqual(result_path.read_bytes(), published)
+            changed = dataclasses.replace(result, owner="worker-b")
+            with self.assertRaises(EvidenceError):
+                publish_worker_result(result_path, changed)
+            self.assertEqual(result_path.read_bytes(), published)
 
 
 if __name__ == "__main__":

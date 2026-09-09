@@ -1550,21 +1550,60 @@ def _field_lines(lines: list[str], field: str) -> list[str]:
     return [line[len(prefix):].strip() for line in lines if line.startswith(prefix)]
 
 
+_NEGATIVE_DIRECTIVE = (
+    r"\b(?:do not|don't|cannot|can't|never|not|"
+    r"refus(?:e|es|ed|al|ing)|declin(?:e|es|ed|ing)|"
+    r"forbid(?:den|s|ding)?|den(?:y|ies|ied|ial))\b"
+)
+
+
+def _has_unambiguous_directive(
+    answer: str,
+    *,
+    directive: str,
+    context: str | None = None,
+    forbidden: str | None = None,
+) -> bool:
+    folded = answer.casefold()
+    if forbidden is not None and re.search(forbidden, folded):
+        return False
+    clauses = re.split(r"[.;]|\b(?:but|although|however)\b", folded)
+    action_context = context or directive
+    if any(re.search(_NEGATIVE_DIRECTIVE, clause) and re.search(action_context, clause) for clause in clauses):
+        return False
+    return any(re.search(directive, clause) for clause in clauses)
+
+
 def _has_affirmative_directive(answer: str) -> bool:
-    directive = r"\b(?:use|apply|authorize|approve|choose|accept|permit|allow|defer|reject)\b"
-    negative = r"\b(?:do not|don't|never|not|refuse to|decline to|forbid|deny)\b"
-    for clause in re.split(r"[.;]|\bbut\b", answer.casefold()):
-        if re.search(directive, clause) and not re.search(negative, clause):
-            return True
-    return False
+    return _has_unambiguous_directive(
+        answer,
+        directive=r"\b(?:use|apply|authorize|approve|choose|accept|permit|allow|defer|reject)\b",
+    )
+
+
+def _has_task_resume_authority(answer: str) -> bool:
+    return _has_unambiguous_directive(
+        answer,
+        directive=r"\b(?:use|apply|authorize|approve|choose|accept|permit|allow|resume|add)\b",
+        context=r"\b(?:use|apply|authorize|approve|choose|accept|permit|allow|resume|continue)\b",
+        forbidden=r"\breject(?:s|ed|ing|ion)?\b",
+    )
 
 
 def _has_filesystem_authorization(answer: str) -> bool:
-    directive = r"\b(?:use|authorize|approve|permit|allow)\b"
-    negative = r"\b(?:do not|don't|never|not|refuse to|decline to|forbid|deny|reject)\b"
-    return any(
-        re.search(directive, clause) and not re.search(negative, clause)
-        for clause in re.split(r"[.;]|\bbut\b", answer.casefold())
+    return _has_unambiguous_directive(
+        answer,
+        directive=r"\b(?:use|authorize|approve|permit|allow)\b",
+        forbidden=r"\breject(?:s|ed|ing|ion)?\b",
+    )
+
+
+def _has_extension_authority(answer: str) -> bool:
+    return _has_unambiguous_directive(
+        answer,
+        directive=r"\b(?:authorize|approve|permit|allow)\b",
+        context=r"\b(?:authorize|approve|permit|allow|remediat\w*|round)\b",
+        forbidden=r"\breject(?:s|ed|ing|ion)?\b",
     )
 
 
@@ -1593,7 +1632,7 @@ def _validate_decision(run_dir: Path, tracker: Tracker, task: TaskRecord, decisi
     answer = answers[0].strip().rstrip(".")
     if not answer or answer.casefold() in {"approved", "yes", "continue", "proceed", "go", "pending user response"}:
         raise TransitionError("generic approval or an empty answer cannot resolve a blocker")
-    if not _has_affirmative_directive(answer):
+    if not _has_task_resume_authority(answer):
         raise TransitionError("decision does not contain an affirmative, non-negated directive")
     if statuses[0].strip().rstrip(".").casefold() != "resolved":
         raise TransitionError("decision is not resolved")
@@ -2803,7 +2842,12 @@ def _validate_remediation_extension_decision(
     required = {
         "Question": _field_lines(lines, "Question"),
         "Answer": _field_lines(lines, "Answer"),
+        "Authorized run": _field_lines(lines, "Authorized run"),
+        "Source revision": _field_lines(lines, "Source revision"),
         "Authorized gate": _field_lines(lines, "Authorized gate"),
+        "Required state": _field_lines(lines, "Required state"),
+        "Required question": _field_lines(lines, "Required question"),
+        "Predecessor decision": _field_lines(lines, "Predecessor decision"),
         "Authorized through round": _field_lines(lines, "Authorized through round"),
         "Authorized findings": _field_lines(lines, "Authorized findings"),
         "Authority marker": _field_lines(lines, "Authority marker"),
@@ -2813,12 +2857,38 @@ def _validate_remediation_extension_decision(
     if any(len(values) != 1 for values in required.values()):
         raise TransitionError("remediation-extension decision evidence is incomplete or ambiguous")
     answer = required["Answer"][0].strip().rstrip(".")
-    if not _has_affirmative_directive(answer):
+    if not _has_extension_authority(answer):
         raise TransitionError("remediation-extension decision is not affirmative")
     if required["Status"][0].strip().rstrip(".").casefold() != "resolved":
         raise TransitionError("remediation-extension decision is unresolved")
     if required["Authorized gate"][0] != gate_id:
         raise TransitionError("remediation-extension decision names a different gate")
+    if required["Authorized run"][0] != tracker.run_id:
+        raise TransitionError("remediation-extension decision names a different run")
+    if required["Source revision"][0] != str(tracker.revision):
+        raise TransitionError("remediation-extension decision is stale for this tracker revision")
+    gate = _gate_record(tracker, gate_id)
+    if required["Required state"][0] != gate.state or required["Required question"][0] != gate.questions:
+        raise TransitionError("remediation-extension decision does not match the required gate state")
+    if round_number == 4:
+        predecessor = "D-006"
+    else:
+        prior = next(
+            (
+                row for row in tracker.remediation
+                if row.gate == gate_id and row.round_number == round_number - 1
+            ),
+            None,
+        )
+        authorities = (
+            tuple(item.split("=", 1)[1] for item in _csv(prior.verification) if item.startswith("extension-authority="))
+            if prior is not None else ()
+        )
+        if len(authorities) != 1:
+            raise TransitionError("remediation-extension predecessor authority is missing or ambiguous")
+        predecessor = authorities[0]
+    if required["Predecessor decision"][0] != predecessor:
+        raise TransitionError("remediation-extension decision names a different predecessor authority")
     if required["Authorized through round"][0] != str(round_number):
         raise TransitionError("remediation-extension decision names a different round ceiling")
     if tuple(_csv(required["Authorized findings"][0])) != finding_ids:
@@ -3364,7 +3434,9 @@ def _validate_rejection_evidence(run_dir: Path, finding_id: str, value: str) -> 
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         raise TransitionError(f"rejection evidence is unreadable: {path}: {exc}") from exc
-    if finding_id not in text or re.search(r"(?im)^rationale:\s*\S", text) is None:
+    finding_fields = re.findall(r"(?im)^finding:\s*(\S+)\s*$", text)
+    rationale_fields = re.findall(r"(?im)^rationale:\s*(\S.*)$", text)
+    if finding_fields != [finding_id] or len(rationale_fields) != 1:
         raise TransitionError("rejection evidence must identify the finding and record a rationale")
 
 

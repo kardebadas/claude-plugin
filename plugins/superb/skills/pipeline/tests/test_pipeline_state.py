@@ -759,6 +759,10 @@ class TaskTransitionTest(unittest.TestCase):
             "conflicting": self.resolved_decision() + "\n- **Answer:** A conflicting answer.\n",
             "generic approval": self.resolved_decision(answer="approved"),
             "explicit refusal": self.resolved_decision(answer="Do not resume or authorize this task"),
+            "reject refusal": self.resolved_decision(answer="Reject resuming this task"),
+            "compound refusal": self.resolved_decision(
+                answer="Do not resume or authorize this task; use the refusal recorded above"
+            ),
         }
         for label, decision_text in cases.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
@@ -1604,6 +1608,25 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
                 )
             self.assertEqual((run_dir / "progress.md").read_bytes(), before)
 
+            prefix_collision = root / "prefix-collision.md"
+            prefix_collision.write_text(
+                "Finding: F-0010\nRationale: this is a different finding.\n",
+                encoding="utf-8",
+            )
+            authoritative.write_text(
+                "<!-- pipeline-findings/v2 -->\n"
+                "| ID | Gate | Severity | Status | Disposition | Evidence | Fix Commit | Re-review |\n"
+                "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                f"| F-001 | phase-01 | Critical | Resolved | Rejected | {prefix_collision} | - | - |\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(TransitionError):
+                evaluate_and_close_review_gate(
+                    run_dir, gate_id="phase-01", findings_path=authoritative,
+                    report_paths=(report,), verification=(_verification_evidence(root, head),), rereview_paths=(),
+                )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
     def test_evidence_backed_rejection_can_close_a_gate(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1622,7 +1645,7 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
             )
             rejection_evidence = root / "rejection-evidence.md"
             rejection_evidence.write_text(
-                "# Finding F-001\n\nRationale: the report contradicts the approved fixture behavior.\n",
+                "Finding: F-001\nRationale: the report contradicts the approved fixture behavior.\n",
                 encoding="utf-8",
             )
             findings = root / "findings.md"
@@ -1819,6 +1842,20 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
                 encoding="utf-8",
             )
             before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                pipeline_state.resolve_gate_questions(
+                    run_dir, gate_id="phase-01", decision_refs=("D-100",),
+                )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+            decisions.write_text(
+                "# Decisions\n\n## D-100 — Gate answer\n\n"
+                "- **Question:** Which remediation behavior applies?\n"
+                "- **Answer:** Do not authorize the reviewed fix contract; use the refusal recorded above.\n"
+                "- **Affected work:** F-001 in phase-01.\n"
+                "- **Status:** Resolved.\n",
+                encoding="utf-8",
+            )
             with self.assertRaises(TransitionError):
                 pipeline_state.resolve_gate_questions(
                     run_dir, gate_id="phase-01", decision_refs=("D-100",),
@@ -2344,6 +2381,22 @@ class PhaseOneReviewRegressionTest(unittest.TestCase):
                     "# Decisions\n\n## D-900 — Filesystem authority\n\n"
                     "- **Question:** May this run use the detected unknown filesystem?\n"
                     "- **Answer:** Do not authorize use of mysteryfs for fingerprint " + "c" * 64 + ".\n"
+                    "- **Scope:** Run 2026-09-08-init-test on fingerprint " + "c" * 64 + ".\n"
+                    "- **Status:** Resolved.\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaises(pipeline_state.FilesystemSuitabilityError):
+                    initialize_run(
+                        run_dir, run_id="2026-09-08-init-test",
+                        base_commit="8348959d1b201a873c68512642a0eb8e5754eaa8",
+                        target_branch="feat/init-test", worker_limit=3, artifacts=artifacts,
+                        approved_existing=(), filesystem_acknowledgement="D-900@" + "c" * 64,
+                    )
+                self.assertFalse(run_dir.exists())
+                decisions.write_text(
+                    "# Decisions\n\n## D-900 — Filesystem authority\n\n"
+                    "- **Question:** May this run use the detected unknown filesystem?\n"
+                    "- **Answer:** Do not authorize mysteryfs; use the recorded refusal for fingerprint " + "c" * 64 + ".\n"
                     "- **Scope:** Run 2026-09-08-init-test on fingerprint " + "c" * 64 + ".\n"
                     "- **Status:** Resolved.\n",
                     encoding="utf-8",
@@ -3010,7 +3063,9 @@ class ActiveRoundOutcomeReconciliationTest(unittest.TestCase):
 
 
 class RemediationExtensionTest(unittest.TestCase):
-    FINDINGS = ("F-002", "F-004", "F-008", "F-010")
+    RUN_ID = "2026-09-08-pipeline-rebuild-v2"
+    FINDINGS = ("P1-GATE-002", "P1-GATE-004", "P1-GATE-008", "P1-GATE-010")
+    ROUND_FIVE_FINDINGS = ("P1-GATE-002", "P1-GATE-008", "P1-GATE-010", "P1-GATE-011")
 
     def make_fixture(self, root: Path) -> tuple[Path, Path]:
         helper = PhaseGateAndRemediationTest()
@@ -3020,24 +3075,36 @@ class RemediationExtensionTest(unittest.TestCase):
             "| ID | Gate | Severity | Status | Disposition | Evidence | Fix Commit | Re-review |\n"
             "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
             + "".join(
-                f"| {finding} | phase-01 | {'Critical' if finding in {'F-002', 'F-010'} else 'Important'} | Open | - | review.md | - | - |\n"
+                f"| {finding} | phase-01 | {'Critical' if finding in {'P1-GATE-002', 'P1-GATE-010'} else 'Important'} | Open | - | review.md | - | - |\n"
                 for finding in self.FINDINGS
             ),
             encoding="utf-8",
         )
+        tracker = validate_run(run_dir)
+        tracker = dataclasses.replace(
+            tracker,
+            run_fields=tuple(
+                (key, self.RUN_ID if key == "run_id" else "37" if key == "revision" else value)
+                for key, value in tracker.run_fields
+            ),
+        )
         (root / "decisions.md").write_text(
             "# Decisions\n\n## D-021 — One finite extension\n\n"
             "- **Question:** May phase-01 receive one finite extension?\n"
-            "- **Answer:** Authorize Round 4 only for phase-01 targeting F-002, F-004, F-008, and F-010.\n"
+            "- **Answer:** Authorize Round 4 only for phase-01 targeting P1-GATE-002, P1-GATE-004, P1-GATE-008, and P1-GATE-010.\n"
+            f"- **Authorized run:** {self.RUN_ID}\n"
+            "- **Source revision:** 37\n"
             "- **Authorized gate:** phase-01\n"
+            "- **Required state:** blocked\n"
+            "- **Required question:** remediation-no-progress-round-3\n"
+            "- **Predecessor decision:** D-006\n"
             "- **Authorized through round:** 4\n"
-            "- **Authorized findings:** F-002,F-004,F-008,F-010\n"
+            "- **Authorized findings:** P1-GATE-002,P1-GATE-004,P1-GATE-008,P1-GATE-010\n"
             "- **Authority marker:** remediation-extension:phase-01:through-round-4\n"
             "- **Scope:** This run's phase-01 Round 4 only.\n"
             "- **Status:** Resolved.\n",
             encoding="utf-8",
         )
-        tracker = validate_run(run_dir)
         first = next(row for row in tracker.remediation if row.gate == "phase-01")
         completed = tuple(
             dataclasses.replace(
@@ -3088,6 +3155,25 @@ class RemediationExtensionTest(unittest.TestCase):
                 )
             self.assertEqual((run_dir / "progress.md").read_bytes(), before_bytes)
 
+            decisions = root / "decisions.md"
+            exact_decision = decisions.read_text(encoding="utf-8")
+            decisions.write_text(
+                exact_decision.replace(
+                    f"- **Authorized run:** {self.RUN_ID}",
+                    "- **Authorized run:** another-run",
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(TransitionError):
+                start_remediation_round(
+                    run_dir, gate_id="phase-01", round_number=4,
+                    finding_ids=self.FINDINGS, fix_plan=str(fix_plan),
+                    fixer_assignments=("fixer-4",), capacity=3,
+                    extension_decision_ref="D-021",
+                )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before_bytes)
+            decisions.write_text(exact_decision, encoding="utf-8")
+
             started = start_remediation_round(
                 run_dir, gate_id="phase-01", round_number=4,
                 finding_ids=self.FINDINGS, fix_plan=str(fix_plan),
@@ -3133,6 +3219,137 @@ class RemediationExtensionTest(unittest.TestCase):
             row = next(row for row in released.remediation if row.gate == "phase-01" and row.round_number == 4)
             self.assertEqual(row.state, "re_reviewing")
             self.assertIn("extension-authority=D-021", row.verification)
+
+    def test_round_five_authority_is_bound_to_exact_run_revision_and_predecessor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, _ = self.make_fixture(root)
+            tracker = validate_run(run_dir)
+            first = next(row for row in tracker.remediation if row.gate == "phase-01")
+            rounds = tuple(
+                dataclasses.replace(
+                    first,
+                    round_number=number,
+                    state="complete",
+                    released_fixers=f"fixer-{number}",
+                    findings=",".join(self.ROUND_FIVE_FINDINGS),
+                    fix_plan=f"fix-plan-{number}.md",
+                    commits=next(gate.head for gate in tracker.gates if gate.id == "phase-01"),
+                    verification=(
+                        ("extension-authority=D-021," if number == 4 else "")
+                        + f"verification-{number}@{next(gate.head for gate in tracker.gates if gate.id == 'phase-01')},"
+                        + "remaining-blockers=" + "+".join(self.ROUND_FIVE_FINDINGS)
+                    ),
+                    re_review=f"rereview-{number}.md",
+                )
+                for number in range(1, 5)
+            )
+            tracker = dataclasses.replace(
+                tracker,
+                run_fields=tuple(
+                    (key, "40" if key == "revision" else value)
+                    for key, value in tracker.run_fields
+                ),
+                gates=tuple(
+                    dataclasses.replace(
+                        gate,
+                        state="blocked",
+                        findings=",".join(self.ROUND_FIVE_FINDINGS),
+                        questions="remediation-limit-reached-round-4",
+                    ) if gate.id == "phase-01" else gate
+                    for gate in tracker.gates
+                ),
+                remediation=rounds + tuple(row for row in tracker.remediation if row.gate != "phase-01"),
+            )
+            (run_dir / "progress.md").write_text(render_tracker(tracker), encoding="utf-8")
+            (root / "findings.md").write_text(
+                "<!-- pipeline-findings/v2 -->\n"
+                "| ID | Gate | Severity | Status | Disposition | Evidence | Fix Commit | Re-review |\n"
+                "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                + "".join(
+                    f"| {finding} | phase-01 | {'Critical' if finding in {'P1-GATE-002', 'P1-GATE-010'} else 'Important'} | Open | - | review.md | - | - |\n"
+                    for finding in self.ROUND_FIVE_FINDINGS
+                ),
+                encoding="utf-8",
+            )
+            decision = (
+                "# Decisions\n\n## D-022 — Exact Round 5\n\n"
+                "- **Question:** May the exact active gate receive Round 5?\n"
+                "- **Answer:** Authorize Round 5 for phase-01 targeting P1-GATE-002, P1-GATE-008, P1-GATE-010, and P1-GATE-011.\n"
+                f"- **Authorized run:** {self.RUN_ID}\n"
+                "- **Source revision:** 40\n"
+                "- **Authorized gate:** phase-01\n"
+                "- **Required state:** blocked\n"
+                "- **Required question:** remediation-limit-reached-round-4\n"
+                "- **Predecessor decision:** D-021\n"
+                "- **Authorized through round:** 5\n"
+                "- **Authorized findings:** P1-GATE-002,P1-GATE-008,P1-GATE-010,P1-GATE-011\n"
+                "- **Authority marker:** remediation-extension:phase-01:through-round-5\n"
+                "- **Scope:** Exact active run and phase-01 Round 5 only.\n"
+                "- **Status:** Resolved.\n"
+            )
+            decisions = root / "decisions.md"
+            fix_plan = root / "fix-plan-5.md"
+            fix_plan.write_text("# Round 5\n", encoding="utf-8")
+            before = (run_dir / "progress.md").read_bytes()
+            invalid_decisions = {
+                "wrong run": decision.replace(
+                    "- **Authorized run:** " + self.RUN_ID, "- **Authorized run:** another-run"
+                ),
+                "stale revision": decision.replace("- **Source revision:** 40", "- **Source revision:** 39"),
+                "wrong state": decision.replace("- **Required state:** blocked", "- **Required state:** accepted"),
+                "wrong question": decision.replace(
+                    "- **Required question:** remediation-limit-reached-round-4",
+                    "- **Required question:** remediation-no-progress-round-4",
+                ),
+                "wrong predecessor": decision.replace(
+                    "- **Predecessor decision:** D-021", "- **Predecessor decision:** D-020"
+                ),
+                "compound refusal": decision.replace(
+                    "- **Answer:** Authorize Round 5 for phase-01 targeting P1-GATE-002, P1-GATE-008, P1-GATE-010, and P1-GATE-011.",
+                    "- **Answer:** Do not authorize Round 5; authorize it only because the refusal was recorded for P1-GATE-002, P1-GATE-008, P1-GATE-010, and P1-GATE-011.",
+                ),
+            }
+            for label, invalid in invalid_decisions.items():
+                with self.subTest(label=label):
+                    decisions.write_text(invalid, encoding="utf-8")
+                    with self.assertRaises(TransitionError):
+                        start_remediation_round(
+                            run_dir, gate_id="phase-01", round_number=5,
+                            finding_ids=self.ROUND_FIVE_FINDINGS, fix_plan=str(fix_plan),
+                            fixer_assignments=("fixer-5",), capacity=3,
+                            extension_decision_ref="D-022",
+                        )
+                    self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+            decisions.write_text(decision, encoding="utf-8")
+            with self.assertRaises(TransitionError):
+                start_remediation_round(
+                    run_dir, gate_id="phase-01", round_number=5,
+                    finding_ids=self.ROUND_FIVE_FINDINGS, fix_plan=str(fix_plan),
+                    fixer_assignments=("fixer-5",), capacity=3,
+                    extension_decision_ref="D-021",
+                )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+            started = start_remediation_round(
+                run_dir, gate_id="phase-01", round_number=5,
+                finding_ids=self.ROUND_FIVE_FINDINGS, fix_plan=str(fix_plan),
+                fixer_assignments=("fixer-5",), capacity=3,
+                extension_decision_ref="D-022",
+            )
+            self.assertEqual(started.revision, 41)
+            row = next(row for row in started.remediation if row.gate == "phase-01" and row.round_number == 5)
+            self.assertEqual((row.state, row.verification), ("fixing", "extension-authority=D-022"))
+            after = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                start_remediation_round(
+                    run_dir, gate_id="phase-01", round_number=6,
+                    finding_ids=self.ROUND_FIVE_FINDINGS, fix_plan=str(fix_plan),
+                    fixer_assignments=("fixer-6",), capacity=3,
+                    extension_decision_ref="D-022",
+                )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), after)
 
 
 

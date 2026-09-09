@@ -343,7 +343,7 @@ def _unique(values: tuple[object, ...], attr: str, error: type[ValueError]) -> N
         raise error(f"duplicate {attr}")
 
 
-def parse_tracker(text: str) -> Tracker:
+def _parse_tracker_for_exact_reconciliation(text: str) -> Tracker:
     headings = ("## Run", "## Current State", "## Tasks", "## Phases", "## Gates", "## Remediation")
     sections = _sections(text, _TRACKER_MARKER, "# Pipeline v2 — Progress Tracker", headings, SchemaError)
     run_fields = _key_values(sections["## Run"], _RUN_KEYS, SchemaError)
@@ -422,6 +422,21 @@ def parse_tracker(text: str) -> Tracker:
     tracker = Tracker(run_fields, current_fields, tasks, phases, gates, remediation)
     if len(_active_worker_ids(tracker)) > tracker.worker_limit:
         raise SchemaError("active worker identities exceed the global worker limit")
+    return tracker
+
+
+def parse_tracker(text: str) -> Tracker:
+    """Parse the one supported tracker format and reject incomplete round outcomes."""
+    tracker = _parse_tracker_for_exact_reconciliation(text)
+    for row in tracker.remediation:
+        outcomes = [
+            item for item in _csv(row.verification)
+            if item.startswith("remaining-blockers=")
+        ]
+        if row.state == "complete" and len(outcomes) != 1:
+            raise SchemaError("completed remediation round needs exactly one remaining-blockers outcome")
+        if row.state != "complete" and outcomes:
+            raise SchemaError("only a completed remediation round may record remaining-blockers")
     return tracker
 
 
@@ -1496,6 +1511,18 @@ def _decision_sections(text: str) -> dict[str, list[str]]:
 def _field_lines(lines: list[str], field: str) -> list[str]:
     prefix = f"- **{field}:**"
     return [line[len(prefix):].strip() for line in lines if line.startswith(prefix)]
+
+
+def _has_affirmative_directive(answer: str) -> bool:
+    folded = answer.casefold()
+    for match in re.finditer(
+        r"\b(?:use|apply|authorize|approve|choose|accept|permit|allow|defer|reject)\b",
+        folded,
+    ):
+        prefix = folded[max(0, match.start() - 16):match.start()]
+        if not re.search(r"(?:do not|don't|never|not)\s+$", prefix):
+            return True
+    return False
 
 
 def _scope_names_task(scope: str, task_id: str) -> bool:
@@ -2639,6 +2666,8 @@ def _resolved_decision_for_terms(
     answer = answers[0].strip().rstrip(".")
     if not answer or answer.casefold() in {"approved", "yes", "continue", "proceed", "go", "pending user response"}:
         raise TransitionError("generic approval or an empty answer cannot resolve a review blocker")
+    if not _has_affirmative_directive(answer):
+        raise TransitionError("decision does not contain an affirmative, non-negated directive")
     if statuses[0].strip().rstrip(".").casefold() != "resolved":
         raise TransitionError("decision is not resolved")
     folded_scopes = " ".join(scopes).casefold()
@@ -2649,12 +2678,22 @@ def _resolved_decision_for_terms(
             continue
         other_status = _field_lines(other_lines, "Status")
         other_scopes = _field_lines(other_lines, "Scope") + _field_lines(other_lines, "Affected task") + _field_lines(other_lines, "Affected work")
+        other_answers = _field_lines(other_lines, "Answer")
         if (
             len(other_status) == 1
             and other_status[0].strip().rstrip(".").casefold() in {"open", "pending", "blocked"}
             and any(term.casefold() in " ".join(other_scopes).casefold() for term in terms)
         ):
             raise TransitionError(f"unresolved decision {other_ref} still blocks review acceptance")
+        if (
+            len(other_status) == 1
+            and other_status[0].strip().rstrip(".").casefold() == "resolved"
+            and len(other_answers) == 1
+            and other_answers[0].strip().rstrip(".").casefold() != answer.casefold()
+            and {scope.strip().rstrip(".").casefold() for scope in other_scopes}
+            & {scope.strip().rstrip(".").casefold() for scope in scopes}
+        ):
+            raise TransitionError(f"resolved decision {other_ref} conflicts on the same review scope")
 
 
 def resolve_gate_questions(
@@ -2823,6 +2862,359 @@ def _recorded_remaining_blockers(row: RemediationRecord | None) -> set[str] | No
     return set() if value == "none" else set(value.split("+"))
 
 
+_ACTIVE_ROUND_OUTCOME_RUN = "2026-09-08-pipeline-rebuild-v2"
+_ACTIVE_ROUND_OUTCOME_GATE = "phase-01"
+_ACTIVE_ROUND_OUTCOME_ROUND = 1
+_ACTIVE_ROUND_OUTCOME_DECISION = "D-019"
+_ACTIVE_ROUND_OUTCOME_BLOCKERS = {
+    "P1-GATE-002", "P1-GATE-004", "P1-GATE-007", "P1-GATE-008",
+}
+
+
+def _round_outcomes_from_notes(path: Path, report_ids: set[str]) -> set[str]:
+    """Read the fixed Round 1 finding-results table used by D-019."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise TransitionError(f"round outcome notes are unreadable: {path}: {exc}") from exc
+    try:
+        start = lines.index("| Finding | Result | Evidence |")
+    except ValueError as exc:
+        raise TransitionError("round outcome notes have no finding-results table") from exc
+    if start + 1 >= len(lines) or _cells(lines[start + 1], TransitionError) != ("---", "---", "---"):
+        raise TransitionError("round outcome notes have an invalid table separator")
+    rows: list[tuple[str, ...]] = []
+    for line in lines[start + 2:]:
+        if not line.startswith("|"):
+            break
+        row = _cells(line, TransitionError)
+        if len(row) != 3:
+            raise TransitionError("round outcome rows must have finding, result, and evidence")
+        rows.append(row)
+    ids = [row[0] for row in rows]
+    if set(ids) != report_ids or len(ids) != len(set(ids)):
+        raise TransitionError("round outcome notes do not cover each reported finding exactly once")
+    open_ids: set[str] = set()
+    for finding_id, result, evidence in rows:
+        if evidence == "-":
+            raise TransitionError("round outcome notes need evidence for every finding")
+        if result == "Resolved":
+            continue
+        if result not in {"Open — Critical", "Open — Important"}:
+            raise TransitionError("round outcome notes contain an unsupported or ambiguous result")
+        open_ids.add(finding_id)
+    return open_ids
+
+
+def _validate_active_round_outcome_decision(run_dir: Path, tracker: Tracker, decision_ref: str) -> None:
+    if decision_ref != _ACTIVE_ROUND_OUTCOME_DECISION:
+        raise TransitionError("the active round-outcome repair requires decision D-019")
+    path = _resolved_reference(run_dir, dict(tracker.run_fields)["decisions"])
+    try:
+        sections = _decision_sections(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, TransitionError) as exc:
+        raise TransitionError(f"cannot read the D-019 reconciliation decision: {exc}") from exc
+    lines = sections.get(decision_ref)
+    if lines is None:
+        raise TransitionError("decision D-019 is missing")
+    answers = _field_lines(lines, "Answer")
+    statuses = _field_lines(lines, "Status")
+    scopes = _field_lines(lines, "Scope") + _field_lines(lines, "Affected work")
+    if len(answers) != 1 or len(statuses) != 1 or not scopes:
+        raise TransitionError("decision D-019 is missing, duplicated, or conflicting")
+    if statuses[0].strip().rstrip(".").casefold() != "resolved":
+        raise TransitionError("decision D-019 is unresolved")
+    authority = " ".join((answers[0], *scopes))
+    required_terms = {
+        _ACTIVE_ROUND_OUTCOME_RUN,
+        _ACTIVE_ROUND_OUTCOME_GATE,
+        "Round 1",
+        *_ACTIVE_ROUND_OUTCOME_BLOCKERS,
+    }
+    if any(term.casefold() not in authority.casefold() for term in required_terms):
+        raise TransitionError("decision D-019 does not authorize this exact run, gate, round, and blocker set")
+    for other_ref, other_lines in sections.items():
+        if other_ref == decision_ref:
+            continue
+        other_status = _field_lines(other_lines, "Status")
+        other_scope = " ".join(
+            _field_lines(other_lines, "Scope") + _field_lines(other_lines, "Affected work")
+        ).casefold()
+        if (
+            len(other_status) == 1
+            and other_status[0].strip().rstrip(".").casefold() in {"open", "pending", "blocked"}
+            and _ACTIVE_ROUND_OUTCOME_RUN.casefold() in other_scope
+            and _ACTIVE_ROUND_OUTCOME_GATE in other_scope
+        ):
+            raise TransitionError(f"unresolved decision {other_ref} conflicts with D-019")
+
+
+def reconcile_active_rebuild_round_one_outcome(
+    run_dir: Path,
+    *,
+    expected_revision: int,
+    expected_tracker_sha256: str,
+    decision_ref: str,
+    report_path: Path,
+    notes_path: Path,
+) -> Tracker:
+    """Apply D-019's one exact-run repair; ordinary resume never calls this."""
+    if expected_revision < 0 or not re.fullmatch(r"[0-9a-f]{64}", expected_tracker_sha256):
+        raise TransitionError("round-outcome reconciliation needs an expected revision and tracker digest")
+    run_dir = Path(run_dir).resolve()
+    if run_dir.name != _ACTIVE_ROUND_OUTCOME_RUN:
+        raise TransitionError("round-outcome reconciliation is restricted to the identified active rebuild run")
+    report_path = Path(report_path).resolve()
+    notes_path = Path(notes_path).resolve()
+    if notes_path != report_path.with_name(report_path.stem + "-notes.md"):
+        raise TransitionError("round-outcome notes do not match the immutable re-review evidence package")
+    try:
+        report_bytes = report_path.read_bytes()
+        notes_bytes = notes_path.read_bytes()
+        source = (run_dir / "progress.md").read_bytes()
+    except OSError as exc:
+        raise TransitionError(f"round-outcome reconciliation evidence is unreadable: {exc}") from exc
+    evidence_digest = hashlib.sha256(report_bytes + b"\0" + notes_bytes).hexdigest()
+    provenance = f"round-outcome-reconciliation={decision_ref}@{evidence_digest}"
+    outcome = "remaining-blockers=" + "+".join(sorted(_ACTIVE_ROUND_OUTCOME_BLOCKERS))
+    transition_id = f"D-019-round-01-{evidence_digest[:16]}"
+
+    try:
+        current = parse_tracker(source.decode("utf-8"))
+    except (SchemaError, UnicodeError):
+        current = None
+    if current is not None:
+        row = next(
+            (item for item in current.remediation if item.gate == _ACTIVE_ROUND_OUTCOME_GATE and item.round_number == 1),
+            None,
+        )
+        if row is not None and outcome in _csv(row.verification) and provenance in _csv(row.verification):
+            return current
+        raise TransitionError("the active tracker no longer has D-019's exact replay state")
+
+    if hashlib.sha256(source).hexdigest() != expected_tracker_sha256:
+        raise TransitionError("round-outcome predecessor digest does not match")
+    try:
+        predecessor = _parse_tracker_for_exact_reconciliation(source.decode("utf-8"))
+    except (SchemaError, UnicodeError) as exc:
+        raise TransitionError(f"round-outcome predecessor is malformed: {exc}") from exc
+    if predecessor.run_id != _ACTIVE_ROUND_OUTCOME_RUN or predecessor.revision != expected_revision:
+        raise TransitionError("round-outcome predecessor run or revision does not match")
+    _validate_tracker_filesystem(run_dir, predecessor)
+
+    with _exclusive_lock(run_dir, timeout_s=5.0):
+        observed = (run_dir / "progress.md").read_bytes()
+        if observed != source:
+            raise TransitionError("tracker changed before round-outcome reconciliation acquired the lock")
+        tracker = _parse_tracker_for_exact_reconciliation(observed.decode("utf-8"))
+        _validate_tracker_filesystem(run_dir, tracker)
+        _validate_active_round_outcome_decision(run_dir, tracker, decision_ref)
+        gate = _gate_record(tracker, _ACTIVE_ROUND_OUTCOME_GATE)
+        round_one = next(
+            (item for item in tracker.remediation if item.gate == gate.id and item.round_number == 1),
+            None,
+        )
+        round_two = next(
+            (item for item in tracker.remediation if item.gate == gate.id and item.round_number == 2),
+            None,
+        )
+        if (
+            round_one is None
+            or round_one.state != "complete"
+            or _recorded_remaining_blockers(round_one) is not None
+            or round_one.re_review == "-"
+            or round_two is None
+            or round_two.state != "re_reviewing"
+            or set(_csv(round_two.findings)) != _ACTIVE_ROUND_OUTCOME_BLOCKERS
+            or round_two.re_review != "-"
+            or gate.state != "re_reviewing"
+            or gate.head == "-"
+        ):
+            raise TransitionError("active remediation history does not match D-019's exact repair shape")
+        recorded_report = _resolved_reference(run_dir, round_one.re_review).resolve()
+        if recorded_report != report_path:
+            raise TransitionError("D-019 report is not the Round 1 row's recorded re-review evidence")
+        report = _parse_review_report(report_path)
+        report_ids = set(_csv(report["findings"]))
+        if (
+            report["gate"] != gate.id
+            or report["assignment"] not in _csv(gate.assignments)
+            or report["head"] != gate.head
+            or report["head"] not in _csv(round_one.commits)
+            or report_ids != set(_csv(round_one.findings))
+        ):
+            raise TransitionError("Round 1 report does not match the recorded gate, code state, or findings")
+        if _round_outcomes_from_notes(notes_path, report_ids) != _ACTIVE_ROUND_OUTCOME_BLOCKERS:
+            raise TransitionError("Round 1 evidence does not prove D-019's exact blocker baseline")
+        updated_round_one = replace(
+            round_one,
+            verification=_append_history(_append_history(round_one.verification, outcome), provenance),
+        )
+        proposed = replace(
+            tracker,
+            remediation=tuple(updated_round_one if item is round_one else item for item in tracker.remediation),
+        )
+        updated = _with_transition_identity(proposed, transition_id, tracker.revision + 1)
+        canonical = render_tracker(updated)
+        reparsed = parse_tracker(canonical)
+        _replace_tracker(run_dir, canonical, transition_id)
+        return reparsed
+
+
+def _review_report_set(
+    paths: tuple[Path, ...],
+    *,
+    gate: GateRecord,
+    expected_base: str,
+) -> tuple[tuple[dict[str, str], ...], str]:
+    reports = tuple(_parse_review_report(path) for path in paths)
+    expected_assignments = tuple(sorted(_csv(gate.assignments)))
+    if tuple(sorted(report["assignment"] for report in reports)) != expected_assignments:
+        raise TransitionError("required reviewer reports are missing, duplicated, or unexpected")
+    heads = {report["head"] for report in reports}
+    if (
+        len(heads) != 1
+        or any(report["gate"] != gate.id or report["base"] != expected_base for report in reports)
+    ):
+        raise TransitionError("review reports do not form the required gate/code-state edge")
+    return reports, next(iter(heads))
+
+
+def _round_verification_items(row: RemediationRecord) -> tuple[str, ...]:
+    return tuple(
+        item for item in _csv(row.verification)
+        if not item.startswith("remaining-blockers=")
+        and not item.startswith("round-outcome-reconciliation=")
+    )
+
+
+def _validate_completed_round_edge(
+    run_dir: Path,
+    tracker: Tracker,
+    gate: GateRecord,
+    row: RemediationRecord,
+    prior_head: str,
+) -> tuple[tuple[dict[str, str], ...], str]:
+    paths = tuple(_resolved_reference(run_dir, value).resolve() for value in _csv(row.re_review))
+    if not paths:
+        raise TransitionError("completed remediation round has no re-review evidence")
+    reports, reviewed_head = _review_report_set(paths, gate=gate, expected_base=prior_head)
+    verification = _round_verification_items(row)
+    if any(not _COMMIT.fullmatch(commit) for commit in _csv(row.commits)):
+        raise TransitionError("completed remediation round has malformed fix provenance")
+    repo_dir = _project_root(run_dir)
+    if (
+        not _git(repo_dir, "merge-base", "--is-ancestor", prior_head, reviewed_head)
+        or not _git(repo_dir, "merge-base", "--is-ancestor", reviewed_head, tracker.target_branch)
+        or any(not _git(repo_dir, "merge-base", "--is-ancestor", commit, reviewed_head) for commit in _csv(row.commits))
+    ):
+        raise TransitionError("completed remediation round is not a contiguous integrated review edge")
+    try:
+        _validate_verification_evidence(run_dir, verification, reviewed_head)
+    except TransitionError:
+        provenance = tuple(
+            item for item in _csv(row.verification)
+            if item.startswith("round-outcome-reconciliation=D-019@")
+        )
+        if not (
+            tracker.run_id == _ACTIVE_ROUND_OUTCOME_RUN
+            and gate.id == _ACTIVE_ROUND_OUTCOME_GATE
+            and row.round_number == _ACTIVE_ROUND_OUTCOME_ROUND
+            and len(provenance) == 1
+            and len(verification) == 1
+            and verification[0].endswith("@" + reviewed_head)
+        ):
+            raise
+    return reports, reviewed_head
+
+
+def _validated_review_lineage(
+    run_dir: Path,
+    tracker: Tracker,
+    gate: GateRecord,
+    report_paths: tuple[Path, ...],
+    active_round: RemediationRecord | None,
+) -> tuple[tuple[dict[str, str], ...], tuple[dict[str, str], ...]]:
+    resolved_input = tuple(Path(path).resolve() for path in report_paths)
+    if active_round is None:
+        initial_reports, initial_head = _review_report_set(
+            resolved_input, gate=gate, expected_base=gate.base,
+        )
+        if initial_head != gate.head:
+            raise TransitionError("initial reports do not match the gate's opened HEAD")
+        return initial_reports, ()
+
+    persisted_paths = tuple(
+        _resolved_reference(run_dir, value).resolve() for value in _csv(gate.reports)
+    )
+    if not persisted_paths or resolved_input != persisted_paths:
+        raise TransitionError("remediation evaluation must reuse the immutable initial report set")
+    initial_reports, cursor = _review_report_set(
+        persisted_paths, gate=gate, expected_base=gate.base,
+    )
+    historical: list[dict[str, str]] = []
+    completed = sorted(
+        (
+            row for row in tracker.remediation
+            if row.gate == gate.id
+            and row.state == "complete"
+            and row.round_number < active_round.round_number
+        ),
+        key=lambda row: row.round_number,
+    )
+    if tuple(row.round_number for row in completed) != tuple(range(1, active_round.round_number)):
+        raise TransitionError("completed remediation rounds do not form a contiguous sequence")
+    for row in completed:
+        reports, cursor = _validate_completed_round_edge(
+            run_dir, tracker, gate, row, cursor,
+        )
+        historical.extend(reports)
+    if cursor != gate.head:
+        raise TransitionError("persisted review lineage does not end at the gate's rolling HEAD")
+    return initial_reports, tuple(historical)
+
+
+def _gate_evaluation_request_digest(
+    findings_path: Path,
+    report_paths: tuple[Path, ...],
+    rereview_paths: tuple[Path, ...],
+    verification: tuple[str, ...],
+) -> str:
+    digest = hashlib.sha256()
+    for label, paths in (("findings", (findings_path,)), ("report", report_paths), ("rereview", rereview_paths)):
+        for path in paths:
+            resolved = Path(path).resolve()
+            try:
+                content = resolved.read_bytes()
+            except OSError as exc:
+                raise TransitionError(f"gate evidence is unreadable: {resolved}: {exc}") from exc
+            digest.update(label.encode())
+            digest.update(b"\0")
+            digest.update(str(resolved).encode())
+            digest.update(b"\0")
+            digest.update(content)
+            digest.update(b"\0")
+    for item in verification:
+        digest.update(b"verification\0")
+        digest.update(item.encode())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _review_evidence_path(run_dir: Path, value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path.resolve()
+    candidates = tuple(
+        candidate.resolve()
+        for candidate in (Path(run_dir) / path, _project_root(run_dir) / path)
+        if candidate.exists()
+    )
+    if len(set(candidates)) != 1:
+        raise TransitionError(f"review evidence reference is missing or ambiguous: {value}")
+    return candidates[0]
+
+
 def evaluate_and_close_review_gate(
     run_dir: Path,
     *,
@@ -2834,8 +3226,18 @@ def evaluate_and_close_review_gate(
 ) -> Tracker:
     if not report_paths or not verification:
         raise TransitionError("gate evaluation needs all reports and code-state verification")
+    request_digest = _gate_evaluation_request_digest(
+        Path(findings_path), report_paths, rereview_paths, verification,
+    )
+    transition_id = f"evaluate-gate-{gate_id}-{request_digest}"
 
     def transition(tracker: Tracker) -> Tracker:
+        if _gate_evaluation_request_digest(
+            Path(findings_path), report_paths, rereview_paths, verification,
+        ) != request_digest:
+            raise TransitionError("gate evidence changed while evaluation was being reserved")
+        if tracker.last_transition == transition_id:
+            raise _AlreadyApplied(tracker)
         gate = _gate_record(tracker, gate_id)
         if gate.state not in {"in_progress", "re_reviewing"}:
             raise TransitionError("gate is not open for evaluation")
@@ -2844,29 +3246,24 @@ def evaluate_and_close_review_gate(
         ).resolve()
         if Path(findings_path).resolve() != authoritative_findings:
             raise TransitionError("findings ledger is not the run's authoritative findings artifact")
-        reports = tuple(_parse_review_report(Path(path)) for path in report_paths)
-        expected_assignments = tuple(gate.assignments.split(","))
-        if tuple(sorted(report["assignment"] for report in reports)) != tuple(sorted(expected_assignments)):
-            raise TransitionError("required reviewer reports are missing, duplicated, or unexpected")
-        if any(report["gate"] != gate.id or report["base"] != gate.base or report["head"] != gate.head for report in reports):
-            raise TransitionError("review report belongs to a different gate or code state")
         active_round = next(
             (row for row in tracker.remediation if row.gate == gate.id and row.state == "re_reviewing"),
             None,
         )
-        rereviews = tuple(_parse_review_report(Path(path)) for path in rereview_paths)
+        reports, historical_reports = _validated_review_lineage(
+            Path(run_dir), tracker, gate, report_paths, active_round,
+        )
         reviewed_head = gate.head
+        rereviews: tuple[dict[str, str], ...] = ()
         if active_round is not None:
             if not rereviews:
-                raise TransitionError("an active remediation round requires re-review evidence")
-            if tuple(sorted(report["assignment"] for report in rereviews)) != tuple(sorted(expected_assignments)):
-                raise TransitionError("re-review assignments do not match the gate")
-            rereview_heads = {report["head"] for report in rereviews}
-            if len(rereview_heads) != 1 or any(report["gate"] != gate.id for report in rereviews):
-                raise TransitionError("re-review reports disagree on gate or reviewed HEAD")
-            reviewed_head = next(iter(rereview_heads))
-            if any(report["base"] != gate.head for report in rereviews):
-                raise TransitionError("re-review base must be the prior reviewed HEAD")
+                if not rereview_paths:
+                    raise TransitionError("an active remediation round requires re-review evidence")
+            rereviews, reviewed_head = _review_report_set(
+                tuple(Path(path).resolve() for path in rereview_paths),
+                gate=gate,
+                expected_base=gate.head,
+            )
             repo_dir = _project_root(Path(run_dir))
             if not _git(repo_dir, "merge-base", "--is-ancestor", gate.head, reviewed_head) or not _git(repo_dir, "merge-base", "--is-ancestor", reviewed_head, tracker.target_branch):
                 raise TransitionError("re-review code state is not integrated after the prior gate HEAD")
@@ -2876,6 +3273,7 @@ def evaluate_and_close_review_gate(
                 item
                 for item in _csv(active_round.verification)
                 if not item.startswith("remaining-blockers=")
+                and not item.startswith("round-outcome-reconciliation=")
             )
         else:
             if gate.type == "phase":
@@ -2894,7 +3292,11 @@ def evaluate_and_close_review_gate(
             raise TransitionError("gate verification does not match the authoritative recorded verification")
         rows = tuple(row for row in _parse_findings(authoritative_findings) if row[1] == gate.id)
         row_ids = {row[0] for row in rows}
-        report_ids = {finding for report in (*reports, *rereviews) for finding in _csv(report["findings"])}
+        report_ids = {
+            finding
+            for report in (*reports, *historical_reports, *rereviews)
+            for finding in _csv(report["findings"])
+        }
         if row_ids != report_ids:
             raise TransitionError("review reports and findings ledger disagree")
         invalid_rows: list[tuple[str, ...]] = []
@@ -2924,25 +3326,31 @@ def evaluate_and_close_review_gate(
                     invalid_rows.append(row)
                 if disposition in {"Deferred", "Rejected"} and fix_commit != "-":
                     invalid_rows.append(row)
-        fixed_commits = [row[6] for row in rows if row[4] == "Fixed" and row[6] != "-"]
-        rereview_ids = {finding for report in rereviews for finding in _csv(report["findings"])}
-        fixed_ids = {row[0] for row in rows if row[4] == "Fixed" and row[6] != "-"}
-        if fixed_commits and (not rereviews or not fixed_ids.issubset(rereview_ids)):
-            raise TransitionError("repository-changing review fixes require matching re-review evidence")
         repo_dir = _project_root(Path(run_dir))
-        remediation_commits = {
-            commit
-            for remediation in tracker.remediation
-            if remediation.gate == gate.id
-            for commit in _csv(remediation.commits)
-        }
-        if any(
-            not _COMMIT.fullmatch(commit)
-            or commit not in remediation_commits
-            or not _git(repo_dir, "merge-base", "--is-ancestor", commit, reviewed_head)
-            for commit in fixed_commits
-        ):
-            raise TransitionError("review fix commit is invalid or absent from the reviewed HEAD")
+        for finding in (row for row in rows if row[4] == "Fixed" and row[6] != "-"):
+            finding_id, _, _, _, _, _, fix_commit, re_review = finding
+            if not _COMMIT.fullmatch(fix_commit) or not _git(
+                repo_dir, "merge-base", "--is-ancestor", fix_commit, reviewed_head
+            ):
+                raise TransitionError("review fix commit is invalid or absent from the reviewed HEAD")
+            expected_rereview = _review_evidence_path(Path(run_dir), re_review)
+            matching_rounds: list[RemediationRecord] = []
+            for remediation in tracker.remediation:
+                if (
+                    remediation.gate != gate.id
+                    or finding_id not in _csv(remediation.findings)
+                    or fix_commit not in _csv(remediation.commits)
+                ):
+                    continue
+                paths = (
+                    tuple(Path(path).resolve() for path in rereview_paths)
+                    if remediation is active_round
+                    else tuple(_resolved_reference(Path(run_dir), value).resolve() for value in _csv(remediation.re_review))
+                )
+                if expected_rereview in paths:
+                    matching_rounds.append(remediation)
+            if len(matching_rounds) != 1:
+                raise TransitionError("fixed finding is not bound to exactly one targeted remediation round and re-review")
         if invalid_rows:
             raise TransitionError("finding status, severity, disposition, or evidence is invalid")
         questions = gate.questions
@@ -2994,18 +3402,20 @@ def evaluate_and_close_review_gate(
             gate,
             state=state,
             head=reviewed_head,
-            reports=",".join(str(Path(path)) for path in report_paths),
+            reports=(gate.reports if active_round is not None else ",".join(str(Path(path)) for path in report_paths)),
             verification=",".join(verification),
             findings=",".join(sorted(row_ids)) or "-",
             questions=questions,
         )
         return replace(_replace_gate(tracker, replacement), remediation=tuple(remediation_rows))
 
-    return locked_tracker_update(
-        Path(run_dir),
-        f"evaluate-gate-{gate_id}-{hashlib.sha256('|'.join(verification).encode()).hexdigest()}",
-        transition, timeout_s=5.0, refresh_next_action=True,
-    )
+    try:
+        return locked_tracker_update(
+            Path(run_dir), transition_id, transition, timeout_s=5.0,
+            replay_returns_current=False, refresh_next_action=True,
+        )
+    except _AlreadyApplied as applied:
+        return applied.tracker
 
 
 def reconcile_run(

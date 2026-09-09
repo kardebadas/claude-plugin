@@ -44,4 +44,4 @@
 ## Remediation
 | Gate | Round | State | Findings | Fix Plan | Commits | Verification | Re-review |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| phase-01 | 1 | complete | F-001 | fix-plan-phase-01-r1.md | abcdef0123456789abcdef0123456789abcdef01 | phase-01-r1-tests.txt | agent-output/phase-01-r1-review.md |
+| phase-01 | 1 | complete | F-001 | fix-plan-phase-01-r1.md | abcdef0123456789abcdef0123456789abcdef01 | phase-01-r1-tests.txt,remaining-blockers=F-001 | agent-output/phase-01-r1-review.md |

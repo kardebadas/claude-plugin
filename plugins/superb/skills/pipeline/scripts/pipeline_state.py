@@ -511,17 +511,30 @@ def _validate_tracker_semantics(tracker: Tracker) -> None:
                 _attempt_baseline(task, task.attempt)
             except TransitionError as exc:
                 raise SchemaError(str(exc)) from exc
-        if task.state == "[~]" and any(
-            value != "-" for value in (
-                task.result, task.source_ref, task.commits, task.artifacts, task.integration,
+        if task.state == "[~]":
+            if any(
+                value != "-" for value in (
+                    task.source_ref, task.commits, task.artifacts, task.integration,
+                )
+            ):
+                raise SchemaError("active task cannot claim completion or integration")
+            resumed = any(
+                re.fullmatch(rf"resumed:[^,]+->{re.escape(task.attempt)}@[^,]+", item)
+                for item in _csv(task.checkpoints)
             )
-        ):
-            raise SchemaError("active task cannot claim completion or integration")
+            if (task.result != "-" or task.verification != "-") and not resumed:
+                raise SchemaError("only a resumed active task may preserve prior result evidence")
         if task.state == "[?]" and (
             task.question == "-"
             or not any(item.startswith(f"blocked:{task.attempt}@") for item in _csv(task.checkpoints))
         ):
             raise SchemaError("blocked task needs its current question checkpoint")
+        if task.state == "[?]" and any(
+            value != "-" for value in (
+                task.source_ref, task.commits, task.artifacts, task.integration,
+            )
+        ):
+            raise SchemaError("blocked task cannot claim completion or integration")
         if task.state == "[x]":
             if task.result == "-" or task.verification == "-":
                 raise SchemaError("completed task needs result and verification evidence")
@@ -564,6 +577,7 @@ def _validate_tracker_semantics(tracker: Tracker) -> None:
             raise SchemaError("active blocked/re-reviewing gate needs sealed finding origins")
         if len(_gate_finding_ids(gate)) != len(set(_gate_finding_ids(gate))):
             raise SchemaError("gate finding identities must be unique")
+    active_rounds: dict[str, list[RemediationRecord]] = {}
     for row in tracker.remediation:
         if row.gate not in gate_ids:
             raise SchemaError("remediation row refers to an unknown gate")
@@ -589,6 +603,21 @@ def _validate_tracker_semantics(tracker: Tracker) -> None:
             or row.commits == "-" or row.verification == "-" or row.re_review == "-"
         ):
             raise SchemaError("completed remediation has incomplete state")
+        if row.state in {"fixing", "re_reviewing"}:
+            active_rounds.setdefault(row.gate, []).append(row)
+        gate = next(item for item in tracker.gates if item.id == row.gate)
+        if row.state == "fixing" and gate.state != "blocked":
+            raise SchemaError("fixing remediation requires its gate to remain blocked")
+        if row.state == "re_reviewing" and gate.state != "re_reviewing":
+            raise SchemaError("re-reviewing remediation requires a matching gate state")
+    if any(len(rows) > 1 for rows in active_rounds.values()):
+        raise SchemaError("a gate cannot have multiple active remediation rounds")
+    for gate in tracker.gates:
+        if gate.state == "re_reviewing" and not any(
+            row.gate == gate.id and row.state == "re_reviewing"
+            for row in tracker.remediation
+        ):
+            raise SchemaError("re-reviewing gate requires exactly one matching active round")
 
 
 def _row(values: tuple[object, ...]) -> str:
@@ -2966,7 +2995,8 @@ def open_review_gate(
     )
 
 
-_REVIEW_FIELDS = ("gate", "assignment", "base", "head", "findings")
+_HISTORICAL_REVIEW_FIELDS = ("gate", "assignment", "base", "head", "findings")
+_REVIEW_FIELDS = (*_HISTORICAL_REVIEW_FIELDS, "outcomes")
 _FINDING_HEADER = ("ID", "Gate", "Severity", "Status", "Disposition", "Evidence", "Fix Commit", "Re-review")
 _VERIFICATION_MARKER = "<!-- pipeline-verification-evidence/v2 -->"
 _VERIFICATION_FIELDS = (
@@ -3060,15 +3090,41 @@ def _validate_verification_evidence(
     return tuple(parsed)
 
 
-def _parse_review_report(path: Path) -> dict[str, str]:
+def _parse_review_report(
+    path: Path,
+    *,
+    allow_sealed_historical: bool = False,
+) -> dict[str, str]:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError) as exc:
         raise TransitionError(f"review report is unreadable: {path}: {exc}") from exc
     if not lines or lines[0] != "<!-- pipeline-review-report/v2 -->":
         raise TransitionError("review report marker is missing")
-    values = dict(_key_values(lines[1:], _REVIEW_FIELDS, TransitionError))
-    return values
+    try:
+        return dict(_key_values(lines[1:], _REVIEW_FIELDS, TransitionError))
+    except TransitionError:
+        if not allow_sealed_historical:
+            raise
+    return dict(_key_values(lines[1:], _HISTORICAL_REVIEW_FIELDS, TransitionError))
+
+
+def _review_outcomes(report: dict[str, str]) -> dict[str, str]:
+    try:
+        outcomes = json.loads(report["outcomes"])
+    except (KeyError, json.JSONDecodeError) as exc:
+        raise TransitionError("new review report needs a valid outcomes JSON object") from exc
+    if (
+        not isinstance(outcomes, dict)
+        or any(
+            not isinstance(finding, str)
+            or not _TOKEN.fullmatch(finding)
+            or outcome not in {"Open", "Resolved"}
+            for finding, outcome in outcomes.items()
+        )
+    ):
+        raise TransitionError("review outcomes must map finding IDs to Open or Resolved")
+    return outcomes
 
 
 def _digest_bound_reference(run_dir: Path, path: Path) -> str:
@@ -3129,10 +3185,13 @@ def _sealed_review_package(
     gate: GateRecord,
     report_paths: tuple[Path, ...],
     rows: tuple[tuple[str, ...], ...],
+    *,
+    allow_sealed_historical: bool = False,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     reports, report_head = _review_report_set(
         tuple(Path(path).resolve() for path in report_paths),
         gate=gate, expected_base=gate.base,
+        allow_sealed_historical=allow_sealed_historical,
     )
     if report_head != gate.head:
         raise TransitionError("initial reports do not match the gate's opened HEAD")
@@ -3157,6 +3216,7 @@ def _validate_sealed_gate_evidence(
     rows = tuple(row for row in _parse_findings(findings_path) if row[1] == gate.id)
     reports, initial_head = _review_report_set(
         report_paths, gate=gate, expected_base=gate.base,
+        allow_sealed_historical=True,
     )
     repo_dir = _project_root(run_dir)
     if not _git(repo_dir, "merge-base", "--is-ancestor", initial_head, gate.head):
@@ -3240,7 +3300,10 @@ def seal_active_master_round_one(run_dir: Path) -> Tracker:
         rows = tuple(row_ for row_ in _parse_findings(findings_path) if row_[1] == gate.id)
         if tuple(sorted(row_[0] for row_ in rows)) != _MASTER_ROUND_ONE_SEAL_FINDINGS:
             raise TransitionError("D-027 findings ledger no longer has the authorized finding set")
-        report_identities, origins = _sealed_review_package(run_dir, gate, report_paths, rows)
+        report_identities, origins = _sealed_review_package(
+            run_dir, gate, report_paths, rows,
+            allow_sealed_historical=True,
+        )
         seal_payload = json.dumps(
             [*report_identities, *origins], separators=(",", ":")
         ).encode("utf-8")
@@ -3804,7 +3867,7 @@ def reconcile_active_rebuild_round_one_outcome(
         recorded_report = _resolved_reference(run_dir, round_one.re_review).resolve()
         if recorded_report != report_path:
             raise TransitionError("D-019 report is not the Round 1 row's recorded re-review evidence")
-        report = _parse_review_report(report_path)
+        report = _parse_review_report(report_path, allow_sealed_historical=True)
         report_ids = set(_csv(report["findings"]))
         if (
             report["gate"] != gate.id
@@ -3836,8 +3899,13 @@ def _review_report_set(
     *,
     gate: GateRecord,
     expected_base: str,
+    allow_sealed_historical: bool = False,
+    rereview: bool = False,
 ) -> tuple[tuple[dict[str, str], ...], str]:
-    reports = tuple(_parse_review_report(path) for path in paths)
+    reports = tuple(
+        _parse_review_report(path, allow_sealed_historical=allow_sealed_historical)
+        for path in paths
+    )
     expected_assignments = tuple(sorted(_csv(gate.assignments)))
     if tuple(sorted(report["assignment"] for report in reports)) != expected_assignments:
         raise TransitionError("required reviewer reports are missing, duplicated, or unexpected")
@@ -3847,15 +3915,35 @@ def _review_report_set(
         or any(report["gate"] != gate.id or report["base"] != expected_base for report in reports)
     ):
         raise TransitionError("review reports do not form the required gate/code-state edge")
+    if not allow_sealed_historical:
+        expected_gate_findings = set(_gate_finding_ids(gate))
+        for report in reports:
+            report_findings = set(_csv(report["findings"]))
+            outcomes = _review_outcomes(report)
+            if set(outcomes) != report_findings:
+                raise TransitionError("review outcomes must map every reported finding exactly once")
+            if rereview:
+                if report_findings != expected_gate_findings:
+                    raise TransitionError("each re-review must conclude every existing gate finding")
+            elif any(outcome != "Open" for outcome in outcomes.values()):
+                raise TransitionError("initial review findings must be reported Open")
     return reports, next(iter(heads))
 
 
 def _round_verification_items(row: RemediationRecord) -> tuple[str, ...]:
+    items = _csv(row.verification)
+    seals = tuple(item for item in items if item.startswith("master-initial-seal:"))
+    if len(seals) > 1 or any(
+        re.fullmatch(r"master-initial-seal:[0-9a-f]{64}", seal) is None
+        for seal in seals
+    ):
+        raise TransitionError("master initial seal metadata is malformed or duplicated")
     return tuple(
-        item for item in _csv(row.verification)
+        item for item in items
         if not item.startswith("remaining-blockers=")
         and not item.startswith("round-outcome-reconciliation=")
         and not item.startswith("extension-authority=")
+        and not item.startswith("master-initial-seal:")
     )
 
 
@@ -3869,7 +3957,10 @@ def _validate_completed_round_edge(
     paths = tuple(_resolve_digest_bound_reference(run_dir, value) for value in _csv(row.re_review))
     if not paths:
         raise TransitionError("completed remediation round has no re-review evidence")
-    reports, reviewed_head = _review_report_set(paths, gate=gate, expected_base=prior_head)
+    reports, reviewed_head = _review_report_set(
+        paths, gate=gate, expected_base=prior_head,
+        allow_sealed_historical=True,
+    )
     verification = _round_verification_items(row)
     if any(not _COMMIT.fullmatch(commit) for commit in _csv(row.commits)):
         raise TransitionError("completed remediation round has malformed fix provenance")
@@ -3922,6 +4013,7 @@ def _validated_review_lineage(
         raise TransitionError("remediation evaluation must reuse the immutable initial report set")
     initial_reports, cursor = _review_report_set(
         persisted_paths, gate=gate, expected_base=gate.base,
+        allow_sealed_historical=True,
     )
     historical: list[dict[str, str]] = []
     completed = sorted(
@@ -4049,6 +4141,7 @@ def evaluate_and_close_review_gate(
                 tuple(Path(path).resolve() for path in rereview_paths),
                 gate=gate,
                 expected_base=gate.head,
+                rereview=True,
             )
             if not _git(repo_dir, "merge-base", "--is-ancestor", gate.head, reviewed_head) or not _git(repo_dir, "merge-base", "--is-ancestor", reviewed_head, tracker.target_branch):
                 raise TransitionError("re-review code state is not integrated after the prior gate HEAD")
@@ -4080,13 +4173,7 @@ def evaluate_and_close_review_gate(
                 subject=f"phase/{subject_phase}", attempt="N/A",
             )
         if active_round is not None:
-            recorded_verification = tuple(
-                item
-                for item in _csv(active_round.verification)
-                if not item.startswith("remaining-blockers=")
-                and not item.startswith("round-outcome-reconciliation=")
-                and not item.startswith("extension-authority=")
-            )
+            recorded_verification = _round_verification_items(active_round)
         else:
             if gate.type == "phase":
                 phase = next(item for item in tracker.phases if item.id == gate.phase)
@@ -4108,6 +4195,15 @@ def evaluate_and_close_review_gate(
             _validate_sealed_gate_evidence(Path(run_dir), gate, authoritative_findings)
             if row_ids != set(_gate_finding_ids(gate)):
                 raise TransitionError("findings ledger changed the sealed gate finding set")
+            outcome_sets = {
+                finding_id: {report_outcomes[finding_id] for report_outcomes in map(_review_outcomes, rereviews)}
+                for finding_id in row_ids
+            }
+            if any(len(outcomes) != 1 for outcomes in outcome_sets.values()):
+                raise TransitionError("reviewer outcome conflict requires explicit consolidation")
+            ledger_status = {row[0]: row[3] for row in rows}
+            if any(next(iter(outcomes)) != ledger_status[finding_id] for finding_id, outcomes in outcome_sets.items()):
+                raise TransitionError("re-review outcomes and authoritative finding status disagree")
         report_ids = {
             finding
             for report in (*reports, *historical_reports, *rereviews)

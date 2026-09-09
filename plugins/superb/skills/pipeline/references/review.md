@@ -15,7 +15,7 @@ before accepting, rejecting, or fixing anything.
 | --- | --- | --- |
 | Phase `final-only` | Mechanical phase verification passed | None. The controller may advance the phase when every other acceptance fact permits it. |
 | Phase `required` | Every task is truthfully complete, source work is integrated, artifact work is validated, mechanical verification passed, and the tracker classification and reason exactly match that phase's approved metadata | Exactly one independent reviewer who did not implement the phase. Review the complete integrated phase and the specific risk named by its reason. |
-| Master | Every phase is verified and every required phase gate is accepted. The base is the immutable tracker `base_commit`; the head is the last approved phase's recorded verified integrated HEAD. | Exactly two independent reviewers over that same complete edge. Neither may be any persisted task implementation owner. Reviewer A covers requirements, behavior, error paths, assumptions, and user decisions. Reviewer B covers integration, architecture, persistence, recovery, concurrency, security where relevant, regressions, and test quality. |
+| Master | Every phase is verified and every required phase gate is accepted. The base is the immutable tracker `base_commit`; the head is the last approved phase's recorded verified integrated HEAD and the current designated target-branch tip. | Exactly two independent reviewers over that same complete edge. Neither may be any persisted task implementation owner. Reviewer A covers requirements, behavior, error paths, assumptions, and user decisions. Reviewer B covers integration, architecture, persistence, recovery, concurrency, security where relevant, regressions, and test quality. |
 
 Open the gate with the controller transition only after those preconditions are
 true. Reviewer capacity consumes the same persisted global `worker_limit` as
@@ -41,7 +41,9 @@ assignment recorded by the controller:
 The phase reviewer reports against the opened phase edge. Both master reports
 must name their own recorded assignments and the identical gate/base/HEAD. The
 controller rejects a caller-selected master base or HEAD and any master reviewer
-whose identifier matches a persisted task implementation owner.
+whose identifier matches a persisted task implementation owner. Recheck the
+target tip at acceptance: if it advanced after opening or report publication,
+keep the gate unresolved and refresh the affected verification and review.
 If a reviewer cannot assess the assigned scope, record the limitation and ask
 the user; do not declare the scope covered or spawn another reviewer.
 
@@ -92,6 +94,8 @@ of the following:
 
 1. Every required report belongs to the recorded gate, assignment, and reviewed
    code-state edge.
+   For the master gate, that reviewed HEAD must still equal the designated
+   target-branch tip.
 2. Digest-bound required verification records `PASS` for the exact applicable
    integrated HEAD and matches the phase or active remediation evidence already
    recorded in `progress.md`.

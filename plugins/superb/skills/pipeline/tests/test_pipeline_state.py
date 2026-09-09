@@ -1511,6 +1511,16 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
         )
         return run_dir, base, implementation, verified_head
 
+    def advance_target_after_verification(self, root: Path) -> str:
+        (root / "post-verification.txt").write_text(
+            "unreviewed target change\n", encoding="utf-8"
+        )
+        self.git(root, "add", "post-verification.txt")
+        self.git(root, "commit", "-qm", "advance target after verification")
+        target_tip = self.git(root, "rev-parse", "HEAD")
+        self.git(root, "branch", "-f", "target", target_tip)
+        return target_tip
+
     def write_report(self, root: Path, name: str, *, gate: str, assignment: str, base: str, head: str, findings: str = "-") -> Path:
         path = root / name
         path.write_text(
@@ -1620,6 +1630,66 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
             )
             gate = next(item for item in opened.gates if item.id == "master")
             self.assertEqual((gate.base, gate.head), (run_base, verified_head))
+
+    def test_master_gate_rejects_post_verification_target_commit_on_open(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, run_base, _, verified_head = self.make_changed_master_run(root)
+            target_tip = self.advance_target_after_verification(root)
+            self.assertNotEqual(target_tip, verified_head)
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                open_review_gate(
+                    run_dir,
+                    gate_id="master",
+                    base=run_base,
+                    head=verified_head,
+                    reviewer_assignments=("reviewer-a", "reviewer-b"),
+                    capacity=3,
+                )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_master_gate_rejects_target_advance_before_acceptance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, run_base, _, verified_head = self.make_changed_master_run(root)
+            open_review_gate(
+                run_dir,
+                gate_id="master",
+                base=run_base,
+                head=verified_head,
+                reviewer_assignments=("reviewer-a", "reviewer-b"),
+                capacity=3,
+            )
+            report_a = self.write_report(
+                root,
+                "master-a.md",
+                gate="master",
+                assignment="reviewer-a",
+                base=run_base,
+                head=verified_head,
+            )
+            report_b = self.write_report(
+                root,
+                "master-b.md",
+                gate="master",
+                assignment="reviewer-b",
+                base=run_base,
+                head=verified_head,
+            )
+            target_tip = self.advance_target_after_verification(root)
+            self.assertNotEqual(target_tip, verified_head)
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                evaluate_and_close_review_gate(
+                    run_dir,
+                    gate_id="master",
+                    findings_path=root / "findings.md",
+                    report_paths=(report_a, report_b),
+                    verification=(_verification_evidence(root, verified_head),),
+                    rereview_paths=(),
+                )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
 
     def test_master_reviewers_cannot_be_persisted_task_implementation_owners(self):
         with tempfile.TemporaryDirectory() as directory:

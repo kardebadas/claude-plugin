@@ -2085,6 +2085,13 @@ def _git(repo_dir: Path, *args: str) -> bool:
     return completed.returncode == 0
 
 
+def _is_target_tip(repo_dir: Path, target_branch: str, commit: str) -> bool:
+    """Return whether commit and the designated target branch name the same history point."""
+    return _git(repo_dir, "merge-base", "--is-ancestor", commit, target_branch) and _git(
+        repo_dir, "merge-base", "--is-ancestor", target_branch, commit
+    )
+
+
 def complete_task(
     run_dir: Path,
     *,
@@ -2625,7 +2632,13 @@ def open_review_gate(
                 )
         _validate_worker_capacity(tracker, reviewer_assignments, capacity)
         repo_dir = _project_root(Path(run_dir))
-        if not _git(repo_dir, "merge-base", "--is-ancestor", base, head) or not _git(repo_dir, "merge-base", "--is-ancestor", head, tracker.target_branch):
+        if not _git(repo_dir, "merge-base", "--is-ancestor", base, head) or (
+            gate.type == "master"
+            and not _is_target_tip(repo_dir, tracker.target_branch, head)
+        ) or (
+            gate.type == "phase"
+            and not _git(repo_dir, "merge-base", "--is-ancestor", head, tracker.target_branch)
+        ):
             raise TransitionError("review range is not an integrated target-branch range")
         return _replace_gate(
             tracker,
@@ -3462,6 +3475,7 @@ def evaluate_and_close_review_gate(
             Path(run_dir), tracker, gate, report_paths, active_round,
         )
         reviewed_head = gate.head
+        repo_dir = _project_root(Path(run_dir))
         rereviews: tuple[dict[str, str], ...] = ()
         if active_round is not None:
             if not rereviews:
@@ -3472,9 +3486,14 @@ def evaluate_and_close_review_gate(
                 gate=gate,
                 expected_base=gate.head,
             )
-            repo_dir = _project_root(Path(run_dir))
             if not _git(repo_dir, "merge-base", "--is-ancestor", gate.head, reviewed_head) or not _git(repo_dir, "merge-base", "--is-ancestor", reviewed_head, tracker.target_branch):
                 raise TransitionError("re-review code state is not integrated after the prior gate HEAD")
+        if gate.type == "master" and not _is_target_tip(
+            repo_dir, tracker.target_branch, reviewed_head
+        ):
+            raise TransitionError(
+                "master review HEAD is no longer the designated target branch tip"
+            )
         _validate_verification_evidence(Path(run_dir), verification, reviewed_head)
         if active_round is not None:
             recorded_verification = tuple(
@@ -3539,7 +3558,6 @@ def evaluate_and_close_review_gate(
                     invalid_rows.append(row)
                 if disposition == "Rejected" and evidence != "-":
                     _validate_rejection_evidence(Path(run_dir), row[0], evidence)
-        repo_dir = _project_root(Path(run_dir))
         for finding in (row for row in rows if row[4] == "Fixed" and row[6] != "-"):
             finding_id, _, _, _, _, _, fix_commit, re_review = finding
             if not _COMMIT.fullmatch(fix_commit) or not _git(

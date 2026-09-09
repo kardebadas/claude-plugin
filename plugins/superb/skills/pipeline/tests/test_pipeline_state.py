@@ -2411,6 +2411,24 @@ class PhaseOneReviewRegressionTest(unittest.TestCase):
                 decisions.write_text(
                     "# Decisions\n\n## D-900 — Filesystem authority\n\n"
                     "- **Question:** May this run use the detected unknown filesystem?\n"
+                    "- **Answer:** Refuse this filesystem; use the existing configuration for mysteryfs.\n"
+                    "- **Scope:** Run 2026-09-08-init-test on fingerprint " + "c" * 64 + ".\n"
+                    "- **Status:** Resolved.\n",
+                    encoding="utf-8",
+                )
+                counterexample_bytes = decisions.read_bytes()
+                with self.assertRaises(pipeline_state.FilesystemSuitabilityError):
+                    initialize_run(
+                        run_dir, run_id="2026-09-08-init-test",
+                        base_commit="8348959d1b201a873c68512642a0eb8e5754eaa8",
+                        target_branch="feat/init-test", worker_limit=3, artifacts=artifacts,
+                        approved_existing=(), filesystem_acknowledgement="D-900@" + "c" * 64,
+                    )
+                self.assertFalse(run_dir.exists())
+                self.assertEqual(decisions.read_bytes(), counterexample_bytes)
+                decisions.write_text(
+                    "# Decisions\n\n## D-900 — Filesystem authority\n\n"
+                    "- **Question:** May this run use the detected unknown filesystem?\n"
                     "- **Answer:** Do not authorize mysteryfs; use the recorded refusal for fingerprint " + "c" * 64 + ".\n"
                     "- **Scope:** Run 2026-09-08-init-test on fingerprint " + "c" * 64 + ".\n"
                     "- **Status:** Resolved.\n",

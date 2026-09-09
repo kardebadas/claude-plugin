@@ -437,6 +437,28 @@ def parse_tracker(text: str) -> Tracker:
             raise SchemaError("completed remediation round needs exactly one remaining-blockers outcome")
         if row.state != "complete" and outcomes:
             raise SchemaError("only a completed remediation round may record remaining-blockers")
+        if outcomes:
+            value = outcomes[0].split("=", 1)[1]
+            blockers = value.split("+")
+            targets = {
+                finding
+                for remediation in tracker.remediation
+                if remediation.gate == row.gate
+                for finding in _csv(remediation.findings)
+            }
+            gate = next((gate for gate in tracker.gates if gate.id == row.gate), None)
+            if gate is not None:
+                targets.update(_csv(gate.findings))
+            if value == "none":
+                blockers = []
+            elif (
+                not value
+                or "none" in blockers
+                or len(blockers) != len(set(blockers))
+                or any(not _TOKEN.fullmatch(blocker) for blocker in blockers)
+                or not set(blockers).issubset(targets)
+            ):
+                raise SchemaError("remaining-blockers must be none or unique targeted finding IDs")
     return tracker
 
 
@@ -775,9 +797,10 @@ def _filesystem_ack(
     if lines is None:
         raise FilesystemSuitabilityError(f"filesystem authorization decision {decision_ref} is missing")
     answers = _field_lines(lines, "Answer")
+    questions = _field_lines(lines, "Question")
     statuses = _field_lines(lines, "Status")
     scopes = _field_lines(lines, "Scope")
-    if len(answers) != 1 or len(statuses) != 1 or len(scopes) != 1:
+    if len(questions) != 1 or len(answers) != 1 or len(statuses) != 1 or len(scopes) != 1:
         raise FilesystemSuitabilityError("filesystem decision evidence is missing, duplicated, or conflicting")
     answer = answers[0].strip().rstrip(".")
     if (
@@ -792,13 +815,15 @@ def _filesystem_ack(
         run_id.casefold() not in scope.casefold()
         or info.fingerprint.casefold() not in scope.casefold()
         or info.fs_type.casefold() not in combined
-        or not any(term in answer.casefold() for term in ("authorize", "allow", "approve", "use"))
+        or not _has_filesystem_authorization(answer)
     ):
         raise FilesystemSuitabilityError("filesystem decision is unrelated to this run, type, or fingerprint")
     for other_ref, other_lines in sections.items():
         if other_ref == decision_ref:
             continue
         other_status = _field_lines(other_lines, "Status")
+        other_questions = _field_lines(other_lines, "Question")
+        other_answers = _field_lines(other_lines, "Answer")
         other_scope = " ".join(_field_lines(other_lines, "Scope")).casefold()
         if (
             len(other_status) == 1
@@ -807,6 +832,18 @@ def _filesystem_ack(
             and info.fingerprint.casefold() in other_scope
         ):
             raise FilesystemSuitabilityError(f"unresolved decision {other_ref} still conflicts with filesystem authority")
+        if (
+            len(other_status) == 1
+            and other_status[0].strip().rstrip(".").casefold() == "resolved"
+            and len(other_questions) == 1
+            and other_questions[0].strip().rstrip(".").casefold()
+            == questions[0].strip().rstrip(".").casefold()
+            and len(other_answers) == 1
+            and other_answers[0].strip().rstrip(".").casefold() != answer.casefold()
+            and run_id.casefold() in other_scope
+            and info.fingerprint.casefold() in other_scope
+        ):
+            raise FilesystemSuitabilityError(f"resolved decision {other_ref} conflicts with filesystem authority")
     return acknowledgement
 
 
@@ -1514,15 +1551,21 @@ def _field_lines(lines: list[str], field: str) -> list[str]:
 
 
 def _has_affirmative_directive(answer: str) -> bool:
-    folded = answer.casefold()
-    for match in re.finditer(
-        r"\b(?:use|apply|authorize|approve|choose|accept|permit|allow|defer|reject)\b",
-        folded,
-    ):
-        prefix = folded[max(0, match.start() - 16):match.start()]
-        if not re.search(r"(?:do not|don't|never|not)\s+$", prefix):
+    directive = r"\b(?:use|apply|authorize|approve|choose|accept|permit|allow|defer|reject)\b"
+    negative = r"\b(?:do not|don't|never|not|refuse to|decline to|forbid|deny)\b"
+    for clause in re.split(r"[.;]|\bbut\b", answer.casefold()):
+        if re.search(directive, clause) and not re.search(negative, clause):
             return True
     return False
+
+
+def _has_filesystem_authorization(answer: str) -> bool:
+    directive = r"\b(?:use|authorize|approve|permit|allow)\b"
+    negative = r"\b(?:do not|don't|never|not|refuse to|decline to|forbid|deny|reject)\b"
+    return any(
+        re.search(directive, clause) and not re.search(negative, clause)
+        for clause in re.split(r"[.;]|\bbut\b", answer.casefold())
+    )
 
 
 def _scope_names_task(scope: str, task_id: str) -> bool:
@@ -1541,14 +1584,17 @@ def _validate_decision(run_dir: Path, tracker: Tracker, task: TaskRecord, decisi
     if decision_ref not in sections:
         raise TransitionError(f"decision {decision_ref} is missing")
     lines = sections[decision_ref]
+    questions = _field_lines(lines, "Question")
     answers = _field_lines(lines, "Answer")
     statuses = _field_lines(lines, "Status")
     scopes = _field_lines(lines, "Scope") + _field_lines(lines, "Affected task")
-    if len(answers) != 1 or len(statuses) != 1 or len(scopes) != 1:
+    if len(questions) != 1 or len(answers) != 1 or len(statuses) != 1 or len(scopes) != 1:
         raise TransitionError("decision evidence is missing, duplicated, or conflicting")
     answer = answers[0].strip().rstrip(".")
     if not answer or answer.casefold() in {"approved", "yes", "continue", "proceed", "go", "pending user response"}:
         raise TransitionError("generic approval or an empty answer cannot resolve a blocker")
+    if not _has_affirmative_directive(answer):
+        raise TransitionError("decision does not contain an affirmative, non-negated directive")
     if statuses[0].strip().rstrip(".").casefold() != "resolved":
         raise TransitionError("decision is not resolved")
     if not _scope_names_task(scopes[0], task.id):
@@ -1558,12 +1604,24 @@ def _validate_decision(run_dir: Path, tracker: Tracker, task: TaskRecord, decisi
             continue
         other_statuses = _field_lines(other_lines, "Status")
         other_scopes = _field_lines(other_lines, "Scope") + _field_lines(other_lines, "Affected task")
+        other_questions = _field_lines(other_lines, "Question")
+        other_answers = _field_lines(other_lines, "Answer")
         if (
             len(other_statuses) == 1
             and other_statuses[0].strip().rstrip(".").casefold() in {"open", "pending", "blocked"}
             and any(_scope_names_task(scope, task.id) for scope in other_scopes)
         ):
             raise TransitionError(f"unresolved decision {other_ref} still blocks {task.id}")
+        if (
+            len(other_statuses) == 1
+            and other_statuses[0].strip().rstrip(".").casefold() == "resolved"
+            and len(other_questions) == 1
+            and other_questions[0].strip().rstrip(".").casefold() == questions[0].strip().rstrip(".").casefold()
+            and len(other_answers) == 1
+            and other_answers[0].strip().rstrip(".").casefold() != answer.casefold()
+            and any(_scope_names_task(scope, task.id) for scope in other_scopes)
+        ):
+            raise TransitionError(f"resolved decision {other_ref} conflicts for {task.id}")
 
 
 def _validate_start_guards(run_dir: Path, tracker: Tracker, task_id: str) -> PlannedTask:
@@ -2659,9 +2717,10 @@ def _resolved_decision_for_terms(
     if lines is None:
         raise TransitionError(f"decision {decision_ref} is missing")
     answers = _field_lines(lines, "Answer")
+    questions = _field_lines(lines, "Question")
     statuses = _field_lines(lines, "Status")
     scopes = _field_lines(lines, "Scope") + _field_lines(lines, "Affected task") + _field_lines(lines, "Affected work")
-    if len(answers) != 1 or len(statuses) != 1 or not scopes:
+    if len(questions) != 1 or len(answers) != 1 or len(statuses) != 1 or not scopes:
         raise TransitionError("decision evidence is missing, duplicated, or conflicting")
     answer = answers[0].strip().rstrip(".")
     if not answer or answer.casefold() in {"approved", "yes", "continue", "proceed", "go", "pending user response"}:
@@ -2677,6 +2736,7 @@ def _resolved_decision_for_terms(
         if other_ref == decision_ref:
             continue
         other_status = _field_lines(other_lines, "Status")
+        other_questions = _field_lines(other_lines, "Question")
         other_scopes = _field_lines(other_lines, "Scope") + _field_lines(other_lines, "Affected task") + _field_lines(other_lines, "Affected work")
         other_answers = _field_lines(other_lines, "Answer")
         if (
@@ -2688,10 +2748,12 @@ def _resolved_decision_for_terms(
         if (
             len(other_status) == 1
             and other_status[0].strip().rstrip(".").casefold() == "resolved"
+            and len(other_questions) == 1
+            and other_questions[0].strip().rstrip(".").casefold()
+            == questions[0].strip().rstrip(".").casefold()
             and len(other_answers) == 1
             and other_answers[0].strip().rstrip(".").casefold() != answer.casefold()
-            and {scope.strip().rstrip(".").casefold() for scope in other_scopes}
-            & {scope.strip().rstrip(".").casefold() for scope in scopes}
+            and any(term.casefold() in " ".join(other_scopes).casefold() for term in terms)
         ):
             raise TransitionError(f"resolved decision {other_ref} conflicts on the same review scope")
 
@@ -2721,6 +2783,53 @@ def resolve_gate_questions(
     )
 
 
+def _validate_remediation_extension_decision(
+    run_dir: Path,
+    tracker: Tracker,
+    *,
+    decision_ref: str,
+    gate_id: str,
+    round_number: int,
+    finding_ids: tuple[str, ...],
+) -> None:
+    decisions_path = _resolved_reference(run_dir, dict(tracker.run_fields)["decisions"])
+    try:
+        sections = _decision_sections(decisions_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, TransitionError) as exc:
+        raise TransitionError(f"cannot read remediation-extension decision: {exc}") from exc
+    lines = sections.get(decision_ref)
+    if lines is None:
+        raise TransitionError(f"remediation-extension decision {decision_ref} is missing")
+    required = {
+        "Question": _field_lines(lines, "Question"),
+        "Answer": _field_lines(lines, "Answer"),
+        "Authorized gate": _field_lines(lines, "Authorized gate"),
+        "Authorized through round": _field_lines(lines, "Authorized through round"),
+        "Authorized findings": _field_lines(lines, "Authorized findings"),
+        "Authority marker": _field_lines(lines, "Authority marker"),
+        "Scope": _field_lines(lines, "Scope"),
+        "Status": _field_lines(lines, "Status"),
+    }
+    if any(len(values) != 1 for values in required.values()):
+        raise TransitionError("remediation-extension decision evidence is incomplete or ambiguous")
+    answer = required["Answer"][0].strip().rstrip(".")
+    if not _has_affirmative_directive(answer):
+        raise TransitionError("remediation-extension decision is not affirmative")
+    if required["Status"][0].strip().rstrip(".").casefold() != "resolved":
+        raise TransitionError("remediation-extension decision is unresolved")
+    if required["Authorized gate"][0] != gate_id:
+        raise TransitionError("remediation-extension decision names a different gate")
+    if required["Authorized through round"][0] != str(round_number):
+        raise TransitionError("remediation-extension decision names a different round ceiling")
+    if tuple(_csv(required["Authorized findings"][0])) != finding_ids:
+        raise TransitionError("remediation-extension decision names a different finding set")
+    if required["Authority marker"][0] != f"remediation-extension:{gate_id}:through-round-{round_number}":
+        raise TransitionError("remediation-extension authority marker is invalid")
+    folded = f"{answer} {required['Scope'][0]}".casefold()
+    if gate_id.casefold() not in folded or any(finding.casefold() not in answer.casefold() for finding in finding_ids):
+        raise TransitionError("remediation-extension decision is unrelated to the requested gate or findings")
+
+
 def start_remediation_round(
     run_dir: Path,
     *,
@@ -2730,23 +2839,54 @@ def start_remediation_round(
     fix_plan: str,
     fixer_assignments: tuple[str, ...] = (),
     capacity: int | None = None,
+    extension_decision_ref: str | None = None,
 ) -> Tracker:
     if (
-        round_number not in {1, 2, 3}
+        round_number < 1
         or not finding_ids
         or len(finding_ids) != len(set(finding_ids))
         or not fixer_assignments
         or len(fixer_assignments) != len(set(fixer_assignments))
     ):
-        raise TransitionError("remediation round must be 1..3 with unique targeted findings")
+        raise TransitionError("remediation round must be positive with unique targeted findings")
+    if round_number <= 3 and extension_decision_ref is not None:
+        raise TransitionError("ordinary remediation rounds do not accept extension authority")
+    if round_number > 3 and (
+        extension_decision_ref is None or re.fullmatch(r"D-[0-9]+", extension_decision_ref) is None
+    ):
+        raise TransitionError("a post-limit round requires an explicit finite-extension decision")
     if not Path(fix_plan).is_file():
         raise TransitionError("remediation fix plan does not exist")
 
     def transition(tracker: Tracker) -> Tracker:
         gate = _gate_record(tracker, gate_id)
+        rows = list(tracker.remediation)
+        existing = next((row for row in rows if row.gate == gate_id and row.round_number == round_number), None)
+        authority = f"extension-authority={extension_decision_ref}" if extension_decision_ref else "-"
+        if (
+            existing is not None
+            and existing.state == "fixing"
+            and existing.findings == ",".join(finding_ids)
+            and existing.fix_plan == fix_plan
+            and existing.fixers == ",".join(fixer_assignments)
+            and existing.verification == authority
+        ):
+            raise _AlreadyApplied(tracker)
         if gate.state != "blocked":
             raise TransitionError("remediation requires a blocked gate")
-        if gate.questions != "-":
+        if round_number > 3:
+            expected_questions = {
+                f"remediation-no-progress-round-{round_number - 1}",
+                f"remediation-oscillation-round-{round_number - 1}",
+                f"remediation-limit-reached-round-{round_number - 1}",
+            }
+            if gate.questions not in expected_questions:
+                raise TransitionError("finite extension does not resolve the gate's current stop reason")
+            _validate_remediation_extension_decision(
+                Path(run_dir), tracker, decision_ref=extension_decision_ref,
+                gate_id=gate_id, round_number=round_number, finding_ids=finding_ids,
+            )
+        elif gate.questions != "-":
             raise TransitionError("an unresolved gate question prevents remediation dispatch")
         _validate_worker_capacity(tracker, fixer_assignments, capacity)
         authoritative_findings = _resolved_reference(
@@ -2759,10 +2899,6 @@ def start_remediation_round(
         }
         if set(finding_ids) != open_blockers:
             raise TransitionError("remediation targets must exactly match the gate's current blocking findings")
-        rows = list(tracker.remediation)
-        existing = next((row for row in rows if row.gate == gate_id and row.round_number == round_number), None)
-        if existing is not None and existing.state == "fixing" and existing.findings == ",".join(finding_ids) and existing.fix_plan == fix_plan and existing.fixers == ",".join(fixer_assignments):
-            raise _AlreadyApplied(tracker)
         if existing is not None and existing.state != "pending":
             raise TransitionError("remediation round is already used or conflicting")
         if round_number > 1:
@@ -2771,13 +2907,16 @@ def start_remediation_round(
                 raise TransitionError("prior remediation round is not complete")
         replacement = RemediationRecord(
             gate_id, round_number, "fixing", ",".join(fixer_assignments), "-",
-            ",".join(finding_ids), fix_plan, "-", "-", "-",
+            ",".join(finding_ids), fix_plan, "-", authority, "-",
         )
         if existing is None:
             rows.append(replacement)
         else:
             rows[rows.index(existing)] = replacement
-        return replace(tracker, remediation=tuple(rows))
+        updated = replace(tracker, remediation=tuple(rows))
+        if round_number > 3:
+            updated = _replace_gate(updated, replace(gate, questions="-"))
+        return updated
 
     try:
         return locked_tracker_update(
@@ -2836,7 +2975,7 @@ def record_remediation_fixes(
             fixers="-",
             released_fixers=released,
             commits=",".join(commits),
-            verification=",".join(verification),
+            verification=_append_history(row.verification, ",".join(verification)),
         )
         interim = replace(
             tracker,
@@ -2984,6 +3123,9 @@ def reconcile_active_rebuild_round_one_outcome(
     except (SchemaError, UnicodeError):
         current = None
     if current is not None:
+        if current.run_id != _ACTIVE_ROUND_OUTCOME_RUN:
+            raise TransitionError("D-019 replay run identity does not match")
+        _validate_active_round_outcome_decision(run_dir, current, decision_ref)
         row = next(
             (item for item in current.remediation if item.gate == _ACTIVE_ROUND_OUTCOME_GATE and item.round_number == 1),
             None,
@@ -3085,6 +3227,7 @@ def _round_verification_items(row: RemediationRecord) -> tuple[str, ...]:
         item for item in _csv(row.verification)
         if not item.startswith("remaining-blockers=")
         and not item.startswith("round-outcome-reconciliation=")
+        and not item.startswith("extension-authority=")
     )
 
 
@@ -3215,6 +3358,16 @@ def _review_evidence_path(run_dir: Path, value: str) -> Path:
     return candidates[0]
 
 
+def _validate_rejection_evidence(run_dir: Path, finding_id: str, value: str) -> None:
+    path = _review_evidence_path(run_dir, value)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise TransitionError(f"rejection evidence is unreadable: {path}: {exc}") from exc
+    if finding_id not in text or re.search(r"(?im)^rationale:\s*\S", text) is None:
+        raise TransitionError("rejection evidence must identify the finding and record a rationale")
+
+
 def evaluate_and_close_review_gate(
     run_dir: Path,
     *,
@@ -3274,6 +3427,7 @@ def evaluate_and_close_review_gate(
                 for item in _csv(active_round.verification)
                 if not item.startswith("remaining-blockers=")
                 and not item.startswith("round-outcome-reconciliation=")
+                and not item.startswith("extension-authority=")
             )
         else:
             if gate.type == "phase":
@@ -3317,6 +3471,8 @@ def evaluate_and_close_review_gate(
                 elif disposition == "Rejected":
                     if evidence == "-" or fix_commit != "-":
                         invalid_rows.append(row)
+                    else:
+                        _validate_rejection_evidence(Path(run_dir), row[0], evidence)
                 else:
                     invalid_rows.append(row)
             else:
@@ -3326,6 +3482,8 @@ def evaluate_and_close_review_gate(
                     invalid_rows.append(row)
                 if disposition in {"Deferred", "Rejected"} and fix_commit != "-":
                     invalid_rows.append(row)
+                if disposition == "Rejected" and evidence != "-":
+                    _validate_rejection_evidence(Path(run_dir), row[0], evidence)
         repo_dir = _project_root(Path(run_dir))
         for finding in (row for row in rows if row[4] == "Fixed" and row[6] != "-"):
             finding_id, _, _, _, _, _, fix_commit, re_review = finding
@@ -3341,6 +3499,8 @@ def evaluate_and_close_review_gate(
                     or finding_id not in _csv(remediation.findings)
                     or fix_commit not in _csv(remediation.commits)
                 ):
+                    continue
+                if remediation is not active_round and finding_id in (_recorded_remaining_blockers(remediation) or set()):
                     continue
                 paths = (
                     tuple(Path(path).resolve() for path in rereview_paths)
@@ -3385,8 +3545,12 @@ def evaluate_and_close_review_gate(
                 questions = f"remediation-oscillation-round-{active_round.round_number}"
             elif blockers and not progress:
                 questions = f"remediation-no-progress-round-{active_round.round_number}"
-            elif blockers and active_round.round_number == 3:
-                questions = "remediation-limit-reached-round-3"
+            else:
+                ceiling = active_round.round_number if any(
+                    item.startswith("extension-authority=") for item in _csv(active_round.verification)
+                ) else 3
+                if blockers and active_round.round_number == ceiling:
+                    questions = f"remediation-limit-reached-round-{ceiling}"
             completed_round = replace(
                 active_round,
                 state="complete",

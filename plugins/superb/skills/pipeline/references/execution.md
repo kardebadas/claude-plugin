@@ -132,18 +132,22 @@ automatic new attempt.
 
 ### Source tasks
 
-A source task completes implementation only when its planned repository change
-exists, its implementation commit or commits exist in the recorded source ref,
-and its applicable task checks have evidence. No diff or missing commit for a
-required source change is a failed task—not an artifact completion and not a
-reason for an empty or unrelated commit.
+A source start/resume records `baseline:<attempt>@<full-target-SHA>` inside the
+same locked assignment transition. A source task completes implementation only
+when its resolved source head contains exactly the complete, ordered, nonempty
+`baseline..source-head` commit range; every changed path is inside its approved
+typed write scope; and one digest-bound `task-test` PASS record matches the run,
+task, attempt, source head, and exact ordered task suite. A pre-baseline,
+omitted, extra, unrelated, empty, or out-of-scope change fails completion. No
+diff or missing commit is an artifact completion or reason for an empty commit.
 
 Integration is recorded separately. For the supported history-preserving path:
 
 1. every recorded implementation commit is an ancestor of the recorded
    integration commit;
 2. the integration commit is an ancestor of the designated target branch;
-3. the integration verification names and applies to that integrated commit.
+3. one digest-bound `task-integration` PASS record names the run/task and exact
+   integration commit.
 
 An unrelated commit that happens to be reachable from the target branch proves
 nothing about the task. Squash, rebase, and cherry-pick equivalence are not
@@ -191,9 +195,13 @@ its plan. Before recording phase verification, confirm:
 2. every source task satisfies the complete implementation-to-integration-to-
    target ancestry rule;
 3. every artifact task has its exact validated outputs and `N/A` integration;
-4. every approved phase command passes on the applicable integrated code state;
-5. the evidence records the command, outcome, code-state identity, applicable
-   inputs/environment, and output path.
+4. every command in the plan's exact ordered phase suite passes on the
+   applicable integrated code state; and
+5. one digest-bound typed `phase` PASS record matches the run, phase, full
+   code-state identity, exact command tuple, applicable inputs, and environment.
+
+Caller-provided command text is checked against the approved tuple; it is not
+authority and cannot substitute, omit, duplicate, add, or reorder a command.
 
 A failing planned suite keeps the phase unfinished. Use TDD and systematic
 debugging for the smallest approved repair, run targeted checks while working,

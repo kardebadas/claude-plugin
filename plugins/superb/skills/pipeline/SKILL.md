@@ -164,9 +164,13 @@ Use `superpowers:test-driven-development` for testable behavior and fixes, and
 `superpowers:systematic-debugging` for unexpected failures. Preserve per-task
 checkpoints within a multi-task batch. Verify source commits, artifact evidence,
 and complete Git integration provenance before downstream work becomes ready.
-Every phase receives its planned mechanical verification on the applicable
-integrated code state. A failing implementation or verification gate keeps the
-phase unfinished and returns to repair, not formal review.
+New source attempts persist their target baseline; completion proves the exact
+nonempty in-scope commit range and digest-bound typed task evidence. Integration
+and phase verification likewise require typed evidence for the exact code state
+and the plan's exact ordered command suite. Every phase receives that planned
+mechanical verification on the applicable integrated code state. A failing
+implementation or verification gate keeps the phase unfinished and returns to
+repair, not formal review.
 
 ### Review and completion
 

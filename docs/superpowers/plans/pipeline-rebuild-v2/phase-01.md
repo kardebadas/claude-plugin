@@ -11,10 +11,11 @@
 **Spec:** `docs/superpowers/specs/2026-09-08-pipeline-rebuild-v2-design.md`
 
 <!-- pipeline-v2-phase: id=01; deps=none; review_gate=required; review_reason=This is the single source of execution truth and concurrency/recovery foundation consumed by every later phase; state corruption or unsafe readiness would repeat/skip work and invalidate all downstream gates. -->
+<!-- pipeline-v2-phase-suite: id=01; commands=["python3.11 -m unittest plugins.superb.skills.pipeline.tests.test_pipeline_state -v","python3.11 -m py_compile plugins/superb/skills/pipeline/scripts/pipeline_state.py","git diff --check"] -->
 
 ## Global constraints
 
-- Design/master-plan decisions D-001 through D-017 in `docs/superpowers/runs/2026-09-08-pipeline-rebuild-v2/decisions.md` are binding. D-017 applies only to adoption of this exact active pre-release rebuild tracker.
+- Applicable decisions D-001 through D-027 in `docs/superpowers/runs/2026-09-08-pipeline-rebuild-v2/decisions.md` are binding. D-017 applies only to adoption of this exact active pre-release rebuild tracker; D-026/D-027 apply only to the bounded master-remediation hardening and exact-run sealing bridge they describe.
 - `progress.md` is the sole mutable authority. Plans, decisions, findings, fix plans, worker results, Git state, and reviewer reports are evidence/references, never a second tracker.
 - The protocol marker is exactly `pipeline-run/v2`; the tracker also requires strict format revision, schema-adoption identity, and filesystem identity fields. V1 recognition uses its legacy heading/current-state/RV/RVJ grammar, not marker absence alone, and every incompatible schema failure is read-only.
 - Python helper support is Python 3.11+, cooperating local processes on one host and local filesystems. Do not claim native Windows proof before it exists; label its path exactly as D-009 requires.
@@ -45,7 +46,23 @@ The helper must read only this fixed single-line comment immediately below every
 
 Every real task comment begins literally with `<!-- pipeline-v2-task:` and ends with `-->`; the fenced rendering above is escaped so a whole-file strict parser does not treat documentation as a second task. `id`, `deps`, `kind`, `batch`, `order`, `write_scope`, and `outputs` are required in that order. `deps` is `none` or comma-separated stable IDs. `kind` is `source` or `artifact` and only the approved task definition may set it. Each scope is exactly `file:<repository-relative-file>` or `tree:<repository-relative-directory>`; absolute paths, `.`/`..`, empty segments, backslashes, symlink-dependent aliases, and glob syntax are rejected rather than normalized. File equality, tree ancestry, and file containment under a tree are conflicts. `outputs` is `none` for source tasks and a comma-separated exact repository-relative file list for artifact tasks; it cannot contain directories or patterns, and every output must fall within `write_scope`. These identities remain repository-relative across worktrees.
 
-The phase comment immediately after the plan header is also strict: its four keys must occur in the shown order. It provides the phase dependency and review classification/reason that initialize the tracker. The exact RED/GREEN and integrated verification commands remain adjacent to each task so the executor can run them verbatim; the helper uses the task comment only for readiness, dispatch conflict, and recovery decisions.
+The phase comment immediately after the plan header is also strict: its four keys must occur in the shown order. It provides the phase dependency and review classification/reason that initialize the tracker. One adjacent `pipeline-v2-phase-suite` JSON string array defines the exact ordered phase commands. Every source task has one adjacent `pipeline-v2-task-suite` array; artifact tasks have none. The helper rejects missing, duplicated, reordered, empty, or identity-mismatched suite metadata and uses these exact commands when validating typed evidence.
+
+## Master-remediation hardening
+
+D-026 prospectively tightens this phase's existing contracts without changing
+the tracker marker/format or rewriting truthful terminal history. New source
+starts/resumes record the exact target baseline; source completion/import proves
+the complete nonempty baseline-to-source commit range, typed write scope, and
+digest-bound `task-test` evidence for the approved task suite. Integration and
+phase/remediation verification use typed digest-bound evidence for the exact
+run, subject, attempt/round, code state, commands, inputs, and environment.
+Every worker-reserving task/review/fix transition obtains fresh controller-bound
+capacity inside the tracker lock. Initial review reports and finding
+introductions are digest-sealed and validated through later rounds while the
+review cursor advances. D-027 supplies one exact-run, idempotent sealing bridge
+for the already-open Master Round 1 only; it is not an ordinary future-run API,
+migration, or bypass.
 
 ## File structure map
 
@@ -78,6 +95,7 @@ git diff --check
 ### P1-01 — Define the strict v2 tracker, result, and phase-plan contracts
 
 <!-- pipeline-v2-task: id=P1-01; deps=none; kind=source; batch=state-core; order=1; write_scope=file:plugins/superb/skills/pipeline/scripts/pipeline_state.py,file:plugins/superb/skills/pipeline/templates/progress.md,file:plugins/superb/skills/pipeline/templates/worker-result.md,file:plugins/superb/skills/pipeline/templates/verification-evidence.md,file:plugins/superb/skills/pipeline/tests/test_pipeline_state.py,tree:plugins/superb/skills/pipeline/tests/fixtures; outputs=none -->
+<!-- pipeline-v2-task-suite: id=P1-01; commands=["python3.11 -m unittest plugins.superb.skills.pipeline.tests.test_pipeline_state.TrackerContractTest plugins.superb.skills.pipeline.tests.test_pipeline_state.PlanMetadataContractTest -v"] -->
 
 **Objective / behavior:** Establish the deterministic tracker/result grammars and the pure strict parser for approved phase-plan metadata. The tracker has: protocol marker, required tracker-format revision and schema-adoption identity, run identity (`run_id`, `base_commit`, `target_branch`, `worker_limit`, filesystem identity/acknowledgement, artifact paths), revision/last-transition identity, current phase/batch/next eligible action, task table, phase table, gate table, and remediation table with active/released fixer ownership. A worker result names the controller-assigned run/task/attempt/owner, plan-declared kind, status/checkpoints, source ref/commits or exact artifact paths, tests/evidence, and concerns-or-question. The phase-plan parser reads the single phase comment from the document header and each task comment only when its preceding nonempty line is that task's heading. No parser accepts detached arbitrary Markdown, hidden fields, reordered/unknown metadata keys, or unknown states.
 
@@ -126,6 +144,7 @@ The tracker carries a monotonic revision and stable last-transition identity. Th
 ### P1-02 — Make initialization and incompatible-schema failures safe
 
 <!-- pipeline-v2-task: id=P1-02; deps=P1-01; kind=source; batch=state-core; order=2; write_scope=file:plugins/superb/skills/pipeline/scripts/pipeline_state.py,file:plugins/superb/skills/pipeline/tests/test_pipeline_state.py,tree:plugins/superb/skills/pipeline/tests/fixtures; outputs=none -->
+<!-- pipeline-v2-task-suite: id=P1-02; commands=["python3.11 -m unittest plugins.superb.skills.pipeline.tests.test_pipeline_state.InitializationAndSchemaSafetyTest -v"] -->
 
 **Objective / behavior:** Add explicit initialization and read-only validation. Initialization creates a new run directory, or creates only `progress.md` in a pre-created directory whose existing entries exactly match explicitly approved artifact paths and contain no tracker/schema-like file. It never overwrites. `validate`, `inspect`, and `next` never mutate. A recognized v1 fixture is identified from `# Pipeline — Progress Tracker`, `## Current State`, and legacy task/RV/RVJ line grammar; missing marker, malformed v2, unknown marker/version, and v1 must report the run path and “no files changed.” This ordinary API is not used to convert the rebuild bootstrap tracker.
 
@@ -171,6 +190,7 @@ CLI forms are `init RUN_DIR --run-id ID --base-commit SHA --target-branch BRANCH
 ### P1-03 — Serialize mutations and atomically replace the tracker
 
 <!-- pipeline-v2-task: id=P1-03; deps=P1-02; kind=source; batch=state-core; order=3; write_scope=file:plugins/superb/skills/pipeline/scripts/pipeline_state.py,file:plugins/superb/skills/pipeline/tests/test_pipeline_state.py; outputs=none -->
+<!-- pipeline-v2-task-suite: id=P1-03; commands=["python3.11 -m unittest plugins.superb.skills.pipeline.tests.test_pipeline_state.AtomicMutationTest -v"] -->
 
 **Objective / behavior:** Before creating/acquiring a lock, read and validate the schema and D-015 filesystem suitability. Then protect every mutation with a stable separate run-local lock and re-read/revalidate → transition → validate → same-directory temporary write → flush/fsync → atomic replace → directory sync where supported → unlock. Known network/distributed types fail; unknown types require a D-ID acknowledgement bound to the current mount/volume fingerprint and resolving to one explicit `Resolved` decision applicable to this run, filesystem type, and fingerprint. A syntactically valid or nonexistent D-ID is not authority. Never create a lock beside incompatible state, unlock by deleting the lock path, or fall back to an unlocked write. Reuse the repository’s Craft `session.py` distinction between POSIX `flock` and `msvcrt.locking`, adapting it rather than copying an unexamined platform assumption.
 
@@ -225,6 +245,7 @@ The lock path is `<run-dir>/.pipeline-state.lock`; it is distinct from `progress
 ### P1-04 — Enforce task-level state transitions and controller ownership
 
 <!-- pipeline-v2-task: id=P1-04; deps=P1-03; kind=source; batch=state-core; order=4; write_scope=file:plugins/superb/skills/pipeline/scripts/pipeline_state.py,file:plugins/superb/skills/pipeline/tests/test_pipeline_state.py,tree:plugins/superb/skills/pipeline/tests/fixtures; outputs=none -->
+<!-- pipeline-v2-task-suite: id=P1-04; commands=["python3.11 -m unittest plugins.superb.skills.pipeline.tests.test_pipeline_state.TaskTransitionTest plugins.superb.skills.pipeline.tests.test_pipeline_state.PhaseAdvancementTest -v"] -->
 
 **Objective / behavior:** Model legal implementation-marker transitions: `[ ] → [~] → [x]`, `[~] → [?] → [~]` after an explicit answer/retry, and `[~] → [?]` for a blocked outcome. `[x]` never regresses. A controller persists `[~]`, owner, and immutable attempt before dispatch. Only a controller records `[x]` or separate integration facts; workers write result artifacts and cannot mutate the tracker. Completion derives `source`/`artifact` from the approved phase metadata, never from a worker request or an empty diff.
 
@@ -287,6 +308,7 @@ The derived-action and phase-cursor contract is part of this task: completing th
 ### P1-05 — Calculate safe batch readiness from parsed phase metadata
 
 <!-- pipeline-v2-task: id=P1-05; deps=P1-04; kind=source; batch=state-core; order=5; write_scope=file:plugins/superb/skills/pipeline/scripts/pipeline_state.py,file:plugins/superb/skills/pipeline/tests/test_pipeline_state.py,tree:plugins/superb/skills/pipeline/tests/fixtures; outputs=none -->
+<!-- pipeline-v2-task-suite: id=P1-05; commands=["python3.11 -m unittest plugins.superb.skills.pipeline.tests.test_pipeline_state.SchedulerReadinessTest -v"] -->
 
 **Objective / behavior:** Consume P1-01's parsed metadata and return candidate tasks eligible for a batch. Eligibility requires: v2 state valid; phase-plan metadata valid; source dependencies proven integrated and artifact dependencies verified complete; no unanswered decision/question; matching planned batch/order; no typed-scope overlap with active/reserved work or another selected candidate; active workers below persisted `worker_limit`; and no active phase/gate conflict. Readiness output is advisory. Actual starts are serialized under the tracker lock and revalidate all conditions so stale output cannot authorize a dispatch.
 
@@ -329,6 +351,7 @@ def reserve_tasks(run_dir: Path, phase_plan: Path, *, task_ids: tuple[str, ...],
 ### P1-06 — Validate and import immutable worker results idempotently
 
 <!-- pipeline-v2-task: id=P1-06; deps=P1-04,P1-05; kind=source; batch=state-core; order=6; write_scope=file:plugins/superb/skills/pipeline/scripts/pipeline_state.py,file:plugins/superb/skills/pipeline/templates/worker-result.md,file:plugins/superb/skills/pipeline/tests/test_pipeline_state.py,tree:plugins/superb/skills/pipeline/tests/fixtures; outputs=none -->
+<!-- pipeline-v2-task-suite: id=P1-06; commands=["python3.11 -m unittest plugins.superb.skills.pipeline.tests.test_pipeline_state.WorkerResultImportTest -v"] -->
 
 **Objective / behavior:** Workers atomically publish attempt-scoped result files beside their final `agent-output/` location; the controller reads them and, under the tracker lock, validates run/task/attempt/owner together, plan-declared kind, expected evidence, and—only for source tasks—source ref/Git commits, then imports once. `owner` is the exact controller-assigned identifier already persisted for the attempt; it is never inferred and an incoming result never changes tracker ownership. An exact accepted result replay is a no-op only when its persisted result identity and content match; a stale, conflicting, kind-mismatched, missing-evidence, wrong-owner, or wrong-source-ref result is rejected with tracker bytes unchanged.
 
@@ -372,6 +395,7 @@ def import_worker_result(run_dir: Path, *, result_path: Path, phase_plan: Path,
 ### P1-07 — Record integration, mechanical verification, and gate/remediation state
 
 <!-- pipeline-v2-task: id=P1-07; deps=P1-05,P1-06; kind=source; batch=state-core; order=7; write_scope=file:plugins/superb/skills/pipeline/scripts/pipeline_state.py,file:plugins/superb/skills/pipeline/tests/test_pipeline_state.py,tree:plugins/superb/skills/pipeline/tests/fixtures; outputs=none -->
+<!-- pipeline-v2-task-suite: id=P1-07; commands=["python3.11 -m unittest plugins.superb.skills.pipeline.tests.test_pipeline_state.PhaseGateAndRemediationTest -v"] -->
 
 **Objective / behavior:** Make phase completion mechanical before formal review. A phase may be verified only when every source task satisfies complete integration ancestry with commit-bound verification, every artifact task has verified completion and truthful `N/A` integration, and its planned suite passed on the recorded integrated HEAD. Validate each phase's `final-only`/`required` classification and reason against that phase's own approved metadata. Persist gate base/HEAD, assignments/reports, evidence-derived acceptance state, open findings/questions, active/released role ownership, and immutable remediation identity. Required review starts only after mechanical verification; remediation starts at round one after initial round zero and cannot exceed three rounds.
 
@@ -427,6 +451,7 @@ def evaluate_and_close_review_gate(run_dir: Path, *, gate_id: str,
 ### P1-08 — Reconcile interrupted work against durable evidence and Git
 
 <!-- pipeline-v2-task: id=P1-08; deps=P1-06,P1-07; kind=source; batch=state-core; order=8; write_scope=file:plugins/superb/skills/pipeline/scripts/pipeline_state.py,file:plugins/superb/skills/pipeline/tests/test_pipeline_state.py,tree:plugins/superb/skills/pipeline/tests/fixtures; outputs=none -->
+<!-- pipeline-v2-task-suite: id=P1-08; commands=["python3.11 -m unittest plugins.superb.skills.pipeline.tests.test_pipeline_state.ReconciliationTest -v"] -->
 
 **Objective / behavior:** Provide a deterministic resume/reconciliation report. It reads spec/master plan/tracker/active phase plan/decisions/findings-or-fix-plan/Git/worktree/results in that order of authority, then reconciles every `[~]` task according to its approved kind. A validated source result imports once before integration; a validated artifact result imports once with artifact evidence and `N/A`; consistent live ownership remains `[~]`; partial/missing evidence is preserved and diagnosed. Resume rechecks the same complete source-integration ancestry as normal execution. It also resolves post-replacement uncertainty by revision/last-transition identity without blindly repeating completion or round increments. Resume never migrates/reinitializes incompatible state or redispatches `[x]` work.
 

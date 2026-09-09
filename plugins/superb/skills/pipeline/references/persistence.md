@@ -40,9 +40,21 @@ Persist `[~]`, controller-assigned owner, and attempt before dispatch. `start_ta
 
 Workers never edit `progress.md`. A worker may invoke only `publish_worker_result` for its own assigned immutable result. Only the controller performs tracker transitions and result import. Workers atomically publish immutable attempt-scoped result files using `templates/worker-result.md`. Every result copies the assigned `run_id`, `task_id`, `attempt`, and `owner`; import validates all four together under the lock for every status and both task kinds. Never infer a missing owner or rewrite tracker ownership to fit incoming evidence. A superseded-attempt result is stale even when the owner is unchanged. An exact accepted-result replay is a no-op only when its persisted identity and content digest match; changed content or identity is conflicting evidence.
 
-A plan-declared `source` task requires the planned source change, source ref, implementation commit provenance, tests, and evidence before `[x]`; integration remains separate. A plan-declared `artifact` task requires exactly its approved output paths plus validation evidence, records integration `N/A`, and never invents an empty or unrelated commit. Workers cannot choose task kind from whether a diff exists. Keep every task's checkpoints recoverable inside a multi-task batch.
+A plan-declared `source` task records its exact target-branch baseline at each
+start/resume, then requires the complete nonempty baseline-to-source commit
+range, in-scope changed paths, and digest-bound typed task-suite PASS evidence
+before `[x]`; integration remains separate. A plan-declared `artifact` task
+requires exactly its approved output paths plus validation evidence, records
+integration `N/A`, and never invents an empty or unrelated commit. Workers
+cannot choose task kind from whether a diff exists. Keep every task's
+checkpoints recoverable inside a multi-task batch.
 
-For history-preserving source integration, every recorded implementation commit must be an ancestor of the integration commit, the integration commit must be an ancestor of the designated target branch, and applicable verification must identify that integrated state. An unrelated reachable target commit is not integration proof. No squash/rebase/cherry-pick equivalence is assumed.
+For history-preserving source integration, every recorded implementation commit
+must be an ancestor of the integration commit, the integration commit must be
+an ancestor of the designated target branch, and one digest-bound typed
+`task-integration` PASS record must identify that exact integrated state. An
+unrelated reachable target commit or a SHA embedded in arbitrary prose is not
+integration proof. No squash/rebase/cherry-pick equivalence is assumed.
 
 ## File-first resume and reconciliation
 

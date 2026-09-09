@@ -54,6 +54,13 @@ the report marker, gate, assignment, base, HEAD, and finding claims against the
 actual reviewed state. Deduplicate overlapping claims under stable finding IDs
 and write the authoritative `findings.md`; a rediscovered issue keeps its ID.
 The controller must keep the report set consistent with those stable IDs.
+On the first evaluated result, persist each initial report as a digest-bound
+identity and each finding introduction as an identity bound to gate, stable ID,
+severity, and its introducing report digest(s). Later remediation validates
+those sealed bytes and identities before dispatch or acceptance; changing a
+report, deleting an introduction, or rewriting its ID/severity fails closed.
+`gate.head` may advance through reviewed remediation edges, but the sealed
+initial reports retain their original reviewed HEAD.
 
 Use exactly these severities, classified by demonstrated consequence:
 
@@ -139,8 +146,10 @@ confirmed Critical or Important findings remain:
    and record command, outcome, digest-bound evidence, code-state identity,
    relevant environment, and elapsed time.
 6. Call `record_remediation_fixes` only with strict post-review fix commits,
-   the integrated fix HEAD, and applicable verification. This releases fixer
-   ownership and reserves the gate's recorded reviewer assignments.
+   the integrated fix HEAD, and one digest-bound typed `remediation` PASS record
+   matching the run, gate, round, and fix HEAD. This releases fixer ownership
+   and reserves the gate's recorded reviewer assignments using a fresh
+   controller-bound capacity observation inside the tracker lock.
 7. Re-review the same gate. Check targeted findings, the fix diff, introduced
    regressions, and relevant integration consequences; then record exactly one
    `remaining-blockers` outcome and evaluate the gate.

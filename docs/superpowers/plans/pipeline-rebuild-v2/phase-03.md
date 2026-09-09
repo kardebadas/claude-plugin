@@ -11,6 +11,7 @@
 **Spec:** docs/superpowers/specs/2026-09-08-pipeline-rebuild-v2-design.md
 
 <!-- pipeline-v2-phase: id=03; deps=01,02; review_gate=final-only; review_reason=Repository validation, packaging, and documentation are mechanically verified here; formal acceptance occurs only at the final master gate. -->
+<!-- pipeline-v2-phase-suite: id=03; commands=["python3.11 -m unittest discover -s plugins/superb/skills/pipeline/tests -v","./tools/check-plugin.sh","./tools/check-plugin-mutants.sh","python3 -m unittest discover -s plugins/superb/skills/craft/tests -v","./tools/test-craftui.sh","git diff --check","git status --short --branch"] -->
 
 ## Global constraints
 
@@ -50,6 +51,7 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
 
 ### Task P3-T01: Replace V1 Pipeline validation with a narrow V2 release gate
 <!-- pipeline-v2-task: id=P3-T01; deps=none; kind=source; batch=P3-validation; order=1; write_scope=file:tools/check-plugin.py,file:tools/check-plugin.sh; outputs=none -->
+<!-- pipeline-v2-task-suite: id=P3-T01; commands=["./tools/check-plugin.sh"] -->
 
 **Files:**
 
@@ -154,6 +156,7 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
 
 ### Task P3-T02: Replace V1 mutations with no-op-aware V2 mutations
 <!-- pipeline-v2-task: id=P3-T02; deps=P3-T01,P3-T03,P3-T06; kind=source; batch=P3-validation; order=2; write_scope=file:tools/check-plugin-mutants.sh; outputs=none -->
+<!-- pipeline-v2-task-suite: id=P3-T02; commands=["./tools/check-plugin-mutants.sh"] -->
 
 **Files:**
 
@@ -214,6 +217,7 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
 
 ### Task P3-T03: Wire V2 tests and gates into CI
 <!-- pipeline-v2-task: id=P3-T03; deps=P3-T01; kind=source; batch=P3-ci; order=1; write_scope=file:.github/workflows/checks.yml; outputs=none -->
+<!-- pipeline-v2-task-suite: id=P3-T03; commands=["python3.11 -m unittest discover -s plugins/superb/skills/pipeline/tests -v","./tools/check-plugin.sh"] -->
 
 **Files:**
 
@@ -271,6 +275,7 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
 
 ### Task P3-T04: Report Pipeline Python 3.11+ without changing Craft support
 <!-- pipeline-v2-task: id=P3-T04; deps=none; kind=source; batch=P3-setup; order=1; write_scope=file:plugins/superb/skills/setup/check-deps.sh,file:plugins/superb/skills/setup/SKILL.md,file:plugins/superb/skills/setup/README.md; outputs=none -->
+<!-- pipeline-v2-task-suite: id=P3-T04; commands=["bash -n plugins/superb/skills/setup/check-deps.sh","bash plugins/superb/skills/setup/check-deps.sh"] -->
 
 **Files:**
 
@@ -326,6 +331,7 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
 
 ### Task P3-T05: Update user documentation to the V2 contract
 <!-- pipeline-v2-task: id=P3-T05; deps=none; kind=source; batch=P3-docs; order=1; write_scope=file:README.md,file:plugins/superb/README.md; outputs=none -->
+<!-- pipeline-v2-task-suite: id=P3-T05; commands=["./tools/check-plugin.sh","git diff --check"] -->
 
 **Files:**
 
@@ -370,6 +376,7 @@ The phase comment owns cross-phase dependencies 01,02. Each task comment therefo
 
 ### Task P3-T06: Ship the approved package version
 <!-- pipeline-v2-task: id=P3-T06; deps=P3-T03; kind=source; batch=P3-package; order=1; write_scope=file:plugins/superb/.claude-plugin/plugin.json,file:plugins/superb/.codex-plugin/plugin.json; outputs=none -->
+<!-- pipeline-v2-task-suite: id=P3-T06; commands=["python3 -m json.tool plugins/superb/.claude-plugin/plugin.json","python3 -m json.tool plugins/superb/.codex-plugin/plugin.json","./tools/check-plugin.sh"] -->
 
 **Files:**
 

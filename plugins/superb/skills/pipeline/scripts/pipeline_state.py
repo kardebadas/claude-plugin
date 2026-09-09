@@ -243,6 +243,7 @@ class PlannedTask:
     order: int
     write_scope: tuple[str, ...]
     outputs: tuple[str, ...]
+    verification_commands: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -251,6 +252,19 @@ class PhaseMetadata:
     deps: tuple[str, ...]
     review_gate: str
     review_reason: str
+    verification_commands: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class VerificationEvidence:
+    purpose: str
+    run_id: str
+    subject: str
+    attempt: str
+    code_state: str
+    commands: tuple[str, ...]
+    environment: str
+    inputs: str
 
 
 @dataclass(frozen=True)
@@ -448,7 +462,7 @@ def parse_tracker(text: str) -> Tracker:
             }
             gate = next((gate for gate in tracker.gates if gate.id == row.gate), None)
             if gate is not None:
-                targets.update(_csv(gate.findings))
+                targets.update(_gate_finding_ids(gate))
             if value == "none":
                 blockers = []
             elif (
@@ -459,7 +473,122 @@ def parse_tracker(text: str) -> Tracker:
                 or not set(blockers).issubset(targets)
             ):
                 raise SchemaError("remaining-blockers must be none or unique targeted finding IDs")
+    _validate_tracker_semantics(tracker)
     return tracker
+
+
+def _parse_finding_origin(value: str) -> tuple[str, str, str] | None:
+    match = re.fullmatch(
+        r"([A-Za-z0-9][A-Za-z0-9._/-]*)@(Critical|Important|Minor)@sha256=([0-9a-f]{64})",
+        value,
+    )
+    return None if match is None else (match.group(1), match.group(2), match.group(3))
+
+
+def _gate_finding_ids(gate: GateRecord) -> tuple[str, ...]:
+    values = _csv(gate.findings)
+    return tuple(parsed[0] if (parsed := _parse_finding_origin(value)) else value for value in values)
+
+
+def _validate_tracker_semantics(tracker: Tracker) -> None:
+    phase_ids = {phase.id for phase in tracker.phases}
+    gate_ids = {gate.id for gate in tracker.gates}
+    for task in tracker.tasks:
+        if task.state == "[ ]" and any(
+            value != "-" for value in (
+                task.owner, task.attempt, task.result, task.checkpoints,
+                task.source_ref, task.commits, task.artifacts,
+                task.integration, task.verification, task.question,
+            )
+        ):
+            raise SchemaError("unstarted task cannot carry lifecycle or proof state")
+        if task.state in {"[~]", "[?]", "[x]"} and (
+            task.owner == "-" or task.attempt == "-" or task.checkpoints == "-"
+        ):
+            raise SchemaError("started task needs owner, attempt, and checkpoints")
+        if task.kind == "source" and task.state in {"[~]", "[?]"}:
+            try:
+                _attempt_baseline(task, task.attempt)
+            except TransitionError as exc:
+                raise SchemaError(str(exc)) from exc
+        if task.state == "[~]" and any(
+            value != "-" for value in (
+                task.result, task.source_ref, task.commits, task.artifacts, task.integration,
+            )
+        ):
+            raise SchemaError("active task cannot claim completion or integration")
+        if task.state == "[?]" and (
+            task.question == "-"
+            or not any(item.startswith(f"blocked:{task.attempt}@") for item in _csv(task.checkpoints))
+        ):
+            raise SchemaError("blocked task needs its current question checkpoint")
+        if task.state == "[x]":
+            if task.result == "-" or task.verification == "-":
+                raise SchemaError("completed task needs result and verification evidence")
+            if task.kind == "source" and (
+                task.source_ref == "-" or task.commits == "-" or task.integration == "N/A"
+            ):
+                raise SchemaError("completed source task needs source provenance and integration state")
+            if task.kind == "artifact" and (
+                task.artifacts == "-" or task.integration != "N/A"
+            ):
+                raise SchemaError("completed artifact task needs exact artifacts and N/A integration")
+    for phase in tracker.phases:
+        if phase.state == "[x]" and phase.verification == "-":
+            raise SchemaError("verified phase needs verification evidence")
+        if phase.state in {"[ ]", "[~]"} and phase.verification != "-":
+            raise SchemaError("unverified phase cannot carry verification evidence")
+        if phase.state == "[x]" and phase.gate != "-" and phase.gate not in gate_ids:
+            raise SchemaError("phase refers to an unknown review gate")
+    for gate in tracker.gates:
+        if gate.type == "phase" and gate.phase not in phase_ids:
+            raise SchemaError("phase review gate refers to an unknown phase")
+        if gate.type == "master" and gate.phase != "-":
+            raise SchemaError("master review gate cannot name a phase")
+        if gate.state in {"in_progress", "re_reviewing", "blocked", "accepted"} and any(
+            value == "-" for value in (gate.base, gate.head, gate.assignments)
+        ):
+            raise SchemaError("opened review gate needs its immutable edge and assignments")
+        if gate.state in {"blocked", "accepted"} and any(
+            value == "-" for value in (gate.reports, gate.verification)
+        ):
+            raise SchemaError("evaluated review gate needs reports and verification")
+        if gate.state == "accepted" and gate.questions != "-":
+            raise SchemaError("accepted review gate cannot retain unresolved questions")
+        origins = tuple(_parse_finding_origin(value) for value in _csv(gate.findings))
+        if any(origin is not None for origin in origins) and any(origin is None for origin in origins):
+            raise SchemaError("gate findings cannot mix sealed and unsealed identities")
+        if gate.state in {"blocked", "re_reviewing"} and gate.findings != "-" and any(
+            origin is None for origin in origins
+        ):
+            raise SchemaError("active blocked/re-reviewing gate needs sealed finding origins")
+        if len(_gate_finding_ids(gate)) != len(set(_gate_finding_ids(gate))):
+            raise SchemaError("gate finding identities must be unique")
+    for row in tracker.remediation:
+        if row.gate not in gate_ids:
+            raise SchemaError("remediation row refers to an unknown gate")
+        if row.state == "pending" and any(
+            value != "-" for value in (
+                row.fixers, row.released_fixers, row.findings, row.fix_plan,
+                row.commits, row.verification, row.re_review,
+            )
+        ):
+            raise SchemaError("pending remediation cannot carry lifecycle state")
+        if row.state == "fixing" and (
+            row.fixers == "-" or row.findings == "-" or row.fix_plan == "-"
+            or row.commits != "-" or row.re_review != "-"
+        ):
+            raise SchemaError("fixing remediation has incomplete or impossible state")
+        if row.state == "re_reviewing" and (
+            row.fixers != "-" or row.released_fixers == "-" or row.findings == "-"
+            or row.fix_plan == "-" or row.commits == "-" or row.verification == "-"
+        ):
+            raise SchemaError("re-reviewing remediation has incomplete state")
+        if row.state == "complete" and (
+            row.fixers != "-" or row.findings == "-" or row.fix_plan == "-"
+            or row.commits == "-" or row.verification == "-" or row.re_review == "-"
+        ):
+            raise SchemaError("completed remediation has incomplete state")
 
 
 def _row(values: tuple[object, ...]) -> str:
@@ -561,6 +690,23 @@ def render_worker_result(result: WorkerResult) -> str:
 
 _PHASE_METADATA = re.compile(r"<!-- pipeline-v2-phase: id=([^;]+); deps=([^;]+); review_gate=([^;]+); review_reason=(.+) -->\Z")
 _TASK_METADATA = re.compile(r"<!-- pipeline-v2-task: id=([^;]+); deps=([^;]+); kind=([^;]+); batch=([^;]+); order=([^;]+); write_scope=([^;]+); outputs=([^;]+) -->\Z")
+_PHASE_SUITE = re.compile(r"<!-- pipeline-v2-phase-suite: id=([^;]+); commands=(.+) -->\Z")
+_TASK_SUITE = re.compile(r"<!-- pipeline-v2-task-suite: id=([^;]+); commands=(.+) -->\Z")
+
+
+def _parse_command_suite(raw: str) -> tuple[str, ...]:
+    try:
+        values = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise PlanMetadataError("verification commands must be a JSON string array") from exc
+    if (
+        not isinstance(values, list)
+        or not values
+        or any(not isinstance(value, str) or not value or "|" in value or "\n" in value for value in values)
+        or len(values) != len(set(values))
+    ):
+        raise PlanMetadataError("verification commands must be unique nonempty table-safe strings")
+    return tuple(values)
 
 
 def _safe_relative(value: str) -> PurePosixPath:
@@ -585,7 +731,16 @@ def _parse_phase_document(path: Path) -> tuple[PhaseMetadata, tuple[PlannedTask,
     if phase.group(3) not in {"required", "final-only"} or not phase.group(4).strip():
         raise PlanMetadataError("invalid phase review metadata")
     phase_deps = () if phase.group(2) == "none" else tuple(phase.group(2).split(","))
-    metadata = PhaseMetadata(phase.group(1), phase_deps, phase.group(3), phase.group(4))
+    suite_indexes = [index for index, line in enumerate(lines) if line.startswith("<!-- pipeline-v2-phase-suite:")]
+    if len(suite_indexes) != 1 or suite_indexes[0] != phase_index + 1:
+        raise PlanMetadataError("phase suite must occur exactly once immediately after phase metadata")
+    phase_suite = _PHASE_SUITE.fullmatch(lines[suite_indexes[0]])
+    if phase_suite is None or phase_suite.group(1) != phase.group(1):
+        raise PlanMetadataError("phase suite identity must match phase metadata")
+    metadata = PhaseMetadata(
+        phase.group(1), phase_deps, phase.group(3), phase.group(4),
+        _parse_command_suite(phase_suite.group(2)),
+    )
     tasks = []
     for index, line in enumerate(lines):
         if not line.startswith("<!-- pipeline-v2-task:"):
@@ -624,7 +779,23 @@ def _parse_phase_document(path: Path) -> tuple[PhaseMetadata, tuple[PlannedTask,
             output = _safe_relative(output_raw)
             if not any((scope_type == "file" and output == scope) or (scope_type == "tree" and scope in output.parents) for scope_type, scope in parsed_scopes):
                 raise PlanMetadataError("artifact output is outside its write scope")
-        tasks.append(PlannedTask(task_id, deps, kind, batch, order, scopes, outputs))
+        suite_candidates = [
+            candidate
+            for candidate in lines[index + 1:index + 2]
+            if candidate.startswith("<!-- pipeline-v2-task-suite:")
+        ]
+        if kind == "source":
+            if len(suite_candidates) != 1:
+                raise PlanMetadataError(f"source task {task_id} needs one adjacent verification suite")
+            task_suite = _TASK_SUITE.fullmatch(suite_candidates[0])
+            if task_suite is None or task_suite.group(1) != task_id:
+                raise PlanMetadataError("task suite identity must match task metadata")
+            verification_commands = _parse_command_suite(task_suite.group(2))
+        else:
+            if suite_candidates:
+                raise PlanMetadataError("artifact tasks use exact outputs, not a source-task suite")
+            verification_commands = ()
+        tasks.append(PlannedTask(task_id, deps, kind, batch, order, scopes, outputs, verification_commands))
     if not tasks:
         raise PlanMetadataError("phase plan contains no tasks")
     ids = [task.id for task in tasks]
@@ -1664,7 +1835,40 @@ def _dependency_ready(run_dir: Path, tracker: Tracker, task: TaskRecord) -> bool
     if task.integration in {"-", "N/A"} or task.commits == "-":
         return False
     repo_dir = _project_root(run_dir)
-    return task.integration in task.verification and all(
+    if any(item.startswith("baseline:") for item in _csv(task.checkpoints)):
+        candidates = tuple(
+            item for item in _csv(task.verification)
+            if "#sha256=" in item and item.endswith("@" + task.integration)
+        )
+        valid_references = []
+        for reference in candidates:
+            try:
+                _validate_verification_evidence(
+                    run_dir, (reference,), task.integration,
+                    purpose="task-integration", run_id=tracker.run_id,
+                    subject=f"task/{task.id}", attempt="N/A",
+                )
+            except TransitionError:
+                continue
+            valid_references.append(reference)
+        if len(valid_references) != 1:
+            return False
+    else:
+        escaped = re.escape(task.integration)
+        historical_patterns = (
+            rf"reconciled-existing-integration:{escaped}",
+            rf"integrated-head:{escaped}",
+            rf"integrated:[^,@]+@{escaped}",
+            rf"integration@{escaped}:[^,]+",
+            rf"integrated-[^:]+:PASS@{escaped}",
+            rf"integrated:[^,]+@{escaped}",
+        )
+        if not any(
+            any(re.fullmatch(pattern, item) for pattern in historical_patterns)
+            for item in _csv(task.verification)
+        ):
+            return False
+    return all(
         _git(repo_dir, "merge-base", "--is-ancestor", commit, task.integration)
         for commit in task.commits.split(",")
     ) and _git(repo_dir, "merge-base", "--is-ancestor", task.integration, tracker.target_branch)
@@ -1903,10 +2107,11 @@ def reserve_tasks(
     transition_id = "reserve-" + "-".join(f"{task}-{attempt}" for task, attempt in zip(task_ids, attempts))
 
     def transition(current: Tracker) -> Tracker:
-        tracker, planned, available = _scheduler_context(Path(run_dir), Path(phase_plan), capacity)
+        detected = _detected_runtime_capacity(Path(run_dir), current)
+        tracker, planned, available = _scheduler_context(Path(run_dir), Path(phase_plan), detected)
         if tracker != current:
             raise TransitionError("tracker changed while the reservation lock was held")
-        _validate_worker_capacity(tracker, owners, capacity)
+        _validate_worker_capacity(tracker, owners, detected)
         by_id = {task.id: task for task in planned}
         records = {task.id: task for task in tracker.tasks}
         try:
@@ -1944,6 +2149,10 @@ def reserve_tasks(
             record = _task_record(updated, item.id)
             if any(attempt in value for value in (record.attempt, record.checkpoints, record.result)):
                 raise TransitionError("task attempt has already been used")
+            checkpoint = f"started:{attempt}"
+            if item.kind == "source":
+                baseline = _resolved_commit(_project_root(Path(run_dir)), tracker.target_branch)
+                checkpoint = f"{checkpoint},baseline:{attempt}@{baseline}"
             updated = _replace_task(
                 updated,
                 replace(
@@ -1951,7 +2160,7 @@ def reserve_tasks(
                     state="[~]",
                     owner=owner,
                     attempt=attempt,
-                    checkpoints=_append_history(record.checkpoints, f"started:{attempt}"),
+                    checkpoints=_append_history(record.checkpoints, checkpoint),
                 ),
             )
         return updated
@@ -1975,7 +2184,7 @@ def start_task(run_dir: Path, *, task_id: str, owner: str, attempt: str) -> Trac
         task = _task_record(tracker, task_id)
         if task.state != "[ ]":
             raise TransitionError("start_task handles first start only")
-        _validate_start_guards(Path(run_dir), tracker, task_id)
+        definition = _validate_start_guards(Path(run_dir), tracker, task_id)
         _validate_worker_capacity(
             tracker,
             (owner,),
@@ -1983,9 +2192,13 @@ def start_task(run_dir: Path, *, task_id: str, owner: str, attempt: str) -> Trac
         )
         if any(attempt in value for value in (task.attempt, task.checkpoints, task.result)):
             raise TransitionError("task attempt has already been used")
+        checkpoint = f"started:{attempt}"
+        if definition.kind == "source":
+            baseline = _resolved_commit(_project_root(Path(run_dir)), tracker.target_branch)
+            checkpoint = f"{checkpoint},baseline:{attempt}@{baseline}"
         return _replace_task(
             tracker,
-            replace(task, state="[~]", owner=owner, attempt=attempt, checkpoints=_append_history(task.checkpoints, f"started:{attempt}")),
+            replace(task, state="[~]", owner=owner, attempt=attempt, checkpoints=_append_history(task.checkpoints, checkpoint)),
         )
 
     return locked_tracker_update(
@@ -2048,12 +2261,16 @@ def resume_task(
         if new_attempt == prior_attempt or any(new_attempt in value for value in (task.checkpoints, task.result)):
             raise TransitionError("new attempt must be distinct and unused")
         _validate_decision(Path(run_dir), tracker, task, decision_ref)
-        _validate_start_guards(Path(run_dir), tracker, task_id)
+        definition = _validate_start_guards(Path(run_dir), tracker, task_id)
         _validate_worker_capacity(
             tracker,
             (new_owner,),
             _detected_runtime_capacity(Path(run_dir), tracker),
         )
+        checkpoint = marker
+        if definition.kind == "source":
+            baseline = _resolved_commit(_project_root(Path(run_dir)), tracker.target_branch)
+            checkpoint = f"{checkpoint},baseline:{new_attempt}@{baseline}"
         return _replace_task(
             tracker,
             replace(
@@ -2061,7 +2278,7 @@ def resume_task(
                 state="[~]",
                 owner=new_owner,
                 attempt=new_attempt,
-                checkpoints=_append_history(task.checkpoints, marker),
+                checkpoints=_append_history(task.checkpoints, checkpoint),
                 question=f"resolved:{decision_ref}",
             ),
         )
@@ -2083,6 +2300,75 @@ def _git(repo_dir: Path, *args: str) -> bool:
         check=False,
     )
     return completed.returncode == 0
+
+
+def _git_output(repo_dir: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ("git", "-C", str(repo_dir), *args),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise TransitionError(
+            f"Git evidence command failed: git {' '.join(args)}: {completed.stderr.strip()}"
+        )
+    return completed.stdout.strip()
+
+
+def _resolved_commit(repo_dir: Path, reference: str) -> str:
+    resolved = _git_output(repo_dir, "rev-parse", "--verify", f"{reference}^{{commit}}")
+    if not _COMMIT.fullmatch(resolved):
+        raise TransitionError("Git reference did not resolve to one full commit")
+    return resolved
+
+
+def _attempt_baseline(task: TaskRecord, attempt: str) -> str:
+    prefix = f"baseline:{attempt}@"
+    matches = [item.removeprefix(prefix) for item in _csv(task.checkpoints) if item.startswith(prefix)]
+    if len(matches) != 1 or not _COMMIT.fullmatch(matches[0]):
+        raise TransitionError("source attempt needs exactly one recorded full-commit baseline")
+    return matches[0]
+
+
+def _path_in_write_scope(path: str, scopes: tuple[str, ...]) -> bool:
+    candidate = PurePosixPath(path)
+    return any(
+        (kind == "file" and candidate == scope)
+        or (kind == "tree" and (candidate == scope or scope in candidate.parents))
+        for kind, scope in (_scope_parts(raw) for raw in scopes)
+    )
+
+
+def _validate_source_provenance(
+    *,
+    repo_dir: Path,
+    task: TaskRecord,
+    definition: PlannedTask,
+    attempt: str,
+    source_ref: str,
+    commits: tuple[str, ...],
+) -> str:
+    baseline = _attempt_baseline(task, attempt)
+    source_head = _resolved_commit(repo_dir, source_ref)
+    if baseline == source_head or not _git(repo_dir, "merge-base", "--is-ancestor", baseline, source_head):
+        raise TransitionError("source completion must be strictly after its recorded baseline")
+    expected = tuple(
+        line for line in _git_output(repo_dir, "rev-list", "--reverse", f"{baseline}..{source_head}").splitlines()
+        if line
+    )
+    if not expected or commits != expected:
+        raise TransitionError("implementation commits must equal the complete ordered baseline-to-source range")
+    changed = tuple(
+        line for line in _git_output(repo_dir, "diff", "--name-only", baseline, source_head).splitlines()
+        if line
+    )
+    if not changed:
+        raise TransitionError("source task produced no repository change")
+    if any(not _path_in_write_scope(path, definition.write_scope) for path in changed):
+        raise TransitionError("source task changed a path outside its approved write scope")
+    return source_head
 
 
 def _is_target_tip(repo_dir: Path, target_branch: str, commit: str) -> bool:
@@ -2114,17 +2400,22 @@ def complete_task(
         if task.kind == "source":
             if source_ref is None or not commits or artifacts:
                 raise TransitionError("source completion requires source ref and commits only")
-            if not _git(repo_dir, "rev-parse", "--verify", source_ref):
-                raise TransitionError("source ref does not exist")
-            for commit in commits:
-                if not _COMMIT.fullmatch(commit) or not _git(repo_dir, "cat-file", "-e", f"{commit}^{{commit}}") or not _git(repo_dir, "merge-base", "--is-ancestor", commit, source_ref):
-                    raise TransitionError("implementation commit is invalid or absent from source ref")
+            source_head = _validate_source_provenance(
+                repo_dir=Path(repo_dir), task=task, definition=definition,
+                attempt=attempt, source_ref=source_ref, commits=commits,
+            )
+            _validate_verification_evidence(
+                Path(run_dir), evidence, source_head,
+                purpose="task-test", run_id=tracker.run_id,
+                subject=f"task/{task.id}", attempt=attempt,
+                commands=definition.verification_commands,
+            )
             replacement = replace(
                 task,
                 state="[x]",
                 result=_append_history(task.result, f"result:{attempt}"),
                 checkpoints=_append_history(task.checkpoints, f"completed:{attempt}"),
-                source_ref=source_ref,
+                source_ref=source_head,
                 commits=",".join(commits),
                 artifacts="-",
                 integration="-",
@@ -2173,13 +2464,16 @@ def record_task_integration(
 ) -> Tracker:
     if not verification or not _COMMIT.fullmatch(integration_commit):
         raise TransitionError("integration commit and verification are required")
-    if not any(integration_commit in item for item in verification):
-        raise TransitionError("integration verification must identify the integration commit")
 
     def transition(tracker: Tracker) -> Tracker:
         task = _task_record(tracker, task_id)
         if task.kind != "source" or task.state != "[x]" or task.commits == "-":
             raise TransitionError("only a completed source task can be integrated")
+        _validate_verification_evidence(
+            Path(run_dir), verification, integration_commit,
+            purpose="task-integration", run_id=tracker.run_id,
+            subject=f"task/{task.id}", attempt="N/A",
+        )
         if not _git(repo_dir, "cat-file", "-e", f"{integration_commit}^{{commit}}"):
             raise TransitionError("integration commit does not exist")
         for commit in task.commits.split(","):
@@ -2306,12 +2600,17 @@ def import_worker_result(
             raise EvidenceError("result attempt is not the current active attempt")
         if result.owner != task.owner:
             raise EvidenceError("result owner does not match the controller-assigned owner")
-        for evidence_path in result.evidence:
+        for evidence_reference in result.evidence:
+            evidence_path = evidence_reference.split("#sha256=", 1)[0]
             try:
                 safe_evidence = _safe_relative(evidence_path)
             except PlanMetadataError as exc:
                 raise EvidenceError(f"worker evidence path is unsafe: {evidence_path}") from exc
-            if not (Path(run_dir) / safe_evidence).is_file():
+            candidates = (
+                Path(run_dir) / safe_evidence,
+                _project_root(Path(run_dir)) / safe_evidence,
+            )
+            if not any(path.is_file() for path in candidates):
                 raise EvidenceError(f"worker evidence is missing: {evidence_path}")
         allowed_checkpoint_evidence = set(result.evidence) | set(result.artifacts)
         if any(checkpoint.evidence not in allowed_checkpoint_evidence for checkpoint in result.checkpoints):
@@ -2328,20 +2627,26 @@ def import_worker_result(
         result_history = _append_history(task.result, identity)
         if result.status in {"DONE", "DONE_WITH_CONCERNS"}:
             if result.kind == "source":
-                if not _git(repo_dir, "rev-parse", "--verify", result.source_ref):
-                    raise EvidenceError("worker source ref does not exist")
-                if any(
-                    not _git(repo_dir, "cat-file", "-e", f"{commit}^{{commit}}")
-                    or not _git(repo_dir, "merge-base", "--is-ancestor", commit, result.source_ref)
-                    for commit in result.commits
-                ):
-                    raise EvidenceError("worker commit is invalid or absent from its source ref")
+                try:
+                    source_head = _validate_source_provenance(
+                        repo_dir=repo_dir, task=task, definition=definition,
+                        attempt=result.attempt, source_ref=result.source_ref,
+                        commits=result.commits,
+                    )
+                    _validate_verification_evidence(
+                        Path(run_dir), result.evidence, source_head,
+                        purpose="task-test", run_id=tracker.run_id,
+                        subject=f"task/{task.id}", attempt=result.attempt,
+                        commands=definition.verification_commands,
+                    )
+                except TransitionError as exc:
+                    raise EvidenceError(str(exc)) from exc
                 replacement = replace(
                     task,
                     state="[x]",
                     result=result_history,
                     checkpoints=_append_history(checkpoints, f"completed:{result.attempt}"),
-                    source_ref=result.source_ref,
+                    source_ref=source_head,
                     commits=",".join(result.commits),
                     artifacts="-",
                     integration="-",
@@ -2431,27 +2736,34 @@ def record_phase_verification(
         raise TransitionError("phase verification needs commands, evidence, and a full commit")
 
     def transition(tracker: Tracker) -> Tracker:
-        _validate_verification_evidence(Path(run_dir), evidence, head)
         metadata, planned = _phase_document_for(tracker, Path(run_dir), phase_id)
+        if commands != metadata.verification_commands:
+            raise TransitionError("phase verification commands must exactly match the approved ordered suite")
+        records = _validate_verification_evidence(
+            Path(run_dir), evidence, head,
+            purpose="phase", run_id=tracker.run_id,
+            subject=f"phase/{phase_id}", attempt="N/A",
+            commands=metadata.verification_commands,
+        )
         matches = [phase for phase in tracker.phases if phase.id == phase_id]
         if len(matches) != 1:
             raise TransitionError(f"unknown phase {phase_id}")
         phase = matches[0]
         if phase.review_gate != metadata.review_gate or phase.review_reason != metadata.review_reason:
             raise TransitionError("phase review classification or reason conflicts with approved metadata")
-        records = {task.id: task for task in tracker.tasks}
-        if any(not _dependency_ready(Path(run_dir), tracker, records[item.id]) for item in planned):
+        task_records = {task.id: task for task in tracker.tasks}
+        if any(not _dependency_ready(Path(run_dir), tracker, task_records[item.id]) for item in planned):
             raise TransitionError("every phase task must be verified and truthfully integrated")
         repo_dir = _project_root(Path(run_dir))
         if not _git(repo_dir, "cat-file", "-e", f"{head}^{{commit}}") or not _git(repo_dir, "merge-base", "--is-ancestor", head, tracker.target_branch):
             raise TransitionError("phase verification HEAD is not on the target branch")
         if any(
-            records[item.id].kind == "source"
-            and not _git(repo_dir, "merge-base", "--is-ancestor", records[item.id].integration, head)
+            task_records[item.id].kind == "source"
+            and not _git(repo_dir, "merge-base", "--is-ancestor", task_records[item.id].integration, head)
             for item in planned
         ):
             raise TransitionError("phase verification HEAD does not contain every source integration")
-        verification = f"head:{head};commands:{','.join(commands)};evidence:{','.join(evidence)}"
+        verification = f"head:{head};commands:{','.join(records[0].commands)};evidence:{evidence[0]}"
         return _replace_phase(tracker, replace(phase, state="[x]", verification=verification))
 
     return locked_tracker_update(
@@ -2630,7 +2942,10 @@ def open_review_gate(
                 raise TransitionError(
                     "master reviewers must be independent from every task implementation owner"
                 )
-        _validate_worker_capacity(tracker, reviewer_assignments, capacity)
+        _validate_worker_capacity(
+            tracker, reviewer_assignments,
+            _detected_runtime_capacity(Path(run_dir), tracker),
+        )
         repo_dir = _project_root(Path(run_dir))
         if not _git(repo_dir, "merge-base", "--is-ancestor", base, head) or (
             gate.type == "master"
@@ -2654,20 +2969,29 @@ def open_review_gate(
 _REVIEW_FIELDS = ("gate", "assignment", "base", "head", "findings")
 _FINDING_HEADER = ("ID", "Gate", "Severity", "Status", "Disposition", "Evidence", "Fix Commit", "Re-review")
 _VERIFICATION_MARKER = "<!-- pipeline-verification-evidence/v2 -->"
-_VERIFICATION_FIELDS = ("code_state", "outcome", "commands")
+_VERIFICATION_FIELDS = (
+    "purpose", "run_id", "subject", "attempt", "code_state", "outcome",
+    "commands", "environment", "inputs",
+)
+_VERIFICATION_PURPOSES = {"task-test", "task-integration", "phase", "remediation"}
 
 
 def _validate_verification_evidence(
     run_dir: Path,
     references: tuple[str, ...],
     expected_head: str,
-) -> None:
-    """Require digest-bound PASS evidence whose recorded code state is exact."""
-    if not references:
-        raise TransitionError("verification evidence is required")
-    if len(references) != len(set(references)):
-        raise TransitionError("verification evidence references must be unique")
+    *,
+    purpose: str | None = None,
+    run_id: str | None = None,
+    subject: str | None = None,
+    attempt: str | None = None,
+    commands: tuple[str, ...] | None = None,
+) -> tuple[VerificationEvidence, ...]:
+    """Require one digest-bound typed PASS proof for the exact code state."""
+    if len(references) != 1:
+        raise TransitionError("exactly one verification evidence reference is required")
     project_root = _project_root(run_dir).resolve()
+    parsed: list[VerificationEvidence] = []
     for reference in references:
         path_and_digest, separator, recorded_head = reference.rpartition("@")
         raw_path, digest_separator, digest = path_and_digest.rpartition("#sha256=")
@@ -2698,12 +3022,42 @@ def _validate_verification_evidence(
         if not lines or lines[0] != _VERIFICATION_MARKER:
             raise TransitionError("verification evidence marker is missing")
         values = dict(_key_values(lines[1:], _VERIFICATION_FIELDS, TransitionError))
+        try:
+            command_values = json.loads(values["commands"])
+        except json.JSONDecodeError as exc:
+            raise TransitionError("verification commands must be a JSON string array") from exc
         if (
-            values["code_state"] != expected_head
+            values["purpose"] not in _VERIFICATION_PURPOSES
+            or not _TOKEN.fullmatch(values["run_id"])
+            or not re.fullmatch(r"(?:task|phase|gate)/[A-Za-z0-9][A-Za-z0-9._/-]*", values["subject"])
+            or (values["attempt"] != "N/A" and not _TOKEN.fullmatch(values["attempt"]))
+            or values["code_state"] != expected_head
             or values["outcome"] != "PASS"
-            or values["commands"] in {"", "-"}
+            or not isinstance(command_values, list)
+            or not command_values
+            or any(not isinstance(command, str) or not command or "|" in command or "\n" in command for command in command_values)
+            or len(command_values) != len(set(command_values))
+            or values["environment"] in {"", "-"}
+            or values["inputs"] in {"", "-"}
         ):
             raise TransitionError("verification evidence does not prove PASS on the applicable code state")
+        record = VerificationEvidence(
+            values["purpose"], values["run_id"], values["subject"],
+            values["attempt"], values["code_state"], tuple(command_values),
+            values["environment"], values["inputs"],
+        )
+        expected = (
+            (purpose, record.purpose, "purpose"),
+            (run_id, record.run_id, "run"),
+            (subject, record.subject, "subject"),
+            (attempt, record.attempt, "attempt"),
+            (commands, record.commands, "commands"),
+        )
+        for wanted, actual, label in expected:
+            if wanted is not None and wanted != actual:
+                raise TransitionError(f"verification evidence {label} does not match the required identity")
+        parsed.append(record)
+    return tuple(parsed)
 
 
 def _parse_review_report(path: Path) -> dict[str, str]:
@@ -2715,6 +3069,199 @@ def _parse_review_report(path: Path) -> dict[str, str]:
         raise TransitionError("review report marker is missing")
     values = dict(_key_values(lines[1:], _REVIEW_FIELDS, TransitionError))
     return values
+
+
+def _digest_bound_reference(run_dir: Path, path: Path) -> str:
+    project_root = _project_root(run_dir).resolve()
+    resolved = Path(path).resolve()
+    try:
+        relative = resolved.relative_to(project_root).as_posix()
+    except ValueError as exc:
+        raise TransitionError("review evidence must remain inside the project workspace") from exc
+    if any(character in relative for character in ",;|#\n"):
+        raise TransitionError("review evidence path contains an unsupported identity delimiter")
+    try:
+        digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise TransitionError(f"review evidence is unreadable: {resolved}: {exc}") from exc
+    return f"{relative}#sha256={digest}"
+
+
+def _resolve_digest_bound_reference(run_dir: Path, value: str) -> Path:
+    raw_path, separator, digest = value.rpartition("#sha256=")
+    if separator != "#sha256=" or not raw_path or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise TransitionError("review evidence reference must bind a path and SHA-256 digest")
+    path = _resolved_reference(run_dir, raw_path).resolve()
+    project_root = _project_root(run_dir).resolve()
+    if not path.is_relative_to(project_root):
+        raise TransitionError("review evidence must remain inside the project workspace")
+    try:
+        content = path.read_bytes()
+    except OSError as exc:
+        raise TransitionError(f"review evidence is unreadable: {path}: {exc}") from exc
+    if hashlib.sha256(content).hexdigest() != digest:
+        raise TransitionError("review evidence digest does not match its immutable identity")
+    return path
+
+
+def _finding_origin_identity(
+    row: tuple[str, ...],
+    report_identities: tuple[str, ...],
+    reports: tuple[dict[str, str], ...],
+) -> str:
+    finding_id, gate_id, severity = row[:3]
+    introducing = tuple(
+        identity
+        for identity, report in zip(report_identities, reports)
+        if finding_id in _csv(report["findings"])
+    )
+    if not introducing:
+        raise TransitionError(f"finding {finding_id} has no introducing review report")
+    payload = json.dumps(
+        [finding_id, gate_id, severity, *introducing],
+        separators=(",", ":"), sort_keys=False,
+    ).encode("utf-8")
+    return f"{finding_id}@{severity}@sha256={hashlib.sha256(payload).hexdigest()}"
+
+
+def _sealed_review_package(
+    run_dir: Path,
+    gate: GateRecord,
+    report_paths: tuple[Path, ...],
+    rows: tuple[tuple[str, ...], ...],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    reports, report_head = _review_report_set(
+        tuple(Path(path).resolve() for path in report_paths),
+        gate=gate, expected_base=gate.base,
+    )
+    if report_head != gate.head:
+        raise TransitionError("initial reports do not match the gate's opened HEAD")
+    identities = tuple(_digest_bound_reference(run_dir, path) for path in report_paths)
+    origins = tuple(
+        _finding_origin_identity(row, identities, reports)
+        for row in sorted(rows, key=lambda item: item[0])
+    )
+    return identities, origins
+
+
+def _validate_sealed_gate_evidence(
+    run_dir: Path,
+    gate: GateRecord,
+    findings_path: Path,
+) -> None:
+    report_values = _csv(gate.reports)
+    origins = tuple(_parse_finding_origin(value) for value in _csv(gate.findings))
+    if not report_values or any(origin is None for origin in origins):
+        raise TransitionError("blocked gate review evidence has not been digest-sealed")
+    report_paths = tuple(_resolve_digest_bound_reference(run_dir, value) for value in report_values)
+    rows = tuple(row for row in _parse_findings(findings_path) if row[1] == gate.id)
+    reports, initial_head = _review_report_set(
+        report_paths, gate=gate, expected_base=gate.base,
+    )
+    repo_dir = _project_root(run_dir)
+    if not _git(repo_dir, "merge-base", "--is-ancestor", initial_head, gate.head):
+        raise TransitionError("sealed initial review HEAD is not an ancestor of the current gate HEAD")
+    expected_reports = tuple(_digest_bound_reference(run_dir, path) for path in report_paths)
+    expected_origins = tuple(
+        _finding_origin_identity(row, expected_reports, reports)
+        for row in sorted(rows, key=lambda item: item[0])
+    )
+    if report_values != expected_reports or tuple(_csv(gate.findings)) != expected_origins:
+        raise TransitionError("review reports or finding origins conflict with the sealed gate package")
+
+
+_MASTER_ROUND_ONE_SEAL_RUN = "2026-09-08-pipeline-rebuild-v2"
+_MASTER_ROUND_ONE_SEAL_REVISION = 119
+_MASTER_ROUND_ONE_SEAL_TRACKER_DIGEST = "5e07cd560718630adad54ed3d016fd69bb2110c699c261b13b419e5a91c8305e"
+_MASTER_ROUND_ONE_SEAL_FINDINGS = tuple(f"MASTER-{number:03d}" for number in range(1, 7))
+_MASTER_ROUND_ONE_SEAL_FIXER = "master-fixer-controller"
+_MASTER_ROUND_ONE_SEAL_REPORT_DIGESTS = (
+    "9060f4156f48b6259b933d4c5d47f138c5adb68d1d9ce816f5e1b686d9056542",
+    "58386de65448288f7492edd417d6f368faaecf7e6ea2e456894e01ae7c28eebb",
+)
+_MASTER_ROUND_ONE_SEAL_FINDINGS_DIGEST = "dd459120587218de73e66570bef396226bf9c611557cbcd79d5db644d9837e86"
+
+
+def seal_active_master_round_one(run_dir: Path) -> Tracker:
+    """Seal the exact D-027 bootstrap package before fix recording or re-review."""
+    run_dir = Path(run_dir)
+    marker_prefix = "master-initial-seal:"
+
+    def already_sealed(tracker: Tracker) -> bool:
+        row = next(
+            (item for item in tracker.remediation if item.gate == "master" and item.round_number == 1),
+            None,
+        )
+        if row is None or not any(item.startswith(marker_prefix) for item in _csv(row.verification)):
+            return False
+        gate = _gate_record(tracker, "master")
+        findings_path = _resolved_reference(run_dir, dict(tracker.run_fields)["findings"])
+        _validate_sealed_gate_evidence(run_dir, gate, findings_path)
+        return True
+
+    try:
+        current = validate_run(run_dir)
+    except SchemaError:
+        current = None
+    if current is not None and already_sealed(current):
+        return current
+
+    with _exclusive_lock(run_dir, timeout_s=5.0):
+        progress = run_dir / "progress.md"
+        source = progress.read_bytes()
+        if hashlib.sha256(source).hexdigest() != _MASTER_ROUND_ONE_SEAL_TRACKER_DIGEST:
+            raise TransitionError("D-027 sealing tracker digest does not match the authorized post-start state")
+        tracker = _parse_tracker_for_exact_reconciliation(source.decode("utf-8"))
+        if tracker.run_id != _MASTER_ROUND_ONE_SEAL_RUN or tracker.revision != _MASTER_ROUND_ONE_SEAL_REVISION:
+            raise TransitionError("D-027 sealing run or revision does not match the authorized state")
+        gate = _gate_record(tracker, "master")
+        row = next(
+            (item for item in tracker.remediation if item.gate == "master" and item.round_number == 1),
+            None,
+        )
+        if (
+            gate.state != "blocked"
+            or _csv(gate.findings) != _MASTER_ROUND_ONE_SEAL_FINDINGS
+            or row is None
+            or row.state != "fixing"
+            or _csv(row.findings) != _MASTER_ROUND_ONE_SEAL_FINDINGS
+            or row.fixers != _MASTER_ROUND_ONE_SEAL_FIXER
+            or row.commits != "-"
+            or row.re_review != "-"
+        ):
+            raise TransitionError("D-027 sealing gate or round shape is not the authorized bootstrap state")
+        report_paths = tuple(_resolved_reference(run_dir, value).resolve() for value in _csv(gate.reports))
+        observed_report_digests = tuple(hashlib.sha256(path.read_bytes()).hexdigest() for path in report_paths)
+        findings_path = _resolved_reference(run_dir, dict(tracker.run_fields)["findings"]).resolve()
+        if observed_report_digests != _MASTER_ROUND_ONE_SEAL_REPORT_DIGESTS:
+            raise TransitionError("D-027 initial review reports changed before sealing")
+        if hashlib.sha256(findings_path.read_bytes()).hexdigest() != _MASTER_ROUND_ONE_SEAL_FINDINGS_DIGEST:
+            raise TransitionError("D-027 findings ledger changed before sealing")
+        rows = tuple(row_ for row_ in _parse_findings(findings_path) if row_[1] == gate.id)
+        if tuple(sorted(row_[0] for row_ in rows)) != _MASTER_ROUND_ONE_SEAL_FINDINGS:
+            raise TransitionError("D-027 findings ledger no longer has the authorized finding set")
+        report_identities, origins = _sealed_review_package(run_dir, gate, report_paths, rows)
+        seal_payload = json.dumps(
+            [*report_identities, *origins], separators=(",", ":")
+        ).encode("utf-8")
+        seal_digest = hashlib.sha256(seal_payload).hexdigest()
+        sealed_gate = replace(
+            gate,
+            reports=",".join(report_identities),
+            findings=",".join(origins),
+        )
+        sealed_row = replace(row, verification=f"{marker_prefix}{seal_digest}")
+        proposed = replace(
+            _replace_gate(tracker, sealed_gate),
+            remediation=tuple(sealed_row if item is row else item for item in tracker.remediation),
+        )
+        proposed = _with_next_action(proposed, derive_next_action(run_dir, proposed))
+        transition_id = f"seal-master-round-1-{seal_digest}"
+        updated = _with_transition_identity(proposed, transition_id, tracker.revision + 1)
+        canonical = render_tracker(updated)
+        reparsed = parse_tracker(canonical)
+        _replace_tracker(run_dir, canonical, transition_id)
+        return reparsed
 
 
 def _parse_findings(path: Path) -> tuple[tuple[str, ...], ...]:
@@ -2808,7 +3355,7 @@ def resolve_gate_questions(
         gate = _gate_record(tracker, gate_id)
         if set(_csv(gate.questions)) != set(decision_refs):
             raise TransitionError("decision references do not exactly match the current gate questions")
-        terms = {gate.id, gate.phase, *_csv(gate.findings)}
+        terms = {gate.id, gate.phase, *_gate_finding_ids(gate)}
         for decision_ref in decision_refs:
             _resolved_decision_for_terms(Path(run_dir), tracker, decision_ref, terms)
         return _replace_gate(tracker, replace(gate, questions="-"))
@@ -2954,10 +3501,14 @@ def start_remediation_round(
             )
         elif gate.questions != "-":
             raise TransitionError("an unresolved gate question prevents remediation dispatch")
-        _validate_worker_capacity(tracker, fixer_assignments, capacity)
+        _validate_worker_capacity(
+            tracker, fixer_assignments,
+            _detected_runtime_capacity(Path(run_dir), tracker),
+        )
         authoritative_findings = _resolved_reference(
             Path(run_dir), dict(tracker.run_fields)["findings"]
         )
+        _validate_sealed_gate_evidence(Path(run_dir), gate, authoritative_findings)
         open_blockers = {
             row[0]
             for row in _parse_findings(authoritative_findings)
@@ -3009,7 +3560,6 @@ def record_remediation_fixes(
         raise TransitionError("fix integration needs a HEAD, commits, and verification")
 
     def transition(tracker: Tracker) -> Tracker:
-        _validate_verification_evidence(Path(run_dir), verification, fix_head)
         gate = _gate_record(tracker, gate_id)
         row = next(
             (item for item in tracker.remediation if item.gate == gate_id and item.round_number == round_number),
@@ -3017,6 +3567,15 @@ def record_remediation_fixes(
         )
         if row is None or row.state != "fixing" or row.fixers == "-":
             raise TransitionError("only an active fixing round can move to re-review")
+        _validate_sealed_gate_evidence(
+            Path(run_dir), gate,
+            _resolved_reference(Path(run_dir), dict(tracker.run_fields)["findings"]),
+        )
+        _validate_verification_evidence(
+            Path(run_dir), verification, fix_head,
+            purpose="remediation", run_id=tracker.run_id,
+            subject=f"gate/{gate_id}", attempt=f"round-{round_number}",
+        )
         if gate.state != "blocked" or gate.questions != "-":
             raise TransitionError("gate is not eligible for re-review")
         if (
@@ -3048,7 +3607,10 @@ def record_remediation_fixes(
             remediation=tuple(updated_row if item is row else item for item in tracker.remediation),
         )
         assignments = _csv(gate.assignments)
-        _validate_worker_capacity(interim, assignments, capacity)
+        _validate_worker_capacity(
+            interim, assignments,
+            _detected_runtime_capacity(Path(run_dir), interim),
+        )
         return _replace_gate(interim, replace(gate, state="re_reviewing"))
 
     return locked_tracker_update(
@@ -3304,7 +3866,7 @@ def _validate_completed_round_edge(
     row: RemediationRecord,
     prior_head: str,
 ) -> tuple[tuple[dict[str, str], ...], str]:
-    paths = tuple(_resolved_reference(run_dir, value).resolve() for value in _csv(row.re_review))
+    paths = tuple(_resolve_digest_bound_reference(run_dir, value) for value in _csv(row.re_review))
     if not paths:
         raise TransitionError("completed remediation round has no re-review evidence")
     reports, reviewed_head = _review_report_set(paths, gate=gate, expected_base=prior_head)
@@ -3354,7 +3916,7 @@ def _validated_review_lineage(
         return initial_reports, ()
 
     persisted_paths = tuple(
-        _resolved_reference(run_dir, value).resolve() for value in _csv(gate.reports)
+        _resolve_digest_bound_reference(run_dir, value) for value in _csv(gate.reports)
     )
     if not persisted_paths or resolved_input != persisted_paths:
         raise TransitionError("remediation evaluation must reuse the immutable initial report set")
@@ -3411,6 +3973,8 @@ def _gate_evaluation_request_digest(
 
 
 def _review_evidence_path(run_dir: Path, value: str) -> Path:
+    if "#sha256=" in value:
+        return _resolve_digest_bound_reference(run_dir, value)
     path = Path(value)
     if path.is_absolute():
         return path.resolve()
@@ -3494,7 +4058,27 @@ def evaluate_and_close_review_gate(
             raise TransitionError(
                 "master review HEAD is no longer the designated target branch tip"
             )
-        _validate_verification_evidence(Path(run_dir), verification, reviewed_head)
+        if active_round is not None:
+            _validate_verification_evidence(
+                Path(run_dir), verification, reviewed_head,
+                purpose="remediation", run_id=tracker.run_id,
+                subject=f"gate/{gate.id}", attempt=f"round-{active_round.round_number}",
+            )
+        else:
+            subject_phase = gate.phase
+            if gate.type == "master":
+                candidates = [
+                    item for item in tracker.phases
+                    if item.state == "[x]" and _phase_verification_head(item) == reviewed_head
+                ]
+                if not candidates:
+                    raise TransitionError("master gate has no recorded phase verification for its reviewed HEAD")
+                subject_phase = candidates[-1].id
+            _validate_verification_evidence(
+                Path(run_dir), verification, reviewed_head,
+                purpose="phase", run_id=tracker.run_id,
+                subject=f"phase/{subject_phase}", attempt="N/A",
+            )
         if active_round is not None:
             recorded_verification = tuple(
                 item
@@ -3520,6 +4104,10 @@ def evaluate_and_close_review_gate(
             raise TransitionError("gate verification does not match the authoritative recorded verification")
         rows = tuple(row for row in _parse_findings(authoritative_findings) if row[1] == gate.id)
         row_ids = {row[0] for row in rows}
+        if active_round is not None:
+            _validate_sealed_gate_evidence(Path(run_dir), gate, authoritative_findings)
+            if row_ids != set(_gate_finding_ids(gate)):
+                raise TransitionError("findings ledger changed the sealed gate finding set")
         report_ids = {
             finding
             for report in (*reports, *historical_reports, *rereviews)
@@ -3578,7 +4166,7 @@ def evaluate_and_close_review_gate(
                 paths = (
                     tuple(Path(path).resolve() for path in rereview_paths)
                     if remediation is active_round
-                    else tuple(_resolved_reference(Path(run_dir), value).resolve() for value in _csv(remediation.re_review))
+                    else tuple(_resolve_digest_bound_reference(Path(run_dir), value) for value in _csv(remediation.re_review))
                 )
                 if expected_rereview in paths:
                     matching_rounds.append(remediation)
@@ -3631,17 +4219,29 @@ def evaluate_and_close_review_gate(
                     active_round.verification,
                     "remaining-blockers=" + ("+".join(sorted(open_blocker_ids)) or "none"),
                 ),
-                re_review=",".join(str(Path(path)) for path in rereview_paths),
+                re_review=",".join(
+                    _digest_bound_reference(Path(run_dir), Path(path))
+                    for path in rereview_paths
+                ),
             )
             remediation_rows[remediation_rows.index(active_round)] = completed_round
         state = "blocked" if blockers or questions != "-" else "accepted"
+        if active_round is None:
+            report_identities, finding_origins = _sealed_review_package(
+                Path(run_dir), gate, report_paths, rows,
+            )
+            persisted_reports = ",".join(report_identities)
+            persisted_findings = ",".join(finding_origins) or "-"
+        else:
+            persisted_reports = gate.reports
+            persisted_findings = gate.findings
         replacement = replace(
             gate,
             state=state,
             head=reviewed_head,
-            reports=(gate.reports if active_round is not None else ",".join(str(Path(path)) for path in report_paths)),
+            reports=persisted_reports,
             verification=",".join(verification),
-            findings=",".join(sorted(row_ids)) or "-",
+            findings=persisted_findings,
             questions=questions,
         )
         return replace(_replace_gate(tracker, replacement), remediation=tuple(remediation_rows))

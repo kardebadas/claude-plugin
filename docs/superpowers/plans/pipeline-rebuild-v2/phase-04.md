@@ -11,6 +11,7 @@
 **Spec:** `docs/superpowers/specs/2026-09-08-pipeline-rebuild-v2-design.md`
 
 <!-- pipeline-v2-phase: id=04; deps=01,02,03; review_gate=final-only; review_reason=Phase 4 is acceptance evidence and mandatory-master-review preparation; no ordinary phase review is authorized. -->
+<!-- pipeline-v2-phase-suite: id=04; commands=["python3.11 -m unittest discover -s plugins/superb/skills/pipeline/tests -v","./tools/check-plugin.sh","./tools/check-plugin-mutants.sh","python3 -m unittest discover -s plugins/superb/skills/craft/tests -v","./tools/test-craftui.sh","git diff --check","git status --short --branch","field-aware A-01-A-20 matrix validation"] -->
 
 ## Global constraints
 
@@ -87,6 +88,7 @@ P4-01 is sequential foundation. P4-02 is controller-only reuse. P4-03 dispatches
 ### P4-01 — Separate worker stimuli from controller oracles
 
 <!-- pipeline-v2-task: id=P4-01; deps=none; kind=source; batch=pressure-foundation; order=1; write_scope=file:plugins/superb/skills/pipeline/tests/fixtures/pressure/phase-04-worker-stimuli.md,file:plugins/superb/skills/pipeline/tests/fixtures/pressure/extract_phase04_stimulus.py,file:docs/superpowers/runs/2026-09-08-pipeline-rebuild-v2/phase-04-controller-oracles.md; outputs=none -->
+<!-- pipeline-v2-task-suite: id=P4-01; commands=["python3.11 plugins/superb/skills/pipeline/tests/fixtures/pressure/extract_phase04_stimulus.py R01","python3.11 -m py_compile plugins/superb/skills/pipeline/tests/fixtures/pressure/extract_phase04_stimulus.py","git diff --check"] -->
 
 **Files:** Create exactly the three named paths.
 

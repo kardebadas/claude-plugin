@@ -111,6 +111,7 @@ section:
 
 ```text
 <!-- pipeline-v2-phase: id=<phase-id>; deps=<none-or-phase-ids>; review_gate=<final-only-or-required>; review_reason=<nonempty-approved-reason> -->
+<!-- pipeline-v2-phase-suite: id=<same-phase-id>; commands=["<exact-command>","<next-command>"] -->
 ```
 
 Place one ordered task comment immediately below every task heading:
@@ -118,6 +119,17 @@ Place one ordered task comment immediately below every task heading:
 ```text
 <!-- pipeline-v2-task: id=<stable-id>; deps=<none-or-task-ids>; kind=<source-or-artifact>; batch=<batch-id>; order=<positive-integer>; write_scope=<typed-scopes>; outputs=<none-or-exact-files> -->
 ```
+
+Immediately after each `source` task comment, place its ordered task suite:
+
+```text
+<!-- pipeline-v2-task-suite: id=<same-task-id>; commands=["<exact-command>"] -->
+```
+
+Commands are a nonempty JSON string array in exact execution order, with no
+duplicates. The phase suite is required for every phase; the task suite is
+required only for `source` tasks. Artifact tasks use their exact output and
+validation contract and must not carry a source-task suite.
 
 The keys are exactly `id`, `deps`, `kind`, `batch`, `order`, `write_scope`, and
 `outputs`, in that order. Dependencies are `none` or comma-separated stable

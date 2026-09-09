@@ -14,7 +14,7 @@
 | commits | <commits_or_dash> |
 | artifacts | <artifacts_or_dash> |
 | tests | <test_commands> |
-| evidence | <evidence_paths> |
+| evidence | <digest_bound_typed_task_evidence_or_artifact_validation_paths> |
 | concerns | <concerns_or_dash> |
 | question | <question_or_dash> |
 | blocking_reason | <blocking_reason_or_dash> |

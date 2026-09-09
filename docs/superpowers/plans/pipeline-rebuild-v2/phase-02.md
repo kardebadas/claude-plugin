@@ -11,6 +11,7 @@
 **Spec:** docs/superpowers/specs/2026-09-08-pipeline-rebuild-v2-design.md
 
 <!-- pipeline-v2-phase: id=02; deps=01; review_gate=required; review_reason=The instructions control user escalation, dispatch authority, destructive boundaries, and formal acceptance. A prose ambiguity can cause unauthorized decisions or false completion across every future run. -->
+<!-- pipeline-v2-phase-suite: id=02; commands=["python3.11 -m unittest discover -s plugins/superb/skills/pipeline/tests -v","test $(wc -l < plugins/superb/skills/pipeline/SKILL.md) -le 500","validate Phase 2 pressure evidence inventory and digests","run the two named no-op-aware Phase 2 mutation simulations","git diff --check"] -->
 
 ## Global constraints
 
@@ -90,6 +91,7 @@ Expected: the exact twelve plan-declared outputs exist (six RED, five micro-cont
 
 ### Task P2-T02: Rewrite the compact control-plane router
 <!-- pipeline-v2-task: id=P2-T02; deps=P2-T01; kind=source; batch=P2-control-plane; order=1; write_scope=file:plugins/superb/skills/pipeline/SKILL.md; outputs=none -->
+<!-- pipeline-v2-task-suite: id=P2-T02; commands=["python3.11 -m unittest discover -s plugins/superb/skills/pipeline/tests -v","git diff --check"] -->
 
 **Stable ID:** P2-T02
 **Depends on:** P2-T01
@@ -128,6 +130,7 @@ git commit -m "feat(pipeline): add v2 control plane"
 
 ### Task P2-T03: Create the planning-stage contract
 <!-- pipeline-v2-task: id=P2-T03; deps=P2-T01; kind=source; batch=P2-planning; order=1; write_scope=file:plugins/superb/skills/pipeline/references/planning.md; outputs=none -->
+<!-- pipeline-v2-task-suite: id=P2-T03; commands=["python3.11 -m unittest discover -s plugins/superb/skills/pipeline/tests -v","git diff --check"] -->
 
 **Stable ID:** P2-T03
 **Depends on:** P2-T01
@@ -160,6 +163,7 @@ git commit -m "docs(pipeline): add v2 planning contract"
 
 ### Task P2-T04: Create the execution-stage batch/verification contract
 <!-- pipeline-v2-task: id=P2-T04; deps=P2-T01; kind=source; batch=P2-execution; order=1; write_scope=file:plugins/superb/skills/pipeline/references/execution.md; outputs=none -->
+<!-- pipeline-v2-task-suite: id=P2-T04; commands=["python3.11 -m unittest discover -s plugins/superb/skills/pipeline/tests -v","git diff --check"] -->
 
 **Stable ID:** P2-T04
 **Depends on:** P2-T01
@@ -192,6 +196,7 @@ git commit -m "docs(pipeline): add v2 execution contract"
 
 ### Task P2-T05: Create persistence instructions and decisions template; verify Phase 1 state/result templates
 <!-- pipeline-v2-task: id=P2-T05; deps=P2-T01; kind=source; batch=P2-persistence; order=1; write_scope=file:plugins/superb/skills/pipeline/references/persistence.md,file:plugins/superb/skills/pipeline/templates/decisions.md; outputs=none -->
+<!-- pipeline-v2-task-suite: id=P2-T05; commands=["python3.11 -m unittest discover -s plugins/superb/skills/pipeline/tests -v","git diff --check"] -->
 
 **Stable ID:** P2-T05
 **Depends on:** P2-T01
@@ -227,6 +232,7 @@ git commit -m "docs(pipeline): add v2 persistence contract"
 
 ### Task P2-T06: Create hybrid review/remediation instructions and templates
 <!-- pipeline-v2-task: id=P2-T06; deps=P2-T01; kind=source; batch=P2-review; order=1; write_scope=file:plugins/superb/skills/pipeline/references/review.md,file:plugins/superb/skills/pipeline/templates/findings.md,file:plugins/superb/skills/pipeline/templates/fix-plan.md; outputs=none -->
+<!-- pipeline-v2-task-suite: id=P2-T06; commands=["python3.11 -m unittest discover -s plugins/superb/skills/pipeline/tests -v","git diff --check"] -->
 
 **Stable ID:** P2-T06
 **Depends on:** P2-T01
@@ -259,6 +265,7 @@ git commit -m "docs(pipeline): add v2 review contract"
 
 ### Task P2-T07: Rewrite README and remove exactly superseded v1 artifacts
 <!-- pipeline-v2-task: id=P2-T07; deps=P2-T02,P2-T03,P2-T04,P2-T05,P2-T06; kind=source; batch=P2-cleanup; order=1; write_scope=file:plugins/superb/skills/pipeline/README.md,file:plugins/superb/skills/pipeline/references/run-state.md,file:plugins/superb/skills/pipeline/references/implement.md,file:plugins/superb/skills/pipeline/references/parallel.md,file:plugins/superb/skills/pipeline/references/fix-loop.md,file:plugins/superb/skills/pipeline/templates/register.md,file:plugins/superb/skills/pipeline/templates/implementer-prompt.md,file:plugins/superb/skills/pipeline/templates/kit.md,file:plugins/superb/skills/pipeline/scripts/task-brief; outputs=none -->
+<!-- pipeline-v2-task-suite: id=P2-T07; commands=["python3.11 -m unittest discover -s plugins/superb/skills/pipeline/tests -v","git diff --check"] -->
 
 **Stable ID:** P2-T07
 **Depends on:** P2-T02, P2-T03, P2-T04, P2-T05, P2-T06

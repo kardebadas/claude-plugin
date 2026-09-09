@@ -92,9 +92,24 @@ fi
 
 # --- python3: craft's browser UI. Genuinely optional. -----------------------
 if command -v python3 >/dev/null 2>&1; then
-  echo "OPTIONAL python3 OK $(python3 -c 'import sys;print(".".join(map(str,sys.version_info[:3])))' 2>/dev/null || echo unknown)"
+  PYTHON3_VERSION=$(python3 -c 'import sys;print(".".join(map(str,sys.version_info[:3])))' 2>/dev/null || echo unknown)
+  echo "OPTIONAL python3 OK $PYTHON3_VERSION"
 else
   echo "OPTIONAL python3 MISSING craft-ui-falls-back-to-file-mode"
+fi
+
+# --- python3.11+: required by pipeline's standard-library state helper. -----
+if command -v python3 >/dev/null 2>&1 &&
+   python3 -c 'import sys; raise SystemExit(not (sys.version_info >= (3, 11)))' 2>/dev/null; then
+  echo "REQUIRED pipeline-python OK $PYTHON3_VERSION"
+else
+  if command -v python3 >/dev/null 2>&1; then
+    echo "REQUIRED pipeline-python MISSING found-$PYTHON3_VERSION-requires-3.11+"
+  else
+    echo "REQUIRED pipeline-python MISSING requires-python-3.11+"
+  fi
+  echo "NOTE report the Pipeline Python limitation; do not install or upgrade a runtime"
+  note_worse 1
 fi
 
 # Deliberately NOT checked: whether the user's project is a git repository.

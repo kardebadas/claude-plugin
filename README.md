@@ -29,7 +29,7 @@ inside it is invoked as `superb:<skill>`:
 | ----- | --------- | ---------- |
 | [`setup`](plugins/superb/skills/setup) | `superb:setup` | Installs and verifies the dependencies the other skills need. Detects the harness, reports one fact per line, and on Claude Code runs the installs itself — then re-runs the check, because an install that printed no error has not been verified. On Codex, where plugins install through an interactive picker, it says so rather than attempting a workaround. |
 | [`craft`](plugins/superb/skills/craft) | `superb:craft` | Turns a vague product idea into a clear definition of what to build. Puts a questionnaire tailored to the product in front of you — in a local browser UI, or in `CRAFT.md` — which you answer in your own time; each pass folds your answers in, records confirmed decisions, surfaces assumptions and contradictions, and gets shorter. Technical questions branch on what you are building, so a CLI is never asked about a frontend framework. Drives its own rounds without prompting, and `VISION CLEAR` is earned by a script plus a reader who never saw the conversation. Deliberately stops before planning — no tasks, no phases, no code. |
-| [`pipeline`](plugins/superb/skills/pipeline) | `superb:pipeline` | Takes a settled idea to a finished branch: brainstorm, pressure-test, design gate, master plan, phase expansion, plan gate, then an autonomous per-phase implement/review/fix loop. Keeps its state on disk so a compaction or a crash cannot lose the run, and runs independent tasks as parallel implementers in separate worktrees. |
+| [`pipeline`](plugins/superb/skills/pipeline) | `superb:pipeline` | Takes a settled idea to a clean, committed local feature branch. It saves the approved design and plans, tracks task-level execution in a strict `pipeline-run/v2` file, runs compatible batches within an explicit `worker_limit`, mechanically verifies every phase, and applies formal review only at approved high-risk and final boundaries. |
 | [`bug-investigate`](plugins/superb/skills/bug-investigate) | `superb:bug-investigate` | Finds out **why** something is broken and stops there — no plan, no edits. The same investigation `bug-fix` runs first, split out because "why is this happening?" is a different question from "fix this", and knowing is often the whole deliverable. |
 | [`bug-fix`](plugins/superb/skills/bug-fix) | `superb:bug-fix` | Carries a reported bug from symptom to a regression-tested fix. Dispatches an investigator into its own context, and refuses to plan a fix until the root cause is proven with `file:line` evidence — a plausible fix for an unproven cause closes the ticket and leaves the bug live. Not done until a test that failed before the fix passes after it. |
 
@@ -73,7 +73,8 @@ skills silently fail to load.
 
 It will not write to your config, install a language runtime, or run `git init`
 to satisfy an optional dependency. Without `python3` craft falls back to its
-file questionnaire; outside a git repository pipeline runs tasks one at a time.
+file questionnaire. Pipeline reports an unsatisfied runtime or repository
+requirement instead of silently weakening its execution guarantees.
 
 ### `superb:craft`
 
@@ -115,41 +116,59 @@ puts the same questionnaire in `CRAFT.md` instead. Nothing is blocked by the UI.
 ### `superb:pipeline`
 
 ```
-> /superb:pipeline build what CRAFT.md describes
+> /superb:pipeline
 ```
 
-It asks until nothing is ambiguous — there is no cap on question rounds, and
-"use your judgment" changes the *format* of the questions, never whether an
-unknown gets asked. Then two gates, and they are the only two:
+Pipeline first investigates the repository and writes an approved design, a
+complete master plan, and one detailed file per phase. If the user instructions,
+recorded answers, approved design/plans, and repository rules do not answer a
+required question, affected work stops, the question is saved, and the user is
+asked. Another agent's preference is never substituted for that answer.
 
 ```
-GATE 1 — the design.   A spec, after two agents have tried to break it.
-GATE 2 — the plan.     Phases, tasks, and which of them can run at once.
+docs/superpowers/specs/<feature>-design.md
+docs/superpowers/plans/<feature>-master-plan.md
+docs/superpowers/plans/<feature>/phase-*.md
+docs/superpowers/runs/<run-id>/progress.md
 ```
 
-At GATE 2 you see the shape of the build before it starts:
+`progress.md` is the single mutable execution tracker and carries the strict
+`pipeline-run/v2` marker. Task ownership, attempts, checkpoints, source commits
+or artifact evidence, integration, phase verification, reviews, and remediation
+rounds are persisted there or referenced from it. After compaction, a restart,
+or an interrupted worker commit, Pipeline reconstructs the next permitted
+action from those files and Git evidence before deciding whether to resume,
+reconcile, or dispatch anything.
+
+Resume is v2-only. Recognized legacy v1 state and missing, malformed, unknown,
+or unsupported schemas are rejected without changing the run or creating a
+replacement. Starting a new v2 run is a separate explicit decision.
+
+Every run also records an explicit positive `worker_limit`. It is one global
+ceiling across phase planners, implementers, fixers, and reviewers. Tasks are
+durable recovery checkpoints, not automatic agent boundaries: compatible
+ordered tasks may share an executor, while independent batches may run in
+parallel only after dependencies, unresolved questions, ownership, write-scope
+conflicts, and current capacity are revalidated. Multi-task batches retain a
+checkpoint for each task.
+
+The review boundary is deliberately hybrid:
 
 ```
-Phase A — schema, renderer, session   deps: none
-  W1  T1 session paths    T3 validation    T4 renderer     ← 3 at once
-  W2  T2 session lock                                      ← needs T1
-Phase B — the HTTP surface            deps: A
+ordinary phase (`final-only`)  -> mechanical verification, no phase reviewer
+approved high-risk phase       -> mechanical verification, then one reviewer
+all accepted phases            -> mandatory master review by exactly two reviewers
 ```
 
-Tasks share a wave only when neither depends on the other **and** they touch no
-file in common; each one then runs in its own git worktree. Phases with no
-dependency between them run as concurrent lanes.
+Confirmed Critical and Important findings block. Findings are consolidated
+before one scoped fix batch, then verified and re-reviewed at the same gate.
+The default bound is three fix/re-review rounds per gate; the initial review is
+round zero. A blocked or non-converging gate reaches the user rather than
+waiving defects or resetting its history.
 
-After that it runs on its own: implement, review, fix, next phase — stopping
-only for a genuine unknown, a blocked subagent, or the finished branch. Every
-**phase** is reviewed as a unit by agents that did not write it, over exact
-commit ranges that together cover the whole phase diff, and no phase advances
-until its review and any fix rounds have closed. Completing a task dispatches
-no reviewer: implementation runs to the end of the phase, and review is the
-phase boundary.
-
-The run's state lives on disk, so a compaction or a crash resumes from the
-tracker rather than from memory.
+Completion leaves the designated feature branch clean, committed, integrated,
+and locally recoverable. Pipeline never pushes, publishes, creates a pull
+request, or merges into `main` or `master`.
 
 ### `superb:bug-fix`
 
@@ -198,25 +217,27 @@ only the standard library — no pip, no npm, no build step. If `python3` is
 missing, or the server cannot start, it falls back to the `CRAFT.md`
 questionnaire and keeps working.
 
-**`pipeline` composes [superpowers](https://github.com/obra/superpowers) and
-will not run without it.** It deliberately reimplements none of these — it owns
-only the seams between them:
+**`pipeline` requires Python 3.11+ and composes
+[superpowers](https://github.com/obra/superpowers).** Its standard-library
+Python helper validates and atomically updates the local v2 tracker; it does
+not install Python. This requirement is separate from Craft's Python 3.9+ UI
+support. Pipeline owns only the orchestration and persistence seams:
 
 | Stage | Skill it invokes |
 |-------|------------------|
-| 1 — brainstorm | `superpowers:brainstorming` |
-| 2, 3 — master plan, per-phase expansion | `superpowers:writing-plans` |
-| 4 — the autonomous per-phase implement/review/fix loop | pipeline's own `references/implement.md` and `references/fix-loop.md` |
-| 5 — finish | `superpowers:finishing-a-development-branch` |
+| Discovery and approved design | `superpowers:brainstorming` |
+| Master plan and per-phase expansion | `superpowers:writing-plans` |
+| Independent implementation batches | `superpowers:dispatching-parallel-agents`, `superpowers:using-git-worktrees` |
+| Testable implementation and debugging | `superpowers:test-driven-development`, `superpowers:systematic-debugging` |
+| Required high-risk and master reviews | `superpowers:requesting-code-review`, `superpowers:receiving-code-review` |
+| Skill pressure tests and final evidence | `superpowers:writing-skills`, `superpowers:verification-before-completion` |
 
 **`bug-fix` composes superpowers too, and ships its own agent.** It needs
 `superpowers:writing-plans` to plan the fix, `superpowers:systematic-debugging`
 for the no-subagent investigation path, and
 `superpowers:subagent-driven-development` for fixes larger than three files —
-that skill is `bug-fix`'s dependency, not `pipeline`'s. At `bug-fix`'s task
-scope its per-task review contract is the right one; `pipeline` accepts work at
-the phase, so it dispatches implementation itself
-(`skills/pipeline/references/implement.md`).
+that skill is `bug-fix`'s dependency, not `pipeline`'s. Pipeline uses its own
+compatible-batch controller and has no per-task formal review.
 The investigator itself is bundled — `plugins/superb/agents/bug-investigator.md`
 — so there is nothing extra to install for it.
 
@@ -238,22 +259,17 @@ claude plugin install superpowers@claude-plugins-official
 **Codex CLI** — open the plugin search interface with `/plugins`, search for
 `superpowers`, and select *Install Plugin*.
 
-**They are separate installs and they drift.** This machine currently runs
-**6.3.0** under Claude Code and **6.2.0** under Codex. `pipeline` uses only the
-four skills above, whose interfaces have been stable — but a version gap is
-worth ruling out before blaming the pipeline for behaving differently in one
-harness than the other.
-
-**`pipeline` also expects a `/review` skill in the target repository.** Stage 4
-calls it after every phase. If your repo has no `/review`, that step has nothing
-to invoke — supply one, or expect the review half of the loop to be skipped.
+**They are separate installs and can drift.** Check the installed contracts in
+the harness that will run Pipeline. Pipeline does not depend on an external
+review command, does not use Superpowers' per-task-development orchestrator,
+and does not invoke an interactive branch-finishing workflow.
 
 ### For contributors
 
-Two gates, both run by CI on every push and pull request, and both worth running
-before you push:
+The repository checks below run in CI and are also worth running locally:
 
 ```
+python3.11 -m unittest discover -s plugins/superb/skills/pipeline/tests -v
 ./tools/check-plugin.sh            plugin structure — frontmatter, namespace, manifests, drift
 ./tools/check-plugin-mutants.sh    proves the above can still fail
 ./tools/test-craftui.sh            the craft UI test suite
@@ -265,8 +281,9 @@ frontmatter, which then loads with its description silently stripped.
 
 `check-plugin-mutants.sh` is the reason to believe it. A gate that passes
 everything is indistinguishable from a gate that checks nothing, so the harness
-applies 33 deliberate breakages and fails if any of them slips through. It works
-on a throwaway copy of the repository and never touches your working tree.
+applies deliberate breakages and fails if any changed-target mutation slips
+through. It works on a throwaway copy of the repository and never touches your
+working tree.
 
 The craft UI's test suite (`tools/test-craftui.sh`, 778 tests plus an
 end-to-end smoke test) needs `python3` and nothing else to run. Two layers

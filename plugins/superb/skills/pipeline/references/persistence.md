@@ -2,9 +2,9 @@
 
 Read this reference before creating, inspecting, updating, or resuming a run. `progress.md` is the single authoritative execution tracker. Plans define work; `decisions.md`, `findings.md`, fix plans, verification records, and worker results are referenced evidence, not alternate state.
 
-Use `scripts/pipeline_state.py` as the controller's strict Python 3.11+ standard-library helper. It supports one documented `pipeline-run/v2` Markdown format. Do not edit tracker tables by hand, infer missing fields, or introduce a second editable state file.
+Use `scripts/pipeline_state.py` as the strict Python 3.11+ standard-library helper. It supports one documented `pipeline-run/v2` Markdown format. Do not edit tracker tables by hand, infer missing fields, or introduce a second editable state file.
 
-The CLI names are exact: `validate <run_dir>` validates v2 state, `inspect <run_dir>` returns a read-only summary, `next <run_dir> --phase-plan <path> --capacity <n>` returns advisory readiness, and `init` creates only an explicitly selected new run. Controller code uses the importable APIs such as `validate_run`, `reconcile_run`, `publish_worker_result`, and `import_worker_result`; do not invent a prose-only substitute transition.
+The CLI names are exact: `validate <run_dir>` validates v2 state, `inspect <run_dir>` returns a read-only summary, `next <run_dir> --phase-plan <path> --capacity <n>` returns advisory readiness, and `init` creates only an explicitly selected new run. Controller code uses the importable APIs such as `validate_run`, `reconcile_run`, and `import_worker_result`; do not invent a prose-only substitute transition. Worker result publication is the sole helper-call exception described below.
 
 ## Before any update or dispatch
 
@@ -38,7 +38,7 @@ Lock acquisition failures, write failures, and replacement/synchronization failu
 
 Persist `[~]`, controller-assigned owner, and attempt before dispatch. `start_task` handles only the first `[ ]` to `[~]` start. After a blocked `[?]` attempt receives an applicable explicit answer, `resume_task` requires the matching prior attempt, a distinct unused new attempt, its assigned owner, and the resolved `task.resume` decision reference. Context/session recovery alone does not create another attempt.
 
-Workers never edit `progress.md`. They atomically publish immutable attempt-scoped result files using `templates/worker-result.md`. Every result copies the assigned `run_id`, `task_id`, `attempt`, and `owner`; import validates all four together under the lock for every status and both task kinds. Never infer a missing owner or rewrite tracker ownership to fit incoming evidence. A superseded-attempt result is stale even when the owner is unchanged. An exact accepted-result replay is a no-op only when its persisted identity and content digest match; changed content or identity is conflicting evidence.
+Workers never edit `progress.md`. A worker may invoke only `publish_worker_result` for its own assigned immutable result. Only the controller performs tracker transitions and result import. Workers atomically publish immutable attempt-scoped result files using `templates/worker-result.md`. Every result copies the assigned `run_id`, `task_id`, `attempt`, and `owner`; import validates all four together under the lock for every status and both task kinds. Never infer a missing owner or rewrite tracker ownership to fit incoming evidence. A superseded-attempt result is stale even when the owner is unchanged. An exact accepted-result replay is a no-op only when its persisted identity and content digest match; changed content or identity is conflicting evidence.
 
 A plan-declared `source` task requires the planned source change, source ref, implementation commit provenance, tests, and evidence before `[x]`; integration remains separate. A plan-declared `artifact` task requires exactly its approved output paths plus validation evidence, records integration `N/A`, and never invents an empty or unrelated commit. Workers cannot choose task kind from whether a diff exists. Keep every task's checkpoints recoverable inside a multi-task batch.
 

@@ -1443,6 +1443,7 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
 """,
             encoding="utf-8",
         )
+        (root / "master.md").write_text(f"# Master\n\n{plan}\n", encoding="utf-8")
         decisions = root / "decisions.md"
         decisions.write_text("# Decisions\n", encoding="utf-8")
         findings = root / "findings.md"
@@ -1467,6 +1468,48 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
 
         locked_tracker_update(run_dir, "fixture-complete", complete_rows, timeout_s=1.0)
         return run_dir, plan, head
+
+    def make_changed_master_run(self, root: Path) -> tuple[Path, str, str, str]:
+        run_dir, _, base = self.make_run(
+            root, phase_id="04", review_gate="final-only", reason="Final only."
+        )
+        (root / "source.txt").write_text("implemented\n", encoding="utf-8")
+        self.git(root, "add", "source.txt")
+        self.git(root, "commit", "-qm", "implement feature")
+        implementation = self.git(root, "rev-parse", "HEAD")
+        (root / "release.txt").write_text("verified input\n", encoding="utf-8")
+        self.git(root, "add", "release.txt")
+        self.git(root, "commit", "-qm", "prepare verified integration")
+        verified_head = self.git(root, "rev-parse", "HEAD")
+        self.git(root, "branch", "-f", "target", verified_head)
+
+        def integrate_source(tracker):
+            rows = tuple(
+                dataclasses.replace(
+                    task,
+                    owner="phase-implementer",
+                    commits=implementation,
+                    source_ref="target",
+                    integration=implementation,
+                    verification=f"tested:{implementation}",
+                )
+                if task.kind == "source"
+                else task
+                for task in tracker.tasks
+            )
+            return dataclasses.replace(tracker, tasks=rows)
+
+        locked_tracker_update(
+            run_dir, "fixture-source-change", integrate_source, timeout_s=1.0
+        )
+        record_phase_verification(
+            run_dir,
+            phase_id="04",
+            head=verified_head,
+            commands=("full suite",),
+            evidence=(_verification_evidence(root, verified_head),),
+        )
+        return run_dir, base, implementation, verified_head
 
     def write_report(self, root: Path, name: str, *, gate: str, assignment: str, base: str, head: str, findings: str = "-") -> Path:
         path = root / name
@@ -1543,6 +1586,81 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
                 rereview_paths=(),
             )
             self.assertEqual(next(gate.state for gate in accepted.gates if gate.id == "master"), "accepted")
+
+    def test_master_gate_requires_run_base_and_last_verified_phase_head(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, run_base, implementation, verified_head = self.make_changed_master_run(root)
+            invalid_edges = (
+                ("empty-after-change", verified_head, verified_head),
+                ("later-than-run-base", implementation, verified_head),
+                ("stale-head", run_base, implementation),
+            )
+            for label, base, head in invalid_edges:
+                with self.subTest(label=label):
+                    before = (run_dir / "progress.md").read_bytes()
+                    with self.assertRaises(TransitionError):
+                        open_review_gate(
+                            run_dir,
+                            gate_id="master",
+                            base=base,
+                            head=head,
+                            reviewer_assignments=("reviewer-a", "reviewer-b"),
+                            capacity=3,
+                        )
+                    self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+            opened = open_review_gate(
+                run_dir,
+                gate_id="master",
+                base=run_base,
+                head=verified_head,
+                reviewer_assignments=("reviewer-a", "reviewer-b"),
+                capacity=3,
+            )
+            gate = next(item for item in opened.gates if item.id == "master")
+            self.assertEqual((gate.base, gate.head), (run_base, verified_head))
+
+    def test_master_reviewers_cannot_be_persisted_task_implementation_owners(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, run_base, _, verified_head = self.make_changed_master_run(root)
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                open_review_gate(
+                    run_dir,
+                    gate_id="master",
+                    base=run_base,
+                    head=verified_head,
+                    reviewer_assignments=("phase-implementer", "reviewer-b"),
+                    capacity=3,
+                )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_worker_publication_contract_reserves_state_import_for_controller(self):
+        skill = (REPOSITORY / "plugins/superb/skills/pipeline/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        persistence = (
+            REPOSITORY / "plugins/superb/skills/pipeline/references/persistence.md"
+        ).read_text(encoding="utf-8")
+        review = (
+            REPOSITORY / "plugins/superb/skills/pipeline/references/review.md"
+        ).read_text(encoding="utf-8")
+
+        for instructions in (skill, persistence):
+            normalized = " ".join(instructions.split())
+            self.assertIn(
+                "A worker may invoke only `publish_worker_result` for its own assigned immutable result.",
+                normalized,
+            )
+            self.assertIn(
+                "Only the controller performs tracker transitions and result import.",
+                normalized,
+            )
+        self.assertIn("immutable tracker `base_commit`", review)
+        self.assertIn("last approved phase's recorded verified integrated HEAD", review)
+        self.assertIn("persisted task implementation owner", review)
 
     def test_gate_acceptance_requires_matching_reports_verification_and_no_blockers(self):
         with tempfile.TemporaryDirectory() as directory:

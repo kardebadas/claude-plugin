@@ -2604,6 +2604,25 @@ def open_review_gate(
                 raise TransitionError("master review needs two reviewers after all phases verify")
             if any(item.type == "phase" and item.state != "accepted" for item in tracker.gates):
                 raise TransitionError("master review waits for every required phase gate")
+            documents = _approved_phase_sequence(Path(run_dir), tracker)
+            last_phase_id = documents[-1][1].id
+            last_phase = next(
+                (phase for phase in tracker.phases if phase.id == last_phase_id), None
+            )
+            expected_head = (
+                _phase_verification_head(last_phase) if last_phase is not None else None
+            )
+            if base != tracker.base_commit or head != expected_head:
+                raise TransitionError(
+                    "master review must use the immutable run base and last approved phase verification HEAD"
+                )
+            implementation_owners = {
+                task.owner for task in tracker.tasks if task.owner != "-"
+            }
+            if implementation_owners.intersection(reviewer_assignments):
+                raise TransitionError(
+                    "master reviewers must be independent from every task implementation owner"
+                )
         _validate_worker_capacity(tracker, reviewer_assignments, capacity)
         repo_dir = _project_root(Path(run_dir))
         if not _git(repo_dir, "merge-base", "--is-ancestor", base, head) or not _git(repo_dir, "merge-base", "--is-ancestor", head, tracker.target_branch):

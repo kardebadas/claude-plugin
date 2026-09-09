@@ -92,8 +92,10 @@ state into this installed skill directory.
 
 `progress.md` is the sole mutable execution tracker. Plans define the work;
 decisions, findings, fix plans, worker results, and verification records are
-referenced evidence, not competing trackers. Only the controller invokes the
-Python state helper or changes tracker state. Workers never edit `progress.md`.
+referenced evidence, not competing trackers. Only the controller performs
+tracker transitions and result import. A worker may invoke only
+`publish_worker_result` for its own assigned immutable result. Workers never
+edit `progress.md`.
 
 Before updating an existing run or dispatching from one, validate its v2 schema
 and run identity. Initialize a fresh run only through the planning/persistence
@@ -174,7 +176,9 @@ reviewer only after complete integration and successful mechanical verification;
 dependent work waits for that gate.
 
 After every phase is accepted, the mandatory master gate uses exactly two
-independent complementary reviewers over the same integrated base and HEAD.
+independent complementary reviewers over the complete edge from the immutable
+tracker `base_commit` to the last approved phase's recorded verified integrated
+HEAD. Neither reviewer may be a persisted task implementation owner.
 Collect all required reports before consolidating or dispatching fixes. Apply
 the shared `Critical` / `Important` / `Minor` acceptance and bounded remediation
 contract in [references/review.md](references/review.md). Every

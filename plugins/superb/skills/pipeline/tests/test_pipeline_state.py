@@ -675,13 +675,19 @@ class TaskTransitionTest(unittest.TestCase):
         )
         return run_dir
 
-    def resolved_decision(self, task: str = "PX-01", answer: str = "Use the recorded interface.") -> str:
+    def resolved_decision(
+        self,
+        task: str = "PX-01",
+        answer: str = "Use the recorded interface.",
+        action: str = "task.resume",
+    ) -> str:
         return f"""# Decisions
 
 ## D-100 — Resume
 
 - **Question:** Which interface applies?
 - **Answer:** {answer}
+- **Decision action:** {action}
 - **Scope:** {task} and its current blocker.
 - **Status:** Resolved.
 """
@@ -757,12 +763,15 @@ class TaskTransitionTest(unittest.TestCase):
             "unresolved": self.resolved_decision().replace("Resolved.", "Open."),
             "unrelated": self.resolved_decision(task="PX-99"),
             "conflicting": self.resolved_decision() + "\n- **Answer:** A conflicting answer.\n",
-            "generic approval": self.resolved_decision(answer="approved"),
-            "explicit refusal": self.resolved_decision(answer="Do not resume or authorize this task"),
-            "reject refusal": self.resolved_decision(answer="Reject resuming this task"),
-            "compound refusal": self.resolved_decision(
-                answer="Do not resume or authorize this task; use the refusal recorded above"
-            ),
+            "missing action": self.resolved_decision().replace("- **Decision action:** task.resume\n", ""),
+            "empty action": self.resolved_decision(action=""),
+            "unknown action": self.resolved_decision(action="task.retry"),
+            "wrong action": self.resolved_decision(action="review.resolve-question"),
+            "duplicate action": self.resolved_decision()
+            + "\n- **Decision action:** task.resume\n",
+            "reviewer counterexample without action": self.resolved_decision(
+                answer="Refuse this task; use the recorded interface."
+            ).replace("- **Decision action:** task.resume\n", ""),
         }
         for label, decision_text in cases.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
@@ -1341,6 +1350,7 @@ class WorkerResultImportTest(unittest.TestCase):
 
 - **Question:** Which behavior?
 - **Answer:** Use the explicitly recorded behavior.
+- **Decision action:** task.resume
 - **Scope:** PR-01 current blocker.
 - **Status:** Resolved.
 """,
@@ -1806,6 +1816,7 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
                 "# Decisions\n\n## D-100 — Gate answer\n\n"
                 "- **Question:** Which remediation behavior applies?\n"
                 "- **Answer:** Use the explicit reviewed fix contract.\n"
+                "- **Decision action:** review.resolve-question\n"
                 "- **Affected work:** F-001 in phase-01.\n"
                 "- **Status:** Resolved.\n",
                 encoding="utf-8",
@@ -1815,7 +1826,7 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
             )
             self.assertEqual(next(gate.questions for gate in resolved.gates if gate.id == "phase-01"), "-")
 
-    def test_negated_or_conflicting_resolved_gate_decisions_are_rejected_unchanged(self):
+    def test_missing_wrong_or_conflicting_gate_actions_are_rejected_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             run_dir, _, _ = self.make_run(root)
@@ -1836,7 +1847,7 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
             decisions.write_text(
                 "# Decisions\n\n## D-100 — Gate answer\n\n"
                 "- **Question:** Which remediation behavior applies?\n"
-                "- **Answer:** Do not authorize the reviewed fix contract.\n"
+                "- **Answer:** Reject the reviewed fix contract.\n"
                 "- **Affected work:** F-001 in phase-01.\n"
                 "- **Status:** Resolved.\n",
                 encoding="utf-8",
@@ -1851,7 +1862,8 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
             decisions.write_text(
                 "# Decisions\n\n## D-100 — Gate answer\n\n"
                 "- **Question:** Which remediation behavior applies?\n"
-                "- **Answer:** Do not authorize the reviewed fix contract; use the refusal recorded above.\n"
+                "- **Answer:** Use the reviewed fix contract.\n"
+                "- **Decision action:** task.resume\n"
                 "- **Affected work:** F-001 in phase-01.\n"
                 "- **Status:** Resolved.\n",
                 encoding="utf-8",
@@ -1866,11 +1878,13 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
                 "# Decisions\n\n## D-100 — Gate answer\n\n"
                 "- **Question:** Which remediation behavior applies?\n"
                 "- **Answer:** Use the reviewed fix contract.\n"
+                "- **Decision action:** review.resolve-question\n"
                 "- **Affected work:** F-001 in phase-01.\n"
                 "- **Status:** Resolved.\n\n"
                 "## D-101 — Conflicting gate answer\n\n"
                 "- **Question:** Which remediation behavior applies?\n"
                 "- **Answer:** Use the incompatible alternate contract.\n"
+                "- **Decision action:** review.resolve-question\n"
                 "- **Affected work:** F-001 in phase-01.\n"
                 "- **Status:** Resolved.\n",
                 encoding="utf-8",
@@ -2024,6 +2038,7 @@ class PhaseAdvancementTest(unittest.TestCase):
                 "# Decisions\n\n## D-100 — Answer\n\n"
                 "- **Question:** Which behavior applies?\n"
                 "- **Answer:** Use the explicitly recorded behavior.\n"
+                "- **Decision action:** task.resume\n"
                 "- **Scope:** P1-A current blocker.\n"
                 "- **Status:** Resolved.\n",
                 encoding="utf-8",
@@ -2413,6 +2428,7 @@ class PhaseOneReviewRegressionTest(unittest.TestCase):
                     "# Decisions\n\n## D-900 — Filesystem authority\n\n"
                     "- **Question:** May this run use the detected unknown filesystem?\n"
                     "- **Answer:** Authorize mysteryfs for fingerprint " + "c" * 64 + ".\n"
+                    "- **Decision action:** filesystem.authorize\n"
                     "- **Scope:** Run 2026-09-08-init-test on fingerprint " + "c" * 64 + ".\n"
                     "- **Status:** Resolved.\n\n"
                     "## D-901 — Conflicting filesystem authority\n\n"
@@ -2434,6 +2450,7 @@ class PhaseOneReviewRegressionTest(unittest.TestCase):
                     "# Decisions\n\n## D-900 — Filesystem authority\n\n"
                     "- **Question:** May this run use the detected unknown filesystem?\n"
                     "- **Answer:** Authorize mysteryfs for fingerprint " + "c" * 64 + ".\n"
+                    "- **Decision action:** filesystem.authorize\n"
                     "- **Scope:** Run 2026-09-08-init-test on fingerprint " + "c" * 64 + ".\n"
                     "- **Status:** Resolved.\n",
                     encoding="utf-8",
@@ -3092,6 +3109,7 @@ class RemediationExtensionTest(unittest.TestCase):
             "# Decisions\n\n## D-021 — One finite extension\n\n"
             "- **Question:** May phase-01 receive one finite extension?\n"
             "- **Answer:** Authorize Round 4 only for phase-01 targeting P1-GATE-002, P1-GATE-004, P1-GATE-008, and P1-GATE-010.\n"
+            "- **Decision action:** remediation.start-round\n"
             f"- **Authorized run:** {self.RUN_ID}\n"
             "- **Source revision:** 37\n"
             "- **Authorized gate:** phase-01\n"
@@ -3276,6 +3294,7 @@ class RemediationExtensionTest(unittest.TestCase):
                 "# Decisions\n\n## D-022 — Exact Round 5\n\n"
                 "- **Question:** May the exact active gate receive Round 5?\n"
                 "- **Answer:** Authorize Round 5 for phase-01 targeting P1-GATE-002, P1-GATE-008, P1-GATE-010, and P1-GATE-011.\n"
+                "- **Decision action:** remediation.start-round\n"
                 f"- **Authorized run:** {self.RUN_ID}\n"
                 "- **Source revision:** 40\n"
                 "- **Authorized gate:** phase-01\n"
@@ -3305,9 +3324,26 @@ class RemediationExtensionTest(unittest.TestCase):
                 "wrong predecessor": decision.replace(
                     "- **Predecessor decision:** D-021", "- **Predecessor decision:** D-020"
                 ),
-                "compound refusal": decision.replace(
+                "missing action with refusal-bearing prose": decision.replace(
+                    "- **Decision action:** remediation.start-round\n", ""
+                ).replace(
                     "- **Answer:** Authorize Round 5 for phase-01 targeting P1-GATE-002, P1-GATE-008, P1-GATE-010, and P1-GATE-011.",
-                    "- **Answer:** Do not authorize Round 5; authorize it only because the refusal was recorded for P1-GATE-002, P1-GATE-008, P1-GATE-010, and P1-GATE-011.",
+                    "- **Answer:** Decline this extension; authorize it according to the recorded metadata for P1-GATE-002, P1-GATE-008, P1-GATE-010, and P1-GATE-011.",
+                ),
+                "quoted authority without action": decision.replace(
+                    "- **Decision action:** remediation.start-round\n", ""
+                ).replace(
+                    "- **Answer:** Authorize Round 5 for phase-01 targeting P1-GATE-002, P1-GATE-008, P1-GATE-010, and P1-GATE-011.",
+                    "- **Answer:** The note says \"authorize Round 5\" for P1-GATE-002, P1-GATE-008, P1-GATE-010, and P1-GATE-011.",
+                ),
+                "wrong action": decision.replace(
+                    "- **Decision action:** remediation.start-round",
+                    "- **Decision action:** review.resolve-question",
+                ),
+                "duplicate action": decision.replace(
+                    "- **Decision action:** remediation.start-round\n",
+                    "- **Decision action:** remediation.start-round\n"
+                    "- **Decision action:** remediation.start-round\n",
                 ),
             }
             for label, invalid in invalid_decisions.items():

@@ -802,6 +802,7 @@ def _filesystem_ack(
     scopes = _field_lines(lines, "Scope")
     if len(questions) != 1 or len(answers) != 1 or len(statuses) != 1 or len(scopes) != 1:
         raise FilesystemSuitabilityError("filesystem decision evidence is missing, duplicated, or conflicting")
+    _require_decision_action(lines, "filesystem.authorize", FilesystemSuitabilityError)
     answer = answers[0].strip().rstrip(".")
     if (
         not answer
@@ -815,7 +816,6 @@ def _filesystem_ack(
         run_id.casefold() not in scope.casefold()
         or info.fingerprint.casefold() not in scope.casefold()
         or info.fs_type.casefold() not in combined
-        or not _has_filesystem_authorization(answer)
     ):
         raise FilesystemSuitabilityError("filesystem decision is unrelated to this run, type, or fingerprint")
     for other_ref, other_lines in sections.items():
@@ -1550,61 +1550,28 @@ def _field_lines(lines: list[str], field: str) -> list[str]:
     return [line[len(prefix):].strip() for line in lines if line.startswith(prefix)]
 
 
-_NEGATIVE_DIRECTIVE = (
-    r"\b(?:do not|don't|cannot|can't|never|not|"
-    r"refus(?:e|es|ed|al|ing)|declin(?:e|es|ed|ing)|"
-    r"forbid(?:den|s|ding)?|den(?:y|ies|ied|ial))\b"
-)
+_DECISION_ACTIONS = frozenset({
+    "task.resume",
+    "review.resolve-question",
+    "filesystem.authorize",
+    "remediation.start-round",
+    "none",
+})
 
 
-def _has_unambiguous_directive(
-    answer: str,
-    *,
-    directive: str,
-    context: str | None = None,
-    forbidden: str | None = None,
-) -> bool:
-    folded = answer.casefold()
-    if forbidden is not None and re.search(forbidden, folded):
-        return False
-    clauses = re.split(r"[.;]|\b(?:but|although|however)\b", folded)
-    action_context = context or directive
-    if any(re.search(_NEGATIVE_DIRECTIVE, clause) and re.search(action_context, clause) for clause in clauses):
-        return False
-    return any(re.search(directive, clause) for clause in clauses)
-
-
-def _has_affirmative_directive(answer: str) -> bool:
-    return _has_unambiguous_directive(
-        answer,
-        directive=r"\b(?:use|apply|authorize|approve|choose|accept|permit|allow|defer|reject)\b",
-    )
-
-
-def _has_task_resume_authority(answer: str) -> bool:
-    return _has_unambiguous_directive(
-        answer,
-        directive=r"\b(?:use|apply|authorize|approve|choose|accept|permit|allow|resume|add)\b",
-        context=r"\b(?:use|apply|authorize|approve|choose|accept|permit|allow|resume|continue)\b",
-        forbidden=r"\breject(?:s|ed|ing|ion)?\b",
-    )
-
-
-def _has_filesystem_authorization(answer: str) -> bool:
-    return _has_unambiguous_directive(
-        answer,
-        directive=r"\b(?:use|authorize|approve|permit|allow)\b",
-        forbidden=r"\breject(?:s|ed|ing|ion)?\b",
-    )
-
-
-def _has_extension_authority(answer: str) -> bool:
-    return _has_unambiguous_directive(
-        answer,
-        directive=r"\b(?:authorize|approve|permit|allow)\b",
-        context=r"\b(?:authorize|approve|permit|allow|remediat\w*|round)\b",
-        forbidden=r"\breject(?:s|ed|ing|ion)?\b",
-    )
+def _require_decision_action(
+    lines: list[str],
+    expected: str,
+    error_type: type[Exception] = TransitionError,
+) -> None:
+    actions = _field_lines(lines, "Decision action")
+    if len(actions) != 1:
+        raise error_type("decision action is missing, duplicated, or ambiguous")
+    action = actions[0]
+    if action not in _DECISION_ACTIONS:
+        raise error_type(f"unknown decision action {action!r}")
+    if action != expected:
+        raise error_type(f"decision action {action!r} cannot authorize {expected!r}")
 
 
 def _scope_names_task(scope: str, task_id: str) -> bool:
@@ -1629,11 +1596,10 @@ def _validate_decision(run_dir: Path, tracker: Tracker, task: TaskRecord, decisi
     scopes = _field_lines(lines, "Scope") + _field_lines(lines, "Affected task")
     if len(questions) != 1 or len(answers) != 1 or len(statuses) != 1 or len(scopes) != 1:
         raise TransitionError("decision evidence is missing, duplicated, or conflicting")
+    _require_decision_action(lines, "task.resume")
     answer = answers[0].strip().rstrip(".")
     if not answer or answer.casefold() in {"approved", "yes", "continue", "proceed", "go", "pending user response"}:
         raise TransitionError("generic approval or an empty answer cannot resolve a blocker")
-    if not _has_task_resume_authority(answer):
-        raise TransitionError("decision does not contain an affirmative, non-negated directive")
     if statuses[0].strip().rstrip(".").casefold() != "resolved":
         raise TransitionError("decision is not resolved")
     if not _scope_names_task(scopes[0], task.id):
@@ -2761,11 +2727,10 @@ def _resolved_decision_for_terms(
     scopes = _field_lines(lines, "Scope") + _field_lines(lines, "Affected task") + _field_lines(lines, "Affected work")
     if len(questions) != 1 or len(answers) != 1 or len(statuses) != 1 or not scopes:
         raise TransitionError("decision evidence is missing, duplicated, or conflicting")
+    _require_decision_action(lines, "review.resolve-question")
     answer = answers[0].strip().rstrip(".")
     if not answer or answer.casefold() in {"approved", "yes", "continue", "proceed", "go", "pending user response"}:
         raise TransitionError("generic approval or an empty answer cannot resolve a review blocker")
-    if not _has_affirmative_directive(answer):
-        raise TransitionError("decision does not contain an affirmative, non-negated directive")
     if statuses[0].strip().rstrip(".").casefold() != "resolved":
         raise TransitionError("decision is not resolved")
     folded_scopes = " ".join(scopes).casefold()
@@ -2842,6 +2807,7 @@ def _validate_remediation_extension_decision(
     required = {
         "Question": _field_lines(lines, "Question"),
         "Answer": _field_lines(lines, "Answer"),
+        "Decision action": _field_lines(lines, "Decision action"),
         "Authorized run": _field_lines(lines, "Authorized run"),
         "Source revision": _field_lines(lines, "Source revision"),
         "Authorized gate": _field_lines(lines, "Authorized gate"),
@@ -2856,9 +2822,8 @@ def _validate_remediation_extension_decision(
     }
     if any(len(values) != 1 for values in required.values()):
         raise TransitionError("remediation-extension decision evidence is incomplete or ambiguous")
+    _require_decision_action(lines, "remediation.start-round")
     answer = required["Answer"][0].strip().rstrip(".")
-    if not _has_extension_authority(answer):
-        raise TransitionError("remediation-extension decision is not affirmative")
     if required["Status"][0].strip().rstrip(".").casefold() != "resolved":
         raise TransitionError("remediation-extension decision is unresolved")
     if required["Authorized gate"][0] != gate_id:
@@ -2895,9 +2860,8 @@ def _validate_remediation_extension_decision(
         raise TransitionError("remediation-extension decision names a different finding set")
     if required["Authority marker"][0] != f"remediation-extension:{gate_id}:through-round-{round_number}":
         raise TransitionError("remediation-extension authority marker is invalid")
-    folded = f"{answer} {required['Scope'][0]}".casefold()
-    if gate_id.casefold() not in folded or any(finding.casefold() not in answer.casefold() for finding in finding_ids):
-        raise TransitionError("remediation-extension decision is unrelated to the requested gate or findings")
+    if gate_id.casefold() not in required["Scope"][0].casefold():
+        raise TransitionError("remediation-extension decision scope is unrelated to the requested gate")
 
 
 def start_remediation_round(

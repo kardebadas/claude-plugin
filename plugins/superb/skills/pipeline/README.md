@@ -1,114 +1,163 @@
 # pipeline
 
-Part of the `superb` plugin — invoked as **`superb:pipeline`**.
+Part of the `superb` plugin, invoked as **`superb:pipeline`**.
 
-Takes a feature from an idea to a finished branch in one mostly-autonomous run.
+Pipeline takes a substantial feature from an initial idea to a clean, committed
+local feature branch. It is a thin controller around Superpowers: Superpowers
+skills investigate, plan, implement, debug, review, and verify; Pipeline keeps
+the approved roadmap, execution state, evidence, and authorization boundaries
+consistent across those stages.
 
-It **composes** existing skills rather than reimplementing them — brainstorming,
-planning, implementation and review are all delegated. What this skill owns is
-the seams between them, and the discipline that keeps a long run honest.
+## Modes
 
-## The run
+| Command | Behavior |
+| --- | --- |
+| `/superb:pipeline` | Start a full run with discovery and planning. |
+| `/superb:pipeline resume` | Resume one compatible v2 run from its files and Git evidence. Never creates or replaces a run. |
+| `/superb:pipeline status` | Read-only inspection. Never locks, writes, reconciles, dispatches, tests, or fixes. |
 
+Any other argument stops for clarification instead of guessing a mode.
+
+## Decisions stay with the user
+
+Before making a required choice, Pipeline reads the user's instructions,
+recorded answers, approved design and plans, and written repository rules. If
+those sources do not answer the question, or conflict, affected work stops. The
+question is recorded, sent to the user, and resumed only after the explicit
+answer is persisted. Another agent may investigate options, but it cannot
+decide an unresolved requirement for the user. Generic approval or “continue”
+does not resolve a separate choice.
+
+This zero-assumption rule applies during discovery, planning, implementation,
+testing, debugging, review, remediation, and recovery.
+
+## Files are the execution authority
+
+A run follows the repository's explicit convention, or otherwise uses:
+
+```text
+docs/superpowers/
+├── specs/<feature>-design.md
+├── plans/<feature>-master-plan.md
+├── plans/<feature>/phase-*.md
+└── runs/<run-id>/
+    ├── progress.md
+    ├── decisions.md
+    ├── findings.md
+    ├── fix-plan-<gate>-r<n>.md
+    └── agent-output/
 ```
-brainstorm question rounds
-  -> 2-agent pressure-test (its gaps become more questions)
-  -> GATE 1: approve the design
-  -> master plan
-  -> one expansion agent per phase (+ 12-task cap, waves, lanes)
-  -> GATE 2: approve the expanded plan
-  -> autonomous per-phase loop: implement -> review fan-out -> recursive fix
-  -> finish the branch
-```
 
-After GATE 2 the run does not stop for check-ins. It stops only when a named
-guard rail trips.
+`progress.md` is the single mutable execution tracker. Plans define tasks;
+decisions, findings, fix plans, worker results, and verification records are
+referenced evidence. Only the controller changes tracker state through the
+Python helper. Workers publish isolated, attempt-scoped results and never edit
+the tracker.
 
-## What it actually enforces
+Every v2 run carries an explicit schema marker. Resume validates it before an
+update or dispatch, then reconstructs the next permitted action from the
+approved files, tracker, decisions and findings, worker results, and Git
+evidence. It reconciles in-progress attempts before redispatch, so completed
+work is not repeated and unfinished work is not skipped.
 
-**The zero-assumption law.** Every unknown becomes a question to the user, and
-every one of them is a numbered row in an on-disk Assumptions Register. Bulk
-replies ("approved", "go") close nothing — an entry closes only on an explicit
-answer to that entry, recorded verbatim. No gate may be presented while the
-register has an open row.
+Resume supports v2 only. Recognized v1, missing, malformed, unknown, or
+unsupported schema state is preserved unchanged and rejected with a diagnostic.
+Pipeline does not migrate, rename, reinitialize, overwrite, or silently replace
+an incompatible run. Starting a separate v2 run is a separate explicit user
+decision.
 
-**The run state law.** The files are the truth; the model's memory is not.
-Every run keeps a directory holding a progress tracker, the register, and a
-findings ledger. The tracker is read before a phase starts and written before a
-phase is called complete, and it is updated around *every individual task* —
-`[~]` before the work begins, `[x]` plus the commit hash when it lands. That
-`[~]` is the only thing that distinguishes "never started" from "died halfway"
-after a crash or a context compaction.
+Ignored local run files survive context compaction in the same workspace. They
+do not survive directory deletion, machine loss, or a fresh clone.
 
-**Review is a line in the tracker, not a memory.** Every phase ends with an
-`RV` line, ticked `[~]` before the reviewers go out and `[x]` only against their
-returned report files — one per reviewer, counted against the number the line
-declares. It exists because the ledger cannot tell you whether review happened:
-an empty findings file is exactly what a phase nobody reviewed looks like, so
-any gate phrased "no open blocking findings" passes when the fan-out never ran.
-An unreviewed phase is an unticked box instead. A Rule 3 split and a lane join
-each get an `RVJ` line for the joint review no single phase's `RV` covers.
+## Planning and execution
 
-**Reviewer fan-out.** A phase of N tasks gets `ceil(N/5)` slice reviewers over
-exact commit ranges — the same count whether or not it ran implementation
-waves, and a slice may split a wave — plus an integration reviewer where a boundary no
-single slice covers is named on the round, and not otherwise: a multi-slice
-round with nothing crossing between its slices declares
-`no integration boundary` rather than paying for a third reviewer over a diff
-the slices already read. The slices must cover every commit on the phase branch — including
-any the orchestrator wrote inline, which have no task line and so are covered
-by nothing unless a slice is widened to reach them. Fix rounds get their own
-math — one reviewer per file cluster in the fix diff — and the assigned ranges
-must cover every fix commit a reviewer can own, because a clean round from
-reviewers who never looked at a fix closes nothing.
+Pipeline saves and obtains approval for the design, complete master plan, and
+every detailed phase plan before implementation. Each phase has at most 12
+genuine task checkpoints. Every task declares dependencies, source or artifact
+kind, compatible batch/order, typed file/tree write scope, and exact artifact
+outputs when applicable.
 
-**A findings ledger with stable IDs.** Every blocking finding gets an `F-NNN`
-that is never reused or renumbered. A rediscovered finding keeps its ID, which
-is what makes the convergence rule a set comparison instead of a judgment call.
+Each run requires an explicit positive `worker_limit` that is compatible with
+detected runtime capacity. The one persisted limit is global across phase
+planners, implementers, fixers, and reviewers. It is a ceiling, not a target;
+free capacity never authorizes dependent, conflicting, early, duplicate, or
+unnecessary work. Workers cannot spawn untracked helpers.
 
-**Guard rails.** An ambiguity the plan does not settle stops the run and asks.
-A finding that survives the fix run that targeted it stops the run and asks,
-before the caps rather than at them. Fix recursion is capped at depth 2 and 5
-iterations per phase, and both counters live in the ledger — a cap compared
-against a remembered number stops capping the moment context is compacted.
+A task is a durable recovery checkpoint, not automatically an agent boundary.
+Compatible sequential tasks may stay with one executor. Independent batches
+may run concurrently only after the controller serializes their starts and
+revalidates dependencies, questions, ownership, typed write-scope conflicts,
+and current capacity. Each task records owner, attempt, checkpoints, result,
+verification, and source-commit or artifact evidence.
 
-**Rule 6 — dependency waves.** Each task is annotated with what it depends on
-and what files it touches. From those the orchestrator computes waves inside a
-phase and lanes across phases *before* the plan gate, so what gets approved is a
-schedule. A wave of two or more dispatches that many implementers at once, each
-in its own git worktree and branch, merged in task order with the build gates
-run after the merge. Tasks that share a file or a dependency still run in order.
+Testable behavior and fixes use test-driven development. Targeted checks run
+while a batch is being implemented; integration and phase checks run on the
+applicable integrated state. Source tasks require complete implementation-
+commit-to-integration-to-target ancestry. Approved artifact-only tasks require
+their exact outputs and validation evidence, record integration as `N/A`, and
+do not create fabricated commits.
 
-## Invocation
+## Verification and review
 
-| Command | What it does |
-| ------- | ------------ |
-| `/superb:pipeline` | Full run, starting at the brainstorm |
-| `/superb:pipeline resume` | Re-enter an interrupted run; never starts a new one |
-| `/superb:pipeline status` | Read-only report — no writes, no dispatches, no fixes |
+Every phase receives mechanical verification. A normal `final-only` phase has
+no formal phase reviewer. A phase explicitly classified `required` receives
+one independent reviewer only after all its work is complete, integrated, and
+mechanically verified. Dependent work waits for that gate.
 
-Referred to by name — in a prompt, or by another skill — it is
-`superb:pipeline`. The `superb:` prefix is the plugin name and only matters for
-disambiguation; dropping it also works when nothing else claims the name.
+After every phase is accepted, a mandatory master gate uses exactly two
+independent complementary reviewers over the same integrated base and HEAD.
+Formal gates use `Critical`, `Important`, and `Minor`; confirmed Critical and
+Important findings block. Every Minor has a recorded disposition. Fixes are
+consolidated into one scoped plan per remediation round, verified, and
+re-reviewed at the same gate. The default maximum is three fix/re-review rounds;
+the initial review is round zero.
 
-## Requires
+Agent pressure scenarios from `superpowers:writing-skills` are recorded as
+real-agent evidence. Deterministic helper checks and mutation simulations are
+labelled separately; neither is represented as the other.
 
-The [superpowers](https://github.com/obra/superpowers) plugin. This skill calls
-`superpowers:brainstorming`, `superpowers:writing-plans` and
-`superpowers:finishing-a-development-branch`, and it expects a `/review` skill
-in the repo it is run against.
+## Requirements and supported platform scope
 
-It does **not** call `superpowers:subagent-driven-development`. That skill has
-no implementation-only mode — an implementer returning `DONE` dispatches a
-reviewer for that task, and a task completes only at zero open findings at any
-severity through an uncapped fix/re-review loop — and it is phase-unaware.
-Stage 4's IMPLEMENT state is `references/implement.md` instead, so completing a
-task dispatches no reviewer and the phase's `RV` fan-out is the only code
-review in the loop.
+Pipeline requires Python 3.11+ and the Python standard library. Its state helper
+supports cooperating processes on one host over a local filesystem with working
+OS locking and same-filesystem atomic replacement semantics. Network or
+distributed filesystems and cross-host synchronization are outside its
+guarantees.
 
-## Run state lives in the project, never in the plugin
+Platform evidence for this rebuild is:
 
-A run writes to `<project>/docs/superpowers/runs/YYYY-MM-DD-<topic>/`. The
-`templates/` directory in this skill is read-only: it is copied, never edited.
-Writing run state into the skill directory would leak one project's work into
-the next.
+- Linux: implemented and natively tested on a local ext4 filesystem.
+- macOS: implemented for the documented local-filesystem contract; native
+  macOS verification was unavailable.
+- Windows: **Implemented; simulation-tested; native Windows verification
+  pending.**
+
+The helper distinguishes cooperative-writer exclusion, atomic visibility of a
+complete old or new tracker, process-interruption reconciliation, and durability
+across an OS crash or power loss. It claims only the guarantees established by
+the supported environment and recorded evidence.
+
+Required installed Superpowers skills are:
+
+- `superpowers:brainstorming`
+- `superpowers:writing-plans`
+- `superpowers:dispatching-parallel-agents`
+- `superpowers:using-git-worktrees`
+- `superpowers:test-driven-development`
+- `superpowers:systematic-debugging`
+- `superpowers:requesting-code-review`
+- `superpowers:receiving-code-review`
+- `superpowers:verification-before-completion`
+- `superpowers:writing-skills`
+
+Pipeline does not invoke `superpowers:subagent-driven-development`,
+`superpowers:executing-plans`, or an interactive branch-finishing workflow, and
+does not depend on an external `/review` command. Those workflows conflict with
+the approved batch, phase-verification, and selective formal-review boundaries.
+
+## Local-only completion
+
+A successful run leaves all intended work committed and integrated on the
+designated clean feature branch, with plans and local run state consistent and
+recoverable. It never pushes, publishes, creates a pull request, or merges into
+`main` or `master`.

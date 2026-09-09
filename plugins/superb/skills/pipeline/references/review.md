@@ -36,7 +36,18 @@ assignment recorded by the controller:
 | base | <reviewed-base-commit> |
 | head | <reviewed-head-commit> |
 | findings | <stable-finding-ids-or-> |
+| outcomes | {"<finding-id>":"Open-or-Resolved"} |
 ```
+
+The `outcomes` value is one JSON object. An initial report maps every finding it
+introduces to `Open`; a clean initial report uses `findings=-` and `{}`. Every
+re-review assignment maps every existing gate finding exactly once to `Open`
+or `Resolved`, even when the report's main discussion focuses on only a subset.
+Any `Open` from a required reviewer blocks. Conflicting reviewer conclusions
+block consolidation and require explicit resolution; silence is never evidence
+that an earlier finding was resolved. Existing five-field reports remain
+readable only when already content-digest sealed as historical lineage. Never
+publish a new initial or re-review report in that historical format.
 
 The phase reviewer reports against the opened phase edge. Both master reports
 must name their own recorded assignments and the identical gate/base/HEAD. The
@@ -100,7 +111,9 @@ silently omitting an earlier finding proves nothing. Acceptance requires all
 of the following:
 
 1. Every required report belongs to the recorded gate, assignment, and reviewed
-   code-state edge.
+   code-state edge, and its explicit outcome mapping covers the required finding
+   set. Re-review outcomes must agree with the consolidated authoritative status;
+   conflicting or missing conclusions cannot close the gate.
    For the master gate, that reviewed HEAD must still equal the designated
    target-branch tip.
 2. Digest-bound required verification records `PASS` for the exact applicable

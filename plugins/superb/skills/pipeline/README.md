@@ -112,6 +112,11 @@ consolidated into one scoped plan per remediation round, verified, and
 re-reviewed at the same gate. The default maximum is three fix/re-review rounds;
 the initial review is round zero.
 
+After the master gate accepts, the controller records digest-bound final
+verification for that accepted HEAD. `complete` is derived only while that
+evidence and target tip remain applicable, so a later session can recover the
+terminal state without relying on conversation memory.
+
 Agent pressure scenarios from `superpowers:writing-skills` are recorded as
 real-agent evidence. Deterministic helper checks and mutation simulations are
 labelled separately; neither is represented as the other.
@@ -120,15 +125,17 @@ labelled separately; neither is represented as the other.
 
 Pipeline requires Python 3.11+ and the Python standard library. Its state helper
 supports cooperating processes on one host over a local filesystem with working
-OS locking and same-filesystem atomic replacement semantics. Network or
+OS locking, hard links for no-clobber initial publication, and same-filesystem
+atomic replacement semantics. Network or
 distributed filesystems and cross-host synchronization are outside its
 guarantees.
 
 Platform evidence for this rebuild is:
 
 - Linux: implemented and natively tested on a local ext4 filesystem.
-- macOS: implemented for the documented local-filesystem contract; native
-  macOS verification was unavailable.
+- macOS: filesystem metadata uses `stat -f %m` plus `diskutil info -plist`;
+  implemented and simulation-tested, but native macOS verification was
+  unavailable.
 - Windows: **Implemented; simulation-tested; native Windows verification
   pending.**
 

@@ -21,6 +21,11 @@ Open the gate with the controller transition only after those preconditions are
 true. Reviewer capacity consumes the same persisted global `worker_limit` as
 task and fixer ownership. Run the two master reviewers concurrently only when
 the global limit and detected runtime capacity permit; otherwise queue them.
+The tracker records the complete required reviewer set while capacity controls
+which queued assignments are active. With `worker_limit=1`, run one assignment,
+publish its immutable report, release that slot, and run the second assignment;
+gate evaluation still requires both independent reports. Apply the same queue
+lifecycle to re-review.
 Free capacity never authorizes an early, duplicate, third, ordinary-phase, or
 task reviewer.
 
@@ -41,17 +46,26 @@ are rejected:
 | outcomes | {"<finding-id>":"Open-or-Resolved"} |
 ```
 
-The `outcomes` value is one JSON object. An initial report maps every finding it
-introduces to `Open`; a clean initial report uses `findings=-` and `{}`. Every
-re-review assignment maps every existing gate finding exactly once to `Open`
-or `Resolved`, even when the report's main discussion focuses on only a subset.
+The `outcomes` value is one JSON object with unique finding keys; repeated keys
+are invalid even when the repeated values agree. An initial report maps every
+finding it introduces to `Open`; a clean initial report uses `findings=-` and
+`{}`. Every re-review assignment maps every finding that existed before that
+re-review exactly once to `Open` or `Resolved`, even when the report's main
+discussion focuses on only a subset. It may additionally introduce a new
+stable finding, which is bound to that re-review's digest as its immutable
+origin and starts `Open` in the same gate and remediation history.
 Any `Open` from a required reviewer blocks. Conflicting reviewer conclusions
 block consolidation and require explicit resolution; silence is never evidence
 that an earlier finding was resolved. Existing five-field reports remain
 readable only when already content-digest sealed as historical lineage. Never
 publish a new initial or re-review report in that historical format.
 
-The phase reviewer reports against the opened phase edge. Both master reports
+The phase reviewer reports against the phase's approved boundary through its
+verified HEAD. For the first phase the boundary is the run base; for a later
+phase it is the prior phase's applicable accepted/verified HEAD. A
+source-changing phase cannot use a caller-selected empty or partial range; an
+all-artifact phase may truthfully retain the same HEAD while its artifact
+evidence remains required. Both master reports
 must name their own recorded assignments and the identical gate/base/HEAD. The
 controller rejects a caller-selected master base or HEAD and any master reviewer
 whose identifier matches a persisted task implementation owner. Recheck the
@@ -118,6 +132,13 @@ Minor disposition needs an unanswered choice, record and ask the user. Clear
 the gate question only through an applicable resolved decision carrying
 `Decision action: review.resolve-question`; generic approval or reviewer
 preference is not authority.
+
+An `Open` Minor is a valid pending disposition, not an invalid finding row. If
+the user explicitly chooses `Fixed`, record a resolved
+`review.resolve-question` decision scoped exactly to that finding. The same
+gate's next remediation plan may then target that authorized Minor alone or
+alongside the exact current blockers. Without that authority an open Minor is
+not silently fixed, promoted, deferred, or rejected.
 
 ## Evidence-derived acceptance
 
@@ -219,7 +240,7 @@ open a loop per finding, or introduce task-level formal review.
 
 ## Verification evidence during review
 
-Under D-024, reviewer independence means independent evaluation, not automatic
+Reviewer independence means independent evaluation, not automatic
 duplication of an applicable full suite. Reviewers inspect the diff and
 requirements, validate supplied evidence, and run focused adversarial checks.
 Reuse evidence only when its recorded code state and relevant working-tree
@@ -229,5 +250,9 @@ do not call stale evidence fresh. A reviewer may run broader checks when
 evidence is missing, inconsistent, inapplicable, explicitly required, or a
 focused probe exposes wider risk, and records why.
 
-The mandatory final verification still follows an accepted master gate. No
+The mandatory final verification still follows an accepted master gate. Record
+its digest-bound `final` PASS evidence for the accepted master HEAD through the
+controller transition. Only then may the derived next action become
+`complete`; a fresh session must revalidate that evidence and the target tip.
+No
 formal gate authorizes push, publish, PR creation, or merge to `main`/`master`.

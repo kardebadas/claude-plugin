@@ -6,6 +6,13 @@ Use `scripts/pipeline_state.py` as the strict Python 3.11+ standard-library help
 
 The CLI names are exact: `validate <run_dir>` validates v2 state, `inspect <run_dir>` returns a read-only summary, `next <run_dir> --phase-plan <path> --capacity <n>` returns advisory readiness, and `init` creates only an explicitly selected new run. Controller code uses the importable APIs such as `validate_run`, `reconcile_run`, and `import_worker_result`; do not invent a prose-only substitute transition. Worker result publication is the sole helper-call exception described below.
 
+For a minimal executable integration from a different target repository, run
+`examples/controller_walkthrough.py <installed-skill-dir> <empty-project-dir>`.
+It imports the helper from the installed skill path, binds runtime capacity,
+initializes a one-phase run, reserves work, publishes/imports task evidence,
+verifies the phase, performs the mandatory two-report master gate, records
+final verification, and proves a fresh file-backed read derives `complete`.
+
 ## Before any update or dispatch
 
 1. Run the helper's read-only schema and filesystem-suitability validation before creating or opening the run lock.
@@ -14,6 +21,12 @@ The CLI names are exact: `validate <run_dir>` validates v2 state, `inspect <run_
 4. Require the run's positive persisted `worker_limit` and a fresh controller-bound runtime-capacity observation before a worker start. Capacity is global across active task owners, gate reviewers, and remediation fixers; the same owner on compatible batched tasks counts once.
 
 Never create a replacement run during resume. A new v2 run is a separate explicit user choice in a separate directory. `initialize_run` may create `progress.md` in an existing directory only when the tracker is absent and the directory exactly matches the supplied approved artifacts; it never overwrites tracker-like or unrelated contents.
+It validates the complete tracker first, publishes through a same-directory
+temporary file and a no-clobber atomic link, and then synchronizes the run
+directory. A failure before publication leaves no authoritative partial
+tracker; a failure after publication is an uncertain outcome that must be
+reconciled by run identity and tracker contents. A competing initializer's
+`progress.md` is never replaced.
 
 ## Controller-owned transitions
 
@@ -71,8 +84,10 @@ If a valid result and Git/evidence satisfy the contract, import it once. If an o
 
 The master plan is the exact ordered authority for its phase-plan paths.
 Initialization rejects missing, extra, duplicate, or reordered phase
-references, and every reservation/start rechecks the current phase's declared
-phase dependencies and required predecessor gates.
+references, phases with more than 12 tasks, cyclic task dependencies, and
+unknown, cyclic, or forward phase dependencies. Every reservation/start
+rechecks the current phase's declared phase dependencies and required
+predecessor gates.
 
 When a remediation round starts, store the fix plan as its repository-relative
 path plus SHA-256 digest. Recovery resolves and revalidates that immutable
@@ -88,7 +103,7 @@ An unresolved or conflicting required choice blocks only dependent work: record 
 
 ## Supported platform contract
 
-The supported contract is cooperating processes on one host over a local filesystem with working OS-backed locks and same-filesystem atomic replacement semantics. Linux and macOS use POSIX locking. Linux is the native platform exercised by this rebuild; do not report macOS as natively tested without a macOS run. The Windows standard-library path is **Implemented; simulation-tested; native Windows verification pending** until a native Windows runner proves process contention, replacement, interruption/recovery, and lock release.
+The supported contract is cooperating processes on one host over a local filesystem with working OS-backed locks, hard links for no-clobber initial publication, and same-filesystem atomic replacement semantics. Linux and macOS use POSIX locking. On macOS, determine the containing mount with `stat -f %m` and obtain the filesystem type from `diskutil info -plist`; a file-type format token is not filesystem metadata. Linux is the native platform exercised by this rebuild; do not report macOS as natively tested without a macOS run. The Windows standard-library path is **Implemented; simulation-tested; native Windows verification pending** until a native Windows runner proves process contention, replacement, interruption/recovery, and lock release.
 
 Network/distributed filesystems and cross-host synchronization are outside the guarantee. Do not claim the helper can recognize every unusual filesystem or provide universal crash/power-loss durability. Distinguish cooperative-writer exclusion, atomic visibility of a complete old or new tracker, process-interruption reconciliation, and durability across OS crash or power loss.
 

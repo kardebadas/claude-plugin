@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import multiprocessing
+import plistlib
 import re
 import subprocess
 import tempfile
@@ -442,6 +443,35 @@ class PlanMetadataContractTest(unittest.TestCase):
         self.assertEqual(parsed[0][0].id, "P1-01")
         self.assertEqual(parsed[3][-1].id, "P4-08")
 
+    def test_phase_plan_rejects_more_than_twelve_tasks_and_dependency_cycles(self):
+        def document(task_count: int, dependencies: dict[int, str] | None = None) -> str:
+            dependencies = dependencies or {}
+            tasks = []
+            for number in range(1, task_count + 1):
+                task_id = f"PX-{number:02d}"
+                tasks.append(
+                    f"### {task_id} — Source\n"
+                    f"<!-- pipeline-v2-task: id={task_id}; deps={dependencies.get(number, 'none')}; kind=source; batch=core; order={number}; write_scope=file:src/{number}.py; outputs=none -->\n"
+                    f"<!-- pipeline-v2-task-suite: id={task_id}; commands=[\"test-{number}\"] -->\n"
+                )
+            return (
+                "# Phase\n\n"
+                "<!-- pipeline-v2-phase: id=99; deps=none; review_gate=final-only; review_reason=Mechanical verification is sufficient. -->\n"
+                "<!-- pipeline-v2-phase-suite: id=99; commands=[\"phase-suite\"] -->\n\n"
+                + "\n".join(tasks)
+            )
+
+        invalid = {
+            "thirteen tasks": document(13),
+            "two-node cycle": document(2, {1: "PX-02", 2: "PX-01"}),
+        }
+        for label, source in invalid.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "phase.md"
+                path.write_text(source, encoding="utf-8")
+                with self.assertRaises(PlanMetadataError):
+                    parse_phase_plan(path)
+
 
 class InitializationAndSchemaSafetyTest(unittest.TestCase):
     def snapshot(self, root: Path) -> dict[str, bytes]:
@@ -529,6 +559,83 @@ class InitializationAndSchemaSafetyTest(unittest.TestCase):
                     with self.assertRaises(SchemaError):
                         self.initialize(run_dir, artifacts)
                     self.assertEqual(self.snapshot(run_dir), before)
+
+    def test_initialize_rejects_non_executable_phase_dependency_order(self):
+        """A known dependency that appears later must fail at ingestion, not deadlock readiness."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plans = []
+            for phase_id, deps in (("01", "none"), ("02", "03"), ("03", "02")):
+                task_id = f"P{phase_id}-01"
+                path = root / f"phase-{phase_id}.md"
+                path.write_text(
+                    f"# Phase {phase_id}\n\n"
+                    f"<!-- pipeline-v2-phase: id={phase_id}; deps={deps}; review_gate=final-only; review_reason=Mechanical verification is sufficient. -->\n"
+                    f"<!-- pipeline-v2-phase-suite: id={phase_id}; commands=[\"phase-{phase_id}\"] -->\n\n"
+                    f"### {task_id} — Source\n"
+                    f"<!-- pipeline-v2-task: id={task_id}; deps=none; kind=source; batch=core; order=1; write_scope=file:src/{phase_id}.py; outputs=none -->\n"
+                    f"<!-- pipeline-v2-task-suite: id={task_id}; commands=[\"test-{phase_id}\"] -->\n",
+                    encoding="utf-8",
+                )
+                plans.append(path)
+            master = root / "master.md"
+            master.write_text(
+                "# Master\n\n" + "\n".join(f"- **Detailed plan:** `{path}`" for path in plans),
+                encoding="utf-8",
+            )
+            artifacts = {
+                "spec": str(root / "spec.md"),
+                "master_plan": str(master),
+                "phase_plans": ",".join(str(path) for path in plans),
+                "decisions": str(root / "decisions.md"),
+                "findings": str(root / "findings.md"),
+            }
+            run_dir = root / "run"
+            before = self.snapshot(root)
+            with self.assertRaises(SchemaError):
+                self.initialize(run_dir, artifacts)
+            self.assertEqual(self.snapshot(root), before)
+
+    def test_initial_tracker_publication_is_atomic_no_clobber_and_stage_aware(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifacts, _ = self.inputs(root)
+            run_dir = root / "pre-publication"
+            with mock.patch.object(
+                pipeline_state, "_sync_file", side_effect=OSError("injected temp sync failure")
+            ):
+                with self.assertRaises(TrackerWriteError):
+                    self.initialize(run_dir, artifacts)
+            self.assertFalse((run_dir / "progress.md").exists())
+            self.assertFalse(any(run_dir.glob(".progress.*.tmp")))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifacts, _ = self.inputs(root)
+            run_dir = root / "competing"
+            run_dir.mkdir()
+            sentinel = b"competing initializer won\n"
+
+            def competing_link(_source, destination):
+                Path(destination).write_bytes(sentinel)
+                raise FileExistsError("injected competing publication")
+
+            with mock.patch.object(pipeline_state.os, "link", side_effect=competing_link):
+                with self.assertRaises(TrackerWriteError):
+                    self.initialize(run_dir, artifacts)
+            self.assertEqual((run_dir / "progress.md").read_bytes(), sentinel)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifacts, _ = self.inputs(root)
+            run_dir = root / "post-publication"
+            with mock.patch.object(
+                pipeline_state, "_sync_directory", side_effect=OSError("injected directory sync failure")
+            ):
+                with self.assertRaises(UpdateOutcomeUncertain) as caught:
+                    self.initialize(run_dir, artifacts)
+            self.assertIsNotNone(caught.exception.tracker)
+            self.assertEqual(validate_run(run_dir), caught.exception.tracker)
 
     def test_legacy_v1_is_recognized_and_left_byte_identical(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2260,7 +2367,10 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
     def git(self, repo: Path, *args: str) -> str:
         return subprocess.run(("git", *args), cwd=repo, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.strip()
 
-    def make_run(self, root: Path, *, phase_id: str = "01", review_gate: str = "required", reason: str = "Phase-specific risk.") -> tuple[Path, Path, str]:
+    def make_run(
+        self, root: Path, *, phase_id: str = "01", review_gate: str = "required",
+        reason: str = "Phase-specific risk.", worker_limit: int = 3,
+    ) -> tuple[Path, Path, str]:
         self.git(root, "init", "-q")
         self.git(root, "config", "user.email", "pipeline@example.invalid")
         self.git(root, "config", "user.name", "Pipeline Test")
@@ -2292,7 +2402,7 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
         findings.write_text("<!-- pipeline-findings/v2 -->\n| ID | Gate | Severity | Status | Disposition | Evidence | Fix Commit | Re-review |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n", encoding="utf-8")
         run_dir = root / "run"
         initialize_run(
-            run_dir, run_id="gate-test", base_commit=head, target_branch="target", worker_limit=3,
+            run_dir, run_id="gate-test", base_commit=head, target_branch="target", worker_limit=worker_limit,
             artifacts={"spec": "spec.md", "master_plan": "master.md", "phase_plans": str(plan), "decisions": str(decisions), "findings": str(findings)},
             approved_existing=(),
         )
@@ -2328,9 +2438,10 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
         locked_tracker_update(run_dir, "fixture-complete", complete_rows, timeout_s=1.0)
         return run_dir, plan, head
 
-    def make_changed_master_run(self, root: Path) -> tuple[Path, str, str, str]:
+    def make_changed_master_run(self, root: Path, *, worker_limit: int = 3) -> tuple[Path, str, str, str]:
         run_dir, _, base = self.make_run(
-            root, phase_id="04", review_gate="final-only", reason="Final only."
+            root, phase_id="04", review_gate="final-only", reason="Final only.",
+            worker_limit=worker_limit,
         )
         (root / "source.txt").write_text("implemented\n", encoding="utf-8")
         self.git(root, "add", "source.txt")
@@ -2496,6 +2607,59 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
             self.assertNotEqual(target_tip, head)
             self.assertEqual((run_dir / "progress.md").read_bytes(), before)
 
+    def test_source_changing_phase_review_uses_the_approved_phase_boundary(self):
+        """A caller-selected verified-head..verified-head edge must not omit phase work."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, _, phase_base = self.make_run(root)
+            (root / "source.txt").write_text("phase implementation\n", encoding="utf-8")
+            self.git(root, "add", "source.txt")
+            self.git(root, "commit", "-qm", "phase implementation")
+            implementation = self.git(root, "rev-parse", "HEAD")
+            self.git(root, "branch", "-f", "target", implementation)
+
+            def record_source_change(tracker):
+                return dataclasses.replace(
+                    tracker,
+                    tasks=tuple(
+                        dataclasses.replace(
+                            task,
+                            commits=implementation,
+                            integration=implementation,
+                            verification=f"reconciled-existing-integration:{implementation}",
+                        ) if task.kind == "source" else task
+                        for task in tracker.tasks
+                    ),
+                )
+
+            locked_tracker_update(
+                run_dir, "fixture-phase-source-change", record_source_change,
+                timeout_s=1.0,
+            )
+            evidence = _verification_evidence(root, implementation)
+            record_phase_verification(
+                run_dir, phase_id="01", head=implementation,
+                commands=("suite",), evidence=(evidence,),
+            )
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                open_review_gate(
+                    run_dir, gate_id="phase-01", base=implementation,
+                    head=implementation, reviewer_assignments=("reviewer-1",),
+                    capacity=3,
+                )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+            opened = open_review_gate(
+                run_dir, gate_id="phase-01", base=phase_base,
+                head=implementation, reviewer_assignments=("reviewer-1",),
+                capacity=3,
+            )
+            self.assertEqual(
+                next(gate.base for gate in opened.gates if gate.id == "phase-01"),
+                phase_base,
+            )
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             run_dir, _, head = self.make_run(root)
@@ -2568,6 +2732,134 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
             )
             self.assertEqual(next(gate.state for gate in accepted.gates if gate.id == "master"), "accepted")
 
+    def test_master_review_pair_can_be_queued_under_worker_limit_one(self):
+        """The required reviewer set is not a claim that both run concurrently."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, run_base, _, head = self.make_changed_master_run(root, worker_limit=1)
+            opened = open_review_gate(
+                run_dir, gate_id="master", base=run_base, head=head,
+                reviewer_assignments=("reviewer-a", "reviewer-b"), capacity=3,
+            )
+            self.assertEqual(
+                next(gate.assignments for gate in opened.gates if gate.id == "master"),
+                "reviewer-a,reviewer-b",
+            )
+            reports = tuple(
+                self.write_report(
+                    root, f"queued-{suffix}.md", gate="master",
+                    assignment=f"reviewer-{suffix}", base=run_base, head=head,
+                )
+                for suffix in ("a", "b")
+            )
+            accepted = evaluate_and_close_review_gate(
+                run_dir, gate_id="master", findings_path=root / "findings.md",
+                report_paths=reports,
+                verification=(_verification_evidence(root, head, subject="phase/04"),),
+                rereview_paths=(),
+            )
+            self.assertEqual(
+                next(gate.state for gate in accepted.gates if gate.id == "master"),
+                "accepted",
+            )
+
+    def test_final_verification_is_persisted_and_second_resume_derives_complete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, run_base, _, head = self.make_changed_master_run(root)
+            open_review_gate(
+                run_dir, gate_id="master", base=run_base, head=head,
+                reviewer_assignments=("reviewer-a", "reviewer-b"), capacity=3,
+            )
+            reports = tuple(
+                self.write_report(
+                    root, f"terminal-{suffix}.md", gate="master",
+                    assignment=f"reviewer-{suffix}", base=run_base, head=head,
+                )
+                for suffix in ("a", "b")
+            )
+            accepted = evaluate_and_close_review_gate(
+                run_dir, gate_id="master", findings_path=root / "findings.md",
+                report_paths=reports,
+                verification=(_verification_evidence(root, head, subject="phase/04"),),
+                rereview_paths=(),
+            )
+            self.assertEqual(dict(accepted.current_fields)["next_action"], "final-verification")
+            final_evidence = _verification_evidence(
+                root, head, "final", purpose="final", run_id="gate-test",
+                subject="project", commands=("canonical-final",), inputs="clean-target-snapshot",
+            )
+            completed = pipeline_state.record_final_verification(
+                run_dir, head=head, commands=("canonical-final",),
+                evidence=(final_evidence,), repo_dir=root,
+            )
+            self.assertEqual(dict(completed.current_fields)["next_action"], "complete")
+            revision = completed.revision
+            replay = pipeline_state.record_final_verification(
+                run_dir, head=head, commands=("canonical-final",),
+                evidence=(final_evidence,), repo_dir=root,
+            )
+            self.assertEqual(replay.revision, revision)
+            self.assertEqual(inspect_run(run_dir)["derived_next_action"], "complete")
+
+    def test_master_rereview_pair_can_be_queued_under_worker_limit_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, run_base, _, reviewed_head = self.make_changed_master_run(root, worker_limit=1)
+            open_review_gate(
+                run_dir, gate_id="master", base=run_base, head=reviewed_head,
+                reviewer_assignments=("reviewer-a", "reviewer-b"), capacity=3,
+            )
+            reports = tuple(
+                self.write_report(
+                    root, f"initial-{suffix}.md", gate="master",
+                    assignment=f"reviewer-{suffix}", base=run_base, head=reviewed_head,
+                    findings="F-001",
+                )
+                for suffix in ("a", "b")
+            )
+            findings = root / "findings.md"
+            findings.write_text(
+                "<!-- pipeline-findings/v2 -->\n"
+                "| ID | Gate | Severity | Status | Disposition | Evidence | Fix Commit | Re-review |\n"
+                "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                "| F-001 | master | Important | Open | - | initial-a.md,initial-b.md | - | - |\n",
+                encoding="utf-8",
+            )
+            evaluate_and_close_review_gate(
+                run_dir, gate_id="master", findings_path=findings,
+                report_paths=reports,
+                verification=(_verification_evidence(root, reviewed_head, subject="phase/04"),),
+                rereview_paths=(),
+            )
+            fix_plan = root / "master-fix.md"
+            fix_plan.write_text(
+                "# Fix\n\n<!-- pipeline-remediation-scope/v2 -->\n"
+                "| Finding | Kind | Artifacts |\n| --- | --- | --- |\n"
+                "| F-001 | source | none |\n",
+                encoding="utf-8",
+            )
+            start_remediation_round(
+                run_dir, gate_id="master", round_number=1,
+                finding_ids=("F-001",), fix_plan=str(fix_plan),
+                fixer_assignments=("fixer-1",), capacity=3,
+            )
+            (root / "master-fix.txt").write_text("fixed\n", encoding="utf-8")
+            self.git(root, "add", "master-fix.txt")
+            self.git(root, "commit", "-qm", "master fix")
+            fix_head = self.git(root, "rev-parse", "HEAD")
+            self.git(root, "branch", "-f", "target", fix_head)
+            verification = _remediation_evidence(root, fix_head, "master", 1, "queued-rereview")
+            queued = record_remediation_fixes(
+                run_dir, gate_id="master", round_number=1, fix_head=fix_head,
+                commits=(fix_head,), verification=(verification,), capacity=3,
+                repo_dir=root,
+            )
+            self.assertEqual(
+                next(gate.state for gate in queued.gates if gate.id == "master"),
+                "re_reviewing",
+            )
+
     def test_new_reports_require_complete_explicit_finding_outcomes(self):
         invalid_outcomes = (
             ("missing", {}),
@@ -2635,6 +2927,21 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
                     report_paths=(legacy,), verification=(evidence,), rereview_paths=(),
                 )
             self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_review_outcomes_reject_duplicate_json_keys_before_mapping(self):
+        """Last-key-wins JSON parsing must not erase an earlier reviewer outcome."""
+        self.assertEqual(
+            pipeline_state._review_outcomes(
+                {"outcomes": '{"F-001":"Open","F-002":"Resolved"}'}
+            ),
+            {"F-001": "Open", "F-002": "Resolved"},
+        )
+        for raw in (
+            '{"F-001":"Open","F-001":"Resolved"}',
+            '{"F-001":"Open","F-001":"Open"}',
+        ):
+            with self.subTest(raw=raw), self.assertRaises(TransitionError):
+                pipeline_state._review_outcomes({"outcomes": raw})
 
     def test_review_report_accepts_one_terminal_block_after_narrative_only(self):
         block = (
@@ -3593,6 +3900,215 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
                 "accepted",
             )
 
+    def test_rereview_can_introduce_a_new_finding_without_rewriting_initial_lineage(self):
+        """A regression discovered during remediation stays in the same gate and round history."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, _, initial_head = self.make_run(root)
+            phase_evidence = _verification_evidence(root, initial_head)
+            record_phase_verification(
+                run_dir, phase_id="01", head=initial_head,
+                commands=("suite",), evidence=(phase_evidence,),
+            )
+            open_review_gate(
+                run_dir, gate_id="phase-01", base=initial_head, head=initial_head,
+                reviewer_assignments=("reviewer-1",), capacity=3,
+            )
+            initial = self.write_report(
+                root, "initial.md", gate="phase-01", assignment="reviewer-1",
+                base=initial_head, head=initial_head, findings="F-001",
+            )
+            findings = root / "findings.md"
+            findings.write_text(
+                "<!-- pipeline-findings/v2 -->\n"
+                "| ID | Gate | Severity | Status | Disposition | Evidence | Fix Commit | Re-review |\n"
+                "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                "| F-001 | phase-01 | Important | Open | - | initial.md | - | - |\n",
+                encoding="utf-8",
+            )
+            evaluate_and_close_review_gate(
+                run_dir, gate_id="phase-01", findings_path=findings,
+                report_paths=(initial,), verification=(phase_evidence,), rereview_paths=(),
+            )
+
+            plan_one = root / "round-one.md"
+            plan_one.write_text(
+                "# Round one\n\n<!-- pipeline-remediation-scope/v2 -->\n"
+                "| Finding | Kind | Artifacts |\n| --- | --- | --- |\n"
+                "| F-001 | source | none |\n",
+                encoding="utf-8",
+            )
+            start_remediation_round(
+                run_dir, gate_id="phase-01", round_number=1,
+                finding_ids=("F-001",), fix_plan=str(plan_one),
+                fixer_assignments=("fixer-1",), capacity=3,
+            )
+            (root / "fix-one.txt").write_text("fix one\n", encoding="utf-8")
+            self.git(root, "add", "fix-one.txt")
+            self.git(root, "commit", "-qm", "fix one")
+            fix_one = self.git(root, "rev-parse", "HEAD")
+            self.git(root, "branch", "-f", "target", fix_one)
+            verification_one = _remediation_evidence(root, fix_one, "phase-01", 1, "new-finding-one")
+            record_remediation_fixes(
+                run_dir, gate_id="phase-01", round_number=1, fix_head=fix_one,
+                commits=(fix_one,), verification=(verification_one,), capacity=3,
+                repo_dir=root,
+            )
+            rereview_one = self.write_report(
+                root, "rereview-one.md", gate="phase-01", assignment="reviewer-1",
+                base=initial_head, head=fix_one, findings="F-001,F-002",
+                outcomes={"F-001": "Resolved", "F-002": "Open"},
+            )
+            findings.write_text(
+                "<!-- pipeline-findings/v2 -->\n"
+                "| ID | Gate | Severity | Status | Disposition | Evidence | Fix Commit | Re-review |\n"
+                "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                f"| F-001 | phase-01 | Important | Resolved | Fixed | {verification_one} | {fix_one} | {rereview_one} |\n"
+                "| F-002 | phase-01 | Important | Open | - | rereview-one.md | - | - |\n",
+                encoding="utf-8",
+            )
+            blocked = evaluate_and_close_review_gate(
+                run_dir, gate_id="phase-01", findings_path=findings,
+                report_paths=(initial,), verification=(verification_one,),
+                rereview_paths=(rereview_one,),
+            )
+            gate = next(item for item in blocked.gates if item.id == "phase-01")
+            self.assertEqual(gate.state, "blocked")
+            self.assertEqual(set(pipeline_state._gate_finding_ids(gate)), {"F-001", "F-002"})
+
+            plan_two = root / "round-two.md"
+            plan_two.write_text(
+                "# Round two\n\n<!-- pipeline-remediation-scope/v2 -->\n"
+                "| Finding | Kind | Artifacts |\n| --- | --- | --- |\n"
+                "| F-002 | source | none |\n",
+                encoding="utf-8",
+            )
+            start_remediation_round(
+                run_dir, gate_id="phase-01", round_number=2,
+                finding_ids=("F-002",), fix_plan=str(plan_two),
+                fixer_assignments=("fixer-2",), capacity=3,
+            )
+            (root / "fix-two.txt").write_text("fix two\n", encoding="utf-8")
+            self.git(root, "add", "fix-two.txt")
+            self.git(root, "commit", "-qm", "fix two")
+            fix_two = self.git(root, "rev-parse", "HEAD")
+            self.git(root, "branch", "-f", "target", fix_two)
+            verification_two = _remediation_evidence(root, fix_two, "phase-01", 2, "new-finding-two")
+            record_remediation_fixes(
+                run_dir, gate_id="phase-01", round_number=2, fix_head=fix_two,
+                commits=(fix_two,), verification=(verification_two,), capacity=3,
+                repo_dir=root,
+            )
+            rereview_two = self.write_report(
+                root, "rereview-two.md", gate="phase-01", assignment="reviewer-1",
+                base=fix_one, head=fix_two, findings="F-001,F-002",
+                outcomes={"F-001": "Resolved", "F-002": "Resolved"},
+            )
+            findings.write_text(
+                "<!-- pipeline-findings/v2 -->\n"
+                "| ID | Gate | Severity | Status | Disposition | Evidence | Fix Commit | Re-review |\n"
+                "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                f"| F-001 | phase-01 | Important | Resolved | Fixed | {verification_one} | {fix_one} | {rereview_one} |\n"
+                f"| F-002 | phase-01 | Important | Resolved | Fixed | {verification_two} | {fix_two} | {rereview_two} |\n",
+                encoding="utf-8",
+            )
+            accepted = evaluate_and_close_review_gate(
+                run_dir, gate_id="phase-01", findings_path=findings,
+                report_paths=(initial,), verification=(verification_two,),
+                rereview_paths=(rereview_two,),
+            )
+            self.assertEqual(
+                next(item.state for item in accepted.gates if item.id == "phase-01"),
+                "accepted",
+            )
+
+    def test_open_minor_can_follow_explicit_fix_decision_through_same_gate(self):
+        """A valid Minor selected for fixing must not be forced into defer/reject."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, _, head = self.make_run(root)
+            phase_evidence = _verification_evidence(root, head)
+            record_phase_verification(
+                run_dir, phase_id="01", head=head,
+                commands=("suite",), evidence=(phase_evidence,),
+            )
+            open_review_gate(
+                run_dir, gate_id="phase-01", base=head, head=head,
+                reviewer_assignments=("reviewer-1",), capacity=3,
+            )
+            initial = self.write_report(
+                root, "minor-review.md", gate="phase-01", assignment="reviewer-1",
+                base=head, head=head, findings="F-MINOR",
+            )
+            (root / "decisions.md").write_text(
+                "# Decisions\n\n## D-100 — Minor disposition\n\n"
+                "- **Question:** What disposition should F-MINOR receive?\n"
+                "- **Answer:** Fix it in the next remediation round.\n"
+                "- **Decision action:** review.resolve-question\n"
+                "- **Scope:** F-MINOR in phase-01.\n"
+                "- **Status:** Resolved.\n",
+                encoding="utf-8",
+            )
+            findings = root / "findings.md"
+            findings.write_text(
+                "<!-- pipeline-findings/v2 -->\n"
+                "| ID | Gate | Severity | Status | Disposition | Evidence | Fix Commit | Re-review |\n"
+                "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                "| F-MINOR | phase-01 | Minor | Open | - | D-100 | - | - |\n",
+                encoding="utf-8",
+            )
+            blocked = evaluate_and_close_review_gate(
+                run_dir, gate_id="phase-01", findings_path=findings,
+                report_paths=(initial,), verification=(phase_evidence,), rereview_paths=(),
+            )
+            gate = next(item for item in blocked.gates if item.id == "phase-01")
+            self.assertEqual((gate.state, gate.questions), ("blocked", "-"))
+
+            fix_plan = root / "minor-fix-plan.md"
+            fix_plan.write_text(
+                "# Minor fix\n\n<!-- pipeline-remediation-scope/v2 -->\n"
+                "| Finding | Kind | Artifacts |\n| --- | --- | --- |\n"
+                "| F-MINOR | source | none |\n",
+                encoding="utf-8",
+            )
+            start_remediation_round(
+                run_dir, gate_id="phase-01", round_number=1,
+                finding_ids=("F-MINOR",), fix_plan=str(fix_plan),
+                fixer_assignments=("fixer-1",), capacity=3,
+            )
+            (root / "minor-fix.txt").write_text("minor fix\n", encoding="utf-8")
+            self.git(root, "add", "minor-fix.txt")
+            self.git(root, "commit", "-qm", "fix minor")
+            fix_head = self.git(root, "rev-parse", "HEAD")
+            self.git(root, "branch", "-f", "target", fix_head)
+            verification = _remediation_evidence(root, fix_head, "phase-01", 1, "minor-fix")
+            record_remediation_fixes(
+                run_dir, gate_id="phase-01", round_number=1,
+                fix_head=fix_head, commits=(fix_head,), verification=(verification,),
+                capacity=3, repo_dir=root,
+            )
+            rereview = self.write_report(
+                root, "minor-rereview.md", gate="phase-01", assignment="reviewer-1",
+                base=head, head=fix_head, findings="F-MINOR",
+                outcomes={"F-MINOR": "Resolved"},
+            )
+            findings.write_text(
+                "<!-- pipeline-findings/v2 -->\n"
+                "| ID | Gate | Severity | Status | Disposition | Evidence | Fix Commit | Re-review |\n"
+                "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                f"| F-MINOR | phase-01 | Minor | Resolved | Fixed | {verification} | {fix_head} | {rereview} |\n",
+                encoding="utf-8",
+            )
+            accepted = evaluate_and_close_review_gate(
+                run_dir, gate_id="phase-01", findings_path=findings,
+                report_paths=(initial,), verification=(verification,),
+                rereview_paths=(rereview,),
+            )
+            self.assertEqual(
+                next(item.state for item in accepted.gates if item.id == "phase-01"),
+                "accepted",
+            )
+
     def test_gate_questions_clear_only_from_applicable_resolved_decisions(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -3624,6 +4140,103 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
                 run_dir, gate_id="phase-01", decision_refs=("D-100",),
             )
             self.assertEqual(next(gate.questions for gate in resolved.gates if gate.id == "phase-01"), "-")
+
+    def test_master_question_scope_ignores_sentinel_and_requires_exact_identity(self):
+        """A '-' phase sentinel or finding-ID prefix must not authorize another gate."""
+        def blocked_master(root: Path) -> Path:
+            run_dir, run_base, _, reviewed_head = self.make_changed_master_run(root)
+            open_review_gate(
+                run_dir, gate_id="master", base=run_base, head=reviewed_head,
+                reviewer_assignments=("reviewer-a", "reviewer-b"), capacity=3,
+            )
+            reports = tuple(
+                self.write_report(
+                    root, f"master-{suffix}.md", gate="master", assignment=f"reviewer-{suffix}",
+                    base=run_base, head=reviewed_head, findings="F-001",
+                )
+                for suffix in ("a", "b")
+            )
+            (root / "findings.md").write_text(
+                "<!-- pipeline-findings/v2 -->\n"
+                "| ID | Gate | Severity | Status | Disposition | Evidence | Fix Commit | Re-review |\n"
+                "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                "| F-001 | master | Important | Open | - | master-a.md,master-b.md | - | - |\n",
+                encoding="utf-8",
+            )
+            evaluate_and_close_review_gate(
+                run_dir, gate_id="master", findings_path=root / "findings.md",
+                report_paths=reports,
+                verification=(_verification_evidence(root, reviewed_head, subject="phase/04"),),
+                rereview_paths=(),
+            )
+            return run_dir
+
+        invalid_scopes = ("phase-99 only.", "master-extra only.", "F-001-extra only.")
+        for index, scope in enumerate(invalid_scopes, start=1):
+            with self.subTest(scope=scope), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                run_dir = blocked_master(root)
+                decision_ref = f"D-{200 + index}"
+                locked_tracker_update(
+                    run_dir, f"fixture-master-question-{index}",
+                    lambda tracker: dataclasses.replace(
+                        tracker,
+                        gates=tuple(
+                            dataclasses.replace(
+                                gate, state="blocked",
+                                findings="F-001@Important@sha256=" + "a" * 64,
+                                questions=decision_ref,
+                            ) if gate.id == "master" else gate
+                            for gate in tracker.gates
+                        ),
+                    ),
+                    timeout_s=1.0,
+                )
+                (root / "decisions.md").write_text(
+                    "# Decisions\n\n"
+                    f"## {decision_ref} — Review answer\n\n"
+                    "- **Question:** Which review behavior applies?\n"
+                    "- **Answer:** Use the explicitly selected behavior.\n"
+                    "- **Decision action:** review.resolve-question\n"
+                    f"- **Scope:** {scope}\n"
+                    "- **Status:** Resolved.\n",
+                    encoding="utf-8",
+                )
+                before = (run_dir / "progress.md").read_bytes()
+                with self.assertRaises(TransitionError):
+                    pipeline_state.resolve_gate_questions(
+                        run_dir, gate_id="master", decision_refs=(decision_ref,),
+                    )
+                self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = blocked_master(root)
+            locked_tracker_update(
+                run_dir, "fixture-master-question-valid",
+                lambda tracker: dataclasses.replace(
+                    tracker,
+                    gates=tuple(
+                        dataclasses.replace(gate, state="blocked", questions="D-299")
+                        if gate.id == "master" else gate
+                        for gate in tracker.gates
+                    ),
+                ),
+                timeout_s=1.0,
+            )
+            (root / "decisions.md").write_text(
+                "# Decisions\n\n## D-299 — Master answer\n\n"
+                "- **Question:** Which review behavior applies?\n"
+                "- **Answer:** Use the explicitly selected behavior.\n"
+                "- **Decision action:** review.resolve-question\n"
+                "- **Scope:** master gate.\n"
+                "- **Status:** Resolved.\n",
+                encoding="utf-8",
+            )
+            resolved = pipeline_state.resolve_gate_questions(
+                run_dir, gate_id="master", decision_refs=("D-299",),
+            )
+            self.assertEqual(next(gate.questions for gate in resolved.gates if gate.id == "master"), "-")
 
     def test_missing_wrong_or_conflicting_gate_actions_are_rejected_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3708,6 +4321,7 @@ class PhaseAdvancementTest(unittest.TestCase):
         root: Path,
         *,
         first_gate: str = "required",
+        second_gate: str = "final-only",
         phase_two_deps: str = "01",
         phase_count: int = 2,
     ) -> tuple[Path, tuple[Path, ...], str]:
@@ -3722,7 +4336,11 @@ class PhaseAdvancementTest(unittest.TestCase):
         plans = []
         phase_specs = [
             ("01", "none", first_gate, "Foundational state risk.", "P1-A", "source", "file:source.txt", "none"),
-            ("02", phase_two_deps, "final-only", "Mechanical verification only.", "P2-A", "artifact", "file:evidence/two.md", "evidence/two.md"),
+            (
+                "02", phase_two_deps, second_gate,
+                "Downstream recovery risk." if second_gate == "required" else "Mechanical verification only.",
+                "P2-A", "artifact", "file:evidence/two.md", "evidence/two.md",
+            ),
             ("03", "01,02", "final-only", "Mechanical verification only.", "P3-A", "artifact", "file:evidence/three.md", "evidence/three.md"),
         ]
         for phase_id, deps, gate, reason, task_id, kind, scope, outputs in phase_specs[:phase_count]:
@@ -3801,35 +4419,102 @@ class PhaseAdvancementTest(unittest.TestCase):
         self.assertEqual(dict(integrated.current_fields)["next_action"], "verify-phase-01")
         return commit
 
-    def accept_phase_gate(self, root: Path, run_dir: Path, head: str) -> None:
+    def accept_phase_gate(
+        self, root: Path, run_dir: Path, head: str, *, phase_id: str = "01",
+        phase_base: str | None = None,
+    ) -> None:
+        phase_base = phase_base or validate_run(run_dir).base_commit
+        gate_id = f"phase-{phase_id}"
+        report_name = f"review-{phase_id}.md"
         opened = open_review_gate(
-            run_dir, gate_id="phase-01", base=head, head=head,
+            run_dir, gate_id=gate_id, base=phase_base, head=head,
             reviewer_assignments=("reviewer-1",), capacity=3,
         )
-        self.assertEqual(dict(opened.current_fields)["next_action"], "await-review-phase-01")
-        report = root / "review.md"
+        self.assertEqual(dict(opened.current_fields)["next_action"], f"await-review-{gate_id}")
+        report = root / report_name
         report.write_text(
             "<!-- pipeline-review-report/v2 -->\n"
             "| Field | Value |\n| --- | --- |\n"
-            f"| gate | phase-01 |\n| assignment | reviewer-1 |\n| base | {head} |\n"
+            f"| gate | {gate_id} |\n| assignment | reviewer-1 |\n| base | {phase_base} |\n"
             f"| head | {head} |\n| findings | - |\n| outcomes | {{}} |\n",
             encoding="utf-8",
         )
-        accepted = evaluate_and_close_review_gate(
-            run_dir, gate_id="phase-01", findings_path=root / "findings.md",
+        phase = next(item for item in opened.phases if item.id == phase_id)
+        evaluate_and_close_review_gate(
+            run_dir, gate_id=gate_id, findings_path=root / "findings.md",
             report_paths=(report,),
-            verification=(_verification_evidence(
-                root, head, run_id="advance-test", commands=("suite",)
-            ),),
+            verification=pipeline_state._phase_verification_evidence(phase),
             rereview_paths=(),
         )
-        self.assertEqual(dict(accepted.current_fields)["next_action"], "advance-phase-01")
 
     def test_last_task_completion_derives_integration_then_verification(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             run_dir, plans, _ = self.make_run(root)
             self.complete_first_source(root, run_dir, plans[0])
+
+    def test_accepted_required_last_phase_routes_to_master_gate(self):
+        """A required review on the last phase must not derive a nonexistent successor."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, plans, _ = self.make_run(root, phase_count=1)
+            head = self.complete_first_source(root, run_dir, plans[0])
+            record_phase_verification(
+                run_dir, phase_id="01", head=head, commands=("suite",),
+                evidence=(_verification_evidence(
+                    root, head, run_id="advance-test", commands=("suite",)
+                ),),
+            )
+            self.accept_phase_gate(root, run_dir, head)
+            tracker = validate_run(run_dir)
+            self.assertEqual(
+                pipeline_state.derive_next_action(run_dir, tracker),
+                "open-gate-master",
+            )
+
+    def test_required_last_phase_after_ordinary_phase_routes_to_master_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, plans, _ = self.make_run(
+                root, first_gate="final-only", second_gate="required",
+            )
+            head = self.complete_first_source(root, run_dir, plans[0])
+            record_phase_verification(
+                run_dir, phase_id="01", head=head, commands=("suite",),
+                evidence=(_verification_evidence(
+                    root, head, run_id="advance-test", commands=("suite",)
+                ),),
+            )
+            pipeline_state.advance_phase(
+                run_dir, completed_phase_id="01", next_phase_id="02",
+            )
+            output = root / "evidence/two.md"
+            output.parent.mkdir()
+            output.write_text("validated artifact\n", encoding="utf-8")
+            start_task(run_dir, task_id="P2-A", owner="worker-b", attempt="attempt-2")
+            complete_task(
+                run_dir, task_id="P2-A", attempt="attempt-2", phase_plan=plans[1],
+                source_ref=None, commits=(), artifacts=(Path("evidence/two.md"),),
+                evidence=(_artifact_validation_evidence(
+                    root, head, run_id="advance-test", task_id="P2-A",
+                    attempt="attempt-2", outputs=("evidence/two.md",),
+                ),),
+                repo_dir=root,
+            )
+            record_phase_verification(
+                run_dir, phase_id="02", head=head, commands=("suite",),
+                evidence=(_verification_evidence(
+                    root, head, label="phase-02-suite", run_id="advance-test",
+                    subject="phase/02", commands=("suite",),
+                ),),
+            )
+            self.accept_phase_gate(
+                root, run_dir, head, phase_id="02", phase_base=head,
+            )
+            self.assertEqual(
+                pipeline_state.derive_next_action(run_dir, validate_run(run_dir)),
+                "open-gate-master",
+            )
 
     def test_direct_start_cannot_bypass_the_current_phase(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -4034,7 +4719,7 @@ class PhaseAdvancementTest(unittest.TestCase):
     def test_wrong_skipped_dependency_and_unresolved_question_fail_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            run_dir, plans, _ = self.make_run(root, first_gate="final-only", phase_two_deps="01,03", phase_count=3)
+            run_dir, plans, _ = self.make_run(root, first_gate="final-only", phase_count=3)
             head = self.complete_first_source(root, run_dir, plans[0])
             record_phase_verification(
                 run_dir, phase_id="01", head=head, commands=("suite",),
@@ -4042,7 +4727,7 @@ class PhaseAdvancementTest(unittest.TestCase):
                     root, head, run_id="advance-test", commands=("suite",)
                 ),),
             )
-            for completed, successor in (("02", "03"), ("01", "03"), ("01", "02")):
+            for completed, successor in (("02", "03"), ("01", "03"), ("01", "99")):
                 with self.subTest(completed=completed, successor=successor):
                     before = (run_dir / "progress.md").read_bytes()
                     with self.assertRaises(TransitionError):
@@ -4240,6 +4925,23 @@ class ReconciliationTest(unittest.TestCase):
                     self.assertTrue(any("fix-plan-contradiction:master:1" in item for item in report.questions))
                 else:
                     self.assertIn("resume-remediation:master:1", report.actions)
+
+
+class InstalledControllerWalkthroughTest(unittest.TestCase):
+    def test_walkthrough_imports_installed_helper_from_an_unrelated_project(self):
+        script = REPOSITORY / "plugins/superb/skills/pipeline/examples/controller_walkthrough.py"
+        skill_dir = REPOSITORY / "plugins/superb/skills/pipeline"
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "target-project"
+            completed = subprocess.run(
+                ("python3.11", str(script), str(skill_dir), str(project)),
+                cwd=Path(directory), text=True, check=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+        summary = json.loads(completed.stdout)
+        self.assertEqual(summary["next_action"], "complete")
+        self.assertEqual(summary["current_phase"], "01")
+        self.assertEqual(summary["master_gate"], "accepted")
 
 
 class PhaseOneReviewRegressionTest(unittest.TestCase):
@@ -4916,6 +5618,32 @@ class PhaseOneReviewRegressionTest(unittest.TestCase):
             ):
                 info = pipeline_state.classify_filesystem(Path("/tmp"))
                 self.assertEqual((info.classification, info.fs_type), ("supported-local", fs_type))
+
+    def test_macos_probe_reads_filesystem_metadata_not_stat_file_type(self):
+        """The macOS probe must parse disk metadata rather than stat's %T file kind."""
+        mount = subprocess.CompletedProcess(
+            args=(), returncode=0, stdout="/Volumes/Data\n", stderr=""
+        )
+        disk = subprocess.CompletedProcess(
+            args=(), returncode=0,
+            stdout=plistlib.dumps({
+                "FilesystemType": "apfs",
+                "MountPoint": "/Volumes/Data",
+                "DeviceIdentifier": "disk3s1",
+            }),
+            stderr=b"",
+        )
+        with mock.patch.object(pipeline_state, "_existing_path", return_value=Path("/Volumes/Data/project")), mock.patch.object(
+            pipeline_state.subprocess, "run", side_effect=(mount, disk)
+        ) as run, mock.patch.object(
+            pipeline_state.os, "stat", return_value=mock.Mock(st_dev=42)
+        ):
+            fs_type, fingerprint = pipeline_state._macos_filesystem(Path("/project"))
+        self.assertEqual(fs_type, "apfs")
+        self.assertRegex(fingerprint, r"^[0-9a-f]{64}$")
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[0][:3], ("/usr/bin/stat", "-f", "%m"))
+        self.assertEqual(run.call_args_list[1].args[0], ("/usr/sbin/diskutil", "info", "-plist", "/Volumes/Data"))
 
     def test_gate_and_fixer_reservations_share_the_global_worker_ceiling(self):
         helper = PhaseGateAndRemediationTest()

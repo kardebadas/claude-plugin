@@ -185,8 +185,9 @@ execution route.
 
 Before presenting the executable plan, verify that the design, master plan,
 and every phase plan exist on disk; shared interfaces and dependencies are
-settled; every phase has no more than 12 tasks; task metadata parses under the
-strict contract; acceptance behavior, tests, coverage policy, batches, worker
+settled; every phase has 1–12 tasks; task and phase dependencies are acyclic
+and executable in the master order; task metadata parses under the strict
+contract; acceptance behavior, tests, coverage policy, batches, worker
 limit, and review checkpoints are explicit; and no required question remains
 open.
 
@@ -194,6 +195,5 @@ Obtain explicit user approval of the complete executable plan—the master plan
 and every detailed phase plan—before any implementation starts. That approval
 authorizes execution only of decisions already recorded; it never authorizes
 guessing. Persist the resolved artifact paths so the run can locate them from
-the project and implementation worktrees. The `A-01` through `A-20`
-acceptance evidence belongs to Phase 4; planning names those requirements
-without claiming that future checks have run.
+the project and implementation worktrees. Planning names acceptance
+requirements without claiming that future checks have run.

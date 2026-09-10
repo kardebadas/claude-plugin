@@ -193,7 +193,9 @@ Use `superpowers:verification-before-completion` for fresh final evidence. The
 last accepted phase routes to the mandatory master gate, not project completion.
 Completion requires the master gate, final verification, all intended work
 committed and integrated on the designated clean feature branch, and consistent
-recoverable files.
+recoverable files. Persist the final verification against the accepted master
+HEAD so a fresh session derives `complete` from files and Git rather than a
+previous completion message.
 
 Do not invoke superpowers:subagent-driven-development or
 superpowers:executing-plans. Their generated task-review/handoff workflows

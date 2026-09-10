@@ -170,9 +170,14 @@ confirmed Critical or Important findings remain:
    user questions.
 2. Write one scoped `fix-plan.md` for exactly the current blockers; compatible
    Minor dispositions may share it without expanding scope silently.
-3. Before dispatch, call `start_remediation_round` to persist the gate, round,
-   targeted finding IDs, fix-plan path, active fixer assignments, and any exact
-   finite-extension authority. Parallel fix batches still consume one round.
+3. Before dispatch, call `start_remediation_round`. It validates any present
+   machine-readable remedy authority against the exact target set before it
+   persists the gate, round, digest-bound fix-plan path, active fixer
+   assignments, and any finite-extension authority. Invalid or ambiguous scope
+   reserves nothing; the same authority is revalidated during fix recording,
+   evaluation, and recovery. A source-only plan without the table retains the
+   strict source-remediation default. Parallel fix batches still consume one
+   round.
 4. Use compatible batches rather than one fixer per finding. Respect
    dependencies, typed write scopes, and the global worker limit. Apply
    **superpowers:test-driven-development** to behavior changes and

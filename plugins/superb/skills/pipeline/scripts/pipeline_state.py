@@ -3690,6 +3690,11 @@ def start_remediation_round(
         rows = list(tracker.remediation)
         existing = next((row for row in rows if row.gate == gate_id and row.round_number == round_number), None)
         authority = f"extension-authority={extension_decision_ref}" if extension_decision_ref else "-"
+        replacement = RemediationRecord(
+            gate_id, round_number, "fixing", ",".join(fixer_assignments), "-",
+            ",".join(finding_ids), fix_plan_identity, "-", authority, "-",
+        )
+        _remediation_scope(Path(run_dir), replacement)
         if (
             existing is not None
             and existing.state == "fixing"
@@ -3736,10 +3741,6 @@ def start_remediation_round(
             prior = next((row for row in rows if row.gate == gate_id and row.round_number == round_number - 1), None)
             if prior is None or prior.state != "complete":
                 raise TransitionError("prior remediation round is not complete")
-        replacement = RemediationRecord(
-            gate_id, round_number, "fixing", ",".join(fixer_assignments), "-",
-            ",".join(finding_ids), fix_plan_identity, "-", authority, "-",
-        )
         if existing is None:
             rows.append(replacement)
         else:

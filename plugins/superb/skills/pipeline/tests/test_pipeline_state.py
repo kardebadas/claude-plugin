@@ -3376,6 +3376,75 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
             self.assertEqual(replayed, released)
             self.assertEqual((run_dir / "progress.md").read_bytes(), after)
 
+    def test_remediation_scope_is_validated_before_round_reservation(self):
+        """Persisting before scope validation can reserve malformed fixer authority."""
+        invalid_tables = {
+            "malformed-kind": (
+                "<!-- pipeline-remediation-scope/v2 -->\n"
+                "| Finding | Kind | Artifacts |\n| --- | --- | --- |\n"
+                "| F-001 | guessed | none |\n"
+            ),
+            "duplicate-authority": (
+                "<!-- pipeline-remediation-scope/v2 -->\n"
+                "| Finding | Kind | Artifacts |\n| --- | --- | --- |\n"
+                "| F-001 | source | none |\n\n"
+                "<!-- pipeline-remediation-scope/v2 -->\n"
+                "| Finding | Kind | Artifacts |\n| --- | --- | --- |\n"
+                "| F-001 | source | none |\n"
+            ),
+            "mismatched-finding": (
+                "<!-- pipeline-remediation-scope/v2 -->\n"
+                "| Finding | Kind | Artifacts |\n| --- | --- | --- |\n"
+                "| F-OTHER | source | none |\n"
+            ),
+            "incomplete-artifacts": (
+                "<!-- pipeline-remediation-scope/v2 -->\n"
+                "| Finding | Kind | Artifacts |\n| --- | --- | --- |\n"
+                "| F-001 | artifact | [] |\n"
+            ),
+        }
+        for label, table in invalid_tables.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                run_dir, _, head = self.make_run(root)
+                self.prepare_blocked_phase_gate(root, run_dir, head)
+                fix_plan = root / "fix-plan.md"
+                fix_plan.write_text("# Fix plan\n\n" + table, encoding="utf-8")
+                before = (run_dir / "progress.md").read_bytes()
+                with self.assertRaises(TransitionError):
+                    start_remediation_round(
+                        run_dir, gate_id="phase-01", round_number=1,
+                        finding_ids=("F-001",), fix_plan=str(fix_plan),
+                        fixer_assignments=("fixer-1",), capacity=3,
+                    )
+                self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, _, head = self.make_run(root)
+            self.prepare_blocked_phase_gate(root, run_dir, head)
+            fix_plan = root / "fix-plan.md"
+            fix_plan.write_text(
+                "# Fix plan\n\n"
+                "<!-- pipeline-remediation-scope/v2 -->\n"
+                "| Finding | Kind | Artifacts |\n| --- | --- | --- |\n"
+                "| F-001 | source | none |\n",
+                encoding="utf-8",
+            )
+            reserved = start_remediation_round(
+                run_dir, gate_id="phase-01", round_number=1,
+                finding_ids=("F-001",), fix_plan=str(fix_plan),
+                fixer_assignments=("fixer-1",), capacity=3,
+            )
+            after = (run_dir / "progress.md").read_bytes()
+            replayed = start_remediation_round(
+                run_dir, gate_id="phase-01", round_number=1,
+                finding_ids=("F-001",), fix_plan=str(fix_plan),
+                fixer_assignments=("fixer-1",), capacity=3,
+            )
+            self.assertEqual(replayed, reserved)
+            self.assertEqual((run_dir / "progress.md").read_bytes(), after)
+
     def test_later_round_preserves_fixed_artifact_from_completed_artifact_round(self):
         """Treating N/A as malformed loses a valid artifact resolution on the next round."""
         with tempfile.TemporaryDirectory() as directory:

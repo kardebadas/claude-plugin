@@ -215,7 +215,10 @@ silently omitted from review.
 A failing planned suite keeps the phase unfinished. Use TDD and systematic
 debugging for the smallest approved repair, run targeted checks while working,
 then rerun the affected integration and phase checks. Do not advance dependent
-work from stale or failed evidence.
+work from stale or failed evidence. If required-review remediation advances the
+accepted gate HEAD beyond the recorded phase-verification HEAD, the next action
+is another mechanical phase verification at that reviewed fix HEAD; only then
+may the phase advance or a final phase proceed to master review.
 
 Task start, block, resume, result import, and integration transitions refresh
 the helper-derived `next_action` in the same locked update; that summary never

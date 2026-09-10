@@ -12,6 +12,9 @@ It imports the helper from the installed skill path, binds runtime capacity,
 initializes a one-phase run, reserves work, publishes/imports task evidence,
 verifies the phase, performs the mandatory two-report master gate, records
 final verification, and proves a fresh file-backed read derives `complete`.
+The example executes the commands named by its evidence, keeps local run state
+under the target repository's ignore policy, and finishes only with an empty
+`git status --short` result.
 
 ## Before any update or dispatch
 
@@ -82,6 +85,13 @@ On compaction, restart, interruption, or uncertainty:
 
 If a valid result and Git/evidence satisfy the contract, import it once. If an owner is still active consistently, preserve the attempt and wait or perform independent permitted work. A commit without its result/checkpoint is neither automatic completion nor grounds to repeat the task: inspect the recorded attempt, content, ancestry, and applicable tests, then reconstruct/import only independently validated evidence. Partial, conflicting, or unverifiable state remains blocked and reaches the user. Completed work is not rerun; unfinished work is not skipped.
 
+An active formal review is recovered the same way: validate every digest-bound
+checkpointed report in recorded assignment order, retain the complete required
+reviewer set, and derive the first unreported assignment. A completed report
+releases that reviewer's global worker slot; it is not discarded merely because
+the remaining assignment must run later. Do not infer a completed reviewer from
+conversation memory or a mutable uncheckpointed report.
+
 The master plan is the exact ordered authority for its phase-plan paths.
 Initialization rejects missing, extra, duplicate, or reordered phase
 references, phases with more than 12 tasks, cyclic task dependencies, and
@@ -108,3 +118,9 @@ The supported contract is cooperating processes on one host over a local filesys
 Network/distributed filesystems and cross-host synchronization are outside the guarantee. Do not claim the helper can recognize every unusual filesystem or provide universal crash/power-loss durability. Distinguish cooperative-writer exclusion, atomic visibility of a complete old or new tracker, process-interruption reconciliation, and durability across OS crash or power loss.
 
 Ignored local run files survive context compaction in the same workspace, not deletion, machine loss, or a fresh clone.
+Terminal `complete` is also conditional on the designated target repository
+remaining at the accepted master HEAD with a clean working tree, including no
+unexpected untracked files. The final-verification transition is bound to the
+run's derived project root; a different repository path cannot supply the Git
+proof. A fresh inspect reports inconsistent state instead of trusting a stale
+persisted `complete` summary when those facts no longer hold.

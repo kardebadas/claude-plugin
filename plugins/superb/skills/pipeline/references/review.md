@@ -23,9 +23,13 @@ task and fixer ownership. Run the two master reviewers concurrently only when
 the global limit and detected runtime capacity permit; otherwise queue them.
 The tracker records the complete required reviewer set while capacity controls
 which queued assignments are active. With `worker_limit=1`, run one assignment,
-publish its immutable report, release that slot, and run the second assignment;
-gate evaluation still requires both independent reports. Apply the same queue
-lifecycle to re-review.
+publish its immutable report through the controller's `record_review_report`
+transition, release that slot, and run the next assignment named by the derived
+action; gate evaluation still requires both independent reports. Each
+checkpoint is digest-bound in `progress.md`, so resume validates completed
+reports and continues at the first unreported assignment rather than restarting
+the pair. Apply the same queue lifecycle to re-review. Do not evaluate a
+partially reported queue or accept reports out of assignment order.
 Free capacity never authorizes an early, duplicate, third, ordinary-phase, or
 task reviewer.
 
@@ -134,7 +138,11 @@ the gate question only through an applicable resolved decision carrying
 preference is not authority.
 
 An `Open` Minor is a valid pending disposition, not an invalid finding row. If
-the user explicitly chooses `Fixed`, record a resolved
+it has no authorized disposition yet, evaluation persists a gate question for
+that stable finding and asks the user. Resolve that question only with an
+applicable decision scoped to the exact finding; a phase number, remediation
+round number, substring collision, or unrelated gate is not sufficient scope.
+If the user explicitly chooses `Fixed`, record a resolved
 `review.resolve-question` decision scoped exactly to that finding. The same
 gate's next remediation plan may then target that authorized Minor alone or
 alongside the exact current blockers. Without that authority an open Minor is
@@ -175,7 +183,9 @@ The initial `gate.base` and initial report paths are immutable. During
 remediation, `gate.head` advances only after a validated contiguous edge from
 the prior reviewed HEAD to the verified fix HEAD. Re-review reports use that
 prior HEAD as their base. Validate the complete initial-plus-remediation
-lineage; never reinterpret an initial report as if it reviewed a later HEAD.
+lineage, including every completed round's digest-bound re-review evidence,
+before reserving a later round; never reinterpret an initial report as if it
+reviewed a later HEAD.
 A completed all-artifact edge truthfully records `commits=N/A` and may retain
 the prior HEAD only when its immutable scope is entirely artifact-kind. Its
 Fixed evidence remains bound to that historical round's scope, verification,
@@ -252,7 +262,10 @@ focused probe exposes wider risk, and records why.
 
 The mandatory final verification still follows an accepted master gate. Record
 its digest-bound `final` PASS evidence for the accepted master HEAD through the
-controller transition. Only then may the derived next action become
-`complete`; a fresh session must revalidate that evidence and the target tip.
+controller transition. If a required phase's accepted remediation advanced its
+reviewed HEAD, mechanically verify that post-remediation HEAD before advancing
+or opening the master gate. Only then may the derived next action become
+`complete`; a fresh session must revalidate that evidence, the target tip, and
+the clean target-project working tree.
 No
 formal gate authorizes push, publish, PR creation, or merge to `main`/`master`.

@@ -2037,8 +2037,19 @@ def _active_worker_ids(tracker: Tracker) -> set[str]:
     workers = {task.owner for task in tracker.tasks if task.state == "[~]" and task.owner != "-"}
     for gate in tracker.gates:
         if gate.state in {"in_progress", "re_reviewing"}:
+            if gate.state == "in_progress":
+                completed = len(_csv(gate.reports))
+            else:
+                active_round = next(
+                    (
+                        row for row in tracker.remediation
+                        if row.gate == gate.id and row.state == "re_reviewing"
+                    ),
+                    None,
+                )
+                completed = 0 if active_round is None else len(_csv(active_round.re_review))
             available = max(0, tracker.worker_limit - len(workers))
-            workers.update(_csv(gate.assignments)[:available])
+            workers.update(_csv(gate.assignments)[completed:completed + available])
     for row in tracker.remediation:
         if row.state == "fixing":
             workers.update(_csv(row.fixers))
@@ -2170,10 +2181,28 @@ def _unresolved_task_question(task: TaskRecord) -> bool:
 def _gate_next_action(tracker: Tracker, gate: GateRecord) -> str:
     if gate.state == "pending":
         return f"open-gate-{gate.id}"
-    if gate.state == "in_progress":
-        return f"await-review-{gate.id}"
-    if gate.state == "re_reviewing":
-        return f"await-re-review-{gate.id}"
+    if gate.state in {"in_progress", "re_reviewing"}:
+        assignments = _csv(gate.assignments)
+        if gate.state == "in_progress":
+            completed = len(_csv(gate.reports))
+            waiting = f"await-review-{gate.id}"
+            ready = f"evaluate-review-{gate.id}"
+        else:
+            active_round = next(
+                (
+                    row for row in tracker.remediation
+                    if row.gate == gate.id and row.state == "re_reviewing"
+                ),
+                None,
+            )
+            completed = 0 if active_round is None else len(_csv(active_round.re_review))
+            waiting = f"await-re-review-{gate.id}"
+            ready = f"evaluate-re-review-{gate.id}"
+        if completed == 0:
+            return waiting
+        if completed < len(assignments):
+            return f"dispatch-review-{assignments[completed]}"
+        return ready
     if gate.state == "accepted":
         if gate.type == "master":
             final = tuple(item for item in _csv(gate.verification) if item.startswith("final="))
@@ -2250,7 +2279,10 @@ def derive_next_action(run_dir: Path, tracker: Tracker) -> str:
     if metadata.review_gate == "required":
         phase_gate = _gate_record(tracker, f"phase-{phase_id}")
         if phase_gate.state != "accepted":
+            _validate_recorded_review_queue(run_dir, tracker, phase_gate)
             return _gate_next_action(tracker, phase_gate)
+        if _phase_verification_head(phase) != phase_gate.head:
+            return f"verify-phase-{phase_id}"
 
     phase_ids = [document[1].id for document in documents]
     if phase_ids[-1] != phase_id:
@@ -2260,6 +2292,8 @@ def derive_next_action(run_dir: Path, tracker: Tracker) -> str:
         item.startswith("final=") for item in _csv(master_gate.verification)
     ):
         _validate_persisted_final_verification(run_dir, tracker, master_gate)
+    if master_gate.state in {"in_progress", "re_reviewing"}:
+        _validate_recorded_review_queue(run_dir, tracker, master_gate)
     return _gate_next_action(tracker, master_gate)
 
 
@@ -3359,8 +3393,11 @@ def _validate_persisted_final_verification(
         run_dir, references, gate.head,
         purpose="final", run_id=tracker.run_id, subject="project", attempt="N/A",
     )[0]
-    if not _is_target_tip(_project_root(run_dir), tracker.target_branch, gate.head):
+    project_root = _project_root(run_dir)
+    if not _is_target_tip(project_root, tracker.target_branch, gate.head):
         raise TransitionError("final verification no longer names the designated target tip")
+    if _git_output(project_root, "status", "--porcelain"):
+        raise TransitionError("working-tree changes invalidate persisted final completion")
     return record
 
 
@@ -3381,6 +3418,9 @@ def record_final_verification(
 
     def transition(tracker: Tracker) -> Tracker:
         gate = _gate_record(tracker, "master")
+        project_root = _project_root(Path(run_dir)).resolve()
+        if Path(repo_dir).resolve() != project_root:
+            raise TransitionError("final verification repository does not match the run project")
         existing = tuple(item for item in _csv(gate.verification) if item.startswith("final="))
         if existing:
             raise TransitionError("final verification is already recorded with different evidence")
@@ -3388,8 +3428,8 @@ def record_final_verification(
             raise TransitionError("final verification requires the accepted master-review HEAD")
         if not _is_target_tip(Path(repo_dir), tracker.target_branch, head):
             raise TransitionError("final verification HEAD is not the designated target tip")
-        if _git_output(Path(repo_dir), "status", "--porcelain", "--untracked-files=no"):
-            raise TransitionError("tracked working-tree changes prevent final completion")
+        if _git_output(project_root, "status", "--porcelain"):
+            raise TransitionError("working-tree changes prevent final completion")
         _validate_verification_evidence(
             Path(run_dir), evidence, head,
             purpose="final", run_id=tracker.run_id, subject="project", attempt="N/A",
@@ -3632,8 +3672,6 @@ def _validate_sealed_gate_evidence(
         ),
         key=lambda row: row.round_number,
     ):
-        if not pending:
-            break
         paths = tuple(
             _resolve_digest_bound_reference(run_dir, value)
             for value in _csv(remediation.re_review)
@@ -3850,11 +3888,37 @@ def resolve_gate_questions(
 
     def transition(tracker: Tracker) -> Tracker:
         gate = _gate_record(tracker, gate_id)
-        if set(_csv(gate.questions)) != set(decision_refs):
+        questions = set(_csv(gate.questions))
+        minor_questions = {
+            value.removeprefix("minor-disposition-")
+            for value in questions
+            if value.startswith("minor-disposition-")
+        }
+        if minor_questions and len(minor_questions) == len(questions):
+            if len(decision_refs) != len(minor_questions):
+                raise TransitionError("every pending Minor disposition needs one explicit decision")
+            unmatched = set(decision_refs)
+            for finding_id in sorted(minor_questions):
+                matches = []
+                for decision_ref in unmatched:
+                    try:
+                        _resolved_decision_for_terms(
+                            Path(run_dir), tracker, decision_ref, {finding_id},
+                        )
+                    except TransitionError:
+                        continue
+                    matches.append(decision_ref)
+                if len(matches) != 1:
+                    raise TransitionError(
+                        f"Minor {finding_id} does not have one applicable resolved decision"
+                    )
+                unmatched.remove(matches[0])
+            return _replace_gate(
+                tracker, replace(gate, state="in_progress", questions="-"),
+            )
+        if questions != set(decision_refs):
             raise TransitionError("decision references do not exactly match the current gate questions")
         terms = {gate.id, *_gate_finding_ids(gate)}
-        if gate.phase != "-":
-            terms.add(gate.phase)
         for decision_ref in decision_refs:
             _resolved_decision_for_terms(Path(run_dir), tracker, decision_ref, terms)
         return _replace_gate(tracker, replace(gate, questions="-"))
@@ -4390,6 +4454,149 @@ def _review_report_set(
     return reports, next(iter(heads))
 
 
+def _review_queue_state(
+    tracker: Tracker,
+    gate: GateRecord,
+) -> tuple[tuple[str, ...], RemediationRecord | None]:
+    if gate.state == "in_progress":
+        return _csv(gate.reports), None
+    if gate.state == "re_reviewing":
+        row = next(
+            (
+                item for item in tracker.remediation
+                if item.gate == gate.id and item.state == "re_reviewing"
+            ),
+            None,
+        )
+        if row is None:
+            raise TransitionError("re-review gate has no active remediation round")
+        return _csv(row.re_review), row
+    raise TransitionError("review reports can be queued only for an active review")
+
+
+def _queued_report_expected_edge(
+    gate: GateRecord,
+    row: RemediationRecord | None,
+) -> tuple[str, str, bool]:
+    if row is None:
+        return gate.base, gate.head, False
+    verification = _round_verification_items(row)
+    if len(verification) != 1:
+        raise TransitionError("active re-review has no unique verified fix HEAD")
+    _, separator, head = verification[0].rpartition("@")
+    if separator != "@" or not _COMMIT.fullmatch(head):
+        raise TransitionError("active re-review verification has no full code-state identity")
+    return gate.head, head, True
+
+
+def _validate_queued_report(
+    run_dir: Path,
+    gate: GateRecord,
+    report_reference: str,
+    *,
+    expected_assignment: str,
+    expected_base: str,
+    expected_head: str,
+    rereview: bool,
+) -> dict[str, str]:
+    path = _resolve_digest_bound_reference(run_dir, report_reference)
+    report = _parse_review_report(path)
+    outcomes = _review_outcomes(report)
+    report_findings = set(_csv(report["findings"]))
+    if (
+        report["gate"] != gate.id
+        or report["assignment"] != expected_assignment
+        or report["base"] != expected_base
+        or report["head"] != expected_head
+        or set(outcomes) != report_findings
+    ):
+        raise TransitionError("queued reviewer report does not match its assignment or gate edge")
+    if rereview:
+        if not set(_gate_finding_ids(gate)).issubset(report_findings):
+            raise TransitionError("queued re-review does not conclude every existing gate finding")
+    elif any(outcome != "Open" for outcome in outcomes.values()):
+        raise TransitionError("queued initial review findings must be Open")
+    return report
+
+
+def _validate_recorded_review_queue(
+    run_dir: Path,
+    tracker: Tracker,
+    gate: GateRecord,
+) -> None:
+    if gate.state not in {"in_progress", "re_reviewing"}:
+        return
+    references, row = _review_queue_state(tracker, gate)
+    assignments = _csv(gate.assignments)
+    if len(references) > len(assignments):
+        raise TransitionError("review queue contains more reports than assignments")
+    expected_base, expected_head, rereview = _queued_report_expected_edge(gate, row)
+    for index, reference in enumerate(references):
+        _validate_queued_report(
+            run_dir, gate, reference,
+            expected_assignment=assignments[index],
+            expected_base=expected_base, expected_head=expected_head,
+            rereview=rereview,
+        )
+
+
+def record_review_report(
+    run_dir: Path,
+    *,
+    gate_id: str,
+    report_path: Path,
+) -> Tracker:
+    """Durably checkpoint one queued reviewer report in assignment order."""
+    report_path = Path(report_path).resolve()
+    try:
+        initial_bytes = report_path.read_bytes()
+    except OSError as exc:
+        raise TransitionError(f"review report is unreadable: {report_path}: {exc}") from exc
+    request_digest = hashlib.sha256(initial_bytes).hexdigest()
+    transition_id = f"review-report-{gate_id}-{request_digest}"
+
+    def transition(tracker: Tracker) -> Tracker:
+        try:
+            current_bytes = report_path.read_bytes()
+        except OSError as exc:
+            raise TransitionError(
+                f"review report became unreadable while checkpointing: {report_path}: {exc}"
+            ) from exc
+        if hashlib.sha256(current_bytes).hexdigest() != request_digest:
+            raise TransitionError("review report changed while it was being checkpointed")
+        gate = _gate_record(tracker, gate_id)
+        references, row = _review_queue_state(tracker, gate)
+        assignments = _csv(gate.assignments)
+        identity = _digest_bound_reference(Path(run_dir), report_path)
+        if identity in references:
+            raise _AlreadyApplied(tracker)
+        if len(references) >= len(assignments):
+            raise TransitionError("all required reviewer reports are already checkpointed")
+        expected_base, expected_head, rereview = _queued_report_expected_edge(gate, row)
+        _validate_queued_report(
+            Path(run_dir), gate, identity,
+            expected_assignment=assignments[len(references)],
+            expected_base=expected_base, expected_head=expected_head,
+            rereview=rereview,
+        )
+        updated_references = ",".join((*references, identity))
+        if row is None:
+            return _replace_gate(tracker, replace(gate, reports=updated_references))
+        updated_row = replace(row, re_review=updated_references)
+        return replace(
+            tracker,
+            remediation=tuple(updated_row if item is row else item for item in tracker.remediation),
+        )
+
+    try:
+        return locked_tracker_update(
+            Path(run_dir), transition_id, transition,
+            timeout_s=5.0, refresh_next_action=True,
+        )
+    except _AlreadyApplied as applied:
+        return applied.tracker
+
+
 def _round_verification_items(row: RemediationRecord) -> tuple[str, ...]:
     items = _csv(row.verification)
     seals = tuple(item for item in items if item.startswith("master-initial-seal:"))
@@ -4471,6 +4678,12 @@ def _validated_review_lineage(
         )
         if initial_head != gate.head:
             raise TransitionError("initial reports do not match the gate's opened HEAD")
+        if gate.reports != "-":
+            supplied = tuple(
+                _digest_bound_reference(run_dir, path) for path in resolved_input
+            )
+            if supplied != _csv(gate.reports):
+                raise TransitionError("evaluation reports differ from the checkpointed review queue")
         return initial_reports, ()
 
     persisted_paths = tuple(
@@ -4843,6 +5056,15 @@ def evaluate_and_close_review_gate(
             if not rereviews:
                 if not rereview_paths:
                     raise TransitionError("an active remediation round requires re-review evidence")
+            if active_round.re_review != "-":
+                supplied = tuple(
+                    _digest_bound_reference(Path(run_dir), Path(path).resolve())
+                    for path in rereview_paths
+                )
+                if supplied != _csv(active_round.re_review):
+                    raise TransitionError(
+                        "evaluation re-reviews differ from the checkpointed review queue"
+                    )
             rereviews, reviewed_head = _review_report_set(
                 tuple(Path(path).resolve() for path in rereview_paths),
                 gate=gate,
@@ -4937,6 +5159,7 @@ def evaluate_and_close_review_gate(
         invalid_rows: list[tuple[str, ...]] = []
         blockers: list[tuple[str, ...]] = []
         authorized_minor_fixes: list[tuple[str, ...]] = []
+        pending_minor_questions: list[str] = []
         for row in rows:
             _, _, severity, status, disposition, evidence, fix_commit, re_review = row
             if severity not in {"Critical", "Important", "Minor"} or status not in {"Open", "Resolved"}:
@@ -4964,6 +5187,9 @@ def evaluate_and_close_review_gate(
                     invalid_rows.append(row)
             else:
                 if status == "Open":
+                    if disposition == fix_commit == re_review == evidence == "-":
+                        pending_minor_questions.append(f"minor-disposition-{row[0]}")
+                        continue
                     if disposition != "-" or fix_commit != "-" or re_review != "-" or not re.fullmatch(r"D-[0-9]+", evidence):
                         invalid_rows.append(row)
                     else:
@@ -5024,6 +5250,10 @@ def evaluate_and_close_review_gate(
         if invalid_rows:
             raise TransitionError("finding status, severity, disposition, or evidence is invalid")
         questions = gate.questions
+        if pending_minor_questions:
+            if questions != "-":
+                raise TransitionError("new Minor disposition questions conflict with an existing gate question")
+            questions = ",".join(sorted(pending_minor_questions))
         remediation_rows = list(tracker.remediation)
         if active_round is not None:
             targeted = set(active_round.findings.split(","))

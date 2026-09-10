@@ -79,10 +79,9 @@ def run(skill_dir: Path, project: Path) -> dict[str, str]:
     git(project, "config", "user.email", "pipeline@example.invalid")
     git(project, "config", "user.name", "Pipeline Walkthrough")
     (project / "README.md").write_text("walkthrough\n", encoding="utf-8")
-    git(project, "add", "README.md")
-    git(project, "commit", "-qm", "walkthrough base")
-    head = git(project, "rev-parse", "HEAD")
-    git(project, "branch", "feature/walkthrough")
+    (project / ".gitignore").write_text(
+        "docs/superpowers/runs/*/\n", encoding="utf-8",
+    )
 
     docs = project / "docs/superpowers"
     phase = docs / "plans/walkthrough/phase-01.md"
@@ -91,10 +90,11 @@ def run(skill_dir: Path, project: Path) -> dict[str, str]:
         "# Walkthrough phase\n\n"
         "<!-- pipeline-v2-phase: id=01; deps=none; review_gate=final-only; "
         "review_reason=Mechanical verification only. -->\n"
-        "<!-- pipeline-v2-phase-suite: id=01; commands=[\"phase-check\"] -->\n\n"
+        "<!-- pipeline-v2-phase-suite: id=01; commands=[\"git diff --check\"] -->\n\n"
         "### W-01 — Produce evidence\n"
         "<!-- pipeline-v2-task: id=W-01; deps=none; kind=artifact; batch=walkthrough; "
-        "order=1; write_scope=file:evidence/output.md; outputs=evidence/output.md -->\n",
+        "order=1; write_scope=file:docs/superpowers/runs/walkthrough/agent-output/output.md; "
+        "outputs=docs/superpowers/runs/walkthrough/agent-output/output.md -->\n",
         encoding="utf-8",
     )
     master = docs / "plans/walkthrough-master-plan.md"
@@ -102,6 +102,10 @@ def run(skill_dir: Path, project: Path) -> dict[str, str]:
     spec = docs / "specs/walkthrough-design.md"
     spec.parent.mkdir(parents=True)
     spec.write_text("# Approved walkthrough design\n", encoding="utf-8")
+    git(project, "add", "README.md", ".gitignore", "docs/superpowers/specs", "docs/superpowers/plans")
+    git(project, "commit", "-qm", "walkthrough approved plans")
+    head = git(project, "rev-parse", "HEAD")
+    git(project, "branch", "feature/walkthrough")
     run_dir = docs / "runs/walkthrough"
     run_dir.mkdir(parents=True)
     decisions = run_dir / "decisions.md"
@@ -127,15 +131,20 @@ def run(skill_dir: Path, project: Path) -> dict[str, str]:
         approved_existing=approved,
     )
 
-    output = project / "evidence/output.md"
+    output = run_dir / "agent-output/output.md"
     output.parent.mkdir()
     output.write_text("artifact validated\n", encoding="utf-8")
+    task_command = "test -s docs/superpowers/runs/walkthrough/agent-output/output.md"
+    subprocess.run(
+        ("test", "-s", str(output)), cwd=project, check=True,
+    )
+    output_relative = output.relative_to(project).as_posix()
     output_identity = (
-        f"evidence/output.md#sha256={hashlib.sha256(output.read_bytes()).hexdigest()}"
+        f"{output_relative}#sha256={hashlib.sha256(output.read_bytes()).hexdigest()}"
     )
     task_evidence = verification(
         project, name="task.md", purpose="task-test", subject="task/W-01",
-        attempt="attempt-1", head=head, commands=("artifact-validation",),
+        attempt="attempt-1", head=head, commands=(task_command,),
         inputs=json.dumps((output_identity,), separators=(",", ":")),
     )
     with state.bind_runtime_capacity_provider(run_dir, lambda _run, _tracker: 2):
@@ -145,7 +154,7 @@ def run(skill_dir: Path, project: Path) -> dict[str, str]:
         result_path,
         state.WorkerResult(
             "walkthrough", "W-01", "attempt-1", "worker-a", "artifact", "DONE",
-            "-", (), ("evidence/output.md",), "artifact-validation", (task_evidence,),
+            "-", (), (output_relative,), task_command, (task_evidence,),
             "-", "-", "-", (state.Checkpoint("tested", "complete", task_evidence),),
         ),
     )
@@ -153,12 +162,13 @@ def run(skill_dir: Path, project: Path) -> dict[str, str]:
         run_dir, result_path=result_path, phase_plan=phase, repo_dir=project,
     )
 
+    git(project, "diff", "--check")
     phase_evidence = verification(
         project, name="phase.md", purpose="phase", subject="phase/01", attempt="N/A",
-        head=head, commands=("phase-check",), inputs="walkthrough-artifact",
+        head=head, commands=("git diff --check",), inputs="walkthrough-artifact",
     )
     state.record_phase_verification(
-        run_dir, phase_id="01", head=head, commands=("phase-check",),
+        run_dir, phase_id="01", head=head, commands=("git diff --check",),
         evidence=(phase_evidence,),
     )
     with state.bind_runtime_capacity_provider(run_dir, lambda _run, _tracker: 2):
@@ -170,16 +180,20 @@ def run(skill_dir: Path, project: Path) -> dict[str, str]:
         review_report(project, assignment=assignment, base=head, head=head)
         for assignment in ("reviewer-a", "reviewer-b")
     )
+    for report in reports:
+        state.record_review_report(run_dir, gate_id="master", report_path=report)
     state.evaluate_and_close_review_gate(
         run_dir, gate_id="master", findings_path=findings,
         report_paths=reports, verification=(phase_evidence,), rereview_paths=(),
     )
+    if git(project, "status", "--short"):
+        raise RuntimeError("walkthrough target repository is not clean")
     final_evidence = verification(
         project, name="final.md", purpose="final", subject="project", attempt="N/A",
-        head=head, commands=("final-check",), inputs="accepted-master-head",
+        head=head, commands=("git status --short",), inputs="accepted-master-head",
     )
     state.record_final_verification(
-        run_dir, head=head, commands=("final-check",), evidence=(final_evidence,),
+        run_dir, head=head, commands=("git status --short",), evidence=(final_evidence,),
         repo_dir=project,
     )
     tracker = state.validate_run(run_dir)

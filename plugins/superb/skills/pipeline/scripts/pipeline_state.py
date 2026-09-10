@@ -948,8 +948,14 @@ def _macos_filesystem(path: Path) -> tuple[str, str]:
     )
     lines = tuple(line for line in mount_result.stdout.splitlines() if line.strip())
     fields = lines[-1].split(maxsplit=5) if len(lines) >= 2 else ()
+    filesystem_device = fields[0] if len(fields) == 6 else ""
     mount_point = fields[5] if len(fields) == 6 else ""
-    if mount_result.returncode != 0 or not mount_point or not Path(mount_point).is_absolute():
+    if (
+        mount_result.returncode != 0
+        or not filesystem_device.startswith("/dev/")
+        or not mount_point
+        or not Path(mount_point).is_absolute()
+    ):
         raise FilesystemSuitabilityError(
             f"macOS mount-point probe failed: {mount_result.stderr.strip()}"
         )
@@ -971,7 +977,7 @@ def _macos_filesystem(path: Path) -> tuple[str, str]:
         not isinstance(fs_type, str) or not fs_type
         or not isinstance(recorded_mount, str) or Path(recorded_mount) != Path(mount_point)
         or not isinstance(device, str) or not device
-        or not (Path(mount_point) == resolved or Path(mount_point) in resolved.parents)
+        or filesystem_device != f"/dev/{device}"
     ):
         raise FilesystemSuitabilityError("macOS filesystem metadata is missing or inconsistent")
     normalized = fs_type.casefold()

@@ -6049,13 +6049,13 @@ class PhaseOneReviewRegressionTest(unittest.TestCase):
                 info = pipeline_state.classify_filesystem(Path("/tmp"))
                 self.assertEqual((info.classification, info.fs_type), ("supported-local", fs_type))
 
-    def test_macos_probe_reads_filesystem_metadata_not_stat_file_type(self):
-        """The macOS probe resolves the containing mount instead of using stat mtime."""
+    def test_macos_probe_accepts_data_volume_backing_a_logical_path(self):
+        """The df device, not lexical containment, identifies a firmlink-backed path."""
         mount = subprocess.CompletedProcess(
             args=(), returncode=0,
             stdout=(
                 "Filesystem 512-blocks Used Available Capacity Mounted on\n"
-                "/dev/disk3s1 100 10 90 10% /Volumes/Data\n"
+                "/dev/disk3s5 100 10 90 10% /System/Volumes/Data\n"
             ),
             stderr="",
         )
@@ -6063,12 +6063,13 @@ class PhaseOneReviewRegressionTest(unittest.TestCase):
             args=(), returncode=0,
             stdout=plistlib.dumps({
                 "FilesystemType": "apfs",
-                "MountPoint": "/Volumes/Data",
-                "DeviceIdentifier": "disk3s1",
+                "MountPoint": "/System/Volumes/Data",
+                "DeviceIdentifier": "disk3s5",
+                "DeviceNode": "/dev/disk3s5",
             }),
             stderr=b"",
         )
-        with mock.patch.object(pipeline_state, "_existing_path", return_value=Path("/Volumes/Data/project")), mock.patch.object(
+        with mock.patch.object(pipeline_state, "_existing_path", return_value=Path("/Users/alice/project")), mock.patch.object(
             pipeline_state.subprocess, "run", side_effect=(mount, disk)
         ) as run, mock.patch.object(
             pipeline_state.os, "stat", return_value=mock.Mock(st_dev=42)
@@ -6079,9 +6080,104 @@ class PhaseOneReviewRegressionTest(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
         self.assertEqual(
             run.call_args_list[0].args[0],
-            ("/bin/df", "-P", "/Volumes/Data/project"),
+            ("/bin/df", "-P", "/Users/alice/project"),
         )
-        self.assertEqual(run.call_args_list[1].args[0], ("/usr/sbin/diskutil", "info", "-plist", "/Volumes/Data"))
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            ("/usr/sbin/diskutil", "info", "-plist", "/System/Volumes/Data"),
+        )
+
+    def test_macos_probe_accepts_ordinary_path_beneath_its_mount(self):
+        mount = subprocess.CompletedProcess(
+            args=(), returncode=0,
+            stdout=(
+                "Filesystem 512-blocks Used Available Capacity Mounted on\n"
+                "/dev/disk4s1 100 10 90 10% /Volumes/External\n"
+            ),
+            stderr="",
+        )
+        disk = subprocess.CompletedProcess(
+            args=(), returncode=0,
+            stdout=plistlib.dumps({
+                "FilesystemType": "apfs",
+                "MountPoint": "/Volumes/External",
+                "DeviceIdentifier": "disk4s1",
+                "DeviceNode": "/dev/disk4s1",
+            }),
+            stderr=b"",
+        )
+        with mock.patch.object(
+            pipeline_state, "_existing_path", return_value=Path("/Volumes/External/project")
+        ), mock.patch.object(
+            pipeline_state.subprocess, "run", side_effect=(mount, disk)
+        ), mock.patch.object(
+            pipeline_state.os, "stat", return_value=mock.Mock(st_dev=43)
+        ):
+            self.assertEqual(
+                pipeline_state._macos_filesystem(Path("/project"))[0], "apfs"
+            )
+
+    def test_macos_probe_accepts_mount_path_with_spaces(self):
+        mount = subprocess.CompletedProcess(
+            args=(), returncode=0,
+            stdout=(
+                "Filesystem 512-blocks Used Available Capacity Mounted on\n"
+                "/dev/disk5s1 100 10 90 10% /Volumes/Team Data\n"
+            ),
+            stderr="",
+        )
+        disk = subprocess.CompletedProcess(
+            args=(), returncode=0,
+            stdout=plistlib.dumps({
+                "FilesystemType": "apfs",
+                "MountPoint": "/Volumes/Team Data",
+                "DeviceIdentifier": "disk5s1",
+                "DeviceNode": "/dev/disk5s1",
+            }),
+            stderr=b"",
+        )
+        with mock.patch.object(
+            pipeline_state, "_existing_path", return_value=Path("/Volumes/Team Data/project")
+        ), mock.patch.object(
+            pipeline_state.subprocess, "run", side_effect=(mount, disk)
+        ) as run, mock.patch.object(
+            pipeline_state.os, "stat", return_value=mock.Mock(st_dev=44)
+        ):
+            self.assertEqual(
+                pipeline_state._macos_filesystem(Path("/project"))[0], "apfs"
+            )
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            ("/usr/sbin/diskutil", "info", "-plist", "/Volumes/Team Data"),
+        )
+
+    def test_macos_probe_rejects_wrong_volume_device_identity(self):
+        mount = subprocess.CompletedProcess(
+            args=(), returncode=0,
+            stdout=(
+                "Filesystem 512-blocks Used Available Capacity Mounted on\n"
+                "/dev/disk3s5 100 10 90 10% /System/Volumes/Data\n"
+            ),
+            stderr="",
+        )
+        wrong_disk = subprocess.CompletedProcess(
+            args=(), returncode=0,
+            stdout=plistlib.dumps({
+                "FilesystemType": "apfs",
+                "MountPoint": "/System/Volumes/Data",
+                "DeviceIdentifier": "disk3s6",
+                "DeviceNode": "/dev/disk3s6",
+            }),
+            stderr=b"",
+        )
+        with mock.patch.object(
+            pipeline_state, "_existing_path", return_value=Path("/Users/alice/project")
+        ), mock.patch.object(
+            pipeline_state.subprocess, "run", side_effect=(mount, wrong_disk)
+        ), self.assertRaisesRegex(
+            pipeline_state.FilesystemSuitabilityError, "missing or inconsistent"
+        ):
+            pipeline_state._macos_filesystem(Path("/project"))
 
     def test_macos_probe_rejects_malformed_df_output(self):
         malformed = subprocess.CompletedProcess(
@@ -6096,6 +6192,41 @@ class PhaseOneReviewRegressionTest(unittest.TestCase):
         ):
             pipeline_state._macos_filesystem(Path("/project"))
         self.assertEqual(run.call_count, 1)
+
+    def test_macos_probe_rejects_failed_or_missing_platform_output(self):
+        valid_mount = subprocess.CompletedProcess(
+            args=(), returncode=0,
+            stdout=(
+                "Filesystem 512-blocks Used Available Capacity Mounted on\n"
+                "/dev/disk3s5 100 10 90 10% /System/Volumes/Data\n"
+            ),
+            stderr="",
+        )
+        failed_df = subprocess.CompletedProcess(
+            args=(), returncode=1, stdout="", stderr="df failed",
+        )
+        failed_diskutil = subprocess.CompletedProcess(
+            args=(), returncode=1, stdout=b"", stderr=b"diskutil failed",
+        )
+        missing_diskutil = subprocess.CompletedProcess(
+            args=(), returncode=0, stdout=b"", stderr=b"",
+        )
+        malformed_diskutil = subprocess.CompletedProcess(
+            args=(), returncode=0, stdout=b"not a plist", stderr=b"",
+        )
+        cases = (
+            ("failed df", (failed_df,), "mount-point probe"),
+            ("failed diskutil", (valid_mount, failed_diskutil), "metadata probe"),
+            ("missing diskutil", (valid_mount, missing_diskutil), "metadata probe"),
+            ("malformed diskutil", (valid_mount, malformed_diskutil), "valid property list"),
+        )
+        for label, results, message in cases:
+            with self.subTest(label=label), mock.patch.object(
+                pipeline_state, "_existing_path", return_value=Path("/Users/alice/project")
+            ), mock.patch.object(
+                pipeline_state.subprocess, "run", side_effect=results
+            ), self.assertRaisesRegex(pipeline_state.FilesystemSuitabilityError, message):
+                pipeline_state._macos_filesystem(Path("/project"))
 
     def test_gate_and_fixer_reservations_share_the_global_worker_ceiling(self):
         helper = PhaseGateAndRemediationTest()

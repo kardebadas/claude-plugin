@@ -24,12 +24,15 @@ the global limit and detected runtime capacity permit; otherwise queue them.
 The tracker records the complete required reviewer set while capacity controls
 which queued assignments are active. With `worker_limit=1`, run one assignment,
 publish its immutable report through the controller's `record_review_report`
-transition, release that slot, and run the next assignment named by the derived
-action; gate evaluation still requires both independent reports. Each
-checkpoint is digest-bound in `progress.md`, so resume validates completed
-reports and continues at the first unreported assignment rather than restarting
-the pair. Apply the same queue lifecycle to re-review. Do not evaluate a
-partially reported queue or accept reports out of assignment order.
+transition, release that slot, call `start_review_assignment` to persist the
+next start, and only then dispatch it; gate evaluation still requires both
+independent reports. Opening a gate persists every initial start allowed by the
+available capacity. Each assignment remains explicitly undispatched, active,
+or digest-bound reported, so a report from one reviewer never makes another
+active reviewer eligible for duplicate dispatch. Concurrent reports may finish
+out of assignment order and are bound to their recorded assignment. Apply the
+same queue lifecycle to re-review and do not evaluate a partially dispatched
+required set.
 Free capacity never authorizes an early, duplicate, third, ordinary-phase, or
 task reviewer.
 
@@ -222,8 +225,9 @@ confirmed Critical or Important findings remain:
    require strict post-review fix commits and a newer integrated HEAD. A
    machine-authorized all-artifact round records commits as `N/A` and retains
    the unchanged reviewed target tip. Both paths revalidate the immutable fix
-   plan, release fixer ownership, and reserve the recorded reviewers using a
-   fresh controller-bound capacity observation inside the tracker lock.
+   plan, release fixer ownership, and persist the initial re-review starts that
+   fit a fresh controller-bound capacity observation inside the tracker lock.
+   Persist later queued starts with `start_review_assignment` before dispatch.
 7. Re-review the same gate. Check targeted findings, the fix diff, introduced
    regressions, and relevant integration consequences; then record exactly one
    `remaining-blockers` outcome and evaluate the gate.

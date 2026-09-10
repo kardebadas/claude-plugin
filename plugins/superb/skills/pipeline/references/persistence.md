@@ -85,11 +85,13 @@ On compaction, restart, interruption, or uncertainty:
 
 If a valid result and Git/evidence satisfy the contract, import it once. If an owner is still active consistently, preserve the attempt and wait or perform independent permitted work. A commit without its result/checkpoint is neither automatic completion nor grounds to repeat the task: inspect the recorded attempt, content, ancestry, and applicable tests, then reconstruct/import only independently validated evidence. Partial, conflicting, or unverifiable state remains blocked and reaches the user. Completed work is not rerun; unfinished work is not skipped.
 
-An active formal review is recovered the same way: validate every digest-bound
-checkpointed report in recorded assignment order, retain the complete required
-reviewer set, and derive the first unreported assignment. A completed report
-releases that reviewer's global worker slot; it is not discarded merely because
-the remaining assignment must run later. Do not infer a completed reviewer from
+An active formal review is recovered the same way: retain the complete required
+reviewer set and distinguish each assignment as undispatched, active, or
+digest-bound reported. Opening a gate persists the starts that fit available
+capacity; `start_review_assignment` persists each later queued start before
+dispatch. Reports may finish out of assignment order, replace only their own
+active marker, and release that reviewer's global worker slot. A report from an
+undispatched assignment is rejected. Do not infer a start or completion from
 conversation memory or a mutable uncheckpointed report.
 
 The master plan is the exact ordered authority for its phase-plan paths.
@@ -113,7 +115,7 @@ An unresolved or conflicting required choice blocks only dependent work: record 
 
 ## Supported platform contract
 
-The supported contract is cooperating processes on one host over a local filesystem with working OS-backed locks, hard links for no-clobber initial publication, and same-filesystem atomic replacement semantics. Linux and macOS use POSIX locking. On macOS, determine the containing mount with `stat -f %m` and obtain the filesystem type from `diskutil info -plist`; a file-type format token is not filesystem metadata. Linux is the native platform exercised by this rebuild; do not report macOS as natively tested without a macOS run. The Windows standard-library path is **Implemented; simulation-tested; native Windows verification pending** until a native Windows runner proves process contention, replacement, interruption/recovery, and lock release.
+The supported contract is cooperating processes on one host over a local filesystem with working OS-backed locks, hard links for no-clobber initial publication, and same-filesystem atomic replacement semantics. Linux and macOS use POSIX locking. On macOS, determine the containing mount from `/bin/df -P <path>`, then obtain and cross-check the filesystem type and mount point with `diskutil info -plist`; malformed or inconsistent metadata fails closed. Linux is the native platform exercised by this rebuild; do not report macOS as natively tested without a macOS run. The Windows standard-library path is **Implemented; simulation-tested; native Windows verification pending** until a native Windows runner proves process contention, replacement, interruption/recovery, and lock release.
 
 Network/distributed filesystems and cross-host synchronization are outside the guarantee. Do not claim the helper can recognize every unusual filesystem or provide universal crash/power-loss durability. Distinguish cooperative-writer exclusion, atomic visibility of a complete old or new tracker, process-interruption reconciliation, and durability across OS crash or power loss.
 

@@ -133,7 +133,8 @@ guarantees.
 Platform evidence for this rebuild is:
 
 - Linux: implemented and natively tested on a local ext4 filesystem.
-- macOS: filesystem metadata uses `stat -f %m` plus `diskutil info -plist`;
+- macOS: the containing mount comes from `df -P`, then filesystem metadata is
+  cross-checked with `diskutil info -plist`;
   implemented and simulation-tested, but native macOS verification was
   unavailable.
 - Windows: **Implemented; simulation-tested; native Windows verification

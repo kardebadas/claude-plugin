@@ -82,6 +82,14 @@ def open_review_gate(run_dir: Path, **kwargs):
         return _open_review_gate(run_dir, **kwargs)
 
 
+def start_review_assignment(run_dir: Path, **kwargs):
+    """Persist reviewer dispatch with an explicit controller capacity binding."""
+    with pipeline_state.bind_runtime_capacity_provider(
+        run_dir, lambda _run, tracker: tracker.worker_limit
+    ):
+        return pipeline_state.start_review_assignment(run_dir, **kwargs)
+
+
 def start_remediation_round(run_dir: Path, **kwargs):
     """Exercise fixer reservations with an explicit controller capacity binding."""
     with pipeline_state.bind_runtime_capacity_provider(
@@ -1874,6 +1882,81 @@ class SchedulerReadinessTest(unittest.TestCase):
                 )
             self.assertEqual((run_dir / "progress.md").read_bytes(), before)
 
+    def test_same_owner_source_tasks_require_staggered_reservations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = self.write_plan(
+                root,
+                (
+                    self.task("PS-01", batch="shared", order=1),
+                    self.task("PS-02", batch="shared", order=2),
+                ),
+            )
+            run_dir = self.initialize(root, plan, worker_limit=2)
+            before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaisesRegex(TransitionError, "same owner.*source"):
+                reserve_tasks(
+                    run_dir, plan,
+                    task_ids=("PS-01", "PS-02"),
+                    owners=("worker-1", "worker-1"),
+                    attempts=("attempt-1", "attempt-2"),
+                    capacity=2,
+                )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+            reserve_tasks(
+                run_dir, plan, task_ids=("PS-01",), owners=("worker-1",),
+                attempts=("attempt-1",), capacity=2,
+            )
+            (root / "ps-01.txt").write_text("first\n", encoding="utf-8")
+            self.git(root, "add", "ps-01.txt")
+            self.git(root, "commit", "-qm", "first task")
+            first_head = self.git(root, "rev-parse", "HEAD")
+            self.git(root, "branch", "-f", "target", first_head)
+            first_evidence = _verification_evidence(
+                root, first_head, "same-owner-first", purpose="task-test",
+                run_id="scheduler-test", subject="task/PS-01", attempt="attempt-1",
+                commands=("task-suite-PS-01",),
+            )
+            complete_task(
+                run_dir, task_id="PS-01", attempt="attempt-1", phase_plan=plan,
+                source_ref=first_head, commits=(first_head,), artifacts=(),
+                evidence=(first_evidence,), repo_dir=root,
+            )
+            first_integration = _verification_evidence(
+                root, first_head, "same-owner-first-integration",
+                purpose="task-integration", run_id="scheduler-test",
+                subject="task/PS-01", attempt="N/A", commands=("integration-check",),
+            )
+            record_task_integration(
+                run_dir, task_id="PS-01", integration_commit=first_head,
+                verification=(first_integration,), repo_dir=root,
+            )
+
+            reserve_tasks(
+                run_dir, plan, task_ids=("PS-02",), owners=("worker-1",),
+                attempts=("attempt-2",), capacity=2,
+            )
+            (root / "ps-02.txt").write_text("second\n", encoding="utf-8")
+            self.git(root, "add", "ps-02.txt")
+            self.git(root, "commit", "-qm", "second task")
+            second_head = self.git(root, "rev-parse", "HEAD")
+            self.git(root, "branch", "-f", "target", second_head)
+            second_evidence = _verification_evidence(
+                root, second_head, "same-owner-second", purpose="task-test",
+                run_id="scheduler-test", subject="task/PS-02", attempt="attempt-2",
+                commands=("task-suite-PS-02",),
+            )
+            completed = complete_task(
+                run_dir, task_id="PS-02", attempt="attempt-2", phase_plan=plan,
+                source_ref=second_head, commits=(second_head,), artifacts=(),
+                evidence=(second_evidence,), repo_dir=root,
+            )
+            self.assertEqual(
+                next(task.commits for task in completed.tasks if task.id == "PS-02"),
+                second_head,
+            )
+
     def test_identical_and_tree_child_scopes_conflict(self):
         cases = (
             ("file:shared.txt", "file:shared.txt"),
@@ -2765,7 +2848,27 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
                 pipeline_state.derive_next_action(run_dir, validate_run(run_dir)),
                 "dispatch-review-reviewer-b",
             )
-            self.assertEqual(pipeline_state._active_worker_ids(first), {"reviewer-b"})
+            self.assertEqual(pipeline_state._active_worker_ids(first), set())
+            before_early_result = (run_dir / "progress.md").read_bytes()
+            with self.assertRaisesRegex(TransitionError, "before its dispatch"):
+                pipeline_state.record_review_report(
+                    run_dir, gate_id="master", report_path=reports[1],
+                )
+            self.assertEqual(
+                (run_dir / "progress.md").read_bytes(), before_early_result,
+            )
+            started_b = start_review_assignment(
+                run_dir, gate_id="master", assignment="reviewer-b",
+            )
+            self.assertEqual(pipeline_state._active_worker_ids(started_b), {"reviewer-b"})
+            self.assertEqual(
+                dict(started_b.current_fields)["next_action"],
+                "await-review-master",
+            )
+            replayed_b = start_review_assignment(
+                run_dir, gate_id="master", assignment="reviewer-b",
+            )
+            self.assertEqual(replayed_b.revision, started_b.revision)
             first_report_bytes = reports[0].read_bytes()
             reports[0].write_bytes(first_report_bytes + b"changed after checkpoint\n")
             with self.assertRaises(TransitionError):
@@ -2782,6 +2885,67 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
             accepted = evaluate_and_close_review_gate(
                 run_dir, gate_id="master", findings_path=root / "findings.md",
                 report_paths=reports,
+                verification=(_verification_evidence(root, head, subject="phase/04"),),
+                rereview_paths=(),
+            )
+            self.assertEqual(
+                next(gate.state for gate in accepted.gates if gate.id == "master"),
+                "accepted",
+            )
+
+    def test_dispatched_unreported_reviewer_is_not_redispatched_after_peer_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, run_base, _, head = self.make_changed_master_run(root, worker_limit=3)
+            opened = open_review_gate(
+                run_dir, gate_id="master", base=run_base, head=head,
+                reviewer_assignments=("reviewer-a", "reviewer-b"), capacity=3,
+            )
+            self.assertEqual(
+                pipeline_state._active_worker_ids(opened),
+                {"reviewer-a", "reviewer-b"},
+            )
+            report_a = self.write_report(
+                root, "parallel-a.md", gate="master", assignment="reviewer-a",
+                base=run_base, head=head,
+            )
+            after_a = pipeline_state.record_review_report(
+                run_dir, gate_id="master", report_path=report_a,
+            )
+            self.assertEqual(pipeline_state._active_worker_ids(after_a), {"reviewer-b"})
+            self.assertEqual(
+                dict(after_a.current_fields)["next_action"],
+                "await-review-master",
+            )
+
+    def test_parallel_review_reports_may_finish_out_of_assignment_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, run_base, _, head = self.make_changed_master_run(root, worker_limit=3)
+            open_review_gate(
+                run_dir, gate_id="master", base=run_base, head=head,
+                reviewer_assignments=("reviewer-a", "reviewer-b"), capacity=3,
+            )
+            report_b = self.write_report(
+                root, "parallel-b-first.md", gate="master", assignment="reviewer-b",
+                base=run_base, head=head,
+            )
+            after_b = pipeline_state.record_review_report(
+                run_dir, gate_id="master", report_path=report_b,
+            )
+            self.assertEqual(pipeline_state._active_worker_ids(after_b), {"reviewer-a"})
+            self.assertEqual(dict(after_b.current_fields)["next_action"], "await-review-master")
+            report_a = self.write_report(
+                root, "parallel-a-second.md", gate="master", assignment="reviewer-a",
+                base=run_base, head=head,
+            )
+            completed = pipeline_state.record_review_report(
+                run_dir, gate_id="master", report_path=report_a,
+            )
+            self.assertEqual(dict(completed.current_fields)["next_action"], "evaluate-review-master")
+            accepted = evaluate_and_close_review_gate(
+                run_dir, gate_id="master", findings_path=root / "findings.md",
+                report_paths=(report_b, report_a),
                 verification=(_verification_evidence(root, head, subject="phase/04"),),
                 rereview_paths=(),
             )
@@ -2865,6 +3029,15 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
                 )
                 for suffix in ("a", "b")
             )
+            pipeline_state.record_review_report(
+                run_dir, gate_id="master", report_path=reports[0],
+            )
+            start_review_assignment(
+                run_dir, gate_id="master", assignment="reviewer-b",
+            )
+            pipeline_state.record_review_report(
+                run_dir, gate_id="master", report_path=reports[1],
+            )
             findings = root / "findings.md"
             findings.write_text(
                 "<!-- pipeline-findings/v2 -->\n"
@@ -2919,10 +3092,18 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
             first = pipeline_state.record_review_report(
                 run_dir, gate_id="master", report_path=rereviews[0],
             )
-            self.assertEqual(pipeline_state._active_worker_ids(first), {"reviewer-b"})
+            self.assertEqual(pipeline_state._active_worker_ids(first), set())
             self.assertEqual(
                 dict(first.current_fields)["next_action"],
                 "dispatch-review-reviewer-b",
+            )
+            started_b = start_review_assignment(
+                run_dir, gate_id="master", assignment="reviewer-b",
+            )
+            self.assertEqual(pipeline_state._active_worker_ids(started_b), {"reviewer-b"})
+            self.assertEqual(
+                dict(started_b.current_fields)["next_action"],
+                "await-re-review-master",
             )
             second = pipeline_state.record_review_report(
                 run_dir, gate_id="master", report_path=rereviews[1],
@@ -4883,6 +5064,42 @@ class PhaseAdvancementTest(unittest.TestCase):
                 pipeline_state.advance_phase(run_dir, completed_phase_id="01", next_phase_id="02")
             self.assertEqual((run_dir / "progress.md").read_bytes(), before)
             self.accept_phase_gate(root, run_dir, head)
+            (root / "post-remediation.txt").write_text("fixed\n", encoding="utf-8")
+            self.git(root, "add", "post-remediation.txt")
+            self.git(root, "commit", "-qm", "post-remediation correction")
+            fixed_head = self.git(root, "rev-parse", "HEAD")
+            self.git(root, "branch", "-f", "target", fixed_head)
+
+            def accepted_post_remediation_edge(tracker):
+                return dataclasses.replace(
+                    tracker,
+                    gates=tuple(
+                        dataclasses.replace(gate, head=fixed_head)
+                        if gate.id == "phase-01" else gate
+                        for gate in tracker.gates
+                    ),
+                )
+
+            locked_tracker_update(
+                run_dir, "fixture-accepted-post-remediation-edge",
+                accepted_post_remediation_edge, timeout_s=1.0,
+                refresh_next_action=True,
+            )
+            before_reverification = (run_dir / "progress.md").read_bytes()
+            with self.assertRaisesRegex(TransitionError, "post-remediation|verification"):
+                pipeline_state.advance_phase(
+                    run_dir, completed_phase_id="01", next_phase_id="02"
+                )
+            self.assertEqual(
+                (run_dir / "progress.md").read_bytes(), before_reverification,
+            )
+            record_phase_verification(
+                run_dir, phase_id="01", head=fixed_head, commands=("suite",),
+                evidence=(_verification_evidence(
+                    root, fixed_head, label="post-remediation-advance",
+                    run_id="advance-test", commands=("suite",),
+                ),),
+            )
             advanced = pipeline_state.advance_phase(run_dir, completed_phase_id="01", next_phase_id="02")
             self.assertEqual((dict(advanced.current_fields)["phase"], dict(advanced.current_fields)["next_action"]), ("02", "P2-A"))
             accepted = (run_dir / "progress.md").read_bytes()
@@ -5450,10 +5667,10 @@ class PhaseOneReviewRegressionTest(unittest.TestCase):
                     run_dir, task_id="PS-01", owner="worker-a", attempt="attempt-1",
                 )
                 second = pipeline_state.start_task(
-                    run_dir, task_id="PS-02", owner="worker-a", attempt="attempt-2",
+                    run_dir, task_id="PS-02", owner="worker-b", attempt="attempt-2",
                 )
             self.assertEqual(pipeline_state._active_worker_ids(first), {"worker-a"})
-            self.assertEqual(pipeline_state._active_worker_ids(second), {"worker-a"})
+            self.assertEqual(pipeline_state._active_worker_ids(second), {"worker-a", "worker-b"})
 
     def test_direct_blocked_resume_requires_capacity_but_exact_replay_does_not(self):
         helper = TaskTransitionTest()
@@ -5833,9 +6050,14 @@ class PhaseOneReviewRegressionTest(unittest.TestCase):
                 self.assertEqual((info.classification, info.fs_type), ("supported-local", fs_type))
 
     def test_macos_probe_reads_filesystem_metadata_not_stat_file_type(self):
-        """The macOS probe must parse disk metadata rather than stat's %T file kind."""
+        """The macOS probe resolves the containing mount instead of using stat mtime."""
         mount = subprocess.CompletedProcess(
-            args=(), returncode=0, stdout="/Volumes/Data\n", stderr=""
+            args=(), returncode=0,
+            stdout=(
+                "Filesystem 512-blocks Used Available Capacity Mounted on\n"
+                "/dev/disk3s1 100 10 90 10% /Volumes/Data\n"
+            ),
+            stderr="",
         )
         disk = subprocess.CompletedProcess(
             args=(), returncode=0,
@@ -5855,8 +6077,25 @@ class PhaseOneReviewRegressionTest(unittest.TestCase):
         self.assertEqual(fs_type, "apfs")
         self.assertRegex(fingerprint, r"^[0-9a-f]{64}$")
         self.assertEqual(run.call_count, 2)
-        self.assertEqual(run.call_args_list[0].args[0][:3], ("/usr/bin/stat", "-f", "%m"))
+        self.assertEqual(
+            run.call_args_list[0].args[0],
+            ("/bin/df", "-P", "/Volumes/Data/project"),
+        )
         self.assertEqual(run.call_args_list[1].args[0], ("/usr/sbin/diskutil", "info", "-plist", "/Volumes/Data"))
+
+    def test_macos_probe_rejects_malformed_df_output(self):
+        malformed = subprocess.CompletedProcess(
+            args=(), returncode=0, stdout="Filesystem only-a-header\n", stderr="",
+        )
+        with mock.patch.object(
+            pipeline_state, "_existing_path", return_value=Path("/Volumes/Data/project")
+        ), mock.patch.object(
+            pipeline_state.subprocess, "run", return_value=malformed,
+        ) as run, self.assertRaisesRegex(
+            pipeline_state.FilesystemSuitabilityError, "mount-point probe"
+        ):
+            pipeline_state._macos_filesystem(Path("/project"))
+        self.assertEqual(run.call_count, 1)
 
     def test_gate_and_fixer_reservations_share_the_global_worker_ceiling(self):
         helper = PhaseGateAndRemediationTest()

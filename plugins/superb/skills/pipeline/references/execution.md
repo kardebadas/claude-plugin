@@ -57,9 +57,12 @@ controller serializes the reservation through the state helper and revalidates:
 Several candidates that were individually ready are not jointly authorized.
 If another reservation consumes capacity, a question opens, or ownership
 changes, queue the stale candidate and calculate readiness again. The global
-limit counts unique active owners across implementation, review, and fix roles;
-the same compatible executor may own multiple ordered tasks in one batch
-without creating another worker. Workers must not spawn untracked helpers.
+limit counts unique active owners across implementation, review, and fix roles.
+The same compatible executor may retain several ordered tasks without creating
+another worker, but source tasks on one executor branch are started one at a
+time: checkpoint and integrate the earlier source task before reserving the
+next so each task receives a truthful fresh Git baseline. Artifact-only tasks
+do not invent this source restriction. Workers must not spawn untracked helpers.
 
 ## Persist assignment before dispatch
 
@@ -225,8 +228,10 @@ the helper-derived `next_action` in the same locked update; that summary never
 overrides the underlying facts. Completing the last task does not advance the
 phase. After phase verification and any required phase gate have satisfied the
 approved predicates, the controller uses the explicit `advance_phase` helper
-transition. Advancing the last phase routes to the mandatory master gate, not
-project completion.
+transition. That transition independently requires phase verification at the
+accepted required-gate HEAD; an ancestor-only pre-remediation result cannot
+advance the phase. Advancing the last phase routes to the mandatory master
+gate, not project completion.
 
 Do not dispatch formal reviewers at task boundaries. A `final-only` phase
 continues after mechanical acceptance with no phase reviewer. A phase whose

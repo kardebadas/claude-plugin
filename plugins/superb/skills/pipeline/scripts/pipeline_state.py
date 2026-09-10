@@ -943,11 +943,13 @@ def _linux_filesystem(path: Path) -> tuple[str, str]:
 def _macos_filesystem(path: Path) -> tuple[str, str]:
     resolved = _existing_path(path)
     mount_result = subprocess.run(
-        ("/usr/bin/stat", "-f", "%m", str(resolved)),
+        ("/bin/df", "-P", str(resolved)),
         check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    mount_point = mount_result.stdout.strip()
-    if mount_result.returncode != 0 or not mount_point:
+    lines = tuple(line for line in mount_result.stdout.splitlines() if line.strip())
+    fields = lines[-1].split(maxsplit=5) if len(lines) >= 2 else ()
+    mount_point = fields[5] if len(fields) == 6 else ""
+    if mount_result.returncode != 0 or not mount_point or not Path(mount_point).is_absolute():
         raise FilesystemSuitabilityError(
             f"macOS mount-point probe failed: {mount_result.stderr.strip()}"
         )
@@ -2033,12 +2035,29 @@ def _dependency_ready(run_dir: Path, tracker: Tracker, task: TaskRecord) -> bool
     ) and _git(repo_dir, "merge-base", "--is-ancestor", task.integration, tracker.target_branch)
 
 
+_REVIEW_QUEUE_MARKER = "dispatch-v2"
+_ACTIVE_REVIEW_PREFIX = "active:"
+
+
+def _raw_review_queue(value: str) -> tuple[str, ...]:
+    items = _csv(value)
+    if not items or items[0] != _REVIEW_QUEUE_MARKER:
+        raise TransitionError(
+            "active review lacks persisted dispatch state; reconcile it before dispatch"
+        )
+    return items[1:]
+
+
+def _review_queue_value(entries: tuple[str, ...]) -> str:
+    return ",".join((_REVIEW_QUEUE_MARKER, *entries))
+
+
 def _active_worker_ids(tracker: Tracker) -> set[str]:
     workers = {task.owner for task in tracker.tasks if task.state == "[~]" and task.owner != "-"}
     for gate in tracker.gates:
         if gate.state in {"in_progress", "re_reviewing"}:
             if gate.state == "in_progress":
-                completed = len(_csv(gate.reports))
+                value = gate.reports
             else:
                 active_round = next(
                     (
@@ -2047,9 +2066,21 @@ def _active_worker_ids(tracker: Tracker) -> set[str]:
                     ),
                     None,
                 )
-                completed = 0 if active_round is None else len(_csv(active_round.re_review))
-            available = max(0, tracker.worker_limit - len(workers))
-            workers.update(_csv(gate.assignments)[completed:completed + available])
+                if active_round is None:
+                    continue
+                value = active_round.re_review
+            try:
+                entries = _raw_review_queue(value)
+            except TransitionError:
+                completed = len(_csv(value))
+                available = max(0, tracker.worker_limit - len(workers))
+                workers.update(_csv(gate.assignments)[completed:completed + available])
+            else:
+                workers.update(
+                    entry.removeprefix(_ACTIVE_REVIEW_PREFIX)
+                    for entry in entries
+                    if entry.startswith(_ACTIVE_REVIEW_PREFIX)
+                )
     for row in tracker.remediation:
         if row.state == "fixing":
             workers.update(_csv(row.fixers))
@@ -2106,6 +2137,13 @@ def _validate_review_queue_capacity(
         raise TransitionError("reviewer assignment is not a valid identifier")
     if len(_active_worker_ids(tracker)) >= min(tracker.worker_limit, capacity):
         raise TransitionError("global worker limit or runtime capacity is exhausted")
+
+
+def _review_slots_available(tracker: Tracker, capacity: int) -> int:
+    return max(
+        0,
+        min(tracker.worker_limit, capacity) - len(_active_worker_ids(tracker)),
+    )
 
 
 def _with_next_action(tracker: Tracker, action: str) -> Tracker:
@@ -2184,7 +2222,7 @@ def _gate_next_action(tracker: Tracker, gate: GateRecord) -> str:
     if gate.state in {"in_progress", "re_reviewing"}:
         assignments = _csv(gate.assignments)
         if gate.state == "in_progress":
-            completed = len(_csv(gate.reports))
+            entries = _raw_review_queue(gate.reports)
             waiting = f"await-review-{gate.id}"
             ready = f"evaluate-review-{gate.id}"
         else:
@@ -2195,13 +2233,15 @@ def _gate_next_action(tracker: Tracker, gate: GateRecord) -> str:
                 ),
                 None,
             )
-            completed = 0 if active_round is None else len(_csv(active_round.re_review))
+            if active_round is None:
+                raise TransitionError("re-review gate has no active remediation round")
+            entries = _raw_review_queue(active_round.re_review)
             waiting = f"await-re-review-{gate.id}"
             ready = f"evaluate-re-review-{gate.id}"
-        if completed == 0:
+        if any(entry.startswith(_ACTIVE_REVIEW_PREFIX) for entry in entries):
             return waiting
-        if completed < len(assignments):
-            return f"dispatch-review-{assignments[completed]}"
+        if len(entries) < len(assignments):
+            return f"dispatch-review-{assignments[len(entries)]}"
         return ready
     if gate.state == "accepted":
         if gate.type == "master":
@@ -2357,6 +2397,41 @@ def next_eligible_actions(
     return tuple(selected)
 
 
+def _validate_source_owner_lanes(
+    run_dir: Path,
+    tracker: Tracker,
+    assignments: tuple[tuple[PlannedTask, str], ...],
+) -> None:
+    source_assignments = tuple(
+        (definition, owner)
+        for definition, owner in assignments
+        if definition.kind == "source"
+    )
+    source_owners = tuple(owner for _, owner in source_assignments)
+    if len(source_owners) != len(set(source_owners)):
+        raise TransitionError(
+            "same owner source tasks require staggered starts and integration checkpoints"
+        )
+    selected_ids = {definition.id for definition, _ in source_assignments}
+    authoritative = _planned_tasks(run_dir, tracker)
+    if any(
+        record.owner == owner
+        and record.id not in selected_ids
+        and planned is not None
+        and planned.kind == "source"
+        and (
+            record.state in {"[~]", "[?]"}
+            or (record.state == "[x]" and record.integration == "-")
+        )
+        for _, owner in source_assignments
+        for record in tracker.tasks
+        for planned in (authoritative.get(record.id),)
+    ):
+        raise TransitionError(
+            "same owner source tasks require the prior source task to be integrated"
+        )
+
+
 def reserve_tasks(
     run_dir: Path,
     phase_plan: Path,
@@ -2387,6 +2462,9 @@ def reserve_tasks(
             selected = tuple(by_id[task_id] for task_id in task_ids)
         except KeyError as exc:
             raise TransitionError(f"unknown task in reservation: {exc.args[0]}") from exc
+        _validate_source_owner_lanes(
+            Path(run_dir), tracker, tuple(zip(selected, owners)),
+        )
         if any(records[item.id].state != "[ ]" or records[item.id].question != "-" for item in selected):
             raise TransitionError("every reserved task must still be unstarted and unblocked")
         if any(
@@ -2454,6 +2532,7 @@ def start_task(run_dir: Path, *, task_id: str, owner: str, attempt: str) -> Trac
         if task.state != "[ ]":
             raise TransitionError("start_task handles first start only")
         definition = _validate_start_guards(Path(run_dir), tracker, task_id)
+        _validate_source_owner_lanes(Path(run_dir), tracker, ((definition, owner),))
         _validate_worker_capacity(
             tracker,
             (owner,),
@@ -2531,6 +2610,9 @@ def resume_task(
             raise TransitionError("new attempt must be distinct and unused")
         _validate_decision(Path(run_dir), tracker, task, decision_ref)
         definition = _validate_start_guards(Path(run_dir), tracker, task_id)
+        _validate_source_owner_lanes(
+            Path(run_dir), tracker, ((definition, new_owner),),
+        )
         _validate_worker_capacity(
             tracker,
             (new_owner,),
@@ -3144,10 +3226,12 @@ def advance_phase(
                 raise TransitionError("required phase review has not been accepted")
             if (
                 gate.head == "-"
-                or not _git(repo_dir, "merge-base", "--is-ancestor", verification_head, gate.head)
+                or verification_head != gate.head
                 or not _is_target_tip(repo_dir, tracker.target_branch, gate.head)
             ):
-                raise TransitionError("required phase review does not cover the verified phase state")
+                raise TransitionError(
+                    "required phase needs post-remediation verification for the accepted gate HEAD"
+                )
         elif not _is_target_tip(repo_dir, tracker.target_branch, verification_head):
             raise TransitionError("final-only phase verification is no longer the target branch tip")
 
@@ -3259,10 +3343,11 @@ def open_review_gate(
                 raise TransitionError(
                     "master reviewers must be independent from every task implementation owner"
                 )
-        _validate_review_queue_capacity(
-            tracker, reviewer_assignments,
-            _detected_runtime_capacity(Path(run_dir), tracker),
-        )
+        detected = _detected_runtime_capacity(Path(run_dir), tracker)
+        _validate_review_queue_capacity(tracker, reviewer_assignments, detected)
+        initial_assignments = reviewer_assignments[:_review_slots_available(tracker, detected)]
+        if not initial_assignments:
+            raise TransitionError("no reviewer can be reserved within current worker capacity")
         repo_dir = _project_root(Path(run_dir))
         if not _git(repo_dir, "merge-base", "--is-ancestor", base, head) or not _is_target_tip(
             repo_dir, tracker.target_branch, head
@@ -3270,7 +3355,17 @@ def open_review_gate(
             raise TransitionError("review range is not an integrated target-branch range")
         return _replace_gate(
             tracker,
-            replace(gate, state="in_progress", base=base, head=head, assignments=",".join(reviewer_assignments)),
+            replace(
+                gate,
+                state="in_progress",
+                base=base,
+                head=head,
+                assignments=",".join(reviewer_assignments),
+                reports=_review_queue_value(tuple(
+                    f"{_ACTIVE_REVIEW_PREFIX}{assignment}"
+                    for assignment in initial_assignments
+                )),
+            ),
         )
 
     return locked_tracker_update(
@@ -3914,7 +4009,13 @@ def resolve_gate_questions(
                     )
                 unmatched.remove(matches[0])
             return _replace_gate(
-                tracker, replace(gate, state="in_progress", questions="-"),
+                tracker,
+                replace(
+                    gate,
+                    state="in_progress",
+                    reports=_review_queue_value(_csv(gate.reports)),
+                    questions="-",
+                ),
             )
         if questions != set(decision_refs):
             raise TransitionError("decision references do not exactly match the current gate questions")
@@ -4194,9 +4295,26 @@ def record_remediation_fixes(
             remediation=tuple(updated_row if item is row else item for item in tracker.remediation),
         )
         assignments = _csv(gate.assignments)
-        _validate_review_queue_capacity(
-            interim, assignments,
-            _detected_runtime_capacity(Path(run_dir), interim),
+        detected = _detected_runtime_capacity(Path(run_dir), interim)
+        _validate_review_queue_capacity(interim, assignments, detected)
+        initial_assignments = assignments[:_review_slots_available(interim, detected)]
+        if not initial_assignments:
+            raise TransitionError("no re-reviewer can be reserved within current worker capacity")
+        updated_row = replace(
+            updated_row,
+            re_review=_review_queue_value(tuple(
+                f"{_ACTIVE_REVIEW_PREFIX}{assignment}"
+                for assignment in initial_assignments
+            )),
+        )
+        interim = replace(
+            interim,
+            remediation=tuple(
+                updated_row
+                if item.gate == gate_id and item.round_number == round_number
+                else item
+                for item in interim.remediation
+            ),
         )
         return _replace_gate(interim, replace(gate, state="re_reviewing"))
 
@@ -4459,7 +4577,7 @@ def _review_queue_state(
     gate: GateRecord,
 ) -> tuple[tuple[str, ...], RemediationRecord | None]:
     if gate.state == "in_progress":
-        return _csv(gate.reports), None
+        return _raw_review_queue(gate.reports), None
     if gate.state == "re_reviewing":
         row = next(
             (
@@ -4470,7 +4588,7 @@ def _review_queue_state(
         )
         if row is None:
             raise TransitionError("re-review gate has no active remediation round")
-        return _csv(row.re_review), row
+        return _raw_review_queue(row.re_review), row
     raise TransitionError("review reports can be queued only for an active review")
 
 
@@ -4532,12 +4650,61 @@ def _validate_recorded_review_queue(
         raise TransitionError("review queue contains more reports than assignments")
     expected_base, expected_head, rereview = _queued_report_expected_edge(gate, row)
     for index, reference in enumerate(references):
-        _validate_queued_report(
-            run_dir, gate, reference,
-            expected_assignment=assignments[index],
-            expected_base=expected_base, expected_head=expected_head,
-            rereview=rereview,
+        expected_assignment = assignments[index]
+        if reference.startswith(_ACTIVE_REVIEW_PREFIX):
+            if reference != f"{_ACTIVE_REVIEW_PREFIX}{expected_assignment}":
+                raise TransitionError("active reviewer marker does not match its assignment")
+        else:
+            _validate_queued_report(
+                run_dir, gate, reference,
+                expected_assignment=expected_assignment,
+                expected_base=expected_base, expected_head=expected_head,
+                rereview=rereview,
+            )
+
+
+def start_review_assignment(
+    run_dir: Path,
+    *,
+    gate_id: str,
+    assignment: str,
+) -> Tracker:
+    """Persist one queued reviewer start before the controller dispatches it."""
+    if not _TOKEN.fullmatch(assignment):
+        raise TransitionError("reviewer assignment must be a valid identifier")
+
+    def transition(tracker: Tracker) -> Tracker:
+        gate = _gate_record(tracker, gate_id)
+        entries, row = _review_queue_state(tracker, gate)
+        assignments = _csv(gate.assignments)
+        _validate_recorded_review_queue(Path(run_dir), tracker, gate)
+        try:
+            assignment_index = assignments.index(assignment)
+        except ValueError as exc:
+            raise TransitionError("reviewer is not assigned to this gate") from exc
+        if assignment_index < len(entries):
+            raise _AlreadyApplied(tracker)
+        if assignment_index != len(entries):
+            raise TransitionError("reviewers must be started in the persisted queue order")
+        detected = _detected_runtime_capacity(Path(run_dir), tracker)
+        _validate_worker_capacity(tracker, (assignment,), detected)
+        updated_entries = (*entries, f"{_ACTIVE_REVIEW_PREFIX}{assignment}")
+        value = _review_queue_value(updated_entries)
+        if row is None:
+            return _replace_gate(tracker, replace(gate, reports=value))
+        updated_row = replace(row, re_review=value)
+        return replace(
+            tracker,
+            remediation=tuple(updated_row if item is row else item for item in tracker.remediation),
         )
+
+    try:
+        return locked_tracker_update(
+            Path(run_dir), f"start-review-{gate_id}-{assignment}", transition,
+            timeout_s=5.0, refresh_next_action=True,
+        )
+    except _AlreadyApplied as applied:
+        return applied.tracker
 
 
 def record_review_report(
@@ -4546,7 +4713,7 @@ def record_review_report(
     gate_id: str,
     report_path: Path,
 ) -> Tracker:
-    """Durably checkpoint one queued reviewer report in assignment order."""
+    """Durably checkpoint one result from a reviewer whose start was persisted."""
     report_path = Path(report_path).resolve()
     try:
         initial_bytes = report_path.read_bytes()
@@ -4568,18 +4735,29 @@ def record_review_report(
         references, row = _review_queue_state(tracker, gate)
         assignments = _csv(gate.assignments)
         identity = _digest_bound_reference(Path(run_dir), report_path)
-        if identity in references:
-            raise _AlreadyApplied(tracker)
-        if len(references) >= len(assignments):
-            raise TransitionError("all required reviewer reports are already checkpointed")
         expected_base, expected_head, rereview = _queued_report_expected_edge(gate, row)
+        parsed = _parse_review_report(report_path)
+        assignment = parsed["assignment"]
+        try:
+            index = assignments.index(assignment)
+        except ValueError as exc:
+            raise TransitionError("review report names an unassigned reviewer") from exc
+        if index >= len(references):
+            raise TransitionError("review result arrived before its dispatch was persisted")
+        current = references[index]
+        if current == identity:
+            raise _AlreadyApplied(tracker)
+        if current != f"{_ACTIVE_REVIEW_PREFIX}{assignment}":
+            raise TransitionError("review assignment already has a different result")
         _validate_queued_report(
             Path(run_dir), gate, identity,
-            expected_assignment=assignments[len(references)],
+            expected_assignment=assignment,
             expected_base=expected_base, expected_head=expected_head,
             rereview=rereview,
         )
-        updated_references = ",".join((*references, identity))
+        updated = list(references)
+        updated[index] = identity
+        updated_references = _review_queue_value(tuple(updated))
         if row is None:
             return _replace_gate(tracker, replace(gate, reports=updated_references))
         updated_row = replace(row, re_review=updated_references)
@@ -4673,17 +4851,29 @@ def _validated_review_lineage(
 ) -> tuple[tuple[dict[str, str], ...], tuple[dict[str, str], ...]]:
     resolved_input = tuple(Path(path).resolve() for path in report_paths)
     if active_round is None:
+        queued, _ = _review_queue_state(tracker, gate)
+        if len(queued) != len(_csv(gate.assignments)):
+            raise TransitionError("every required reviewer must be dispatched before gate evaluation")
         initial_reports, initial_head = _review_report_set(
             resolved_input, gate=gate, expected_base=gate.base,
         )
         if initial_head != gate.head:
             raise TransitionError("initial reports do not match the gate's opened HEAD")
-        if gate.reports != "-":
-            supplied = tuple(
-                _digest_bound_reference(run_dir, path) for path in resolved_input
-            )
-            if supplied != _csv(gate.reports):
-                raise TransitionError("evaluation reports differ from the checkpointed review queue")
+        supplied = tuple(
+            _digest_bound_reference(run_dir, path) for path in resolved_input
+        )
+        supplied_by_assignment = {
+            report["assignment"]: identity
+            for report, identity in zip(initial_reports, supplied)
+        }
+        if any(
+            queued_item not in {
+                supplied_by_assignment[assignment],
+                f"{_ACTIVE_REVIEW_PREFIX}{assignment}",
+            }
+            for queued_item, assignment in zip(queued, _csv(gate.assignments))
+        ):
+            raise TransitionError("evaluation reports differ from the checkpointed review queue")
         return initial_reports, ()
 
     persisted_paths = tuple(
@@ -5056,21 +5246,33 @@ def evaluate_and_close_review_gate(
             if not rereviews:
                 if not rereview_paths:
                     raise TransitionError("an active remediation round requires re-review evidence")
-            if active_round.re_review != "-":
-                supplied = tuple(
-                    _digest_bound_reference(Path(run_dir), Path(path).resolve())
-                    for path in rereview_paths
-                )
-                if supplied != _csv(active_round.re_review):
-                    raise TransitionError(
-                        "evaluation re-reviews differ from the checkpointed review queue"
-                    )
             rereviews, reviewed_head = _review_report_set(
                 tuple(Path(path).resolve() for path in rereview_paths),
                 gate=gate,
                 expected_base=gate.head,
                 rereview=True,
             )
+            if active_round.re_review != "-":
+                supplied = tuple(
+                    _digest_bound_reference(Path(run_dir), Path(path).resolve())
+                    for path in rereview_paths
+                )
+                supplied_by_assignment = {
+                    report["assignment"]: identity
+                    for report, identity in zip(rereviews, supplied)
+                }
+                queued = _raw_review_queue(active_round.re_review)
+                assignments = _csv(gate.assignments)
+                if len(queued) != len(assignments) or any(
+                    queued_item not in {
+                        supplied_by_assignment[assignment],
+                        f"{_ACTIVE_REVIEW_PREFIX}{assignment}",
+                    }
+                    for queued_item, assignment in zip(queued, assignments)
+                ):
+                    raise TransitionError(
+                        "evaluation re-reviews differ from the checkpointed review queue"
+                    )
             if not _git(repo_dir, "merge-base", "--is-ancestor", gate.head, reviewed_head) or not _git(repo_dir, "merge-base", "--is-ancestor", reviewed_head, tracker.target_branch):
                 raise TransitionError("re-review code state is not integrated after the prior gate HEAD")
         if gate.type in {"phase", "master"} and not _is_target_tip(

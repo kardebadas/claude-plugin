@@ -4109,6 +4109,26 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
                 "accepted",
             )
 
+    def test_resolving_only_a_minor_does_not_count_as_blocker_progress(self):
+        rows = (
+            ("F-BLOCK", "phase-01", "Important", "Open", "-", "-", "-", "-"),
+            ("F-MINOR", "phase-01", "Minor", "Resolved", "Fixed", "proof", "a" * 40, "review"),
+        )
+        self.assertFalse(
+            pipeline_state._blocking_remediation_progress(
+                rows, {"F-BLOCK", "F-MINOR"}, {"F-BLOCK"},
+            )
+        )
+        resolved_rows = (
+            ("F-BLOCK", "phase-01", "Important", "Resolved", "Fixed", "proof", "b" * 40, "review"),
+            rows[1],
+        )
+        self.assertTrue(
+            pipeline_state._blocking_remediation_progress(
+                resolved_rows, {"F-BLOCK", "F-MINOR"}, set(),
+            )
+        )
+
     def test_gate_questions_clear_only_from_applicable_resolved_decisions(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

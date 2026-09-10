@@ -4784,6 +4784,18 @@ def _validate_artifact_remediation_disposition(
         )
 
 
+def _blocking_remediation_progress(
+    rows: tuple[tuple[str, ...], ...],
+    targeted: set[str],
+    open_blockers: set[str],
+) -> bool:
+    blocking_targets = {
+        row[0] for row in rows
+        if row[0] in targeted and row[2] in {"Critical", "Important"}
+    }
+    return bool(blocking_targets - open_blockers)
+
+
 def evaluate_and_close_review_gate(
     run_dir: Path,
     *,
@@ -5016,7 +5028,7 @@ def evaluate_and_close_review_gate(
         if active_round is not None:
             targeted = set(active_round.findings.split(","))
             open_blocker_ids = {row[0] for row in blockers}
-            progress = bool(targeted - open_blocker_ids)
+            progress = _blocking_remediation_progress(rows, targeted, open_blocker_ids)
             previous = next(
                 (
                     row

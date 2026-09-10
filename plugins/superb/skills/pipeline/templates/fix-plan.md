@@ -1,39 +1,60 @@
-<!-- Copy to <run-dir>/agent-output/p<phase>-fixplan-r<round>.md and fill in.
-     Written BEFORE any fix agent is dispatched, and named on the round in
-     progress.md. Much smaller than the implementation plan: ordinary fixes do
-     not re-enter brainstorming or the master plan. What it exists for is that
-     remediation is a plan someone can check, not a sequence of reactions to
-     whichever finding was read last. -->
+# Pipeline v2 — Gate Fix Plan
 
-# Phase <id> — fix plan, round <r>
+Complete this plan only after every required review report has returned and the
+controller has validated and consolidated the findings. Once its identity and
+scope are recorded in `progress.md`, this plan is immutable for the round.
 
-**Findings in scope:** <F-IDs, one per fix below; every blocking F-ID this
-round targets and nothing else>
-**Out of scope, and why:** <F-IDs deferred as Minor, or ruled false positive
-with the user's answer; or "none">
+## Scope
 
-## Fixes
+| Field | Value |
+| --- | --- |
+| Gate | <gate-id> |
+| Round | <round-number> |
+| Prior reviewed HEAD | <full-commit> |
+| Targeted blocking findings | <Critical-and-Important-IDs> |
+| Included Minor dispositions | <IDs-and-authority-or-none> |
+| Applicable decisions | <decision-refs-or-none> |
+| Fix-plan path | <run-relative-path> |
 
-| # | F-IDs | Root cause (or "unknown — diagnosis first") | Files / components | Depends on | Verified by |
-|---|-------|---------------------------------------------|--------------------|------------|-------------|
-| 1 | F-001, F-004 | <one line> | `src/x.php`, `src/y.php` | — | `<test command>` |
-| 2 | F-002 | <one line> | `src/z.php` | fix 1 | `<test command>` |
+The targeted IDs must equal the gate's current open Critical and Important
+findings. An explicitly included Minor does not manufacture blocker progress.
+If an unanswered choice or conflicting requirement prevents a fix definition,
+record it and ask the user before recording or dispatching this round.
 
-One row per **fix agent**, not per finding: related findings in one file cluster
-are one row. Five findings across two clusters are two rows, not five.
+## Machine-readable remedy authority
 
-## Parallelism
+Include this narrow table whenever any targeted finding is artifact-only. Its
+rows exactly match the ordered targeted finding set; workers cannot reclassify
+them.
 
-<Which rows may run concurrently, and which must not because they touch the
-same files or one depends on the other. "All sequential" is a valid answer.>
+<!-- pipeline-remediation-scope/v2 -->
+| Finding | Kind | Artifacts |
+| --- | --- | --- |
+| <finding-id> | <source-or-artifact> | <none-or-JSON-array-of-exact-repository-relative-paths> |
 
-## Tests required
+`source` uses exactly `none`. `artifact` uses a nonempty JSON string array of
+unique exact paths.
 
-- New or changed tests: <list, or "none — the existing covering tests fail on
-  these findings today", which must be true and checked>
-- Command that must be green before RE_REVIEW: `<command>`
+## Compatible fix batches
 
-## How RE_REVIEW will check this
+| Batch | Finding IDs | Objective and approved behavior | Files / typed write scopes | Depends on | Focused tests and evidence |
+| --- | --- | --- | --- | --- | --- |
+| <batch-id> | <finding-ids> | <smallest approved fix> | <file:/tree: scopes> | <batch-ids-or-none> | <commands-and-output-paths> |
 
-<The fix diff's file clusters, which is what sizes the re-review as `C=<n>`,
-plus anything a reviewer should look at for regressions between fixes.>
+Group related findings that share context and files. Independent, disjoint
+batches may run concurrently within the global worker limit; dependent or
+overlapping work is sequential. A finding is not automatically a fixer
+assignment. Do not add optional changes outside the recorded scope.
+
+## Integrated verification and re-review
+
+- Integration target: `<target-branch>`
+- Required phase verification command(s): `<commands>`
+- Evidence applicability requirements: `<code/tests/fixtures/config/dependencies/environment>`
+- Recorded reviewer assignments reused for the same gate: `<assignments>`
+- Re-review focus: `<targeted-findings, fix-diff, regressions, integration-consequences>`
+
+The controller persists the round and active fixers before dispatch. After the
+batch is committed, integrated, and verified, it records strict fix provenance,
+releases fixers, and reserves the existing gate reviewers. The re-review—not
+this plan—records the round outcome and remaining blocker IDs.

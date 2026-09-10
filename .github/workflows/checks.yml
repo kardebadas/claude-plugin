@@ -12,28 +12,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: ./tools/check-plugin.sh
-      # `--run` is a second mode with arms of its own, and the no-argument
-      # invocation above never enters it. Before this line the only thing that
-      # ever ran it was the mutant harness's own baseline, so a break in the
-      # mode would have surfaced as a harness abort rather than as itself.
-      - run: ./tools/check-plugin.sh --run tools/fixtures/run-ok
-      # The two run states run-ok cannot hold: a phase implemented and
-      # unreviewed, and a phase whose boxes are all [x] while its ledger
-      # still holds an open blocking finding. The arms that read them have
-      # no other conforming input, so without these lines their happy
-      # paths run only inside the mutant harness's own baseline.
-      - run: ./tools/check-plugin.sh --run tools/fixtures/run-open-rv
-      - run: ./tools/check-plugin.sh --run tools/fixtures/run-fixloop
-      # A trailing RVJ that raised a blocking finding and carries its own
-      # appended fix round -- the gate-ownership arm's only conforming input.
-      - run: ./tools/check-plugin.sh --run tools/fixtures/run-rvj-fix
-      # Two concurrent lanes at different legal positions, over the
-      # canonical diamond -- the only conforming input every per-lane arm has.
-      - run: ./tools/check-plugin.sh --run tools/fixtures/run-lanes
-      # The complete leading-RVJ path: blocking finding -> fix plan -> fix
-      # -> re-review under the SAME leading RVJ -> CLOSE -> Lane B retired ->
-      # Lane A enters the joining phase's IMPLEMENT, with that phase NOT PASS.
-      - run: ./tools/check-plugin.sh --run tools/fixtures/run-leading-rvj-fix
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m unittest discover -s plugins/superb/skills/pipeline/tests -v
       - run: ./tools/check-plugin-mutants.sh
 
   craft-brief:

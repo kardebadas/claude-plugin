@@ -10,9 +10,11 @@ argument-hint: "[check]"
 
 Gets `superb`'s dependencies in place, and says plainly what it could not do.
 
-`superb:craft` needs nothing. `superb:pipeline` and `superb:bug-fix` both
-compose [superpowers](https://github.com/obra/superpowers) and do not run
-without it.
+`superb:craft` needs nothing unless its optional browser UI is used.
+`superb:pipeline` and `superb:bug-fix` both compose
+[superpowers](https://github.com/obra/superpowers) and do not run without it.
+Pipeline's standard-library state helper also requires Python 3.11+; Craft's
+browser UI remains separately compatible with Python 3.9+.
 
 ## Step 1 — Run the check. Always, first.
 
@@ -42,6 +44,10 @@ dependency is absent — a failed `claude plugin list` says nothing about what i
 installed. Installing on an `ERROR` is how a present, working dependency gets
 reinstalled over the top of itself. `UNKNOWN` means the same for a different
 reason: nothing could look. In both cases report the `NOTE` lines and stop.
+
+`REQUIRED pipeline-python MISSING` is deliberately not followed by an
+`ACTION`: report that Pipeline needs Python 3.11+ and stop. Never install or
+upgrade a language runtime on the user's behalf.
 
 ## Step 2 — Act, where you can
 
@@ -83,10 +89,11 @@ resolve.
 
 | Dependency | Used by | Without it |
 | ---------- | ------- | ---------- |
-| `python3` | `superb:craft`'s browser UI | Falls back to the `CRAFT.md` questionnaire; nothing lost but the browser |
+| Python 3.9+ | `superb:craft`'s browser UI | Falls back to the `CRAFT.md` questionnaire; nothing lost but the browser |
 
-Report it. **Never install a language runtime to satisfy it** — that is a
-decision with consequences well past this plugin, and it blocks nothing.
+Report it. **Never install a language runtime to satisfy Craft's optional
+report** — that is a decision with consequences well past this plugin, and the
+browser fallback means the optional dependency blocks nothing.
 
 The script deliberately does not check whether the user's project is a git
 repository: it runs from the plugin's install directory, so it would always be

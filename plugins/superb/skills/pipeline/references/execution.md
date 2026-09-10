@@ -157,10 +157,14 @@ recovery, and phase completion all apply the full ancestry predicate.
 ### Artifact tasks
 
 An artifact task completes only with every exact plan-declared output, stable
-task/attempt/owner identity, and applicable validation evidence. Its integration
-is truthfully `N/A`; it needs no source commit and must not use an empty commit,
-unrelated historical commit, or staged ignored report. Missing or invalid
-evidence keeps the task unfinished.
+task/attempt/owner identity, and exactly one digest-bound typed `task-test`
+record. That record names the same run/task/attempt and its `inputs` is a JSON
+string array containing every approved output exactly once as
+`<repository-relative-path>#sha256=<digest>`. Completion, dependency readiness,
+phase verification, and recovery re-read those outputs and validate their
+digests. Its integration is truthfully `N/A`; it needs no source commit and must
+not use an empty commit, unrelated historical commit, or staged ignored report.
+Missing, changed, or invalid evidence keeps the task unfinished.
 
 ## Reconcile interruption before redispatch
 
@@ -202,6 +206,11 @@ its plan. Before recording phase verification, confirm:
 
 Caller-provided command text is checked against the approved tuple; it is not
 authority and cannot substitute, omit, duplicate, add, or reorder a command.
+
+The recorded phase-verification HEAD must equal the designated target-branch
+tip. A required phase gate rechecks that tip when it opens, evaluates, and
+advances; later target work invalidates the stale boundary instead of being
+silently omitted from review.
 
 A failing planned suite keeps the phase unfinished. Use TDD and systematic
 debugging for the smallest approved repair, run targeted checks while working,

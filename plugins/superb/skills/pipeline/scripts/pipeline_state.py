@@ -1123,6 +1123,8 @@ def _initial_tracker(
     known_phases = set(phase_ids)
     if any(dep not in known_phases for metadata, _ in phase_documents for dep in metadata.deps):
         raise SchemaError("phase dependency is unknown")
+    if phase_documents[0][0].deps:
+        raise SchemaError("the initial phase cannot have an unsatisfied dependency")
     tasks = tuple(
         TaskRecord(task.id, task.kind, "[ ]", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-")
         for _, planned in phase_documents
@@ -1201,6 +1203,16 @@ def initialize_run(
         decisions_path=_resolved_reference(run_dir, artifacts["decisions"]),
         run_id=run_id,
     )
+    phase_paths = tuple(artifacts["phase_plans"].split(","))
+    try:
+        _master_phase_paths(
+            run_dir, artifacts["master_plan"], phase_paths,
+            error_type=SchemaError,
+        )
+    except (OSError, UnicodeError) as exc:
+        raise SchemaError(
+            _diagnostic(run_dir, f"approved master plan is unreadable ({exc})")
+        ) from exc
     tracker = _initial_tracker(
         run_id=run_id,
         base_commit=base_commit,
@@ -1831,7 +1843,9 @@ def _validate_decision(run_dir: Path, tracker: Tracker, task: TaskRecord, decisi
 
 def _validate_start_guards(run_dir: Path, tracker: Tracker, task_id: str) -> PlannedTask:
     current_phase = dict(tracker.current_fields)["phase"]
-    _, current_tasks = _phase_document_for(tracker, run_dir, current_phase)
+    current_metadata, current_tasks = _phase_document_for(tracker, run_dir, current_phase)
+    _approved_phase_sequence(run_dir, tracker)
+    _validate_phase_prerequisites(tracker, current_metadata)
     planned = _planned_tasks(run_dir, tracker)
     current_ids = {task.id for task in current_tasks}
     if task_id not in current_ids:
@@ -1860,7 +1874,18 @@ def _dependency_ready(run_dir: Path, tracker: Tracker, task: TaskRecord) -> bool
     if task.state != "[x]" or task.verification == "-":
         return False
     if task.kind == "artifact":
-        return task.integration == "N/A" and task.artifacts != "-"
+        if task.integration != "N/A" or task.artifacts == "-":
+            return False
+        try:
+            definition = _planned_tasks(run_dir, tracker)[task.id]
+            _validate_artifact_evidence(
+                run_dir, tracker, task, definition,
+                _artifact_evidence_references(task), _project_root(run_dir),
+                require_target_tip=False,
+            )
+        except (KeyError, TransitionError):
+            return False
+        return True
     if task.integration in {"-", "N/A"} or task.commits == "-":
         return False
     repo_dir = _project_root(run_dir)
@@ -1969,6 +1994,49 @@ def _phase_documents(
     return tuple(documents)
 
 
+_MASTER_PHASE_PATH = re.compile(
+    r"(?<![A-Za-z0-9._/-])((?:[A-Za-z]:)?/?[A-Za-z0-9._/-]*phase(?:-[A-Za-z0-9._-]+)?\.md)(?![A-Za-z0-9._/-])"
+)
+
+
+def _master_phase_paths(
+    run_dir: Path,
+    master_value: str,
+    supplied_paths: tuple[str, ...],
+    *,
+    error_type: type[ValueError] = TransitionError,
+) -> tuple[str, ...]:
+    """Return the exact approved phase order encoded by the master plan."""
+    master_path = _resolved_reference(run_dir, master_value)
+    master = master_path.read_text(encoding="utf-8")
+    declared = tuple(match.group(1) for match in _MASTER_PHASE_PATH.finditer(master))
+    if not declared:
+        raise error_type("approved master plan has no phase-plan references")
+    declared_ids = tuple(_resolved_reference(run_dir, value).resolve() for value in declared)
+    supplied_ids = tuple(_resolved_reference(run_dir, value).resolve() for value in supplied_paths)
+    if len(declared_ids) != len(set(declared_ids)):
+        raise error_type("approved master plan has duplicate phase-plan references")
+    if len(supplied_ids) != len(set(supplied_ids)):
+        raise error_type("run has duplicate phase-plan references")
+    if set(declared_ids) != set(supplied_ids):
+        raise error_type("run phase plans are missing or extra relative to the approved master plan")
+    if declared_ids != supplied_ids:
+        raise error_type("run phase-plan order conflicts with the approved master plan")
+    return supplied_paths
+
+
+def _validate_phase_prerequisites(tracker: Tracker, metadata: PhaseMetadata) -> None:
+    phases = {phase.id: phase for phase in tracker.phases}
+    for dependency in metadata.deps:
+        phase = phases.get(dependency)
+        if phase is None or phase.state != "[x]":
+            raise TransitionError(f"phase dependency {dependency} is not verified")
+        if phase.review_gate == "required":
+            gate = _gate_record(tracker, f"phase-{dependency}")
+            if gate.state != "accepted":
+                raise TransitionError(f"phase dependency {dependency} has an unresolved review gate")
+
+
 def _unresolved_task_question(task: TaskRecord) -> bool:
     return task.question != "-" and not task.question.startswith("resolved:")
 
@@ -2073,6 +2141,8 @@ def _scheduler_context(run_dir: Path, phase_plan: Path, capacity: int | None) ->
     metadata, planned = _parse_phase_document(supplied_path)
     if dict(tracker.current_fields)["phase"] != metadata.id:
         raise TransitionError("phase plan does not match the active phase")
+    _approved_phase_sequence(run_dir, tracker)
+    _validate_phase_prerequisites(tracker, metadata)
     authoritative = _planned_tasks(run_dir, tracker)
     if any(authoritative.get(task.id) != task for task in planned):
         raise TransitionError("phase plan task metadata conflicts with the run's approved plans")
@@ -2464,6 +2534,10 @@ def complete_task(
                     raise TransitionError(f"artifact is missing: {path}")
             if tuple(actual) != definition.outputs:
                 raise TransitionError("artifact paths do not exactly match approved outputs")
+            _validate_artifact_evidence(
+                Path(run_dir), tracker, task, definition, evidence, Path(repo_dir),
+                require_target_tip=True,
+            )
             replacement = replace(
                 task,
                 state="[x]",
@@ -2688,6 +2762,16 @@ def import_worker_result(
                 for output in actual:
                     if not (repo_dir / output).is_file():
                         raise EvidenceError(f"artifact output is missing: {output}")
+                try:
+                    _validate_artifact_evidence(
+                        Path(run_dir), tracker, task, definition, result.evidence,
+                        repo_dir, require_target_tip=True,
+                    )
+                except TransitionError as exc:
+                    raise EvidenceError(str(exc)) from exc
+                artifact_verification = _append_history(task.verification, f"tests:{result.tests}")
+                for reference in result.evidence:
+                    artifact_verification = _append_history(artifact_verification, reference)
                 replacement = replace(
                     task,
                     state="[x]",
@@ -2697,7 +2781,7 @@ def import_worker_result(
                     commits="-",
                     artifacts=",".join(actual),
                     integration="N/A",
-                    verification=verification,
+                    verification=artifact_verification,
                 )
         else:
             if result.status == "BLOCKED" and result.blocking_reason == "-":
@@ -2784,8 +2868,10 @@ def record_phase_verification(
         if any(not _dependency_ready(Path(run_dir), tracker, task_records[item.id]) for item in planned):
             raise TransitionError("every phase task must be verified and truthfully integrated")
         repo_dir = _project_root(Path(run_dir))
-        if not _git(repo_dir, "cat-file", "-e", f"{head}^{{commit}}") or not _git(repo_dir, "merge-base", "--is-ancestor", head, tracker.target_branch):
-            raise TransitionError("phase verification HEAD is not on the target branch")
+        if not _git(repo_dir, "cat-file", "-e", f"{head}^{{commit}}") or not _is_target_tip(
+            repo_dir, tracker.target_branch, head
+        ):
+            raise TransitionError("phase verification HEAD is not the designated target branch tip")
         if any(
             task_records[item.id].kind == "source"
             and not _git(repo_dir, "merge-base", "--is-ancestor", task_records[item.id].integration, head)
@@ -2815,17 +2901,17 @@ def _approved_phase_sequence(
     run_dir: Path,
     tracker: Tracker,
 ) -> tuple[tuple[str, PhaseMetadata, tuple[PlannedTask, ...]], ...]:
+    fields = dict(tracker.run_fields)
     documents = _phase_documents(run_dir, tracker)
-    master_path = _resolved_reference(run_dir, dict(tracker.run_fields)["master_plan"])
     try:
-        master = master_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        raise TransitionError(f"approved master plan is unreadable: {master_path}: {exc}") from exc
-    missing = [raw_path for raw_path, _, _ in documents if raw_path not in master]
-    if missing:
-        raise TransitionError(
-            "approved master plan does not reference every phase plan: " + ",".join(missing)
+        _master_phase_paths(
+            run_dir,
+            fields["master_plan"],
+            tuple(raw_path for raw_path, _, _ in documents),
         )
+    except (OSError, UnicodeError) as exc:
+        master_path = _resolved_reference(run_dir, fields["master_plan"])
+        raise TransitionError(f"approved master plan is unreadable: {master_path}: {exc}") from exc
     return documents
 
 
@@ -2886,8 +2972,14 @@ def advance_phase(
             gate = _gate_record(tracker, f"phase-{completed_phase_id}")
             if gate.state != "accepted":
                 raise TransitionError("required phase review has not been accepted")
-            if gate.head == "-" or not _git(repo_dir, "merge-base", "--is-ancestor", verification_head, gate.head):
+            if (
+                gate.head == "-"
+                or not _git(repo_dir, "merge-base", "--is-ancestor", verification_head, gate.head)
+                or not _is_target_tip(repo_dir, tracker.target_branch, gate.head)
+            ):
                 raise TransitionError("required phase review does not cover the verified phase state")
+        elif not _is_target_tip(repo_dir, tracker.target_branch, verification_head):
+            raise TransitionError("final-only phase verification is no longer the target branch tip")
 
         for dependency in next_metadata.deps:
             dependency_phase = phase_records.get(dependency)
@@ -2943,6 +3035,8 @@ def open_review_gate(
             phase = next((item for item in tracker.phases if item.id == gate.phase), None)
             if phase is None or phase.review_gate != "required" or phase.state != "[x]" or len(reviewer_assignments) != 1:
                 raise TransitionError("required phase review needs one reviewer after mechanical verification")
+            if head != _phase_verification_head(phase):
+                raise TransitionError("phase review HEAD must equal the recorded phase verification HEAD")
             _, planned = _phase_document_for(tracker, Path(run_dir), gate.phase)
             owners = {next(task for task in tracker.tasks if task.id == item.id).owner for item in planned}
             if reviewer_assignments[0] in owners:
@@ -2976,12 +3070,8 @@ def open_review_gate(
             _detected_runtime_capacity(Path(run_dir), tracker),
         )
         repo_dir = _project_root(Path(run_dir))
-        if not _git(repo_dir, "merge-base", "--is-ancestor", base, head) or (
-            gate.type == "master"
-            and not _is_target_tip(repo_dir, tracker.target_branch, head)
-        ) or (
-            gate.type == "phase"
-            and not _git(repo_dir, "merge-base", "--is-ancestor", head, tracker.target_branch)
+        if not _git(repo_dir, "merge-base", "--is-ancestor", base, head) or not _is_target_tip(
+            repo_dir, tracker.target_branch, head
         ):
             raise TransitionError("review range is not an integrated target-branch range")
         return _replace_gate(
@@ -3090,6 +3180,65 @@ def _validate_verification_evidence(
     return tuple(parsed)
 
 
+def _artifact_evidence_references(task: TaskRecord) -> tuple[str, ...]:
+    references = []
+    for item in _csv(task.verification):
+        candidate = item.removeprefix("evidence:")
+        if "#sha256=" in candidate and "@" in candidate:
+            references.append(candidate)
+    return tuple(references)
+
+
+def _validate_artifact_evidence(
+    run_dir: Path,
+    tracker: Tracker,
+    task: TaskRecord,
+    definition: PlannedTask,
+    references: tuple[str, ...],
+    repo_dir: Path,
+    *,
+    require_target_tip: bool,
+) -> VerificationEvidence:
+    if task.kind != "artifact" or definition.kind != "artifact":
+        raise TransitionError("artifact evidence can validate only a plan-declared artifact task")
+    if tuple(_csv(task.artifacts)) not in {(), definition.outputs}:
+        raise TransitionError("recorded artifact outputs conflict with the approved task definition")
+    if len(references) != 1:
+        raise TransitionError("artifact completion needs exactly one typed validation record")
+    _, separator, recorded_head = references[0].rpartition("@")
+    if separator != "@" or not _COMMIT.fullmatch(recorded_head):
+        raise TransitionError("artifact validation must bind one full code-state commit")
+    records = _validate_verification_evidence(
+        run_dir, references, recorded_head,
+        purpose="task-test", run_id=tracker.run_id,
+        subject=f"task/{task.id}", attempt=task.attempt,
+    )
+    try:
+        inputs = json.loads(records[0].inputs)
+    except json.JSONDecodeError as exc:
+        raise TransitionError("artifact validation inputs must be a JSON string array") from exc
+    if (
+        not isinstance(inputs, list)
+        or any(not isinstance(item, str) for item in inputs)
+        or len(inputs) != len(set(inputs))
+    ):
+        raise TransitionError("artifact validation inputs must be unique digest-bound output identities")
+    input_paths = tuple(item.rpartition("#sha256=")[0] for item in inputs)
+    if input_paths != definition.outputs:
+        raise TransitionError("artifact validation inputs do not exactly match approved outputs")
+    project_root = _project_root(run_dir).resolve()
+    if Path(repo_dir).resolve() != project_root:
+        raise TransitionError("artifact validation repository root does not match the run workspace")
+    for identity in inputs:
+        _resolve_digest_bound_reference(run_dir, identity)
+    if require_target_tip:
+        if not _is_target_tip(project_root, tracker.target_branch, recorded_head):
+            raise TransitionError("artifact validation code state is not the designated target branch tip")
+    elif not _git(project_root, "merge-base", "--is-ancestor", recorded_head, tracker.target_branch):
+        raise TransitionError("artifact validation code state is no longer on the target branch")
+    return records[0]
+
+
 def _parse_review_report(
     path: Path,
     *,
@@ -3099,14 +3248,17 @@ def _parse_review_report(
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError) as exc:
         raise TransitionError(f"review report is unreadable: {path}: {exc}") from exc
-    if not lines or lines[0] != "<!-- pipeline-review-report/v2 -->":
-        raise TransitionError("review report marker is missing")
+    marker = "<!-- pipeline-review-report/v2 -->"
+    positions = [index for index, line in enumerate(lines) if line == marker]
+    if len(positions) != 1:
+        raise TransitionError("review report needs exactly one terminal report marker")
+    report_lines = lines[positions[0] + 1:]
     try:
-        return dict(_key_values(lines[1:], _REVIEW_FIELDS, TransitionError))
+        return dict(_key_values(report_lines, _REVIEW_FIELDS, TransitionError))
     except TransitionError:
         if not allow_sealed_historical:
             raise
-    return dict(_key_values(lines[1:], _HISTORICAL_REVIEW_FIELDS, TransitionError))
+    return dict(_key_values(report_lines, _HISTORICAL_REVIEW_FIELDS, TransitionError))
 
 
 def _review_outcomes(report: dict[str, str]) -> dict[str, str]:
@@ -3531,10 +3683,9 @@ def start_remediation_round(
         extension_decision_ref is None or re.fullmatch(r"D-[0-9]+", extension_decision_ref) is None
     ):
         raise TransitionError("a post-limit round requires an explicit finite-extension decision")
-    if not Path(fix_plan).is_file():
-        raise TransitionError("remediation fix plan does not exist")
-
     def transition(tracker: Tracker) -> Tracker:
+        fix_plan_path = _review_evidence_path(Path(run_dir), fix_plan)
+        fix_plan_identity = _digest_bound_reference(Path(run_dir), fix_plan_path)
         gate = _gate_record(tracker, gate_id)
         rows = list(tracker.remediation)
         existing = next((row for row in rows if row.gate == gate_id and row.round_number == round_number), None)
@@ -3543,7 +3694,7 @@ def start_remediation_round(
             existing is not None
             and existing.state == "fixing"
             and existing.findings == ",".join(finding_ids)
-            and existing.fix_plan == fix_plan
+            and existing.fix_plan == fix_plan_identity
             and existing.fixers == ",".join(fixer_assignments)
             and existing.verification == authority
         ):
@@ -3587,7 +3738,7 @@ def start_remediation_round(
                 raise TransitionError("prior remediation round is not complete")
         replacement = RemediationRecord(
             gate_id, round_number, "fixing", ",".join(fixer_assignments), "-",
-            ",".join(finding_ids), fix_plan, "-", authority, "-",
+            ",".join(finding_ids), fix_plan_identity, "-", authority, "-",
         )
         if existing is None:
             rows.append(replacement)
@@ -4092,6 +4243,125 @@ def _validate_rejection_evidence(run_dir: Path, finding_id: str, value: str) -> 
         raise TransitionError("rejection evidence must identify the finding and record a rationale")
 
 
+def _validate_deferred_evidence(
+    run_dir: Path,
+    tracker: Tracker,
+    finding_id: str,
+    value: str,
+) -> None:
+    path = _resolve_digest_bound_reference(run_dir, value)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise TransitionError(f"deferred-disposition evidence is unreadable: {path}: {exc}") from exc
+    fields = {
+        name: re.findall(rf"(?im)^{name}:\s*(\S.*)$", text)
+        for name in ("Finding", "Impact", "Reason", "Authority")
+    }
+    if (
+        fields["Finding"] != [finding_id]
+        or any(len(fields[name]) != 1 or fields[name][0] == "-" for name in ("Impact", "Reason"))
+        or len(fields["Authority"]) != 1
+        or re.fullmatch(r"D-[0-9]+", fields["Authority"][0]) is None
+    ):
+        raise TransitionError(
+            "deferred-disposition evidence must identify one finding, impact, reason, and decision authority"
+        )
+    decision_ref = fields["Authority"][0]
+    decisions_path = _resolved_reference(run_dir, dict(tracker.run_fields)["decisions"])
+    try:
+        sections = _decision_sections(decisions_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, TransitionError) as exc:
+        raise TransitionError(f"deferred-disposition authority is unreadable: {exc}") from exc
+    lines = sections.get(decision_ref)
+    if lines is None:
+        raise TransitionError("deferred-disposition authority decision is missing")
+    answers = _field_lines(lines, "Answer")
+    statuses = _field_lines(lines, "Status")
+    scopes = _field_lines(lines, "Scope")
+    if len(answers) != 1 or len(statuses) != 1 or len(scopes) != 1:
+        raise TransitionError("deferred-disposition authority is missing, duplicated, or ambiguous")
+    _require_decision_action(lines, "review.resolve-question")
+    answer = answers[0].strip().rstrip(".")
+    if (
+        statuses[0].strip().rstrip(".").casefold() != "resolved"
+        or "defer" not in answer.casefold()
+        or finding_id.casefold() not in answer.casefold()
+        or not _scope_names_task(scopes[0], finding_id)
+    ):
+        raise TransitionError("decision does not explicitly authorize this finding's deferral")
+    for other_ref, other_lines in sections.items():
+        if other_ref == decision_ref:
+            continue
+        other_status = _field_lines(other_lines, "Status")
+        other_scopes = _field_lines(other_lines, "Scope")
+        if (
+            len(other_status) == 1
+            and other_status[0].strip().rstrip(".").casefold() in {"open", "pending", "blocked"}
+            and any(_scope_names_task(scope, finding_id) for scope in other_scopes)
+        ):
+            raise TransitionError(f"unresolved decision {other_ref} conflicts with deferral authority")
+
+
+_ARTIFACT_REMEDIATION_MARKER = "<!-- pipeline-artifact-remediation/v2 -->"
+_ARTIFACT_REMEDIATION_FIELDS = (
+    "finding", "gate", "round", "fix_plan", "artifacts", "verification",
+)
+
+
+def _validate_artifact_remediation_evidence(
+    run_dir: Path,
+    tracker: Tracker,
+    gate: GateRecord,
+    active_round: RemediationRecord | None,
+    finding_id: str,
+    value: str,
+    re_review: str,
+    rereview_paths: tuple[Path, ...],
+    verification: tuple[str, ...],
+) -> None:
+    """Validate an explicitly artifact-only fix without inventing a commit."""
+    if active_round is None or finding_id not in _csv(active_round.findings):
+        raise TransitionError("artifact-only fix is not targeted by the active remediation round")
+    _resolve_digest_bound_reference(run_dir, active_round.fix_plan)
+    path = _resolve_digest_bound_reference(run_dir, value)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise TransitionError(f"artifact-remediation evidence is unreadable: {path}: {exc}") from exc
+    if not lines or lines[0] != _ARTIFACT_REMEDIATION_MARKER:
+        raise TransitionError("artifact-remediation evidence marker is missing")
+    values = dict(
+        _key_values(lines[1:], _ARTIFACT_REMEDIATION_FIELDS, TransitionError)
+    )
+    if (
+        values["finding"] != finding_id
+        or values["gate"] != gate.id
+        or values["round"] != str(active_round.round_number)
+        or values["fix_plan"] != active_round.fix_plan
+    ):
+        raise TransitionError("artifact-remediation evidence does not match the approved round")
+    try:
+        artifacts = json.loads(values["artifacts"])
+    except json.JSONDecodeError as exc:
+        raise TransitionError("artifact-remediation artifacts must be a JSON string array") from exc
+    if (
+        not isinstance(artifacts, list)
+        or not artifacts
+        or any(not isinstance(item, str) for item in artifacts)
+        or len(artifacts) != len(set(artifacts))
+    ):
+        raise TransitionError("artifact-remediation artifacts must be unique digest-bound identities")
+    for artifact in artifacts:
+        _resolve_digest_bound_reference(run_dir, artifact)
+    if len(verification) != 1 or values["verification"] != verification[0]:
+        raise TransitionError("artifact-remediation evidence does not match recorded verification")
+    expected_rereview = _review_evidence_path(run_dir, re_review)
+    supplied_rereviews = {Path(item).resolve() for item in rereview_paths}
+    if expected_rereview not in supplied_rereviews:
+        raise TransitionError("artifact-only fix lacks its applicable re-review")
+
+
 def evaluate_and_close_review_gate(
     run_dir: Path,
     *,
@@ -4145,11 +4415,11 @@ def evaluate_and_close_review_gate(
             )
             if not _git(repo_dir, "merge-base", "--is-ancestor", gate.head, reviewed_head) or not _git(repo_dir, "merge-base", "--is-ancestor", reviewed_head, tracker.target_branch):
                 raise TransitionError("re-review code state is not integrated after the prior gate HEAD")
-        if gate.type == "master" and not _is_target_tip(
+        if gate.type in {"phase", "master"} and not _is_target_tip(
             repo_dir, tracker.target_branch, reviewed_head
         ):
             raise TransitionError(
-                "master review HEAD is no longer the designated target branch tip"
+                f"{gate.type} review HEAD is no longer the designated target branch tip"
             )
         if active_round is not None:
             _validate_verification_evidence(
@@ -4224,8 +4494,13 @@ def evaluate_and_close_review_gate(
                     if disposition != "-" or fix_commit != "-" or re_review != "-":
                         invalid_rows.append(row)
                 elif disposition == "Fixed":
-                    if evidence == "-" or fix_commit == "-" or re_review == "-":
+                    if evidence == "-" or re_review == "-":
                         invalid_rows.append(row)
+                    elif fix_commit == "-":
+                        _validate_artifact_remediation_evidence(
+                            Path(run_dir), tracker, gate, active_round, row[0], evidence,
+                            re_review, rereview_paths, verification,
+                        )
                 elif disposition == "Rejected":
                     if evidence == "-" or fix_commit != "-":
                         invalid_rows.append(row)
@@ -4236,12 +4511,20 @@ def evaluate_and_close_review_gate(
             else:
                 if status != "Resolved" or disposition not in {"Fixed", "Deferred", "Rejected"} or evidence == "-":
                     invalid_rows.append(row)
-                if disposition == "Fixed" and (fix_commit == "-" or re_review == "-"):
-                    invalid_rows.append(row)
+                if disposition == "Fixed":
+                    if re_review == "-":
+                        invalid_rows.append(row)
+                    elif fix_commit == "-":
+                        _validate_artifact_remediation_evidence(
+                            Path(run_dir), tracker, gate, active_round, row[0], evidence,
+                            re_review, rereview_paths, verification,
+                        )
                 if disposition in {"Deferred", "Rejected"} and fix_commit != "-":
                     invalid_rows.append(row)
                 if disposition == "Rejected" and evidence != "-":
                     _validate_rejection_evidence(Path(run_dir), row[0], evidence)
+                if disposition == "Deferred" and evidence != "-":
+                    _validate_deferred_evidence(Path(run_dir), tracker, row[0], evidence)
         for finding in (row for row in rows if row[4] == "Fixed" and row[6] != "-"):
             finding_id, _, _, _, _, _, fix_commit, re_review = finding
             if not _COMMIT.fullmatch(fix_commit) or not _git(
@@ -4441,7 +4724,14 @@ def reconcile_run(
             actions.append(f"await-user-decision:{task.id}:{task.question}")
     for row in tracker.remediation:
         if row.state in {"fixing", "re_reviewing"}:
-            actions.append(f"resume-remediation:{row.gate}:{row.round_number}")
+            try:
+                _resolve_digest_bound_reference(run_dir, row.fix_plan)
+            except TransitionError as exc:
+                questions.append(
+                    f"fix-plan-contradiction:{row.gate}:{row.round_number}:{exc}"
+                )
+            else:
+                actions.append(f"resume-remediation:{row.gate}:{row.round_number}")
 
     return ReconciliationReport(tuple(actions), tuple(questions), tuple(diagnostics))
 

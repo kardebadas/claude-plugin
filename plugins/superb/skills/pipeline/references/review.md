@@ -24,8 +24,10 @@ the global limit and detected runtime capacity permit; otherwise queue them.
 Free capacity never authorizes an early, duplicate, third, ordinary-phase, or
 task reviewer.
 
-Each published report uses the helper's strict report contract and the exact
-assignment recorded by the controller:
+Each published report preserves any technical narrative first and ends with
+exactly one terminal helper report block using the exact assignment recorded by
+the controller. Missing, duplicated, malformed, nonterminal, or trailing blocks
+are rejected:
 
 ```markdown
 <!-- pipeline-review-report/v2 -->
@@ -89,10 +91,20 @@ reject one because its fix is inconvenient.
 
 Each finding is `Open` or `Resolved`. A resolved finding has one disposition:
 
-- `Fixed`: cite applicable verification, the fix commit, and the matching
-  re-review report.
-- `Deferred`: Minor only; its evidence records the finding ID, impact, reason,
-  and explicit authority for deferral.
+- `Fixed`: a repository-changing fix cites applicable verification, its
+  integrated fix commit, and the matching re-review report. An explicitly
+  artifact-only remedy uses `Fix Commit: -` only with a digest-bound
+  `pipeline-artifact-remediation/v2` record naming the exact finding, gate,
+  round, immutable fix plan, nonempty digest-bound artifact set, and recorded
+  remediation verification; its cited re-review must be the applicable report
+  supplied for that round. The active immutable fix plan remains the authority
+  for classifying the remedy as artifact-only.
+- `Deferred`: Minor only. Its digest-bound disposition artifact contains
+  exactly one nonempty `Finding:`, `Impact:`, `Reason:`, and
+  `Authority: D-<number>` field. That decision must be resolved, explicitly
+  authorize deferring the same finding, name it in scope, and carry
+  `Decision action: review.resolve-question`; unrelated, conflicting, generic,
+  or stale authority cannot close the gate.
 - `Rejected`: cite evidence with exactly `Finding: <ID>` and one nonempty
   `Rationale:` that demonstrates why the claim is invalid or inapplicable.
 
@@ -125,7 +137,9 @@ of the following:
 6. Every repository-changing review fix, including a deletion or test-only
    change, has strict commit/integration provenance, applicable verification,
    and a re-review from the recorded gate assignments that covers the fix and
-   relevant integration consequences.
+   relevant integration consequences. An approved artifact-only fix fabricates
+   no commit; it instead satisfies the immutable artifact-remediation evidence
+   contract above and still requires the applicable re-review.
 
 An evidence-backed rejection that changes no repository file needs no invented
 fix commit or empty-diff re-review. Report acceptance as “Passed with no

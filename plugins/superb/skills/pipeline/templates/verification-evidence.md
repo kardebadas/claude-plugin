@@ -9,4 +9,4 @@
 | outcome | PASS |
 | commands | ["<exact-command>","<next-command>"] |
 | environment | <applicable_environment_identity> |
-| inputs | <tests_fixtures_config_dependencies_snapshot_identity> |
+| inputs | <tests_fixtures_config_dependencies_snapshot_identity_or_artifact_JSON_path_sha256_array> |

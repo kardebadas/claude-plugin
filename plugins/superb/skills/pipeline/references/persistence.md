@@ -69,6 +69,17 @@ On compaction, restart, interruption, or uncertainty:
 
 If a valid result and Git/evidence satisfy the contract, import it once. If an owner is still active consistently, preserve the attempt and wait or perform independent permitted work. A commit without its result/checkpoint is neither automatic completion nor grounds to repeat the task: inspect the recorded attempt, content, ancestry, and applicable tests, then reconstruct/import only independently validated evidence. Partial, conflicting, or unverifiable state remains blocked and reaches the user. Completed work is not rerun; unfinished work is not skipped.
 
+The master plan is the exact ordered authority for its phase-plan paths.
+Initialization rejects missing, extra, duplicate, or reordered phase
+references, and every reservation/start rechecks the current phase's declared
+phase dependencies and required predecessor gates.
+
+When a remediation round starts, store the fix plan as its repository-relative
+path plus SHA-256 digest. Recovery resolves and revalidates that immutable
+identity before returning `resume-remediation`; a missing, unreadable,
+outside-workspace, ambiguous, or changed plan is a blocking contradiction, not
+an empty scope or permission to redispatch.
+
 ## Decisions and authority
 
 Use `templates/decisions.md`. The heading supplies the stable decision ID. Preserve the exact question, explicit answer, sources, scope, and status. Every entry has exactly one `Decision action`: `task.resume`, `review.resolve-question`, `filesystem.authorize`, `remediation.start-round`, or `none`. Match that exact action plus the helper's action-specific scope/state/identity fields. Never derive transition authority from answer wording, generic plan approval, another agent's preference, or a fieldless historical entry.

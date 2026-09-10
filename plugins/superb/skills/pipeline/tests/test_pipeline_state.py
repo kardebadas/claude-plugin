@@ -3195,7 +3195,15 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
                 report_paths=(initial,), verification=(phase_evidence,), rereview_paths=(),
             )
             fix_plan = root / "fix-plan.md"
-            fix_plan.write_text("# Approved mixed source/artifact fix plan\n", encoding="utf-8")
+            fix_plan.write_text(
+                "# Approved mixed source/artifact fix plan\n\n"
+                "<!-- pipeline-remediation-scope/v2 -->\n"
+                "| Finding | Kind | Artifacts |\n"
+                "| --- | --- | --- |\n"
+                "| F-SOURCE | source | none |\n"
+                '| F-ARTIFACT | artifact | ["agent-output/rebuilt-acceptance.md"] |\n',
+                encoding="utf-8",
+            )
             started = start_remediation_round(
                 run_dir, gate_id="phase-01", round_number=1,
                 finding_ids=("F-SOURCE", "F-ARTIFACT"), fix_plan=str(fix_plan),
@@ -3238,6 +3246,15 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
                 encoding="utf-8",
             )
             proof_identity = pipeline_state._digest_bound_reference(run_dir, proof)
+            rogue = root / "agent-output/rogue.md"
+            rogue.write_text("not an approved output\n", encoding="utf-8")
+            rogue_identity = pipeline_state._digest_bound_reference(run_dir, rogue)
+            rogue_proof = root / "rogue-artifact-remedy.md"
+            rogue_proof.write_text(
+                proof.read_text(encoding="utf-8").replace(artifact_identity, rogue_identity),
+                encoding="utf-8",
+            )
+            rogue_proof_identity = pipeline_state._digest_bound_reference(run_dir, rogue_proof)
 
             def write_resolved(
                 *, source_commit: str, artifact_evidence: str,
@@ -3252,8 +3269,17 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
                     encoding="utf-8",
                 )
 
-            write_resolved(source_commit=fix_head, artifact_evidence=proof_identity)
+            write_resolved(source_commit=fix_head, artifact_evidence=rogue_proof_identity)
             before = (run_dir / "progress.md").read_bytes()
+            with self.assertRaises(TransitionError):
+                evaluate_and_close_review_gate(
+                    run_dir, gate_id="phase-01", findings_path=findings,
+                    report_paths=(initial,), verification=(remediation_evidence,),
+                    rereview_paths=(rereview,),
+                )
+            self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+            write_resolved(source_commit=fix_head, artifact_evidence=proof_identity)
             artifact.write_text("mutated evidence\n", encoding="utf-8")
             with self.assertRaises(TransitionError):
                 evaluate_and_close_review_gate(
@@ -3264,6 +3290,7 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
             self.assertEqual((run_dir / "progress.md").read_bytes(), before)
 
             artifact.write_text("replacement acceptance evidence\n", encoding="utf-8")
+            original_fix_plan = fix_plan.read_text(encoding="utf-8")
             fix_plan.write_text("# Mutated plan\n", encoding="utf-8")
             with self.assertRaises(TransitionError):
                 evaluate_and_close_review_gate(
@@ -3272,7 +3299,7 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
                     rereview_paths=(rereview,),
                 )
             self.assertEqual((run_dir / "progress.md").read_bytes(), before)
-            fix_plan.write_text("# Approved mixed source/artifact fix plan\n", encoding="utf-8")
+            fix_plan.write_text(original_fix_plan, encoding="utf-8")
 
             write_resolved(
                 source_commit=fix_head, artifact_evidence=proof_identity,
@@ -3300,6 +3327,197 @@ class PhaseGateAndRemediationTest(unittest.TestCase):
                 run_dir, gate_id="phase-01", findings_path=findings,
                 report_paths=(initial,), verification=(remediation_evidence,),
                 rereview_paths=(rereview,),
+            )
+            self.assertEqual(
+                next(gate.state for gate in accepted.gates if gate.id == "phase-01"),
+                "accepted",
+            )
+
+    def test_all_artifact_round_releases_without_commit_and_replay_is_idempotent(self):
+        """Requiring a new commit for artifact-only work fabricates source provenance."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, _, reviewed_head = self.make_run(root)
+            self.prepare_blocked_phase_gate(root, run_dir, reviewed_head)
+            fix_plan = root / "fix-plan.md"
+            fix_plan.write_text(
+                "# Artifact-only fix plan\n\n"
+                "<!-- pipeline-remediation-scope/v2 -->\n"
+                "| Finding | Kind | Artifacts |\n"
+                "| --- | --- | --- |\n"
+                '| F-001 | artifact | ["agent-output/rebuilt.md"] |\n',
+                encoding="utf-8",
+            )
+            start_remediation_round(
+                run_dir, gate_id="phase-01", round_number=1,
+                finding_ids=("F-001",), fix_plan=str(fix_plan),
+                fixer_assignments=("fixer-1",), capacity=3,
+            )
+            verification = _remediation_evidence(
+                root, reviewed_head, "phase-01", 1, "artifact-only"
+            )
+            released = record_remediation_fixes(
+                run_dir, gate_id="phase-01", round_number=1,
+                fix_head=reviewed_head, commits=(), verification=(verification,),
+                capacity=3, repo_dir=root,
+            )
+            row = next(item for item in released.remediation if item.gate == "phase-01")
+            self.assertEqual((row.state, row.commits), ("re_reviewing", "N/A"))
+            self.assertEqual(
+                next(gate.state for gate in released.gates if gate.id == "phase-01"),
+                "re_reviewing",
+            )
+            after = (run_dir / "progress.md").read_bytes()
+            replayed = record_remediation_fixes(
+                run_dir, gate_id="phase-01", round_number=1,
+                fix_head=reviewed_head, commits=(), verification=(verification,),
+                capacity=3, repo_dir=root,
+            )
+            self.assertEqual(replayed, released)
+            self.assertEqual((run_dir / "progress.md").read_bytes(), after)
+
+    def test_later_round_preserves_fixed_artifact_from_completed_artifact_round(self):
+        """Treating N/A as malformed loses a valid artifact resolution on the next round."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, _, reviewed_head = self.make_run(root)
+            phase_evidence = _verification_evidence(root, reviewed_head)
+            record_phase_verification(
+                run_dir, phase_id="01", head=reviewed_head,
+                commands=("suite",), evidence=(phase_evidence,),
+            )
+            open_review_gate(
+                run_dir, gate_id="phase-01", base=reviewed_head, head=reviewed_head,
+                reviewer_assignments=("reviewer-1",), capacity=3,
+            )
+            finding_ids = "F-ARTIFACT,F-REMAINING"
+            initial = self.write_report(
+                root, "review.md", gate="phase-01", assignment="reviewer-1",
+                base=reviewed_head, head=reviewed_head, findings=finding_ids,
+            )
+            findings = root / "findings.md"
+            findings.write_text(
+                "<!-- pipeline-findings/v2 -->\n"
+                "| ID | Gate | Severity | Status | Disposition | Evidence | Fix Commit | Re-review |\n"
+                "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                "| F-ARTIFACT | phase-01 | Important | Open | - | review.md | - | - |\n"
+                "| F-REMAINING | phase-01 | Important | Open | - | review.md | - | - |\n",
+                encoding="utf-8",
+            )
+            evaluate_and_close_review_gate(
+                run_dir, gate_id="phase-01", findings_path=findings,
+                report_paths=(initial,), verification=(phase_evidence,), rereview_paths=(),
+            )
+            round_one_plan = root / "round-one.md"
+            round_one_plan.write_text(
+                "# Artifact round\n\n"
+                "<!-- pipeline-remediation-scope/v2 -->\n"
+                "| Finding | Kind | Artifacts |\n"
+                "| --- | --- | --- |\n"
+                '| F-ARTIFACT | artifact | ["agent-output/fixed.md"] |\n'
+                '| F-REMAINING | artifact | ["agent-output/attempt.md"] |\n',
+                encoding="utf-8",
+            )
+            round_one = start_remediation_round(
+                run_dir, gate_id="phase-01", round_number=1,
+                finding_ids=("F-ARTIFACT", "F-REMAINING"),
+                fix_plan=str(round_one_plan), fixer_assignments=("fixer-1",), capacity=3,
+            )
+            round_one_row = next(row for row in round_one.remediation if row.gate == "phase-01")
+            output = root / "agent-output/fixed.md"
+            output.parent.mkdir()
+            output.write_text("fixed artifact\n", encoding="utf-8")
+            (root / "agent-output/attempt.md").write_text("incomplete attempt\n", encoding="utf-8")
+            output_identity = pipeline_state._digest_bound_reference(run_dir, output)
+            verification_one = _remediation_evidence(
+                root, reviewed_head, "phase-01", 1, "artifact-round"
+            )
+            record_remediation_fixes(
+                run_dir, gate_id="phase-01", round_number=1,
+                fix_head=reviewed_head, commits=(), verification=(verification_one,),
+                capacity=3, repo_dir=root,
+            )
+            rereview_one = self.write_report(
+                root, "rereview-one.md", gate="phase-01", assignment="reviewer-1",
+                base=reviewed_head, head=reviewed_head, findings=finding_ids,
+                outcomes={"F-ARTIFACT": "Resolved", "F-REMAINING": "Open"},
+            )
+            proof = root / "artifact-proof.md"
+            proof.write_text(
+                "<!-- pipeline-artifact-remediation/v2 -->\n"
+                "| Field | Value |\n"
+                "| --- | --- |\n"
+                "| finding | F-ARTIFACT |\n"
+                "| gate | phase-01 |\n"
+                "| round | 1 |\n"
+                f"| fix_plan | {round_one_row.fix_plan} |\n"
+                f"| artifacts | {json.dumps([output_identity], separators=(',', ':'))} |\n"
+                f"| verification | {verification_one} |\n",
+                encoding="utf-8",
+            )
+            proof_identity = pipeline_state._digest_bound_reference(run_dir, proof)
+            findings.write_text(
+                "<!-- pipeline-findings/v2 -->\n"
+                "| ID | Gate | Severity | Status | Disposition | Evidence | Fix Commit | Re-review |\n"
+                "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                f"| F-ARTIFACT | phase-01 | Important | Resolved | Fixed | {proof_identity} | - | {rereview_one} |\n"
+                "| F-REMAINING | phase-01 | Important | Open | - | review.md | - | - |\n",
+                encoding="utf-8",
+            )
+            after_one = evaluate_and_close_review_gate(
+                run_dir, gate_id="phase-01", findings_path=findings,
+                report_paths=(initial,), verification=(verification_one,),
+                rereview_paths=(rereview_one,),
+            )
+            self.assertEqual(
+                next(row.commits for row in after_one.remediation if row.gate == "phase-01"),
+                "N/A",
+            )
+
+            round_two_plan = root / "round-two.md"
+            round_two_plan.write_text(
+                "# Source round\n\n"
+                "<!-- pipeline-remediation-scope/v2 -->\n"
+                "| Finding | Kind | Artifacts |\n"
+                "| --- | --- | --- |\n"
+                "| F-REMAINING | source | none |\n",
+                encoding="utf-8",
+            )
+            start_remediation_round(
+                run_dir, gate_id="phase-01", round_number=2,
+                finding_ids=("F-REMAINING",), fix_plan=str(round_two_plan),
+                fixer_assignments=("fixer-2",), capacity=3,
+            )
+            (root / "source-fix.txt").write_text("source fix\n", encoding="utf-8")
+            self.git(root, "add", "source-fix.txt")
+            self.git(root, "commit", "-qm", "source round")
+            fix_head = self.git(root, "rev-parse", "HEAD")
+            self.git(root, "branch", "-f", "target", fix_head)
+            verification_two = _remediation_evidence(
+                root, fix_head, "phase-01", 2, "source-round"
+            )
+            record_remediation_fixes(
+                run_dir, gate_id="phase-01", round_number=2,
+                fix_head=fix_head, commits=(fix_head,), verification=(verification_two,),
+                capacity=3, repo_dir=root,
+            )
+            rereview_two = self.write_report(
+                root, "rereview-two.md", gate="phase-01", assignment="reviewer-1",
+                base=reviewed_head, head=fix_head, findings=finding_ids,
+                outcomes={"F-ARTIFACT": "Resolved", "F-REMAINING": "Resolved"},
+            )
+            findings.write_text(
+                "<!-- pipeline-findings/v2 -->\n"
+                "| ID | Gate | Severity | Status | Disposition | Evidence | Fix Commit | Re-review |\n"
+                "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                f"| F-ARTIFACT | phase-01 | Important | Resolved | Fixed | {proof_identity} | - | {rereview_one} |\n"
+                f"| F-REMAINING | phase-01 | Important | Resolved | Fixed | {verification_two} | {fix_head} | {rereview_two} |\n",
+                encoding="utf-8",
+            )
+            accepted = evaluate_and_close_review_gate(
+                run_dir, gate_id="phase-01", findings_path=findings,
+                report_paths=(initial,), verification=(verification_two,),
+                rereview_paths=(rereview_two,),
             )
             self.assertEqual(
                 next(gate.state for gate in accepted.gates if gate.id == "phase-01"),

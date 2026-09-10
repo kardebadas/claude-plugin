@@ -98,7 +98,11 @@ Each finding is `Open` or `Resolved`. A resolved finding has one disposition:
   round, immutable fix plan, nonempty digest-bound artifact set, and recorded
   remediation verification; its cited re-review must be the applicable report
   supplied for that round. The active immutable fix plan remains the authority
-  for classifying the remedy as artifact-only.
+  for classifying the remedy as artifact-only. Its single
+  `pipeline-remediation-scope/v2` table must cover the exact ordered targeted
+  finding set: `source` rows use `none`, while `artifact` rows use a nonempty
+  unique JSON array of exact repository-relative output paths. Artifact-remedy
+  evidence must bind exactly those paths.
 - `Deferred`: Minor only. Its digest-bound disposition artifact contains
   exactly one nonempty `Finding:`, `Impact:`, `Reason:`, and
   `Authority: D-<number>` field. That decision must be resolved, explicitly
@@ -151,6 +155,11 @@ remediation, `gate.head` advances only after a validated contiguous edge from
 the prior reviewed HEAD to the verified fix HEAD. Re-review reports use that
 prior HEAD as their base. Validate the complete initial-plus-remediation
 lineage; never reinterpret an initial report as if it reviewed a later HEAD.
+A completed all-artifact edge truthfully records `commits=N/A` and may retain
+the prior HEAD only when its immutable scope is entirely artifact-kind. Its
+Fixed evidence remains bound to that historical round's scope, verification,
+and re-review during later rounds. Source and mixed edges retain strict commit
+and newer-HEAD ancestry.
 
 ## One bounded remediation loop
 
@@ -168,15 +177,17 @@ confirmed Critical or Important findings remain:
    dependencies, typed write scopes, and the global worker limit. Apply
    **superpowers:test-driven-development** to behavior changes and
    **superpowers:systematic-debugging** to unexpected failures.
-5. Run focused regressions while fixing. After the consolidated fix batch is
-   committed and integrated, run the required phase suite once on that state
-   and record command, outcome, digest-bound evidence, code-state identity,
-   relevant environment, and elapsed time.
-6. Call `record_remediation_fixes` only with strict post-review fix commits,
-   the integrated fix HEAD, and one digest-bound typed `remediation` PASS record
-   matching the run, gate, round, and fix HEAD. This releases fixer ownership
-   and reserves the gate's recorded reviewer assignments using a fresh
-   controller-bound capacity observation inside the tracker lock.
+5. Run focused regressions while fixing. After source changes are committed and
+   integrated and artifact outputs are complete, run the required phase suite
+   once on that state and record command, outcome, digest-bound evidence,
+   code-state identity, relevant environment, and elapsed time.
+6. Call `record_remediation_fixes` with one digest-bound typed `remediation`
+   PASS record matching the run, gate, round, and fix HEAD. Mixed/source rounds
+   require strict post-review fix commits and a newer integrated HEAD. A
+   machine-authorized all-artifact round records commits as `N/A` and retains
+   the unchanged reviewed target tip. Both paths revalidate the immutable fix
+   plan, release fixer ownership, and reserve the recorded reviewers using a
+   fresh controller-bound capacity observation inside the tracker lock.
 7. Re-review the same gate. Check targeted findings, the fix diff, introduced
    regressions, and relevant integration consequences; then record exactly one
    `remaining-blockers` outcome and evaluate the gate.

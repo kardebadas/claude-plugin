@@ -21,6 +21,20 @@ findings. An explicitly included Minor does not manufacture blocker progress.
 If an unanswered choice or conflicting requirement prevents a fix definition,
 record it and ask the user before recording or dispatching this round.
 
+## Machine-readable remedy authority
+
+Include this narrow table whenever any targeted finding is artifact-only. Its
+rows exactly match the ordered targeted finding set; workers cannot reclassify
+them.
+
+<!-- pipeline-remediation-scope/v2 -->
+| Finding | Kind | Artifacts |
+| --- | --- | --- |
+| <finding-id> | <source-or-artifact> | <none-or-JSON-array-of-exact-repository-relative-paths> |
+
+`source` uses exactly `none`. `artifact` uses a nonempty JSON string array of
+unique exact paths.
+
 ## Compatible fix batches
 
 | Batch | Finding IDs | Objective and approved behavior | Files / typed write scopes | Depends on | Focused tests and evidence |

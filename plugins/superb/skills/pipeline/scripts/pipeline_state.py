@@ -3770,8 +3770,8 @@ def record_remediation_fixes(
     repo_dir: Path,
 ) -> Tracker:
     """Release fixers and reserve the existing independent reviewers for re-review."""
-    if not _COMMIT.fullmatch(fix_head) or not commits or not verification:
-        raise TransitionError("fix integration needs a HEAD, commits, and verification")
+    if not _COMMIT.fullmatch(fix_head) or not verification:
+        raise TransitionError("fix integration needs a HEAD and verification")
 
     def transition(tracker: Tracker) -> Tracker:
         gate = _gate_record(tracker, gate_id)
@@ -3781,6 +3781,8 @@ def record_remediation_fixes(
         )
         if row is None or row.state != "fixing" or row.fixers == "-":
             raise TransitionError("only an active fixing round can move to re-review")
+        scope = _remediation_scope(Path(run_dir), row)
+        all_artifact = bool(scope) and all(kind == "artifact" for kind, _ in scope.values())
         _validate_sealed_gate_evidence(
             Path(run_dir), gate,
             _resolved_reference(Path(run_dir), dict(tracker.run_fields)["findings"]),
@@ -3792,19 +3794,24 @@ def record_remediation_fixes(
         )
         if gate.state != "blocked" or gate.questions != "-":
             raise TransitionError("gate is not eligible for re-review")
-        if (
-            not _git(Path(repo_dir), "cat-file", "-e", f"{fix_head}^{{commit}}")
-            or not _git(Path(repo_dir), "merge-base", "--is-ancestor", fix_head, tracker.target_branch)
-            or fix_head == gate.head
-            or not _git(Path(repo_dir), "merge-base", "--is-ancestor", gate.head, fix_head)
+        if not _git(Path(repo_dir), "cat-file", "-e", f"{fix_head}^{{commit}}") or not _is_target_tip(
+            Path(repo_dir), tracker.target_branch, fix_head
         ):
             raise TransitionError("fix HEAD is not integrated on the target branch")
-        if any(
-            not _COMMIT.fullmatch(commit)
-            or _git(Path(repo_dir), "merge-base", "--is-ancestor", commit, gate.head)
-            or not _git(Path(repo_dir), "merge-base", "--is-ancestor", gate.head, commit)
-            or not _git(Path(repo_dir), "merge-base", "--is-ancestor", commit, fix_head)
-            for commit in commits
+        if all_artifact:
+            if commits or fix_head != gate.head:
+                raise TransitionError("an all-artifact round uses no commits and preserves the reviewed HEAD")
+        elif (
+            not commits
+            or fix_head == gate.head
+            or not _git(Path(repo_dir), "merge-base", "--is-ancestor", gate.head, fix_head)
+            or any(
+                not _COMMIT.fullmatch(commit)
+                or _git(Path(repo_dir), "merge-base", "--is-ancestor", commit, gate.head)
+                or not _git(Path(repo_dir), "merge-base", "--is-ancestor", gate.head, commit)
+                or not _git(Path(repo_dir), "merge-base", "--is-ancestor", commit, fix_head)
+                for commit in commits
+            )
         ):
             raise TransitionError("fix commit lacks strict post-review provenance in the integrated fix HEAD")
         released = _append_history(row.released_fixers, row.fixers)
@@ -3813,7 +3820,7 @@ def record_remediation_fixes(
             state="re_reviewing",
             fixers="-",
             released_fixers=released,
-            commits=",".join(commits),
+            commits=",".join(commits) if commits else "N/A",
             verification=_append_history(row.verification, ",".join(verification)),
         )
         interim = replace(
@@ -4113,13 +4120,20 @@ def _validate_completed_round_edge(
         allow_sealed_historical=True,
     )
     verification = _round_verification_items(row)
-    if any(not _COMMIT.fullmatch(commit) for commit in _csv(row.commits)):
+    scope = _remediation_scope(run_dir, row)
+    all_artifact = bool(scope) and all(kind == "artifact" for kind, _ in scope.values())
+    commits = _csv(row.commits)
+    if all_artifact:
+        if row.commits != "N/A" or reviewed_head != prior_head:
+            raise TransitionError("completed artifact-only round has inconsistent no-commit provenance")
+        commits = ()
+    elif not commits or any(not _COMMIT.fullmatch(commit) for commit in commits):
         raise TransitionError("completed remediation round has malformed fix provenance")
     repo_dir = _project_root(run_dir)
     if (
         not _git(repo_dir, "merge-base", "--is-ancestor", prior_head, reviewed_head)
         or not _git(repo_dir, "merge-base", "--is-ancestor", reviewed_head, tracker.target_branch)
-        or any(not _git(repo_dir, "merge-base", "--is-ancestor", commit, reviewed_head) for commit in _csv(row.commits))
+        or any(not _git(repo_dir, "merge-base", "--is-ancestor", commit, reviewed_head) for commit in commits)
     ):
         raise TransitionError("completed remediation round is not a contiguous integrated review edge")
     try:
@@ -4307,13 +4321,71 @@ _ARTIFACT_REMEDIATION_MARKER = "<!-- pipeline-artifact-remediation/v2 -->"
 _ARTIFACT_REMEDIATION_FIELDS = (
     "finding", "gate", "round", "fix_plan", "artifacts", "verification",
 )
+_REMEDIATION_SCOPE_MARKER = "<!-- pipeline-remediation-scope/v2 -->"
+_REMEDIATION_SCOPE_HEADER = ("Finding", "Kind", "Artifacts")
+
+
+def _remediation_scope(
+    run_dir: Path,
+    row: RemediationRecord,
+    *,
+    required: bool = False,
+) -> dict[str, tuple[str, tuple[str, ...]]]:
+    """Parse the optional narrow machine authority from an immutable fix plan."""
+    plan = _resolve_digest_bound_reference(run_dir, row.fix_plan)
+    try:
+        lines = plan.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise TransitionError(f"remediation fix plan is unreadable: {plan}: {exc}") from exc
+    positions = [index for index, line in enumerate(lines) if line == _REMEDIATION_SCOPE_MARKER]
+    if not positions:
+        if required:
+            raise TransitionError("artifact-only remediation needs machine-readable fix-plan authority")
+        return {}
+    if len(positions) != 1:
+        raise TransitionError("remediation fix plan needs at most one scope authority")
+    table_lines: list[str] = []
+    for line in lines[positions[0] + 1:]:
+        if not line.startswith("|"):
+            break
+        table_lines.append(line)
+    rows = _table(table_lines, _REMEDIATION_SCOPE_HEADER, TransitionError)
+    finding_ids = tuple(item[0] for item in rows)
+    if finding_ids != _csv(row.findings) or len(finding_ids) != len(set(finding_ids)):
+        raise TransitionError("remediation scope must exactly match the targeted finding order")
+    scope: dict[str, tuple[str, tuple[str, ...]]] = {}
+    for finding_id, kind, raw_artifacts in rows:
+        if kind == "source":
+            if raw_artifacts != "none":
+                raise TransitionError("source remediation scope must declare artifacts as none")
+            artifacts: tuple[str, ...] = ()
+        elif kind == "artifact":
+            try:
+                parsed = json.loads(raw_artifacts)
+            except json.JSONDecodeError as exc:
+                raise TransitionError("artifact remediation scope must use a JSON string array") from exc
+            if (
+                not isinstance(parsed, list)
+                or not parsed
+                or any(not isinstance(item, str) for item in parsed)
+                or len(parsed) != len(set(parsed))
+            ):
+                raise TransitionError("artifact remediation scope needs unique nonempty paths")
+            try:
+                artifacts = tuple(_safe_relative(item).as_posix() for item in parsed)
+            except PlanMetadataError as exc:
+                raise TransitionError(str(exc)) from exc
+        else:
+            raise TransitionError("remediation scope kind must be source or artifact")
+        scope[finding_id] = (kind, artifacts)
+    return scope
 
 
 def _validate_artifact_remediation_evidence(
     run_dir: Path,
     tracker: Tracker,
     gate: GateRecord,
-    active_round: RemediationRecord | None,
+    remediation: RemediationRecord,
     finding_id: str,
     value: str,
     re_review: str,
@@ -4321,9 +4393,12 @@ def _validate_artifact_remediation_evidence(
     verification: tuple[str, ...],
 ) -> None:
     """Validate an explicitly artifact-only fix without inventing a commit."""
-    if active_round is None or finding_id not in _csv(active_round.findings):
+    if finding_id not in _csv(remediation.findings):
         raise TransitionError("artifact-only fix is not targeted by the active remediation round")
-    _resolve_digest_bound_reference(run_dir, active_round.fix_plan)
+    scope = _remediation_scope(run_dir, remediation, required=True)
+    kind, approved_artifacts = scope[finding_id]
+    if kind != "artifact":
+        raise TransitionError("approved remediation scope classifies this finding as source")
     path = _resolve_digest_bound_reference(run_dir, value)
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -4337,8 +4412,8 @@ def _validate_artifact_remediation_evidence(
     if (
         values["finding"] != finding_id
         or values["gate"] != gate.id
-        or values["round"] != str(active_round.round_number)
-        or values["fix_plan"] != active_round.fix_plan
+        or values["round"] != str(remediation.round_number)
+        or values["fix_plan"] != remediation.fix_plan
     ):
         raise TransitionError("artifact-remediation evidence does not match the approved round")
     try:
@@ -4352,6 +4427,9 @@ def _validate_artifact_remediation_evidence(
         or len(artifacts) != len(set(artifacts))
     ):
         raise TransitionError("artifact-remediation artifacts must be unique digest-bound identities")
+    artifact_paths = tuple(item.rpartition("#sha256=")[0] for item in artifacts)
+    if artifact_paths != approved_artifacts:
+        raise TransitionError("artifact-remediation evidence does not match approved artifact paths")
     for artifact in artifacts:
         _resolve_digest_bound_reference(run_dir, artifact)
     if len(verification) != 1 or values["verification"] != verification[0]:
@@ -4360,6 +4438,48 @@ def _validate_artifact_remediation_evidence(
     supplied_rereviews = {Path(item).resolve() for item in rereview_paths}
     if expected_rereview not in supplied_rereviews:
         raise TransitionError("artifact-only fix lacks its applicable re-review")
+
+
+def _validate_artifact_remediation_disposition(
+    run_dir: Path,
+    tracker: Tracker,
+    gate: GateRecord,
+    active_round: RemediationRecord | None,
+    finding_id: str,
+    evidence: str,
+    re_review: str,
+    rereview_paths: tuple[Path, ...],
+    verification: tuple[str, ...],
+) -> None:
+    matches = 0
+    for remediation in tracker.remediation:
+        if (
+            remediation.gate != gate.id
+            or finding_id not in _csv(remediation.findings)
+            or remediation.state not in {"re_reviewing", "complete"}
+        ):
+            continue
+        if remediation is active_round:
+            candidate_rereviews = rereview_paths
+            candidate_verification = verification
+        else:
+            candidate_rereviews = tuple(
+                _resolve_digest_bound_reference(run_dir, item)
+                for item in _csv(remediation.re_review)
+            )
+            candidate_verification = _round_verification_items(remediation)
+        try:
+            _validate_artifact_remediation_evidence(
+                run_dir, tracker, gate, remediation, finding_id, evidence,
+                re_review, candidate_rereviews, candidate_verification,
+            )
+        except TransitionError:
+            continue
+        matches += 1
+    if matches != 1:
+        raise TransitionError(
+            "artifact-only finding is not bound to exactly one targeted remediation round and re-review"
+        )
 
 
 def evaluate_and_close_review_gate(
@@ -4397,6 +4517,8 @@ def evaluate_and_close_review_gate(
             (row for row in tracker.remediation if row.gate == gate.id and row.state == "re_reviewing"),
             None,
         )
+        if active_round is not None:
+            _remediation_scope(Path(run_dir), active_round)
         reports, historical_reports = _validated_review_lineage(
             Path(run_dir), tracker, gate, report_paths, active_round,
         )
@@ -4497,7 +4619,7 @@ def evaluate_and_close_review_gate(
                     if evidence == "-" or re_review == "-":
                         invalid_rows.append(row)
                     elif fix_commit == "-":
-                        _validate_artifact_remediation_evidence(
+                        _validate_artifact_remediation_disposition(
                             Path(run_dir), tracker, gate, active_round, row[0], evidence,
                             re_review, rereview_paths, verification,
                         )
@@ -4515,7 +4637,7 @@ def evaluate_and_close_review_gate(
                     if re_review == "-":
                         invalid_rows.append(row)
                     elif fix_commit == "-":
-                        _validate_artifact_remediation_evidence(
+                        _validate_artifact_remediation_disposition(
                             Path(run_dir), tracker, gate, active_round, row[0], evidence,
                             re_review, rereview_paths, verification,
                         )
@@ -4725,7 +4847,7 @@ def reconcile_run(
     for row in tracker.remediation:
         if row.state in {"fixing", "re_reviewing"}:
             try:
-                _resolve_digest_bound_reference(run_dir, row.fix_plan)
+                _remediation_scope(run_dir, row)
             except TransitionError as exc:
                 questions.append(
                     f"fix-plan-contradiction:{row.gate}:{row.round_number}:{exc}"

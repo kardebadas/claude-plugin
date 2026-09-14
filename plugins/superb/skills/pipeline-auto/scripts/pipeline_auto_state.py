@@ -10,8 +10,6 @@ direction — not here, not later.
 
 from __future__ import annotations
 
-import re
-
 SCHEMA = "pipeline-auto/v1"
 MARKER = f"<!-- {SCHEMA} -->"
 TITLE = "# Pipeline Auto — Progress Tracker"
@@ -121,10 +119,6 @@ _SECTIONS = (
 
 _HEADINGS = tuple(heading for heading, _, _ in _SECTIONS)
 
-_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/@:+-]*")
-_COMMIT = re.compile(r"[0-9a-f]{40}")
-_SHA256 = re.compile(r"[0-9a-f]{64}")
-
 
 def _field(column: str) -> str:
     """Map a column header to its dict key: 'Re-review' -> 're_review'."""
@@ -145,7 +139,14 @@ def _cells(line: str) -> tuple[str, ...]:
 
 
 def _table(section: list[str], header: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
-    content = [line for line in section if line]
+    #: A table is blank-line free by the time it arrives: ``_sections`` has
+    #: already taken the one separator line each section ends with. Absorbing
+    #: any other blank line would let a tracker parse and then render to
+    #: different bytes — the exact asymmetry this format exists to exclude —
+    #: so noise is refused rather than preserved.
+    content = section
+    if any(not line for line in content):
+        raise TrackerValidationError("a blank line inside a table")
     if len(content) < 2 or _cells(content[0]) != header:
         raise TrackerValidationError(f"expected table header {header!r}")
     separator = _cells(content[1])
@@ -173,12 +174,26 @@ def _sections(text: str) -> dict[str, list[str]]:
         raise TrackerValidationError("unknown, missing, or reordered section")
     if any(lines[2:positions[0]]):
         raise TrackerValidationError("unexpected content before the first section")
-    return {
-        heading: lines[positions[index] + 1:(
-            positions[index + 1] if index + 1 < len(positions) else len(lines)
+    sections = {}
+    for index, heading in enumerate(_HEADINGS):
+        last = index + 1 == len(positions)
+        body = lines[positions[index] + 1:(
+            len(lines) if last else positions[index + 1]
         )]
-        for index, heading in enumerate(_HEADINGS)
-    }
+        # Exactly one blank line separates a section from the next heading, and
+        # the final section ends on its last row. Taking that one line here —
+        # rather than filtering blanks in `_table` — is what lets a table reject
+        # every remaining blank line, including a stray one at end of file.
+        if last:
+            if body and not body[-1]:
+                raise TrackerValidationError("trailing blank line at end of tracker")
+        else:
+            if not body or body[-1]:
+                raise TrackerValidationError(
+                    f"expected one blank line at the end of {heading!r}")
+            body = body[:-1]
+        sections[heading] = body
+    return sections
 
 
 def _key_values(section: list[str], keys: tuple[str, ...]) -> dict[str, str]:

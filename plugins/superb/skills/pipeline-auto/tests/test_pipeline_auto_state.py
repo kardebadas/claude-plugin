@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
-REPO_ROOT = SKILL_DIR.parents[3]
 FIXTURES = SKILL_DIR / "tests" / "fixtures"
-FOREIGN_FIXTURES = (
-    REPO_ROOT / "plugins" / "superb" / "skills" / "pipeline" / "tests" / "fixtures"
-)
+
+#: A fixture row a blank line can be inserted ahead of, inside a table body.
+BLANK_TARGET = "| 10 | pending | - |\n"
 
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
 
@@ -112,6 +112,39 @@ class RoundTripTests(unittest.TestCase):
         tracker = pas.parse_tracker(text)
         self.assertEqual(tracker["escalations"], [])
         self.assertEqual(pas.render_tracker(tracker), text)
+
+    def test_a_blank_line_inside_a_table_is_rejected(self):
+        """Parse must not accept bytes the renderer cannot reproduce.
+
+        Absorbing the blank line would let a tracker parse and then render
+        differently — an asymmetry in the byte stability this module exists
+        to hold. The blank line is noise, so it is rejected, not preserved.
+        """
+        text = valid_text().replace(BLANK_TARGET, "\n" + BLANK_TARGET)
+        self.assertNotEqual(text, valid_text())
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_rejected_blank_line_leaves_the_tracker_byte_identical(self):
+        """Every rejection here is a read-only stop: nothing on disk moves."""
+        text = valid_text().replace(BLANK_TARGET, "\n" + BLANK_TARGET)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "progress.md"
+            path.write_bytes(text.encode("utf-8"))
+            before = path.read_bytes()
+            with self.assertRaises(pas.TrackerValidationError):
+                pas.parse_tracker(path.read_text(encoding="utf-8"))
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_a_trailing_blank_line_at_end_of_tracker_is_rejected(self):
+        """The same asymmetry at the other end of the file.
+
+        A blank line after the last row is equally unreproducible by the
+        renderer, so the section splitter refuses it rather than treating it
+        as the separator that precedes a heading.
+        """
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(valid_text() + "\n")
 
     def test_render_rejects_a_row_missing_a_field(self):
         tracker = pas.parse_tracker(valid_text())

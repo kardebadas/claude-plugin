@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import ast
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -125,26 +125,69 @@ class RoundTripTests(unittest.TestCase):
         with self.assertRaises(pas.TrackerValidationError):
             pas.parse_tracker(text)
 
-    def test_a_rejected_blank_line_leaves_the_tracker_byte_identical(self):
-        """Every rejection here is a read-only stop: nothing on disk moves."""
-        text = valid_text().replace(BLANK_TARGET, "\n" + BLANK_TARGET)
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "progress.md"
-            path.write_bytes(text.encode("utf-8"))
-            before = path.read_bytes()
-            with self.assertRaises(pas.TrackerValidationError):
-                pas.parse_tracker(path.read_text(encoding="utf-8"))
-            self.assertEqual(path.read_bytes(), before)
+    def test_a_rejection_is_read_only_because_the_module_cannot_write(self):
+        """Pins the property that actually makes every rejection read-only.
+
+        This assertion used to write a temp file, parse its text, and check the
+        bytes were unchanged. It could not fail: ``parse_tracker`` takes a
+        ``str`` and returns a dict, so no parse — accepted or rejected — can
+        reach that file. Nor is "the input string is unmutated" worth asserting:
+        ``str`` is immutable, so that holds of Python, not of this module.
+
+        What is falsifiable is the capability itself. The module reads and
+        writes nothing: its only import is ``__future__`` and it calls no
+        builtin that opens a file or runs generated code. Add an ``import os``
+        or an ``open()`` and this fails — which is what "read-only stop" in the
+        exception docstrings is actually claiming.
+        """
+        tree = ast.parse(Path(pas.__file__).read_text(encoding="utf-8"))
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imported.add((node.module or "").split(".")[0])
+        self.assertEqual(imported, {"__future__"})
+        called = {node.func.id for node in ast.walk(tree)
+                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+        for builtin in ("open", "__import__", "eval", "exec", "compile"):
+            self.assertNotIn(builtin, called)
 
     def test_a_trailing_blank_line_at_end_of_tracker_is_rejected(self):
         """The same asymmetry at the other end of the file.
 
         A blank line after the last row is equally unreproducible by the
-        renderer, so the section splitter refuses it rather than treating it
-        as the separator that precedes a heading.
+        renderer. The final section keeps its separator line rather than having
+        one taken off it, so the blank reaches the table rule and is refused
+        there — one enforcement point for every blank line in the file.
         """
         with self.assertRaises(pas.TrackerValidationError):
             pas.parse_tracker(valid_text() + "\n")
+
+    def test_no_blank_line_between_the_title_and_the_first_section_is_rejected(self):
+        """The same asymmetry at the head of the file.
+
+        The gap before the first heading was checked for content but never for
+        width, so a tracker with no gap parsed and then rendered with one.
+        """
+        text = valid_text().replace(f"{pas.TITLE}\n\n## Run", f"{pas.TITLE}\n## Run")
+        self.assertNotEqual(text, valid_text())
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_two_blank_lines_between_the_title_and_the_first_section_is_rejected(self):
+        text = valid_text().replace(f"{pas.TITLE}\n\n## Run", f"{pas.TITLE}\n\n\n## Run")
+        self.assertNotEqual(text, valid_text())
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_the_title_gap_the_parser_accepts_is_the_one_the_renderer_emits(self):
+        """The byte-identity half: accepting a gap the renderer cannot emit is
+        the defect, not the gap itself."""
+        rendered = pas.render_tracker(pas.parse_tracker(valid_text()))
+        self.assertIn(f"{pas.TITLE}\n\n## Run", rendered)
+        self.assertNotIn(f"{pas.TITLE}\n\n\n", rendered)
+        self.assertNotIn(f"{pas.TITLE}\n## Run", rendered)
 
     def test_render_rejects_a_row_missing_a_field(self):
         tracker = pas.parse_tracker(valid_text())

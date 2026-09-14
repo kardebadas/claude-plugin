@@ -139,11 +139,14 @@ def _cells(line: str) -> tuple[str, ...]:
 
 
 def _table(section: list[str], header: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
-    #: A table is blank-line free by the time it arrives: ``_sections`` has
-    #: already taken the one separator line each section ends with. Absorbing
-    #: any other blank line would let a tracker parse and then render to
-    #: different bytes — the exact asymmetry this format exists to exclude —
-    #: so noise is refused rather than preserved.
+    #: This is the one place a blank line is judged. ``_sections`` has already
+    #: taken the single separator line off every section that is followed by a
+    #: heading; every blank line still standing — inside a table, or left at
+    #: end of file where the last section has no separator to give up — is
+    #: refused here. Absorbing one would let a tracker parse and then render to
+    #: different bytes, the exact asymmetry this format exists to exclude. The
+    #: check leads ``_cells`` on purpose: ``_cells`` would also reject a blank
+    #: line, but as a row missing its pipes, which is not what went wrong.
     content = section
     if any(not line for line in content):
         raise TrackerValidationError("a blank line inside a table")
@@ -172,22 +175,26 @@ def _sections(text: str) -> dict[str, list[str]]:
         line for line in lines if line.startswith("## ")
     ] != list(_HEADINGS):
         raise TrackerValidationError("unknown, missing, or reordered section")
-    if any(lines[2:positions[0]]):
-        raise TrackerValidationError("unexpected content before the first section")
+    #: The head of the file obeys the same rule as every other section break:
+    #: exactly one blank line, no content. Checking only for content would let
+    #: a no-gap or a two-gap tracker parse and then render to different bytes.
+    if lines[2:positions[0]] != [""]:
+        raise TrackerValidationError(
+            "expected exactly one blank line between the title and the first section")
     sections = {}
     for index, heading in enumerate(_HEADINGS):
         last = index + 1 == len(positions)
         body = lines[positions[index] + 1:(
             len(lines) if last else positions[index + 1]
         )]
-        # Exactly one blank line separates a section from the next heading, and
-        # the final section ends on its last row. Taking that one line here —
-        # rather than filtering blanks in `_table` — is what lets a table reject
-        # every remaining blank line, including a stray one at end of file.
-        if last:
-            if body and not body[-1]:
-                raise TrackerValidationError("trailing blank line at end of tracker")
-        else:
+        # Exactly one blank line separates a section from the next heading.
+        # Taking that one line here — rather than filtering blanks in `_table` —
+        # is what lets a table reject every remaining blank line. The final
+        # section has no following heading, so nothing is taken off it and a
+        # stray blank at end of file reaches `_table` like any other: there is
+        # no separate end-of-file guard, because a second one could only
+        # disagree with the first.
+        if not last:
             if not body or body[-1]:
                 raise TrackerValidationError(
                     f"expected one blank line at the end of {heading!r}")

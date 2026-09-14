@@ -6,7 +6,7 @@
 
 **Architecture:** The controller's behaviour lives in prose that routes; the state module built in P02–P06 enforces it. `SKILL.md` is a router and a Red Flags list, never a manual: it carries the invocation table, the zero-assumption reversal, the twelve-stage routing table, and the rules most likely to be "simplified" away. Each reference owns one stage band and is loaded only for that band. The two agent files are security boundaries expressed as frontmatter: the brain's `tools:` allowlist is what makes depth-1-by-construction and an unforgeable audit trail true, not the prose asking nicely. The SDD review protocol is **inlined** — copied, re-pointed at this skill's run directory, and credited — because a review protocol an unrelated plugin update can overwrite is not reproducible.
 
-**Tech Stack:** Markdown for every deliverable. Bash for the two inlined scripts. Python 3 standard library (`unittest`, `pathlib`, `re`, `os`) for `tests/test_skill_structure.py`; it runs under both `python3 -m unittest` and `pytest`, matching P02's convention.
+**Tech Stack:** Markdown for every deliverable. Bash for the two inlined scripts. Python 3.11 standard library only (`unittest`, `pathlib`, `re`, `os`) for `tests/test_skill_structure.py`. **There is no pytest on this machine** — `python3 -c "import pytest"` raises `ModuleNotFoundError`. Tests are `unittest.TestCase`, discovered with `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`, matching P02's convention.
 
 **Spec:** `docs/superpowers/specs/2026-09-14-pipeline-auto-design.md`
 
@@ -31,6 +31,8 @@
 - Implementation tasks may occupy at most `worker_limit - 3` slots. `worker_limit >= 4` is required for concurrency.
 - Exactly three brains per quorum, exactly three readers at stage 01. A count is never reduced to fit capacity.
 - Python: standard library only. No new dependencies in any phase.
+- **The test runner is `unittest`, not `pytest`.** `pytest` is not installed here. Every test this phase writes is a `unittest.TestCase`, and every `Run:` line in this plan and in every file it produces uses `python3 -m unittest discover -s <tests-dir> -t . -v`. The inlined SDD material assumes pytest in places; adapt the command, never copy it.
+- **A plan that names a test runner nobody verified is installed is a plan failure.** The runner is discovered from the target repository — its CI config, its manifest, its existing test files — and recorded, never assumed from habit. This constraint exists because this very build shipped `pytest` in its own master plan's Tech Stack while its Global Constraints said standard library only, and nothing caught it until someone tried to run it.
 - **No absolute home-directory paths in any committed file.** Repository-relative paths, `~`, or `$HOME` expanded at runtime only. This phase writes more committed prose than any other, so it is the phase most likely to break the rule.
 - No push, no publish, no PR, no merge into `main`/`master`.
 
@@ -158,7 +160,7 @@ Twelve tasks. Task 1 writes the test, which stays RED until Task 12 — that is 
 
 **Interfaces:**
 - Consumes: nothing. This file imports no project code — importing the state module would couple the routing check to the spine and make a spine failure look like a routing failure.
-- Produces: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`, added to the run-wide verification suite from this phase onward.
+- Produces: `tests/test_skill_structure.py`, discovered by `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v` and added to the run-wide verification suite from this phase onward. It is a `unittest.TestCase` module with no third-party import, so it runs on a stdlib-only Python 3.11.
 
 Write the whole validator now, against files that do not exist yet. It fails completely. That is the point: every later task is measured by which of these tests it turns green, and a test written after the prose would be a test written to fit the prose.
 
@@ -2090,6 +2092,12 @@ machine authority.
 `quorum.extend-budget` is **never grantable by quorum.** The action requires
 `Provenance: human` and the validator rejects it on any quorum-provenance
 decision.
+
+**Do not confuse it with `dispatch.extend-budget`**, which raises the
+`agent_dispatch_count` ceiling. They cap different things and must never be
+granted by one another: extending review spend is not permission to accumulate
+more machine authority, and extending machine authority is not permission to
+spend more. Both require `Provenance: human`.
 
 ## Escalation
 

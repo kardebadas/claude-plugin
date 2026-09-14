@@ -149,7 +149,13 @@ def _table(section: list[str], header: tuple[str, ...]) -> tuple[tuple[str, ...]
     #: line, but as a row missing its pipes, which is not what went wrong.
     content = section
     if any(not line for line in content):
-        raise TrackerValidationError("a blank line inside a table")
+        #: The words, not the verdict: a section made only of blank lines has
+        #: no table for a blank line to be inside of, and naming one sends the
+        #: reader looking for a table that was never there. This is not the
+        #: deleted end-of-file guard coming back — no input's fate changes, the
+        #: same raise fires on the same line and only chooses its own wording.
+        raise TrackerValidationError(
+            "a blank line inside a table" if any(content) else "a section with no table")
     if len(content) < 2 or _cells(content[0]) != header:
         raise TrackerValidationError(f"expected table header {header!r}")
     separator = _cells(content[1])

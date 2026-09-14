@@ -13,6 +13,22 @@ FIXTURES = SKILL_DIR / "tests" / "fixtures"
 #: A fixture row a blank line can be inserted ahead of, inside a table body.
 BLANK_TARGET = "| 10 | pending | - |\n"
 
+#: A section boundary in the fixture: the last row of ``## Stage``, the single
+#: blank line, the next heading. Between sections is the one seam where the
+#: blank-line rule lives in ``_sections`` instead of ``_table``, so it needs its
+#: own inputs. ``NO_GAP`` and ``WIDE_GAP`` are the two ways to get it wrong.
+SECTION_BREAK = "| 12 | pending | - |\n\n## Intent\n"
+NO_GAP = "| 12 | pending | - |\n## Intent\n"
+WIDE_GAP = "| 12 | pending | - |\n\n\n## Intent\n"
+
+#: Modules ``pipeline_auto_state`` is permitted to import. This is an
+#: ALLOWLIST, not a snapshot of what it imports today: each name was put here
+#: deliberately, after checking it opens no file and runs no generated code.
+#: ``hashlib`` is listed for the payload and context digests the quorum rows
+#: carry. Widening this set is a decision to be argued for, never a step taken
+#: incidentally to make a failing test pass.
+ALLOWED_IMPORTS = frozenset({"__future__", "hashlib"})
+
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
 
 import pipeline_auto_state as pas  # noqa: E402
@@ -135,10 +151,13 @@ class RoundTripTests(unittest.TestCase):
         ``str`` is immutable, so that holds of Python, not of this module.
 
         What is falsifiable is the capability itself. The module reads and
-        writes nothing: its only import is ``__future__`` and it calls no
-        builtin that opens a file or runs generated code. Add an ``import os``
-        or an ``open()`` and this fails — which is what "read-only stop" in the
-        exception docstrings is actually claiming.
+        writes nothing: it imports only from the reviewed ``ALLOWED_IMPORTS``
+        allowlist and calls no builtin that opens a file or runs generated
+        code. Add an ``import os``, an ``open()`` or an ``eval()`` and this
+        fails — which is what "read-only stop" in the exception docstrings is
+        actually claiming. The allowlist, not an exact import set, is the
+        property worth pinning: the module is allowed to grow an import, it is
+        not allowed to grow a capability.
         """
         tree = ast.parse(Path(pas.__file__).read_text(encoding="utf-8"))
         imported = set()
@@ -147,7 +166,9 @@ class RoundTripTests(unittest.TestCase):
                 imported.update(alias.name.split(".")[0] for alias in node.names)
             elif isinstance(node, ast.ImportFrom):
                 imported.add((node.module or "").split(".")[0])
-        self.assertEqual(imported, {"__future__"})
+        self.assertEqual(
+            imported - ALLOWED_IMPORTS, set(),
+            "module imports outside ALLOWED_IMPORTS; widen it on purpose only")
         called = {node.func.id for node in ast.walk(tree)
                   if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
         for builtin in ("open", "__import__", "eval", "exec", "compile"):
@@ -188,6 +209,65 @@ class RoundTripTests(unittest.TestCase):
         self.assertIn(f"{pas.TITLE}\n\n## Run", rendered)
         self.assertNotIn(f"{pas.TITLE}\n\n\n", rendered)
         self.assertNotIn(f"{pas.TITLE}\n## Run", rendered)
+
+    def test_no_blank_line_between_two_sections_is_rejected(self):
+        """The same asymmetry between sections — the seam left unswept.
+
+        Every section owes exactly one blank line to the break that follows it.
+        A parser that merely stripped whatever trailing blanks it found would
+        take this gapless input and render it back with a gap.
+        """
+        text = valid_text().replace(SECTION_BREAK, NO_GAP)
+        self.assertNotEqual(text, valid_text())
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_two_blank_lines_between_two_sections_is_rejected(self):
+        """One blank line is required, so two is as wrong as none."""
+        text = valid_text().replace(SECTION_BREAK, WIDE_GAP)
+        self.assertNotEqual(text, valid_text())
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_section_gap_the_parser_accepts_renders_back_to_itself(self):
+        """The byte-identity companion: no rejected gap is quietly normalised.
+
+        The rule under test is not "reject these two inputs", it is "anything
+        accepted renders to the bytes it came from". Both variants are expected
+        to be refused; should either ever be accepted, this insists it round
+        trips, which neither can — the renderer emits exactly one blank line
+        between sections.
+        """
+        rendered = pas.render_tracker(pas.parse_tracker(valid_text()))
+        self.assertIn(SECTION_BREAK, rendered)
+        self.assertNotIn(NO_GAP, rendered)
+        self.assertNotIn(WIDE_GAP, rendered)
+        for variant in (NO_GAP, WIDE_GAP):
+            text = valid_text().replace(SECTION_BREAK, variant)
+            try:
+                round_tripped = pas.render_tracker(pas.parse_tracker(text))
+            except pas.TrackerValidationError:
+                continue
+            self.assertEqual(round_tripped, text,
+                             "accepted bytes must render back unchanged")
+
+    def test_an_empty_last_section_is_not_blamed_on_a_table_it_has_not_got(self):
+        """The rejection is right; the words have to be right too.
+
+        A last section holding nothing but its blank line has no table for a
+        blank line to be inside of, and saying otherwise sends the reader
+        hunting for a table that was never there.
+        """
+        text = valid_text()
+        empty_last = text[:text.index("## Gates")] + "## Gates\n\n"
+        with self.assertRaises(pas.TrackerValidationError) as caught:
+            pas.parse_tracker(empty_last)
+        self.assertNotIn("inside a table", str(caught.exception))
+        self.assertIn("no table", str(caught.exception))
+        # The same rule still names the table when there is one to name.
+        with self.assertRaises(pas.TrackerValidationError) as caught:
+            pas.parse_tracker(text.replace(BLANK_TARGET, "\n" + BLANK_TARGET))
+        self.assertIn("inside a table", str(caught.exception))
 
     def test_render_rejects_a_row_missing_a_field(self):
         tracker = pas.parse_tracker(valid_text())

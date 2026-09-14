@@ -261,9 +261,21 @@ built:
 | `## Phases` | ID, State, Verification, Review Class, Class Source, Ratchet, Gate |
 | `## Gates` | ID, Type, Phase, State, Base, Head, Assignments, Reports, Verification, Findings |
 
-Note `## Quorum` carries **three** digest-bearing columns. `Payload Digest` is
-per brain index, not per question — the three brains receive different reading
-assignments, so there is no single payload.
+**Correction to an earlier claim of mine:** I wrote that `Payload Digest` is per
+brain index. It is not, and the committed fixture is right — one digest per cell.
+
+The reading assignment is a **constant rule**, not data: index 0 grounds in the
+spec and intent brief, 1 in repository code and tests, 2 in the decisions record
+and phase plan. `build_payload` is pure, so brain *n*'s payload is fully
+determined by the shared payload plus *n*. One digest over the shared payload —
+the question record and the decisions projection — therefore binds all three, and
+a re-dispatch of index *n* is reproducible from `(Payload Digest, n)`.
+
+This is why the fixture needs no third column, and why "identical payload"
+elsewhere in this document means identical to that index's own payload. If the
+assignment rule ever becomes data rather than a constant, this collapses and the
+column has to carry three digests — so the rule belongs in the frozen constants
+beside `RUNGS`, not in `## Run`.
 
 **`integrate_task` is public and belongs to P04.** The spec assigns integration
 and the ancestry predicate to the task lifecycle, but the interface block named

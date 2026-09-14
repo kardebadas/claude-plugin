@@ -1783,7 +1783,8 @@ class OpenQuorum(unittest.TestCase):
         directory = self.run_dir / "quorum" / self.qid
         record = json.loads((directory / "open.json").read_text(encoding="utf-8"))
         self.assertEqual(record["owners"], QUESTION["owners"])
-        self.assertEqual(len(record["payload_digests"]), 3)
+        self.assertEqual([entry["brain_index"] for entry in record["payload_digests"]], [0, 1, 2])
+        self.assertEqual(len({entry["digest"] for entry in record["payload_digests"]}), 3)
         self.assertTrue(record["question_digest"])
         self.assertTrue(record["context_digest"])
         self.assertEqual(list((directory / "responses").iterdir()), [])
@@ -1919,12 +1920,14 @@ def open_quorum(run_dir: str, *, question_record: str) -> dict:
         else {"decisions": {}, "axis_index": {}}
     (run_dir / "decisions-effective.md").write_text(project_decisions(parsed), encoding="utf-8")
 
-    payload_digests = {}
+    # Per BRAIN INDEX, not per question: the three brains receive different
+    # reading assignments, so there is no single payload to digest.
+    payload_digests = []
     for index, owner in enumerate(record["owners"]):
         payload = build_payload(qid, index, run_dir=str(run_dir))
         rendered = _dumps(payload)
         (directory / f"payload-{owner}.json").write_text(rendered, encoding="utf-8")
-        payload_digests[owner] = _digest(rendered)
+        payload_digests.append({"brain_index": index, "owner": owner, "digest": _digest(rendered)})
 
     opened = {
         "qid": qid, "status": "in_flight", "axis": record["axis"], "phase": record["phase"],
@@ -2993,12 +2996,14 @@ what `open_quorum` branches on. `group_responses` returns index lists, which
 Each of these is something the spec and master plan do not settle. None has been
 guessed at in code beyond the minimum noted; each needs a ruling.
 
-1. **`build_payload(qid, brain_index)` has no way to find the run.** The master
-   plan's signature takes neither a run directory nor a question record. This
-   plan implements `build_payload(qid, brain_index, *, run_dir)` — positionally
-   identical, with one required keyword — and reads the question record from
-   `<run_dir>/quorum/<qid>/question.json`. If the intent was module-level run
-   binding, say so and the signature becomes exact.
+1. ~~`build_payload(qid, brain_index)` has no way to find the run.~~
+   **Settled.** `build_payload(qid, brain_index, *, run_dir)` is the pinned
+   signature; the question record is read from
+   `<run_dir>/quorum/<qid>/question.json`. Likewise settled: `## Quorum`'s
+   `Payload Digest` is recorded **per brain index**, not per question, because
+   the three brains receive different reading assignments and there is no single
+   payload to digest. `open.json` carries
+   `[{"brain_index", "owner", "digest"}, ...]` in brain-index order.
 
 2. **P02 publishes no `## Quorum` / `## Escalations` row grammar.** The spec
    assigns those tracker sections to the state schema (P02), but P02's produced

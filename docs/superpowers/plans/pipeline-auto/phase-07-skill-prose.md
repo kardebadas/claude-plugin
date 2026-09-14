@@ -2189,3 +2189,1004 @@ git commit -m "docs(pipeline-auto): the quorum contract reference"
 ```
 
 ---
+
+### Task 8: `references/planning.md`
+
+**Files:**
+- Create: `plugins/superb/skills/pipeline-auto/references/planning.md`
+- Test: `plugins/superb/skills/pipeline-auto/tests/test_skill_structure.py`
+
+**Interfaces:**
+- Consumes: the `pipeline-auto-intent-reader` agent (Task 2); the `pipeline-auto-brain` agent and `prompts/brain.md` (Tasks 2 and 4) for stage 02; `references/quorum.md` (Task 7) for the rules stage 07 defers to.
+- Produces: the reference `SKILL.md` routes to for stages 01–07. It owns the strict phase-plan metadata grammar `PlanMetadataError` validates, so the grammar is stated here exactly once.
+
+This reference covers everything up to and including the point where the phase set becomes immutable. Its most important sentence is the one about stage 06.
+
+- [ ] **Step 1: Write the failing test**
+
+Already written in Task 1.
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k test_every_required_reference_exists`
+
+Expected: FAIL on `[reference=planning]`.
+
+- [ ] **Step 3: Write the reference**
+
+Create `plugins/superb/skills/pipeline-auto/references/planning.md`:
+
+````markdown
+# Planning: stages 01–07
+
+Read this reference during the intent read, question synthesis, the human gate,
+design, spec, master plan, and phase fan-out. After stage 06 closes, the phase
+set is immutable and nothing in this file applies again.
+
+## Stage 01 — Intent read
+
+Dispatch **exactly three** `pipeline-auto-intent-reader` agents. Not two when
+capacity is tight, not four for a complicated request. At `worker_limit < 3`
+they run sequentially.
+
+Each returns a strict JSON hypothesis: what the request explicitly says (with
+the user's own words quoted), what it implies (with the basis named), what it
+leaves unstated, what it puts out of scope, and what the repository already
+provides with `file:line`.
+
+Reconcile the three into one intent brief. **Conflicts are flagged, never
+resolved.** Three readers disagreeing about what the user asked for is the
+highest-value signal this run will ever produce, and a controller that quietly
+takes the majority reading has destroyed it. Record each conflict with all three
+readings verbatim.
+
+**Unresolved stage-01 conflicts consume stage-03 question slots ahead of any
+stage-02 synthesised question.** An unresolved conflict about what the user
+asked for is by definition higher blast radius than anything downstream.
+
+The intent brief is **immutable after stage 03**. A later finding that
+contradicts it escalates; the human amends it. It is not edited in place by the
+run.
+
+## Stage 02 — Question synthesis
+
+Dispatch **exactly three** `pipeline-auto-brain` agents to propose the open
+decisions — the same three-brain discipline, the same reading assignments, the
+same payload prohibitions. Use `prompts/brain.md`.
+
+The controller then ranks the proposals by blast radius, dedupes them, and cuts
+to **four**. Ranking and cutting are routing, not deciding: the controller does
+not answer any of them and does not add one of its own.
+
+A proposed question that fails admissibility (`references/quorum.md`) is dropped
+here, not carried into the gate. The gate is four slots and they are the most
+expensive four slots in the run.
+
+## Stage 03 — The one gate
+
+**One `AskUserQuestion` call. At most four questions. This is the only
+guaranteed human interaction in the run.**
+
+Persist every answer with `Provenance: human`, a stable axis id, and
+`Decision action: none` unless the answer is itself a transition authority.
+Human answers are `H-<n>`.
+
+These answers are the only requirements the run may treat as unimpeachable.
+Everything decided later traces back to one of them through `consistent_with`,
+or it escalates.
+
+Do not spend a slot on something the repository answers. Do not spend a slot on
+something a quorum could decide from the spec and the code — spend it on what
+only the user knows: budget, deadline, who the users are, what the product is
+*for*, which of two products this is.
+
+**A generic approval is not an answer.** "Sounds good", "continue", "you
+decide" resolves nothing, and the run must not record it as though it did.
+
+## Stage 04 — Design and gate classification
+
+**REQUIRED SUB-SKILL:** `superpowers:brainstorming`, for repository
+investigation, alternatives, and architecture.
+
+Stage 04 also **fixes each phase's `review_class`**, before any plan exists.
+That ordering is deliberate: classifying risk after seeing the plan invites
+classifying it to fit the plan.
+
+`review_class ∈ {final-only, required}`, carried in phase-plan metadata and
+mirrored into the tracker. See `references/execution.md` for what each buys and
+for the one-way ratchet.
+
+**A phase is never reclassified downward.** Not at stage 04 on reflection, not
+later, not by quorum, not to fit capacity or budget.
+
+## Stage 05 — Spec
+
+A brain agent feeds it; `superpowers:writing-plans` writes it. The spec records
+the selected architecture and boundaries, not a chat summary. Save it under the
+repository's convention, or `docs/superpowers/specs/<feature>-design.md` when
+none exists.
+
+## Stage 06 — Master plan
+
+**REQUIRED SUB-SKILL:** `superpowers:writing-plans`.
+
+The master plan identifies every phase, its dependencies, its detailed phase-plan
+path, its planned mechanical verification, and its `review_class` with the
+specific risk reason.
+
+**The phase set becomes immutable when stage 06 closes.** After that transition
+the run cannot create work for itself: phase creation is a stage-06 transition
+and stage 06 is over. Scope expansion is structurally impossible, not merely
+forbidden, and the state machine enforces it rather than the controller's
+restraint. This is what makes the completeness freeze in `references/review.md`
+a guarantee instead of a promise.
+
+**Discover the target repository's test runner now and record it.** Read its CI
+config, its manifest, and its existing test files. Do not assume `pytest`
+because it is common, or `unittest` because the last project used it. A plan
+naming a runner that is not installed is a plan failure, and the failure does not
+surface until an implementer tries to run it — by which time it looks like the
+implementer's problem.
+
+Record the same way: the coverage policy, the lint and format commands, and every
+mandatory repository quality gate. Never invent a coverage percentage. If no
+coverage policy is explicit, it is a stage-03 question or it is behaviour-focused
+testing without a numeric threshold — not a number you chose.
+
+## Stage 07 — Phase fan-out
+
+One `superpowers:writing-plans` worker per phase, capped by `worker_limit`.
+A phase has **at most 12 genuine tasks**; more means split it before approval,
+and substeps are not a place to hide separately checkable work.
+
+**A planner never invents an interface.** An unresolved interface or behaviour
+comes back as `NEEDS_CONTEXT` or `PLAN_CONFLICT` with a question record. That is
+the route into `references/quorum.md`, and it is the only route: a planner does
+not dispatch brains and does not decide.
+
+### Strict phase-plan metadata
+
+One ordered phase comment in the document header, before its first section:
+
+```text
+<!-- pipeline-auto-phase: id=<phase-id>; deps=<none-or-phase-ids>; review_class=<final-only-or-required>; review_reason=<nonempty-approved-reason> -->
+<!-- pipeline-auto-phase-suite: id=<same-phase-id>; commands=["<exact-command>","<next-command>"] -->
+```
+
+One ordered task comment immediately below every task heading:
+
+```text
+<!-- pipeline-auto-task: id=<stable-id>; deps=<none-or-task-ids>; kind=<source-or-artifact>; batch=<batch-id>; order=<positive-integer>; write_scope=<typed-scopes>; outputs=<none-or-exact-files> -->
+```
+
+Immediately after each `source` task comment, its ordered task suite:
+
+```text
+<!-- pipeline-auto-task-suite: id=<same-task-id>; commands=["<exact-command>"] -->
+```
+
+Keys are exactly `id`, `deps`, `kind`, `batch`, `order`, `write_scope`, `outputs`,
+in that order. Commands are a nonempty JSON string array in exact execution
+order with no duplicates. The phase suite is required for every phase; the task
+suite only for `source` tasks.
+
+- `source` changes repository content, uses `outputs=none`, and later requires
+  implementation commits, test evidence, and **separate** integration evidence.
+- `artifact` creates only the exact approved files named by `outputs`, records
+  integration `N/A`, and never justifies an empty or unrelated commit.
+
+**A worker cannot choose its task kind from whether a diff happened to be
+empty.** Only the approved task definition chooses it.
+
+Write scopes are comma-separated `file:<repository-relative-file>` or
+`tree:<repository-relative-directory>`. Reject absolute paths, traversal,
+backslashes, empty segments, globs, and symlink-dependent aliases rather than
+normalizing them. Two exact files conflict when equal; trees conflict by equality
+or ancestry, and a tree conflicts with every file it contains.
+
+**No absolute home-directory path appears in any committed file**, including a
+write scope, an output path, or a command. Repository-relative paths, or `~` /
+`$HOME` expanded at runtime.
+
+## The executable-plan gate
+
+Before implementation starts, verify: the spec, master plan and every phase plan
+exist on disk; shared interfaces are settled; every phase has 1–12 tasks; task
+and phase dependencies are acyclic and executable in master order; every task's
+metadata parses under the strict grammar; the test runner, coverage policy,
+batches, `worker_limit` and `review_class` are explicit; and no escalation is
+outstanding.
+
+`worker_limit` must be a positive integer compatible with detected runtime
+capacity. **`worker_limit >= 4` is required for concurrency**: brains consume
+three unique owners, so implementation tasks may occupy at most
+`worker_limit - 3` slots. Below 4, tasks serialise so the brain slots stay free.
+Otherwise a blocked task holds the slot needed to unblock it and the run
+deadlocks permanently.
+
+There is no second human approval here. Stage 03 was the gate. Everything from
+here is quorum or escalation.
+````
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k test_every_required_reference_exists`
+
+Expected: `[reference=planning]` and `[reference=quorum]` pass; three still fail.
+
+Run: `grep -n "/home/" plugins/superb/skills/pipeline-auto/references/planning.md`
+Expected: no output.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add plugins/superb/skills/pipeline-auto/references/planning.md
+git commit -m "docs(pipeline-auto): planning reference for stages 01-07"
+```
+
+---
+
+### Task 9: `references/execution.md`
+
+**Files:**
+- Create: `plugins/superb/skills/pipeline-auto/references/execution.md`
+- Test: `plugins/superb/skills/pipeline-auto/tests/test_skill_structure.py`
+
+**Interfaces:**
+- Consumes: `prompts/implementer.md`, `prompts/task-reviewer.md`, `prompts/adversarial-reviewer.md` (Tasks 5, 6); `scripts/task-brief`, `scripts/review-package` (Task 3); `scripts/sdd-workspace` (P02); `reserve_task`, `resume_task`, `scopes_overlap`, `publish_worker_result`, `import_worker_result`, `verify_source_range` (P04); `adversarial_required`, `record_task_review`, `open_fix_round`, `ratchet_phase`, `propagate_provisional` (P05).
+- Produces: the reference `SKILL.md` routes to for stages 08–10. It owns the dial, the per-task gate, and the ratchet table.
+
+This is where the inlined SDD protocol lives. Its load-bearing paragraph is the list of things the dial may never switch off — that list is the answer to "we're only on `final-only`, so we can skip this".
+
+- [ ] **Step 1: Write the failing test**
+
+Already written in Task 1.
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k test_every_required_reference_exists`
+
+Expected: FAIL on `[reference=execution]`.
+
+- [ ] **Step 3: Write the reference**
+
+Create `plugins/superb/skills/pipeline-auto/references/execution.md`:
+
+````markdown
+# Execution: stages 08–10
+
+Read this reference while selecting work, dispatching implementers, running the
+per-task gate, integrating, verifying a phase, or debugging a failure.
+
+## Required sub-skills
+
+- **REQUIRED SUB-SKILL:** `superpowers:test-driven-development` for every
+  testable behaviour and every behaviour-changing fix: a meaningful failing test,
+  the intended failure observed, the minimum approved behaviour implemented, the
+  focused test kept green through refactoring. **RED before GREEN is recorded in
+  the implementer's report and the dial never switches it off.**
+- **REQUIRED SUB-SKILL:** `superpowers:systematic-debugging` for stage 10. The
+  cause is traced before any fix.
+- `superpowers:using-git-worktrees` for isolation; one worktree per concurrently
+  dispatched implementer, merged `--no-ff` in task order. `--no-ff` preserves
+  ancestry, so the no-squash rule holds.
+- `superpowers:dispatching-parallel-agents` only for ready independent batches.
+
+**A merge conflict at integration is a hard stop.** Under typed write-scope
+validation a conflict should be impossible, so a conflict is evidence the scopes
+were wrong. It is not something to auto-resolve past.
+
+## The review-intensity dial
+
+`review_class ∈ {final-only, required}`, fixed at stage 04, carried in phase-plan
+metadata, mirrored into the tracker.
+
+**`required`** buys the full per-task gate:
+
+1. a fresh implementer per task, dispatched with a **task brief file** from
+   `scripts/task-brief`, never with plan text pasted through the controller;
+2. a review package from `scripts/review-package`, built from the **persisted
+   reservation baseline** — never `HEAD~1`, which silently drops all but the last
+   commit of a multi-commit task;
+3. a task reviewer returning **three** verdicts: spec, quality, and verification
+   evidence from an independent re-run;
+4. a fix loop to **zero open findings at every severity**, one fixer per round
+   carrying all findings;
+5. completion only after a round returns zero.
+
+**`final-only`** buys mechanical verification only. Stage 11 is the net.
+
+### What the dial may never switch off — at any class
+
+- the adversarial trigger check;
+- typed write-scope declaration and conflict detection;
+- digest-bound typed PASS evidence;
+- the `baseline..source-head` range proof and the integration ancestry predicate;
+- immutable four-part worker result identity (`run_id + task_id + attempt + owner`);
+- TDD RED-before-GREEN evidence recorded in the implementer report;
+- the most-capable-model policy;
+- the zero-open-findings bar itself.
+
+**The dial controls whether a reviewer runs. It never controls what bar that
+reviewer applies.** A `final-only` phase whose diff touches auth still gets the
+adversarial pass, and that pass still holds every finding to the same bar.
+
+### Adversarial triggers — independent; any single one fires
+
+`concurrency` · `authz` · `crypto` · `schema` · `migration` · `delete` ·
+`regulated` · `public-api` · `large-surface` (> 300 changed source lines)
+
+**A 10-line auth change is high-risk.** Collapsing this into "300 lines AND a
+risky path" is the obvious and wrong reading, and it is the single most likely
+way this check gets quietly disabled. `adversarial_required()` returns the
+trigger **name**, so the tracker records which one fired; a trigger that fired
+and was not recorded is indistinguishable from one that never fired.
+
+### The ratchet — upward only
+
+`final-only → required`, mechanically triggered, **never downward and never by
+quorum**:
+
+| Trigger | Condition |
+| --- | --- |
+| (a) `adversarial-finding` | any task produced a CONFIRMED or unrefuted PLAUSIBLE adversarial finding |
+| (b) `repeated-suite-failure` | the phase suite has failed twice or more |
+| (c) `debug-locality` | a stage-10 root cause traced into a file inside this phase's write scopes |
+| (d) `low-confidence-dependency` | a quorum adopted a decision in this phase at `code-evidenced` rather than `specified` |
+| (e) `accumulated-surface` | cumulative changed source lines in the phase exceed 300 |
+
+A ratchet does **not** retroactively review complete tasks. It gates every
+remaining task and adds a phase-scoped review over the phase's whole edge at the
+zero-open-findings bar.
+
+A tracker `review_class` differing from plan metadata is legal **only** with a
+matching ratchet record. Without the record it is a validation failure, because
+otherwise "the tracker says `final-only`" becomes a way to undo a ratchet.
+
+**Never degrade a quorum, a review, or an intensity to fit capacity or budget.**
+The run escalates or halts instead. A soft dispatch-budget threshold escalates
+*reporting* the overrun; a hard one stops the run resumably. It never silently
+downgrades the dial.
+
+## Stage 08 — RED
+
+The failing test is written and **committed before the change**. The implementer
+report records the exact RED command, the relevant failing output, and why that
+failure was the expected one; then the GREEN command and its output. A report
+with a GREEN and no RED is a report claiming a test-first process it cannot
+evidence, and the reviewer treats it as such.
+
+**Run the runner the plan recorded**, discovered from the target repository at
+stage 06. Never substitute a runner because it is the one you know. If the
+recorded runner is not installed, that is a `PLAN_CONFLICT` — stop and publish
+the question record. Do not silently switch runners: a suite that passes under a
+different runner is not evidence about the suite the plan named.
+
+## Stage 09 — GREEN
+
+Before every actual start, serialise the reservation through the state helper and
+revalidate: task state, dependency evidence, outstanding questions, active
+ownership and pairwise scope overlap among **all** candidates in the proposed
+reservation, and the persisted `worker_limit` against a fresh capacity
+observation. Several candidates that were individually ready are not jointly
+authorised.
+
+Persist `[~]`, owner and attempt **before** dispatch. `reserve_task` handles the
+first `[ ]` → `[~]`. `resume_task` handles an answered `[?]` → `[~]` only, and
+requires the matching prior attempt, a distinct unused new attempt, and a
+`decision_ref` resolving to `Decision action: task.resume`.
+
+**Context compaction is not a blocked-task retry.** Reconcile the existing
+assignment first; a consistent active `[~]` attempt stays the same attempt.
+
+Dispatch with `prompts/implementer.md`. Every worker receives its brief file, its
+governing decisions, its write scope, its task suite, and its four-part identity.
+
+### Worker statuses
+
+`DONE` · `DONE_WITH_CONCERNS` · `NEEDS_CONTEXT` · `PLAN_CONFLICT` · `BLOCKED`
+
+- `DONE` is **evidence, not acceptance**. Import validates identity, task
+  definition, required files, Git facts and checks before anything is `[x]`.
+- `NEEDS_CONTEXT` and `PLAN_CONFLICT` move the attempt to `[?]` and carry a
+  question record. That is the route into `references/quorum.md`.
+- `BLOCKED` halts. Three brains cannot conjure an API key, and sending one there
+  is how the quorum degrades into an ask-three-models-when-unsure reflex.
+- **A worker never dispatches anyone**, never edits `progress.md`, never
+  integrates its own work, and never declares a phase accepted. Its only state
+  call is `publish_worker_result` for its own assigned result.
+
+### Completion and integration are separate facts
+
+A `source` start or resume records `baseline:<attempt>@<full-target-SHA>` inside
+the same locked transition. Implementation completes only when the resolved
+source head contains exactly the complete ordered nonempty `baseline..source-head`
+range, every changed path is inside the approved scope, and one digest-bound
+`task-test` PASS record matches the run, task, attempt, source head and exact
+ordered task suite.
+
+Integration is recorded separately: every implementation commit is an ancestor of
+the integration commit; the integration commit is an ancestor of the target
+branch; one digest-bound `task-integration` PASS record names that exact state.
+An unrelated reachable commit proves nothing. No squash, rebase or cherry-pick
+equivalence is assumed.
+
+An `artifact` task requires exactly its declared outputs plus validation
+evidence, records integration `N/A`, and never invents an empty commit.
+
+### The per-task gate, when `review_class` is `required`
+
+1. Build the review package: `scripts/review-package <baseline> <head>`. It
+   prints the path; **the package never enters the controller's context.**
+2. Dispatch the task reviewer (`prompts/task-reviewer.md`) with the brief, the
+   report, the package, the governing decisions and the test commands. **The
+   reviewer is never the implementer.**
+3. Resolve every ⚠️ "cannot verify from diff" item yourself — you hold the
+   cross-task context the reviewer lacks. A confirmed gap is a failed spec
+   review: back to the implementer, then re-review.
+4. Run `adversarial_required()`. If it returns a trigger, dispatch
+   `prompts/adversarial-reviewer.md` on the same package. CONFIRMED findings are
+   Critical; unrefuted PLAUSIBLE are Important.
+5. Fix to **zero open findings at every severity**, one fixer per round carrying
+   all findings, re-reviewing after each. Default cap: three rounds.
+6. Complete the task only after a round returns zero.
+
+**Minor findings are fixed, not deferred.** A deferred finding is a triaged-away
+finding, and the implementer's context is one dispatch away right now.
+
+The one exception is narrow and recorded: see the reconciliation rule in
+`references/review.md`. A Minor or quality-part finding that would require
+reversing a recorded decision goes to reconciliation rather than winning
+automatically; if the decision survives, the finding is recorded
+`REFUTED — governed by <D-ID>` and does not block completion.
+
+**The fix loop does not stall during reconciliation.** The task moves to `[?]`
+with a reconciliation question reference, its owner slot releases, and
+independent work continues. **The fix-round counter does not increment** — a
+decision dispute must not burn the three-round budget and escalate for the wrong
+reason.
+
+## Stage 10 — Debug
+
+**REQUIRED SUB-SKILL:** `superpowers:systematic-debugging`. Establish the cause
+before changing behaviour. Mechanical failures are unfinished implementation:
+repair and rerun the affected checks. Do not manufacture a formal finding or a
+remediation round for work that has not reached its planned gate.
+
+A root cause traced into a file inside this phase's write scopes is ratchet
+trigger (c). Record it; the ratchet is mechanical, not a judgment call.
+
+## The mechanical phase boundary
+
+Before recording phase verification, confirm: every task has verified `[x]`
+evidence; every source task satisfies the full implementation → integration →
+target ancestry rule; every artifact task has its validated outputs and `N/A`
+integration; every command in the plan's **exact ordered** phase suite passes on
+the integrated state; and one digest-bound typed `phase` PASS record matches the
+run, phase, code-state identity, command tuple, inputs and environment.
+
+Caller-supplied command text is checked against the approved tuple. It is not
+authority and cannot substitute, omit, duplicate, add, or reorder a command.
+
+A failing planned suite keeps the phase unfinished. Completing the last task does
+not advance the phase; `advance_phase` does, and only after verification and any
+required gate have passed. Advancing the last phase routes to stage 11, not to
+completion.
+````
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k test_every_required_reference_exists`
+
+Expected: `execution`, `planning` and `quorum` pass.
+
+Run: `grep -n "pytest\|/home/" plugins/superb/skills/pipeline-auto/references/execution.md`
+Expected: no output.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add plugins/superb/skills/pipeline-auto/references/execution.md
+git commit -m "docs(pipeline-auto): execution reference for stages 08-10"
+```
+
+---
+
+### Task 10: `references/review.md` and `templates/completeness-proposals.md`
+
+**Files:**
+- Create: `plugins/superb/skills/pipeline-auto/references/review.md`
+- Create: `plugins/superb/skills/pipeline-auto/templates/completeness-proposals.md`
+- Test: `plugins/superb/skills/pipeline-auto/tests/test_skill_structure.py`
+
+**Interfaces:**
+- Consumes: the two-reviewer gate, `DECISION-CHALLENGE` routing, the completeness freeze and phase-set immutability from P06; `references/quorum.md` for the re-open rules.
+- Produces: the reference `SKILL.md` routes to for stages 11–12, and the frozen proposal ledger the terminal report reads.
+
+Two things here are counter-intuitive enough that the prose must argue for them
+rather than assert them: a fixer's dispute goes to **one** adjudicator, not three
+brains; and `MISSING-FROM-SPEC` is frozen rather than triaged.
+
+- [ ] **Step 1: Write the failing test**
+
+Already written in Task 1.
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k Templates`
+
+Expected: FAIL on `[template=completeness-proposals]`.
+
+- [ ] **Step 3: Write the two files**
+
+Create `plugins/superb/skills/pipeline-auto/references/review.md`:
+
+````markdown
+# Review and completion: stages 11–12
+
+Read this reference for the master gate, contradiction routing, a fixer dispute,
+the completeness critic, or final verification.
+
+**REQUIRED SUB-SKILL:** `superpowers:requesting-code-review` to dispatch.
+**REQUIRED SUB-SKILL:** `superpowers:verification-before-completion` for stage 12.
+
+## Stage 11 — The master gate
+
+**Exactly two independent reviewers**, over the complete edge from the immutable
+tracker `base_commit` to the last approved phase's recorded verified integrated
+HEAD, which must still equal the designated target-branch tip.
+
+**Neither reviewer may be a persisted task implementation owner.** This is
+enforced, not requested.
+
+- **Reviewer A** covers requirements, behaviour, error paths, assumptions, and
+  recorded decisions. A is obliged to **score and name every `provisional`
+  task** — every task whose dependency closure contains a decision adopted at
+  `code-evidenced` rather than `specified`. Each tainting decision's ID and
+  adopted answer are copied **verbatim into A's global-constraints block**. A
+  label the reviewer has to go and look up is a label nobody reads.
+- **Reviewer B** covers integration, architecture, persistence, recovery,
+  concurrency, security where relevant, regressions, and test quality.
+
+Both reports are collected before consolidation or any fix dispatch. Then a
+**completeness critic** runs (below).
+
+Severities are classified by demonstrated consequence: **Critical** — blocking
+security, data loss, destructive behaviour, or fundamental failure to meet an
+approved requirement. **Important** — blocking correctness defect, regression,
+missing approved behaviour or required test, or unsafe recovery or integration.
+**Minor** — nonblocking only when it violates no approved requirement and creates
+no likely defect. **Ease of fixing never determines severity, and a missing
+approved requirement is never Minor.**
+
+**Zero open findings at every severity**, the same bar as the per-task gate. A
+gate that can defer while task gates cannot is incoherent.
+
+A reviewer claim is not true because it was reported. Confirm it against the
+code, the tests, the spec, and `decisions.md`. Never downgrade a verified finding
+to pass a gate, and never reject one because its fix is inconvenient.
+
+## Contradiction routing
+
+**The controller's only power here is routing.** It may not decide which of the
+reviewer and the decision record is right.
+
+| Situation | Route |
+| --- | --- |
+| Code does not comply with a decision | ordinary finding, ordinary fix loop |
+| Plan-mandated finding tracing to a **human** decision | **halt** to the escalation queue, never quorum |
+| Plan-mandated finding tracing to a **quorum** decision | re-open that qid at a raised bar |
+| Plan-mandated finding `writing-plans` invented | ordinary quorum |
+| `DECISION-CHALLENGE` against a **human** decision | **halt**, always |
+| `DECISION-CHALLENGE` against a **quorum** decision | one re-open at a raised bar |
+| Second challenge to the same D-ID | **automatic halt** |
+| Fixer disputes a reviewer finding | **one adjudicator**; quorum only on PLAUSIBLE |
+
+A re-open carries the challenging evidence but **never** the original rung and
+never who chose it. At most one re-open per D-ID per run.
+
+### A fixer's dispute is not a quorum call, because it is not a decision
+
+"Can line 41 be null" is a **fact**, settled by reading code and running an
+experiment — not by a confidence-weighted vote. Three models agreeing that line
+41 cannot be null is far weaker evidence than one model running the test.
+
+Routing facts to the quorum is a category error, and it is the mechanism by which
+a quorum degrades into a general-purpose "ask three models when unsure" reflex,
+which is itself a drift vector.
+
+The dispute is admissible only with a refutation citing `file:line`, or a command
+and its output. **A bare disagreement is inadmissible and the finding stands.**
+
+**One adjudicator** — most capable model, read-only — receives the finding, the
+rebuttal, and the review package, and settles the fact by citation or focused
+experiment:
+
+- **CONFIRMED** — the finding stands and the fixer fixes.
+- **REFUTED** — closed, with the adjudicator's citation.
+- **PLAUSIBLE** — genuinely irreducible. **Only this** becomes a quorum question,
+  and by then it honestly is a judgment call rather than a fact. Frame its
+  candidates neutrally, never loaded toward fixing.
+
+One agent instead of three, more accurate, and it preserves what the quorum is
+for: **choices, not facts.**
+
+**An adjudication never enters `decisions.md` as a requirement decision.** It
+belongs in the findings ledger.
+
+### The one principled exception to zero open findings
+
+Under zero-open-findings every Minor must be fixed. So if a quality-rubric Minor
+required reversing a quorum decision, an automatic reviewer win would let a
+naming opinion silently overturn architecture.
+
+A reviewer finding therefore prevails **only** when it is Critical or Important
+*and* its verdict part is spec-compliance or verification-evidence. A Minor, or
+any quality-part finding, that would require reversal goes to an **unbiased
+reconciliation**. If the decision survives, the finding is recorded
+`REFUTED — governed by <D-ID>` and does not block completion.
+
+Narrow, and recorded rather than discretionary. Do not widen it.
+
+## The completeness critic
+
+Every item is classified `SPEC-NOT-MET` or `MISSING-FROM-SPEC`.
+
+**`SPEC-NOT-MET` is not a proposal — it is a finding.** It enters the fix loop at
+the zero-open-findings bar like any other.
+
+**`MISSING-FROM-SPEC` is frozen.** It is written to the run's
+`completeness-proposals.md`, given an ID, and surfaced in the terminal report. It
+is **never** converted into a task, never dispatched, never quorum'd.
+`next_action` becomes `complete-with-proposals`.
+
+This is not merely forbidden — it is **impossible**: phase creation is a stage-06
+transition, and the phase set became immutable when stage 06 closed. The state
+machine enforces it rather than the controller's restraint.
+
+The reasoning belongs here so a future maintainer can defend the rule rather than
+assert it. Every other quorum answers a question that **blocks** work, and quorum
+exists to unblock, not to enlarge. "Should we also handle X" has no natural
+ceiling, and three brains asked whether an adjacent case is worth covering will
+say yes, confidently, because yes is always defensible. It is the one question
+class where quorum has a **systematic** rather than a random bias, and a
+systematic bias is not something a threshold can fix.
+
+## Stage 12 — Final verification
+
+**REQUIRED SUB-SKILL:** `superpowers:verification-before-completion`.
+
+Record digest-bound `final` PASS evidence for the accepted master HEAD, through
+the controller transition, against the run's derived project root. A different
+repository path cannot supply the Git proof.
+
+Completion requires: the master gate accepted; final verification recorded; all
+intended work committed and integrated on the designated clean feature branch;
+`git status --short` printing **nothing**, with `scratch/` covered by its
+self-ignoring `.gitignore`; and files consistent enough that a fresh session
+derives `complete` from the files and Git rather than from a previous completion
+message.
+
+**Never push, publish, create a pull request, or merge into `main`/`master`.**
+Success leaves a clean committed feature branch and a report.
+
+## The terminal report
+
+It **leads with the quorum-adopted decisions, sorted by confidence ascending** —
+weakest first, because the weakest is the one most likely to be wrong and least
+likely to be read if it is buried at the bottom.
+
+Every quorum-adopted decision is labelled as such, forever, in three places: the
+decision record, the tracker index, and this report. A provenance field read only
+by a validator has informed nobody.
+
+The report also carries:
+
+- every `provisional` task and its tainting decision;
+- the count of `rejected-contradicts-human` and `rejected-contradicts-quorum`
+  events — a run with several is a run whose brains kept pulling away from what
+  the user asked for, and that is the earliest available warning;
+- every frozen `MISSING-FROM-SPEC` proposal;
+- the adoption floor actually applied, and any run-level inflation adjustment;
+- the drift budget consumed and any extensions granted;
+- every escalation, answered or outstanding.
+````
+
+Create `plugins/superb/skills/pipeline-auto/templates/completeness-proposals.md`:
+
+```markdown
+# Completeness proposals — <run-id>
+
+<!-- pipeline-auto-completeness/v1 -->
+
+Everything in this file is **frozen**. It is a record of work this run decided
+not to do, and it is never converted into a task, dispatched, or sent to a
+quorum. The phase set became immutable when stage 06 closed; nothing here can
+change that.
+
+A proposal is not a defect. A missed requirement is a `SPEC-NOT-MET` **finding**
+and it went into the fix loop — it is not in this file. What is in this file is
+the critic's answer to "what else might this reasonably have covered", which is a
+question with no natural ceiling and a systematic bias toward yes.
+
+## Proposals
+
+| ID | Proposal | Raised by | Phase | Why it is out of scope |
+| --- | --- | --- | --- | --- |
+| CP-001 | <one sentence: the behaviour or coverage not in the spec> | <critic assignment id> | <phase id> | `MISSING-FROM-SPEC` — not in the approved spec; the phase set is immutable after stage 06 |
+
+## Per proposal
+
+### CP-001 — <short name>
+
+- **Classification:** `MISSING-FROM-SPEC`
+- **Raised at:** stage 11, gate `<gate-id>`
+- **Evidence:** `<file:line>` or the reviewed range showing what is not covered
+- **What would have to change to build it:** a new run whose stage-03 round asks
+  about it, or an explicit human decision creating a follow-up.
+- **Status:** `Frozen`
+
+## Rules
+
+- The only legal status is `Frozen`.
+- No proposal acquires a task id, a write scope, an owner, or a commit.
+- A proposal is never re-raised as a quorum question in the same run. A re-raise
+  of a frozen proposal is discarded, not re-litigated.
+- When this file is non-empty, `next_action` is `complete-with-proposals` and the
+  terminal report lists every entry. A run that completes with proposals is a
+  successful run that was honest about its edges — not a failed one.
+```
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k Templates -k test_every_required_reference_exists`
+
+Expected: all eight `Templates` subtests pass; `[reference=review]` passes; only `[reference=persistence]` still fails.
+
+Run: `grep -n "pytest\|/home/" plugins/superb/skills/pipeline-auto/references/review.md plugins/superb/skills/pipeline-auto/templates/completeness-proposals.md`
+Expected: no output.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add plugins/superb/skills/pipeline-auto/references/review.md \
+        plugins/superb/skills/pipeline-auto/templates/completeness-proposals.md
+git commit -m "docs(pipeline-auto): review reference and the frozen proposals ledger"
+```
+
+---
+
+### Task 11: `references/persistence.md`
+
+**Files:**
+- Create: `plugins/superb/skills/pipeline-auto/references/persistence.md`
+- Test: `plugins/superb/skills/pipeline-auto/tests/test_skill_structure.py`
+
+**Interfaces:**
+- Consumes: from P02 — `SCHEMA`, `MARKER`, `parse_tracker`, `render_tracker`, `validate_run`, `initialize_run`, `locked_tracker_update`, `publish_immutable` (**returns the sha256 hex digest, not the path**), `derive_next_action`, and the exception hierarchy; from P03 — `parse_decisions` and the decision grammar; from P04 — `reconcile_run`.
+- Produces: the reference `SKILL.md` routes to for status, resume, and recovery.
+
+Two details settled after this plan's first draft and easy to get wrong:
+`publish_immutable` returns a **digest**, not a path — prose that says "the path
+it returns" is a defect. And `## Tasks` carries a **`Phase`** column, so a task
+row is self-describing and a resume does not have to infer a task's phase from
+the plan it came from.
+
+- [ ] **Step 1: Write the failing test**
+
+Already written in Task 1.
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k test_every_required_reference_exists`
+
+Expected: FAIL on `[reference=persistence]`.
+
+- [ ] **Step 3: Write the reference**
+
+Create `plugins/superb/skills/pipeline-auto/references/persistence.md`:
+
+````markdown
+# Persistence, status, and recovery
+
+Read this reference before creating, inspecting, updating, or resuming a run.
+
+**Files are the authority. Conversation memory is never authoritative.** The run
+reconstructs its next action from the tracker, `decisions.md`, immutable worker
+results, evidence digests, and Git. A stale `next_action` summary never overrides
+the underlying facts.
+
+`progress.md` is the single mutable execution tracker. Plans define the work;
+decisions, findings, worker results, quorum records and verification records are
+referenced evidence, not competing trackers.
+
+`scripts/pipeline_auto_state.py` is the strict Python 3 standard-library helper
+for one documented format. **Do not edit tracker tables by hand**, infer missing
+fields, or introduce a second editable state file.
+
+## The schema is `pipeline-auto/v1`, and there is no migration
+
+Marker: `<!-- pipeline-auto/v1 -->`.
+
+A new family name, not `pipeline-run/v3` — a shared family name is an invitation
+to write a migration, and there must never be one.
+
+**No migration from `pipeline-run/v1` or `/v2`, in either direction, ever.**
+
+Recognised-but-foreign, missing, malformed, or unknown schema information is a
+**read-only stop**: preserve the directory, change no files, dispatch nothing,
+and emit a diagnostic naming the other skill and saying the two do not
+interoperate. Rejected input is **byte-identical** after the rejected parse.
+
+An unclassified filesystem is also a read-only stop — **not a quorum call.**
+Three brains know no more about the filesystem than the classifier does, and
+sending them there produces three confident guesses about a fact.
+
+## Where a run lives
+
+```text
+docs/superpowers/runs/<run-id>/
+├── progress.md
+├── decisions.md
+├── decisions-effective.md      (generated, read-only projection)
+├── findings.md
+├── completeness-proposals.md
+├── intent-brief.md
+├── quorum/<qid>/               (question.json, in_flight, responses, finalised)
+├── agent-output/               (immutable worker results)
+└── scratch/                    (self-ignoring; briefs, reports, review packages)
+```
+
+`scratch/` lives **inside the run directory**, created by `scripts/sdd-workspace`
+with a self-ignoring `.gitignore`. Never under `.superpowers/sdd`: that
+durability hole — ephemera outliving the run directory that produced them, with
+nothing to reconcile them against — is exactly what this skill exists to close.
+It also has to be self-ignoring for `git status --short` to be empty at stage 12.
+
+## Tracker sections
+
+The ordinary sections plus, specific to this skill: `## Stage`, `## Intent`,
+`## Questions`, `## Quorum`, `## Escalations`, `## Task Review`, `## Fix Rounds`.
+`## Remediation` does not exist here and is not to be re-added.
+
+`## Stage` carries stages 01–12 and is not optional. Without it, stages 01–07 are
+unrecoverable: a compaction during stage 02 silently re-runs stage 01 and the run
+forks from its own history, producing a second intent brief nobody asked for.
+
+`## Tasks` carries a **`Phase`** column alongside `Provisional`, so a task row
+says which phase owns it without anyone re-deriving it from a plan path.
+`## Phases` carries `Review Class`, `Class Source` and `Ratchet`. A tracker
+`Review Class` differing from plan metadata is legal only with a matching
+`Ratchet` record.
+
+## Controller-owned transitions
+
+Only the controller performs tracker transitions and result import. For each
+mutation `locked_tracker_update` performs one transaction: validate; acquire the
+run-local OS lock with a bounded wait; re-read and revalidate; check transition
+preconditions and evidence; derive `next_action` from facts; render; **reparse
+the render**; write a same-directory temporary file; fsync; atomically replace
+`progress.md`; fsync the directory.
+
+Do not fall back to an unlocked write, delete a lock because it looks stale, hold
+the lock while agents or tests run, truncate state, or update prose with
+find-and-replace.
+
+**Three outcomes, three meanings.** A failure before replacement preserves the
+old tracker and removes only this invocation's temporary file. A failure after
+replacement raises `UpdateOutcomeUncertain`, never `TrackerWriteError`: the update
+**may have applied**. Do not claim unchanged state, roll back, or blindly retry —
+re-read under the lock and reconcile by transition identity so the operation
+cannot apply twice.
+
+A replayed `transition_id` returns current state without mutating.
+
+`publish_immutable(path, content)` **returns the sha256 hex digest of the
+published content**, not the path. The caller already knows the path; what it
+does not know until publication is the digest that binds the evidence. Prose or
+code treating the return value as a path is a defect.
+
+`inspect` and status reads are strictly read-only: they may derive the correct
+action and report that a persisted summary is stale, but they never repair it.
+
+## Decisions and authority
+
+`decisions.md` is **append-only**. The only legal in-place mutation is
+`Adopted → Superseded`.
+
+Human answers are `H-<n>`; quorum answers are `Q-<hash>`, so provenance stays
+legible even if a field is lost. A required `Provenance` field is `human` or
+`quorum`, and a validated **axis index** is checked on every write. A file
+holding two adopted contradicting answers on one axis **fails validation and is a
+read-only stop** — the same severity as a foreign schema.
+
+Every entry has exactly one `Decision action`:
+
+| Action | Grants |
+| --- | --- |
+| `task.resume` | one blocked task's `[?]` → `[~]`, for the named prior attempt |
+| `quorum.adopt` | recording one quorum-adopted answer for one qid |
+| `quorum.extend-budget` | a finite extension of the drift budget. `Provenance: human` only; never grantable by quorum; at most two per run |
+| `dispatch.extend-budget` | a finite raise of the `agent_dispatch_count` ceiling. `Provenance: human` only. **Not interchangeable with `quorum.extend-budget`** — one caps review spend, the other caps machine authority |
+| `none` | nothing. The entry is a record, not an authority |
+
+**Never derive transition authority from answer wording**, from generic plan
+approval, from another agent's preference, or from a fieldless historical entry.
+A quorum answer of "proceed" is as empty as a human's.
+
+Provenance must be visible in three places: the decision record, the tracker
+index, and the terminal report.
+
+## File-first resume
+
+On compaction, restart, interruption, or uncertainty:
+
+1. validate run identity, schema and filesystem contract;
+2. read the spec, master plan, `progress.md` (**`## Stage` first**), the active
+   phase plan, and applicable `decisions.md` entries;
+3. read `findings.md` and any active fix round;
+4. inspect Git branch, worktrees, commits, and immutable result and evidence files;
+5. classify every open quorum before anything else — see below;
+6. reconcile every `[~]` assignment before starting new work;
+7. derive the next permitted action from task, integration, question, quorum,
+   verification and gate facts.
+
+A matching complete worker result is imported once through the normal
+run/task/attempt/owner validator. A consistent active owner with no final result
+stays `[~]`. A commit that appeared immediately before interruption is neither
+automatic success nor grounds to repeat the work: validate the recorded attempt,
+the contents, the ancestry and the applicable tests, and import only
+independently validated evidence.
+
+Partial, conflicting, or unverifiable state stays blocked and reaches the user.
+Completed work is not rerun; unfinished work is not skipped.
+
+### Resuming a quorum
+
+`in_flight` with three response files: **compute and finalise. Do not
+re-dispatch.** With zero to two responses and no live owners: re-dispatch **only
+the missing brain indices**, each rebuilt from its own `(qid, brain_index)` and
+checked against its persisted digest. Never re-dispatch a brain that already
+answered; never discard an answer to obtain a tidier set; never evaluate a
+partial quorum; never recompute a finalised record.
+
+A qid whose `context_digest` no longer matches current `decisions.md` is **not**
+re-opened. Flag it to stage 11 as `stale-context`. Re-deciding on resume is
+precisely the silent-divergence failure this design exists to prevent.
+
+## Supported platform
+
+Cooperating processes on one host over a local filesystem with working OS-backed
+locks, hard links for no-clobber initial publication, and same-filesystem atomic
+replacement. Linux and macOS use POSIX locking; Linux is the natively exercised
+platform. Do not report macOS as natively tested without a macOS run, and do not
+report the Windows path as verified without a native Windows runner proving
+contention, replacement, interruption recovery and lock release.
+
+Network and distributed filesystems are outside the guarantee. Ignored local run
+files survive context compaction in the same workspace — not deletion, machine
+loss, or a fresh clone.
+
+Terminal `complete` is conditional on the target repository remaining at the
+accepted master HEAD with a clean working tree, including no unexpected untracked
+files. A fresh inspect reports inconsistent state rather than trusting a stale
+persisted `complete`.
+````
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k test_every_required_reference_exists`
+
+Expected: PASS — all five reference subtests.
+
+Run: `grep -n "pytest\|/home/" plugins/superb/skills/pipeline-auto/references/persistence.md`
+Expected: no output.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add plugins/superb/skills/pipeline-auto/references/persistence.md
+git commit -m "docs(pipeline-auto): persistence and recovery reference"
+```
+
+---

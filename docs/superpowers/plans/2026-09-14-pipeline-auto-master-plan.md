@@ -6,7 +6,7 @@
 
 **Architecture:** A controller skill (`SKILL.md` + five references) over a single Python state module that owns all durable transitions. The state module is a markdown-tracker parser/renderer with strict semantic validation, an OS-level lock, atomic replacement, and immutable artifact publication. Review discipline is the subagent-driven-development protocol, inlined rather than invoked, with intensity set per phase by a one-way ratchet dial. Every decision the run makes without the user is recorded with its grounding tier and surfaced in the terminal report.
 
-**Tech Stack:** Python 3 standard library only, tests included. **`pytest` is NOT installed on this machine and must not be used** — tests are `unittest.TestCase` and run under `python3 -m unittest discover`, which also keeps them runnable under pytest if it ever appears. Markdown for all durable state. POSIX file locking with a documented fallback.
+**Tech Stack:** Python 3 standard library only, tests included. **`pytest` is NOT installed on this machine and must not be used** — tests are `unittest.TestCase` and run under `python3 -m unittest discover -s <dir> -v`. **Never pass `-t .`** — `pipeline-auto` is hyphenated, so top-level-relative discovery tries to import `plugins.superb.skills.pipeline-auto.tests` and dies with `ImportError: Start directory is not importable`. Verified on Python 3.11.2, with and without `__init__.py`. Sub-suites use repeated `-k A -k B` (unittest ORs them), not pytest's `-k "A or B"`. Markdown for all durable state. POSIX file locking with a documented fallback.
 
 **Spec:** `docs/superpowers/specs/2026-09-14-pipeline-auto-design.md`
 
@@ -69,7 +69,7 @@ Each phase gets its own detailed plan at `docs/superpowers/plans/pipeline-auto/p
 | P02 schema-core | — | `required` | `pipeline_auto_state.py`: parse, render, validate, lock, atomic replace, initialize, filesystem classification. `## Tasks` carries a `Phase` column — the per-phase drift budget and the ratchet are otherwise underivable |
 | P03 quorum-contract | P02 | `required` | Quorum record, qid derivation, tier recomputation, contradiction detection, budget, depth |
 | P04 task-lifecycle | P02 | `required` | Reserve/start/resume, typed scopes, result identity, range proof, ancestry, reconciliation |
-| P05 dial-and-gate | P03, P04 | `required` | `## Task Review`, `## Fix Rounds`, adversarial trigger, one-way ratchet, provisional propagation |
+| P05 dial-and-gate | P03, P04 | `required` | `## Task Review` (14 columns — a task has N rounds, so a placeholder that cannot express per-round intensity and live `Open` counts carries none of the never-off rules), `## Fix Rounds`, adversarial trigger, one-way ratchet, provisional propagation |
 | P06 master-gate | P05 | `required` | Two-reviewer gate, `DECISION-CHALLENGE` routing, completeness freeze, phase-set immutability, final verification |
 | P07 skill-prose | P06 | `final-only` | `SKILL.md`, five references, two agent files, four prompts, all templates, three inlined scripts |
 | P08 pressure-green | P01, P07 | `required` | GREEN transcripts, loophole closure, re-verification |
@@ -124,6 +124,11 @@ def derive_next_action(tracker: dict) -> str: ...
 SECTIONS: dict[str, tuple[str, ...]]   # section name -> ordered column tuple
 def section_columns(name: str) -> tuple[str, ...]: ...
 def append_row(tracker: dict, section: str, row: dict) -> dict: ...
+# `## Tasks` carries BOTH `Phase` and `Decisions`. `Phase` makes the per-phase
+# drift budget derivable; `Decisions` (the decision ids a task's plan cites) is
+# what lets taint cross a phase boundary. Without it the provisional closure
+# stops at the raising phase and a P05 decision tainting a P07 task is silently
+# unmarked — the exact cascade the taint rule exists to catch.
 def repo_root(tracker: dict) -> str: ...   # recorded at init; NEVER derived from run_dir depth
 def classify_filesystem(path: str) -> str: ...  # unclassified => read-only stop BEFORE the run starts
 ```
@@ -193,7 +198,7 @@ A structure validator, `tests/test_skill_structure.py`, asserting: frontmatter p
 Each phase's plan names its exact ordered command tuple. The run-wide suite, executed at the master gate and at final verification, is:
 
 ```bash
-python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v
+python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v
 python3 plugins/superb/skills/pipeline-auto/examples/controller_walkthrough.py
 git -C . diff --name-only c8bddd610119f52b54bf077d284c7f5d8362ae77..HEAD -- plugins/superb/skills/pipeline/
 git status --short
@@ -213,4 +218,4 @@ The third command must print **nothing**. Any output means `skills/pipeline/` wa
 
 **Placeholder scan.** No TBDs. Every interface block above carries real signatures. Phase plans carry the code.
 
-**Type consistency.** `effective_tier` returns a tier name (string), not a float; callers in P05 and P06 look the value up in `TIERS`. `check_contradiction` returns the offending D-ID or `None`, not a boolean. `adversarial_required` returns the trigger name or `None`, not a boolean — so the tracker can record *which* trigger fired.
+**Type consistency.** `effective_rung` returns a rung name (string), not a float; callers in P05 and P06 look the value up in `RUNGS`. `check_contradiction` returns the offending D-ID or `None`, not a boolean. `adversarial_required` returns the trigger name or `None`, not a boolean — so the tracker can record *which* trigger fired.

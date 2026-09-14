@@ -406,7 +406,12 @@ def fixture(name: str) -> str:
 
 def new_run(stack, tracker_fixture: str = "master-gate-progress.md"):
     """A temp run directory holding one of P06's tracker fixtures plus its
-    decisions ledger, findings ledger and an empty results directory."""
+    decisions ledger, findings ledger and an empty results directory.
+
+    A tracker whose stage 06 has closed also gets its sealed `phase-set.json`,
+    because a frozen run without one is a stop by design and every gate function
+    re-checks the seal.
+    """
     root = Path(stack.enter_context(tempfile.TemporaryDirectory()))
     run_dir = root / "run"
     (run_dir / "results").mkdir(parents=True)
@@ -414,7 +419,15 @@ def new_run(stack, tracker_fixture: str = "master-gate-progress.md"):
     (run_dir / "progress.md").write_text(fixture(tracker_fixture), encoding="utf-8")
     (run_dir / "decisions.md").write_text(fixture("master-gate-decisions.md"), encoding="utf-8")
     (run_dir / "findings.md").write_text(fixture("master-gate-findings.md"), encoding="utf-8")
+    tracker = pas.parse_tracker((run_dir / "progress.md").read_text(encoding="utf-8"))
+    if pas.phase_set_frozen(tracker):
+        seal_phase_set(run_dir, [row["id"] for row in tracker["phases"]])
     return root, run_dir
+
+
+def seal_phase_set(run_dir, phases) -> None:
+    (Path(run_dir) / "phase-set.json").write_text(
+        json.dumps({"phases": list(phases), "digest": "-"}), encoding="utf-8")
 
 
 def tracker_of(run_dir) -> dict:
@@ -806,14 +819,13 @@ class PhaseSetImmutability(unittest.TestCase):
         has no evidence behind it; a run in that state is not resumable."""
         with contextlib.ExitStack() as stack:
             _root, run_dir = new_run(stack)
+            (run_dir / "phase-set.json").unlink()
             with self.assertRaises(pas.PhaseSetFrozen):
                 pas.assert_phase_set_intact(str(run_dir))
 
     def test_a_hand_added_phase_row_fails_the_seal(self):
         with contextlib.ExitStack() as stack:
             _root, run_dir = new_run(stack)
-            (run_dir / "phase-set.json").write_text(
-                json.dumps({"phases": ["P01", "P02"], "digest": "x"}), encoding="utf-8")
             text = (run_dir / "progress.md").read_text(encoding="utf-8").replace(
                 "| P02 | [x] | scratch/p02-verification.txt | required | ratchet | "
                 "accumulated-surface@scratch/p02-ratchet.md | gate-p02 |\n",
@@ -827,9 +839,7 @@ class PhaseSetImmutability(unittest.TestCase):
     def test_a_removed_phase_row_fails_the_seal(self):
         with contextlib.ExitStack() as stack:
             _root, run_dir = new_run(stack)
-            (run_dir / "phase-set.json").write_text(
-                json.dumps({"phases": ["P01", "P02", "P03"], "digest": "x"}),
-                encoding="utf-8")
+            seal_phase_set(run_dir, ["P01", "P02", "P03"])
             with self.assertRaises(pas.PhaseSetFrozen):
                 pas.assert_phase_set_intact(str(run_dir))
 
@@ -1890,10 +1900,6 @@ class ContradictionRouting(unittest.TestCase):
     def setUp(self):
         self.decisions = pas.parse_decisions(fixture("master-gate-decisions.md"))
 
-    def route(self, **item):
-        return pas.route_contradiction(self.decisions, item,
-                                       prior_challenges=item.pop("prior", ()) if False else ())
-
     def test_code_not_complying_with_a_decision_is_an_ordinary_fix(self):
         routed = pas.route_contradiction(self.decisions, {
             "kind": "finding", "severity": "Critical",
@@ -2902,3 +2908,761 @@ git commit -m "feat(pipeline-auto): freeze completeness proposals and block spec
 ```
 
 ---
+### Task 9: Evidence-derived master-gate acceptance
+
+**Files:**
+- Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
+- Modify: `plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py`
+
+**Interfaces:**
+- Consumes: `assert_phase_set_intact`, `parse_master_report`, `open_findings`, `_challenge_ledger`, `_stage_row`, `MASTER_GATE_ID`, P02's `locked_tracker_update`, `_load_json`
+- Produces: `evaluate_master_gate(run_dir) -> dict`
+
+**Named fault this task catches:** acceptance supplied rather than derived. A caller's
+`accepted=True`, an empty open-findings list handed in as an argument, or a reviewer
+silently omitting an earlier finding proves nothing — the function takes no verdict, reads
+the files, and returns its own. The second fault is a gate that closes with an open Minor:
+the bar here is the same zero-open-findings bar as a task gate, because a gate that can
+defer while task gates cannot is incoherent. The only exception is a finding already
+recorded `REFUTED — governed by <D-ID>`, and it needs no special case because that finding's
+status is `resolved`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+class MasterGateAcceptance(unittest.TestCase):
+    def setUp(self):
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+        _root, self.run_dir = new_run(self.stack)
+        opened_gate(self.run_dir)
+
+    def both_clean_reports(self):
+        publish_report(self.run_dir, assignment="master-A", reviewer="reviewer-a")
+        publish_report(self.run_dir, assignment="master-B", reviewer="reviewer-b")
+
+    def test_acceptance_cannot_be_supplied(self):
+        with self.assertRaises(TypeError):
+            pas.evaluate_master_gate(str(self.run_dir), accepted=True)
+
+    def test_one_report_is_not_a_two_reviewer_gate(self):
+        publish_report(self.run_dir, assignment="master-A", reviewer="reviewer-a")
+        pass_master_verification(self.run_dir)
+        result = pas.evaluate_master_gate(str(self.run_dir))
+        self.assertFalse(result["accepted"])
+        self.assertIn("master-B has not reported", result["blockers"])
+
+    def test_missing_verification_blocks(self):
+        self.both_clean_reports()
+        result = pas.evaluate_master_gate(str(self.run_dir))
+        self.assertFalse(result["accepted"])
+        self.assertTrue(any("verification" in blocker for blocker in result["blockers"]))
+
+    def test_verification_at_a_different_head_blocks(self):
+        self.both_clean_reports()
+        pass_master_verification(self.run_dir, head="9" * 40)
+        self.assertFalse(pas.evaluate_master_gate(str(self.run_dir))["accepted"])
+
+    def test_an_open_minor_blocks_exactly_like_a_critical(self):
+        self.both_clean_reports()
+        pass_master_verification(self.run_dir)
+        pas.upsert_finding(str(self.run_dir), {"id": "F-110", "scope": "gate-master",
+                                               "severity": "Minor", "status": "open"})
+        result = pas.evaluate_master_gate(str(self.run_dir))
+        self.assertFalse(result["accepted"])
+        self.assertIn("F-110 is open (Minor)", result["blockers"])
+
+    def test_a_refuted_governed_finding_does_not_block(self):
+        self.both_clean_reports()
+        pass_master_verification(self.run_dir)
+        pas.upsert_finding(str(self.run_dir), {
+            "id": "F-110", "scope": "gate-master", "severity": "Minor",
+            "status": "resolved",
+            "disposition": "REFUTED — governed by Q-7c6b5a4938d2"})
+        self.assertTrue(pas.evaluate_master_gate(str(self.run_dir))["accepted"])
+
+    def test_a_queued_escalation_blocks(self):
+        self.both_clean_reports()
+        pass_master_verification(self.run_dir)
+        pas.record_challenge(str(self.run_dir), challenge={
+            "kind": "DECISION-CHALLENGE", "decision_id": "H-001", "reviewer": "reviewer-a",
+            "evidence": "x:1", "consequence": "It drops contended transitions."})
+        result = pas.evaluate_master_gate(str(self.run_dir))
+        self.assertFalse(result["accepted"])
+        self.assertTrue(any("escalation" in blocker for blocker in result["blockers"]))
+        self.assertTrue(any("challenge to H-001" in blocker for blocker in result["blockers"]))
+
+    def test_a_moved_phase_set_is_a_stop_not_a_blocker(self):
+        self.both_clean_reports()
+        pass_master_verification(self.run_dir)
+        seal_phase_set(self.run_dir, ["P01"])
+        with self.assertRaises(pas.PhaseSetFrozen):
+            pas.evaluate_master_gate(str(self.run_dir))
+
+    def test_a_clean_gate_accepts_and_opens_stage_12(self):
+        self.both_clean_reports()
+        pass_master_verification(self.run_dir)
+        result = pas.evaluate_master_gate(str(self.run_dir))
+        self.assertEqual(result, {"accepted": True, "blockers": []})
+        tracker = tracker_of(self.run_dir)
+        gate = next(row for row in tracker["gates"] if row["id"] == pas.MASTER_GATE_ID)
+        self.assertEqual(gate["state"], "accepted")
+        self.assertEqual(pas._stage_row(tracker, "11")["stage_state"], "complete")
+        self.assertEqual(pas._stage_row(tracker, "12")["stage_state"], "active")
+        self.assertEqual(pas.derive_next_action(tracker), "record-final-verification")
+
+    def test_evaluation_is_replay_inert(self):
+        self.both_clean_reports()
+        pass_master_verification(self.run_dir)
+        pas.evaluate_master_gate(str(self.run_dir))
+        snapshot = (self.run_dir / "progress.md").read_bytes()
+        self.assertTrue(pas.evaluate_master_gate(str(self.run_dir))["accepted"])
+        self.assertEqual((self.run_dir / "progress.md").read_bytes(), snapshot)
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k MasterGateAcceptance`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'evaluate_master_gate'`
+
+- [ ] **Step 3: Write the implementation**
+
+```python
+def evaluate_master_gate(run_dir: str) -> dict:
+    """Derive master-gate acceptance from the recorded evidence.
+
+    There is no `accepted` parameter. A caller's assertion, an empty
+    open-findings list handed in as an argument, or a reviewer silently omitting
+    an earlier finding proves nothing; a caller who can assert acceptance IS the
+    gate. The bar is zero open findings at every severity — the same bar a task
+    gate applies, because a master gate that can defer while task gates cannot is
+    incoherent.
+    """
+    directory = Path(run_dir)
+    tracker = parse_tracker((directory / "progress.md").read_text(encoding="utf-8"))
+    assert_phase_set_intact(str(directory), tracker)
+    sealed = _load_json(directory / "gate-master" / "assignments.json")
+
+    blockers = []
+    for assignment in sorted(sealed["assignments"]):
+        report = directory / "gate-master" / "reports" / f"{assignment}.md"
+        if not report.exists():
+            blockers.append(f"{assignment} has not reported")
+            continue
+        block = parse_master_report(report.read_text(encoding="utf-8"))
+        if (block["base"], block["head"]) != (sealed["base"], sealed["head"]):
+            blockers.append(f"{assignment} reviewed a different edge")
+
+    for row in open_findings(str(directory)):
+        blockers.append(f"{row['id']} is open ({row['severity']})")
+
+    for row in tracker["escalations"]:
+        if row["state"] in ("queued", "asked"):
+            blockers.append(f"escalation {row['id']} is unresolved")
+
+    for entry in _challenge_ledger(directory):
+        if entry["route"] in ("halt-escalation", "halt-second-challenge"):
+            blockers.append(f"challenge to {entry['decision_id']} halted the gate")
+
+    verification = directory / "gate-master" / "verification.json"
+    if not verification.exists():
+        blockers.append("no digest-bound master verification record")
+    else:
+        record = _load_json(verification)
+        if record.get("head") != sealed["head"] or record.get("outcome") != "PASS":
+            blockers.append("master verification does not PASS at the reviewed head")
+
+    if blockers:
+        return {"accepted": False, "blockers": blockers}
+
+    def mutate(updated):
+        gate = next(row for row in updated["gates"] if row["id"] == MASTER_GATE_ID)
+        gate["state"] = "accepted"
+        gate["reports"] = ",".join(f"gate-master/reports/{name}.md"
+                                   for name in sorted(sealed["assignments"]))
+        gate["verification"] = "gate-master/verification.json"
+        eleven = _stage_row(updated, "11")
+        eleven["stage_state"] = "complete"
+        eleven["next_action"] = "-"
+        twelve = _stage_row(updated, "12")
+        twelve["stage_state"] = "active"
+        twelve["next_action"] = "record-final-verification"
+        return updated
+
+    locked_tracker_update(str(directory), transition_id="accept-master-gate", mutate=mutate)
+    return {"accepted": True, "blockers": []}
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k MasterGateAcceptance`
+Expected: PASS (10 tests)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git diff --name-only c8bddd610119f52b54bf077d284c7f5d8362ae77..HEAD -- plugins/superb/skills/pipeline/
+git add plugins/superb/skills/pipeline-auto/
+git commit -m "feat(pipeline-auto): derive master-gate acceptance from evidence alone"
+```
+
+---
+
+### Task 10: Final verification — the run-wide suite, and the two commands that must print nothing
+
+**Files:**
+- Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
+- Modify: `plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py`
+
+**Interfaces:**
+- Consumes: `MASTER_GATE_ID`, `_stage_row`, `completeness_proposals`, P02's `repo_root`, `derive_next_action`, `publish_immutable`, `locked_tracker_update`
+- Produces: `FINAL_SUITE_SILENT`, `final_suite_commands(base_commit, project_root) -> tuple[tuple[str, ...], ...]`, `record_final_verification(run_dir, *, results) -> dict`, `derive_terminal_action(run_dir) -> str`
+
+**The run-wide suite, copied from the master plan's "Verification suite" section:**
+
+```bash
+python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v
+python3 plugins/superb/skills/pipeline-auto/examples/controller_walkthrough.py
+git -C . diff --name-only c8bddd610119f52b54bf077d284c7f5d8362ae77..HEAD -- plugins/superb/skills/pipeline/
+git status --short
+```
+
+**Named fault this task catches:** the third and fourth commands passing on exit code alone.
+Both exit `0` when they print something — `git diff --name-only` exits 0 whether or not the
+path changed, and `git status --short` exits 0 with a dirty tree. Checking only the exit
+code means the run completes while `plugins/superb/skills/pipeline/` has been modified,
+which is the single Global Constraint the whole rewrite exists to honour, and while the
+working tree is dirty. Those two commands are verified on **stdout**, and the assertion is
+that they printed **nothing**.
+
+**Second named fault:** the git commands run against a different repository. They are bound
+to the run's recorded project root through `repo_root(tracker)` and carry it as `git -C`, so
+a clean status obtained somewhere else cannot supply the proof.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+class FinalVerification(unittest.TestCase):
+    def setUp(self):
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+        _root, self.run_dir = new_run(self.stack)
+        opened_gate(self.run_dir)
+        publish_report(self.run_dir, assignment="master-A", reviewer="reviewer-a")
+        publish_report(self.run_dir, assignment="master-B", reviewer="reviewer-b")
+        pass_master_verification(self.run_dir)
+        pas.evaluate_master_gate(str(self.run_dir))
+
+    def test_the_suite_is_the_master_plans_four_commands_in_order(self):
+        commands = pas.final_suite_commands(BASE, ".")
+        self.assertEqual(len(commands), 4)
+        self.assertEqual(commands[0], ("python3", "-m", "unittest", "discover", "-s",
+                                       "plugins/superb/skills/pipeline-auto/tests", "-v"))
+        self.assertEqual(commands[1], ("python3",
+                                       "plugins/superb/skills/pipeline-auto/examples/"
+                                       "controller_walkthrough.py"))
+        self.assertEqual(commands[2], ("git", "-C", ".", "diff", "--name-only",
+                                       f"{BASE}..HEAD", "--",
+                                       "plugins/superb/skills/pipeline/"))
+        self.assertEqual(commands[3], ("git", "-C", ".", "status", "--short"))
+        self.assertEqual(pas.FINAL_SUITE_SILENT, (2, 3))
+
+    def test_a_modified_pipeline_skill_fails_even_though_git_exits_zero(self):
+        # THE SILENT-PASS SEED. `git diff --name-only` exits 0 whether or not the
+        # path changed. Checking the exit code alone completes a run that
+        # modified plugins/superb/skills/pipeline/.
+        results = suite_results(self.run_dir,
+                                third="plugins/superb/skills/pipeline/references/review.md")
+        with self.assertRaises(pas.TrackerValidationError) as caught:
+            pas.record_final_verification(str(self.run_dir), results=results)
+        self.assertIn("review.md", str(caught.exception))
+
+    def test_a_dirty_working_tree_fails_even_though_git_exits_zero(self):
+        results = suite_results(self.run_dir, fourth="?? scratch/notes.md")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.record_final_verification(str(self.run_dir), results=results)
+
+    def test_a_failing_suite_command_fails(self):
+        results = suite_results(self.run_dir)
+        results[0]["exit_code"] = 1
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.record_final_verification(str(self.run_dir), results=results)
+
+    def test_the_commands_must_be_the_exact_ordered_tuple(self):
+        commands = pas.final_suite_commands(BASE, ".")
+        for order in (tuple(reversed(commands)), commands[:3],
+                      (("git", "-C", "/elsewhere", "status", "--short"),) + commands[:3]):
+            with self.subTest(order=order), self.assertRaises(pas.TrackerValidationError):
+                pas.record_final_verification(
+                    str(self.run_dir), results=suite_results(self.run_dir, order=order))
+
+    def test_final_verification_requires_an_accepted_master_gate(self):
+        with contextlib.ExitStack() as stack:
+            _root, fresh = new_run(stack)
+            with self.assertRaises(pas.GateError):
+                pas.record_final_verification(str(fresh), results=[])
+
+    def test_a_clean_suite_closes_stage_12_and_derives_complete(self):
+        record = pas.record_final_verification(str(self.run_dir),
+                                               results=suite_results(self.run_dir))
+        self.assertEqual(record["outcome"], "PASS")
+        self.assertEqual(record["head"], HEAD)
+        self.assertEqual(len(record["digest"]), 64)
+        tracker = tracker_of(self.run_dir)
+        self.assertEqual(pas._stage_row(tracker, "12")["stage_state"], "complete")
+        self.assertEqual(pas.derive_next_action(tracker), "complete")
+        self.assertEqual(pas.derive_terminal_action(str(self.run_dir)), "complete")
+
+    def test_a_frozen_proposal_turns_completion_into_complete_with_proposals(self):
+        pas.record_completeness(str(self.run_dir), items=[{
+            "id": "-", "class": "MISSING-FROM-SPEC", "traces_to": "none",
+            "statement": "A sibling case is uncovered.", "evidence": "-"}])
+        pas.record_final_verification(str(self.run_dir), results=suite_results(self.run_dir))
+        self.assertEqual(pas.derive_terminal_action(str(self.run_dir)),
+                         "complete-with-proposals")
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k FinalVerification`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'final_suite_commands'`
+
+- [ ] **Step 3: Write the implementation**
+
+```python
+# Indices into the run-wide suite whose STDOUT must be empty. Both commands exit
+# 0 when they print something: `git diff --name-only` exits 0 whether or not the
+# path changed, and `git status --short` exits 0 with a dirty tree. Verifying
+# them on exit code alone completes a run that modified
+# plugins/superb/skills/pipeline/ — the one Global Constraint this whole rewrite
+# exists to honour — or that left the working tree dirty.
+FINAL_SUITE_SILENT = (2, 3)
+
+
+def final_suite_commands(base_commit: str, project_root: str) -> tuple:
+    """The master plan's run-wide suite, in its exact order.
+
+    The git commands carry `-C <project_root>`, bound to the run's recorded root,
+    so a clean status obtained in some other repository cannot supply the proof.
+    """
+    return (
+        ("python3", "-m", "unittest", "discover", "-s",
+         "plugins/superb/skills/pipeline-auto/tests", "-v"),
+        ("python3",
+         "plugins/superb/skills/pipeline-auto/examples/controller_walkthrough.py"),
+        ("git", "-C", project_root, "diff", "--name-only", f"{base_commit}..HEAD", "--",
+         "plugins/superb/skills/pipeline/"),
+        ("git", "-C", project_root, "status", "--short"),
+    )
+
+
+def record_final_verification(run_dir: str, *, results: list) -> dict:
+    """Stage 12. Record the run-wide suite against the accepted master HEAD."""
+    directory = Path(run_dir)
+    tracker = parse_tracker((directory / "progress.md").read_text(encoding="utf-8"))
+    gate = next((row for row in tracker["gates"] if row["id"] == MASTER_GATE_ID), None)
+    if gate is None or gate["state"] != "accepted":
+        raise GateError("final verification follows an accepted master gate")
+    expected = final_suite_commands(tracker["run"]["base_commit"], repo_root(tracker))
+    actual = tuple(tuple(entry["command"]) for entry in results)
+    if actual != expected:
+        raise TrackerValidationError(
+            "final verification runs the run-wide suite in its exact order and against "
+            f"the run's own project root; expected {expected}, got {actual}")
+    for index, entry in enumerate(results):
+        printable = " ".join(entry["command"])
+        if entry["exit_code"] != 0:
+            raise TrackerValidationError(f"{printable} exited {entry['exit_code']}")
+        if index in FINAL_SUITE_SILENT and entry["stdout"].strip():
+            first = entry["stdout"].strip().splitlines()[0]
+            raise TrackerValidationError(
+                f"{printable} must print nothing and printed {first!r}")
+
+    rendered = _dumps({"head": gate["head"], "outcome": "PASS", "results": results})
+    digest = publish_immutable(
+        str(directory / "gate-master" / "final-verification.json"), rendered)
+
+    def mutate(updated):
+        twelve = _stage_row(updated, "12")
+        twelve["stage_state"] = "complete"
+        twelve["next_action"] = "-"
+        return updated
+
+    locked_tracker_update(str(directory), transition_id="record-final-verification",
+                          mutate=mutate)
+    return {"digest": digest, "head": gate["head"], "outcome": "PASS"}
+
+
+def derive_terminal_action(run_dir: str) -> str:
+    """`complete`, or `complete-with-proposals` when the critic froze anything.
+
+    Derived from files rather than stored, so the tracker never holds a second
+    copy of a fact the proposals file already carries.
+    """
+    directory = Path(run_dir)
+    tracker = parse_tracker((directory / "progress.md").read_text(encoding="utf-8"))
+    action = derive_next_action(tracker)
+    if action == "complete" and completeness_proposals(str(directory)):
+        return "complete-with-proposals"
+    return action
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k FinalVerification`
+Expected: PASS (8 tests)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git diff --name-only c8bddd610119f52b54bf077d284c7f5d8362ae77..HEAD -- plugins/superb/skills/pipeline/
+git add plugins/superb/skills/pipeline-auto/
+git commit -m "feat(pipeline-auto): verify the two silent commands on stdout, not exit code"
+```
+
+---
+
+### Task 11: The terminal report, leading with what the user never approved
+
+**Files:**
+- Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
+- Modify: `plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py`
+
+**Interfaces:**
+- Consumes: `_weakest_first`, `tainting_decisions`, `completeness_proposals`, `derive_terminal_action`, `_challenge_ledger`, P03's `parse_decisions` and `quorum_events`, P02's `publish_immutable`
+- Produces: `TERMINAL_REPORT_HEADING`, `render_terminal_report(run_dir) -> str`, `publish_terminal_report(run_dir) -> str`
+
+**Named fault this task catches:** a provenance field read only by a validator. The run can
+record `Provenance: quorum` on every machine decision, validate it on every write, and still
+hand the user a report in which those decisions are indistinguishable from the ones they
+made themselves. The report therefore **opens** with them, under a heading that says plainly
+they were decided without the user, sorted by grounding rung **ascending** — weakest first,
+because the answer the run was least sure of is the one most likely to be wrong and least
+likely to be noticed.
+
+The test asserts the lowest-rung decision appears in the report's **first** table, not merely
+somewhere in the document. A report that buries the weakest decision under four sections has
+the field and not the effect.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+class TerminalReport(unittest.TestCase):
+    def setUp(self):
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+        _root, self.run_dir = new_run(self.stack)
+        opened_gate(self.run_dir)
+        publish_report(self.run_dir, assignment="master-A", reviewer="reviewer-a")
+        publish_report(self.run_dir, assignment="master-B", reviewer="reviewer-b")
+        pass_master_verification(self.run_dir)
+        pas.evaluate_master_gate(str(self.run_dir))
+        pas.record_final_verification(str(self.run_dir), results=suite_results(self.run_dir))
+
+    def first_table(self, text: str) -> list[str]:
+        """The rows of the report's first pipe table, in order."""
+        rows, seen_header = [], False
+        for line in text.splitlines():
+            if line.startswith("|"):
+                seen_header = True
+                if not line.startswith("| ---"):
+                    rows.append(line)
+            elif seen_header:
+                break
+        return rows
+
+    def test_the_report_opens_with_the_decisions_made_without_the_user(self):
+        text = pas.render_terminal_report(str(self.run_dir))
+        self.assertIn(pas.TERMINAL_REPORT_HEADING, text)
+        self.assertIn("without you", pas.TERMINAL_REPORT_HEADING)
+        body = text.split(pas.TERMINAL_REPORT_HEADING, 1)[0]
+        self.assertNotIn("|", body)      # nothing tabular precedes it
+
+    def test_the_lowest_rung_decision_is_in_the_first_table(self):
+        # THE UNINFORMED-USER SEED. A provenance field read only by a validator
+        # has informed nobody; a report that buries the weakest decision under
+        # four sections has the field and not the effect.
+        rows = self.first_table(pas.render_terminal_report(str(self.run_dir)))
+        self.assertIn("Q-7c6b5a4938d2", rows[1])          # weakest, first data row
+        self.assertIn("code-evidenced", rows[1])
+        self.assertIn("Q-3f2a1b0c9d8e", rows[2])
+        self.assertIn("specified", rows[2])
+
+    def test_the_report_names_the_terminal_action(self):
+        self.assertIn("complete", pas.render_terminal_report(str(self.run_dir)))
+
+    def test_frozen_proposals_are_surfaced_and_marked_not_implemented(self):
+        pas.record_completeness(str(self.run_dir), items=[{
+            "id": "-", "class": "MISSING-FROM-SPEC", "traces_to": "none",
+            "statement": "A sibling case is uncovered.", "evidence": "-"}])
+        text = pas.render_terminal_report(str(self.run_dir))
+        self.assertIn("CP-001", text)
+        self.assertIn("not implemented", text)
+        self.assertIn("complete-with-proposals", text)
+
+    def test_provisional_work_is_listed_with_its_tainting_decision(self):
+        text = pas.render_terminal_report(str(self.run_dir))
+        self.assertIn("P02-T01", text)
+        self.assertIn("Q-7c6b5a4938d2", text)
+
+    def test_a_run_with_no_quorum_decision_still_says_so_in_the_first_table(self):
+        (self.run_dir / "decisions.md").write_text(
+            "\n".join(fixture("master-gate-decisions.md").splitlines()[:13]) + "\n",
+            encoding="utf-8")
+        rows = self.first_table(pas.render_terminal_report(str(self.run_dir)))
+        self.assertIn("no decision was taken without you", rows[1])
+
+    def test_publishing_is_immutable_and_replay_inert(self):
+        first = pas.publish_terminal_report(str(self.run_dir))
+        self.assertEqual(first, pas.publish_terminal_report(str(self.run_dir)))
+        self.assertTrue((self.run_dir / "terminal-report.md").exists())
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k TerminalReport`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'render_terminal_report'`
+
+- [ ] **Step 3: Write the implementation**
+
+```python
+TERMINAL_REPORT_HEADING = "## Decisions this run made without you"
+
+
+def render_terminal_report(run_dir: str) -> str:
+    """The run's closing report, leading with what the user never approved.
+
+    Provenance must be visible in three places — the decision record, the tracker
+    index, and here. A provenance field read only by a validator has informed
+    nobody. Quorum decisions come first, sorted by grounding rung ASCENDING: the
+    answer the run was least sure of is the one most likely to be wrong and least
+    likely to be noticed, so it is the first row the user reads.
+    """
+    directory = Path(run_dir)
+    tracker = parse_tracker((directory / "progress.md").read_text(encoding="utf-8"))
+    parsed = parse_decisions((directory / "decisions.md").read_text(encoding="utf-8"))
+    quorum = _weakest_first([record for record in parsed["decisions"].values()
+                             if record["provenance"] == "quorum"
+                             and record["status"] == "Adopted"])
+    action = derive_terminal_action(str(directory))
+
+    lines = [f"# {tracker['run']['run_id']} — terminal report", "",
+             f"Next action: `{action}`.", "",
+             TERMINAL_REPORT_HEADING, "",
+             "A three-agent quorum decided each of these; you did not. They are listed",
+             "weakest grounding first — the top row is the answer this run was least",
+             "sure of.", "",
+             "| D-ID | Grounding rung | Axis | Question | Adopted answer | Blocked work |",
+             "| --- | --- | --- | --- | --- | --- |"]
+    if not quorum:
+        lines.append("| - | - | - | no decision was taken without you | - | - |")
+    for record in quorum:
+        lines.append(
+            f"| {record['id']} | {record.get('grounding_rung', '-')} | {record['axis']} | "
+            f"{record['question']} | {record['answer']} | {record.get('scope', '-')} |")
+
+    taints = tainting_decisions(str(directory))
+    lines += ["", "## Provisional work", "",
+              "Tasks resting on an answer adopted below `specified` grounding.", ""]
+    if not any(taints.values()):
+        lines.append("None.")
+    for task_id in sorted(task for task, records in taints.items() if records):
+        for record in taints[task_id]:
+            lines.append(f"- **{task_id}** rests on **{record['id']}** "
+                         f"(`{record.get('grounding_rung', '-')}`): {record['answer']}")
+
+    rejected = [event for event in quorum_events(str(directory))
+                if str(event.get("status", "")).startswith("rejected-contradicts")]
+    lines += ["", "## Rejected contradictions", "",
+              f"{len(rejected)} candidate answers were rejected for contradicting a "
+              "recorded decision.",
+              "A run with several of these is a run whose brains kept pulling away from "
+              "what you asked for.", ""]
+    for event in rejected:
+        lines.append(f"- `{event.get('qid', '-')}` — {event.get('status')}")
+
+    challenges = _challenge_ledger(directory)
+    lines += ["", "## Reviewer challenges to recorded decisions", ""]
+    lines.append("None." if not challenges else "")
+    for entry in challenges:
+        lines.append(f"- **{entry['decision_id']}** — {entry['route']}: {entry['reason']}")
+
+    proposals = completeness_proposals(str(directory))
+    lines += ["", "## Completeness proposals (frozen — not implemented)", "",
+              "Recorded for you. The run could not act on these: phase creation closed at",
+              "stage 06, so there was no way to turn one into work.", ""]
+    lines.append("None." if not proposals else "")
+    for proposal in proposals:
+        lines.append(f"- **{proposal['id']}** — {proposal.get('statement', '-')}")
+
+    gate = next((row for row in tracker["gates"] if row["id"] == MASTER_GATE_ID), None)
+    lines += ["", "## Verification", "",
+              f"- Master gate edge: `{gate['base']}..{gate['head']}`" if gate else "- -",
+              f"- Master gate state: {gate['state']}" if gate else "- -",
+              "- Final verification: gate-master/final-verification.json", ""]
+    return "\n".join(lines) + "\n"
+
+
+def publish_terminal_report(run_dir: str) -> str:
+    """Publish the report once. A byte-identical republish is inert."""
+    return publish_immutable(str(Path(run_dir) / "terminal-report.md"),
+                             render_terminal_report(run_dir))
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v`
+Expected: PASS — every P02–P06 class, including the 11 new P06 classes
+
+- [ ] **Step 5: Run the full phase suite**
+
+```bash
+python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v
+python3 -c "import ast; ast.parse(open('plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py').read())"
+git diff --name-only c8bddd610119f52b54bf077d284c7f5d8362ae77..HEAD -- plugins/superb/skills/pipeline/
+git status --short
+```
+
+The third command must print nothing.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add plugins/superb/skills/pipeline-auto/
+git commit -m "feat(pipeline-auto): lead the terminal report with the weakest quorum decision"
+```
+
+---
+
+## Self-review
+
+**Spec coverage.** The master plan's P06 row names five deliverables and each has a task.
+Two-reviewer gate with non-implementer enforcement: Tasks 2, 3, 4, 9. `DECISION-CHALLENGE`
+routing: Tasks 5 and 6, covering all eight rows of the spec's contradiction-routing table
+plus the Minor/quality reversal rule. Completeness freeze: Task 8. Phase-set immutability:
+Task 1, built first because Task 8's freeze is only real if Task 1's guard is. Final
+verification: Task 10. The spec's governing invariant 6 is Task 1; invariant 7 (no push,
+publish, PR or merge) is Task 10, where `git status --short` and the untouched-`pipeline/`
+proof are checked on stdout rather than exit code — this phase adds no push path at all, so
+there is nothing else to gate. The spec's "Cascading on a low-confidence answer" — verbatim
+copy of the tainting decision into the reviewer's global-constraints block — is Task 3. The
+terminal-report requirement from invariant 5 is Task 11.
+
+**Placeholder scan.** No TBDs, no "add error handling", no "similar to Task N". Every Step 1
+carries the actual test code and every Step 3 the actual implementation. The four fixtures
+are written out in full rather than described. The one template file is written out in full.
+
+**Type consistency.** `route_contradiction` returns the same four-key dict everywhere, built
+only by `_route`, which validates its own route name against `ROUTES` — so a typo'd route is
+an exception rather than a silently-unhandled string. `classify_completeness_item` returns a
+`CRITIC_CLASSES` member or raises and never returns `None`. `raised_floor` and
+`_weakest_first` both address `RUNG_ORDER` by index and never by value, matching P03's rule
+that no float comparison exists between rungs. `open_findings`, `parse_findings` and
+`upsert_finding` all speak the same nine-column row dict. `evaluate_master_gate` and
+`record_final_verification` both return dicts and take no verdict.
+
+**Gap found and closed.** The first draft had `tainting_decisions` keyed only on the
+decision's own `Scope` field. That stops the provisional closure at the phase that raised
+the decision, so a decision adopted during P01 governing a P02 task goes unmarked. It now
+reads the task's `Decisions` column first — the column that exists precisely to cross a
+phase boundary — and the fixture was changed so `Q-7c6b5a4938d2` is raised in P01 and taints
+a P02 task, with a test asserting the two phases differ.
+
+**Second gap found and closed.** The first draft's test helper did not write
+`phase-set.json`, so every gate function — each of which re-checks the seal — would have
+failed in every test for the wrong reason, and `test_a_frozen_run_with_no_sealed_file_is_a_stop`
+would have passed accidentally. `new_run` now seals a frozen fixture and that one test
+unlinks the file explicitly.
+
+**Third gap found and closed.** `evaluate_master_gate` originally treated a moved phase set
+as a blocker. That is wrong: a blocker is something a fix round can clear, and a phase set
+that no longer matches its seal is evidence the run's history is not what it claims. It
+raises `PhaseSetFrozen` instead, and a test asserts the difference.
+
+---
+
+## Unresolved — reported, not invented
+
+None of the following is settled by `2026-09-14-pipeline-auto-design.md` or
+`2026-09-14-pipeline-auto-master-plan.md`. Each is marked **derived** (from a cited artifact
+in this repository, and safe to overrule), **open** (no basis to derive; a decision is
+needed), or **blocking** (a task here cannot be completed until someone rules).
+
+1. **`repo_root` as a `## Run` field.** *Blocking for P02, not for P06's code.* The master
+   plan's current revision adds `repo_root(tracker) -> str`, "recorded at init; NEVER derived
+   from run_dir depth", and adds `repo_root` to `initialize_run`'s signature — but P02's
+   phase plan on disk predates that change and its `_RUN_KEYS` has no such key. This plan's
+   two tracker fixtures carry `| repo_root | . |` immediately after `target_branch`, which
+   is a guess at placement. P02 must add the field; if it records the project root somewhere
+   other than `## Run`, the two fixtures lose that line and nothing else changes, because
+   `final_suite_commands` takes the root as a parameter and only `record_final_verification`
+   calls `repo_root(tracker)`.
+
+2. **Column placement of `Decisions` in `## Tasks`, and the fourteen `## Task Review`
+   columns.** *Open.* The coordinator supplied both column sets but not `Decisions`'
+   position; this plan's fixtures place it last, after `Provisional`. Every function here
+   reads cells by name, so only the two fixture files depend on order. P05 owns the final
+   order and these fixtures follow it.
+
+3. **`Adversarial Verdict` vocabulary.** *Derived* from the spec's adjudication verdicts
+   (`CONFIRMED`, `REFUTED`, `PLAUSIBLE`); the master-gate fixture uses `REFUTED`, chosen
+   because a `CONFIRMED` or unrefuted `PLAUSIBLE` adversarial finding is ratchet trigger (a)
+   and would make the fixture's phase state ambiguous. If P05 fixes a different vocabulary,
+   the fixture needs a one-word edit.
+
+4. **Run-local `decisions.md`, `findings.md` and `completeness-proposals.md`.** *Derived*
+   from P03's `open_quorum`, which already reads `run_dir / "decisions.md"` directly. The
+   `## Run` cells naming those files are therefore advisory labels rather than the paths the
+   helpers resolve. If they are meant to be authoritative, every read in this phase needs to
+   go through them and P03's needs the same change.
+
+5. **Master reviewer identifiers and how they are drawn.** *Open.* Nothing in either
+   document says who supplies `reviewers={"A": ..., "B": ...}`. This plan validates the pair
+   and refuses a conflicted one; it does not allocate. The controller prose in P07 must say
+   where the two identifiers come from, and that they must not be recycled from any earlier
+   role in the run.
+
+6. **The magnitude of "a raised bar".** *Derived.* The spec says a `DECISION-CHALLENGE`
+   against a quorum decision becomes "one re-open at a raised bar" without defining the
+   raise. `raised_floor` moves one rung up the ladder, clamped at `specified`, matching the
+   one other place the spec raises a bar by a defined amount — the run-level inflation
+   check, where "the adoption floor rises one rung". If a different magnitude is intended,
+   it is a one-line change in `raised_floor`.
+
+7. **Where the re-open's raised floor is enforced.** *Open.* P06 writes
+   `quorum/<qid>/reopen.json` carrying `raised_floor`; P03's `finalize_quorum` and
+   `current_floor` are the code that would have to honour it, and P03's plan on disk does not
+   mention re-opens at all. Someone must confirm that P03 reads `reopen.json`, or the raised
+   bar is recorded and never applied.
+
+8. **The adjudicator's identity and model.** *Open.* The spec requires "one adjudicator —
+   most capable model, read-only" for a fixer dispute and an "unbiased reconciliation" for a
+   decision dispute, without saying whether they are the same agent type. This plan enforces
+   only that the reconciliation adjudicator is neither master reviewer nor any prior owner.
+   P07 must define the agent.
+
+9. **`quorum_events` record shape.** *Derived.* Task 11 reads `event["status"]` and
+   `event["qid"]` and counts statuses beginning `rejected-contradicts`, matching P03's
+   documented `finalize_quorum().status` values. P03 declares `quorum_events(run_dir) ->
+   list[dict]` without fixing the keys. If they differ, the rejected-contradictions section
+   of the terminal report needs the real key names.
+
+10. **Worker-result owner grammar.** *Derived* from P03's decision-record field style;
+    `owner_history` scans `<run_dir>/results/**/*.md` for a `- **Owner:** <id>` line. P04
+    owns `templates/worker-result.md` and `publish_worker_result`, and neither document fixes
+    the field spelling. If P04 emits a different one, that regex is the single line to change
+    — but until it is confirmed, **the independence check's coverage of released workers
+    depends on a grammar this plan assumed.**
+
+11. **Escalation blast radius for a halted challenge.** *Derived.* `_queue_escalation` uses
+    `blast="run"` because the spec makes the freeze on raising run-wide and because a
+    challenge to a recorded decision is not scoped to one phase. Neither document enumerates
+    the legal blast values; P02 validates only that it is a token.
+
+12. **Whether stage 11 may re-open after a fix round.** *Open.* The v2 review reference
+    allows `gate.head` to advance through reviewed remediation edges, and this phase's
+    `open_master_gate` is inert once the gate leaves `pending`. A `SPEC-NOT-MET` finding that
+    is fixed therefore needs a re-review path that this plan does not build, because neither
+    document says whether `pipeline-auto`'s master gate keeps v2's bounded remediation loop
+    or replaces it with the per-task fix loop at gate scope. **This is the largest open item
+    in the phase** and it should be ruled on before P07 writes the stage-11 prose.

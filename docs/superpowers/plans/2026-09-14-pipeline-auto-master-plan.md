@@ -55,7 +55,7 @@
 | `tests/test_pipeline_auto_state.py` | Unit tests, re-derived against this skill's own faults |
 | `tests/fixtures/` | Valid and invalid trackers, phase plans, worker results, brain responses |
 | `plugins/superb/agents/pipeline-auto-brain.md` | `tools:` exactly `{Read, Grep, Glob}`. **No `Bash`** — frontmatter allowlists tools, not commands, so "read-only Bash" is unenforceable and a brain holding `Bash` can rewrite `decisions.md`. No `Agent`, no `Write`, no `Edit` |
-| `plugins/superb/agents/pipeline-auto-intent-reader.md` | Stage-01 reader; strict JSON hypothesis out, no design proposals |
+| `plugins/superb/agents/pipeline-auto-intent-reader.md` | Stage-01 reader; strict JSON hypothesis out, no design proposals. `tools:` exactly `{Read, Grep, Glob}` — same reason as the brain, and sharper: it writes the intent brief every later citation anchors to |
 
 ---
 
@@ -190,6 +190,86 @@ def propagate_provisional(tracker: dict) -> dict: ...
 ### P07 produces — consumed by P09
 
 A structure validator, `tests/test_skill_structure.py`, asserting: frontmatter present and within limits; every `references/*.md` named in `SKILL.md`'s routing table exists on disk; every agent named in `SKILL.md` exists as a file; every prompt template referenced resolves. Its named fault: renaming a reference without updating the routing table produces a dead route at runtime, silently, mid-run.
+
+---
+
+## Cross-phase clarifications
+
+Resolved after the phase plans were written, where two phases needed the same
+answer. These bind every phase.
+
+**Stage 11 re-reviews after a fix round, bounded at three rounds.** Neither the
+spec nor the master plan said so, and P06 correctly refused to invent it — but it
+is entailed rather than open. The inlined SDD protocol states that a final review
+returning findings gets one fix subagent carrying the complete list, then the
+final review re-runs on the updated package, and the branch is done when a round
+returns zero. The recorded default extends zero-open-findings to the master gate,
+so a gate that could not re-review would be a gate that can never close after its
+first finding. The bound is the same fix-round cap of three that applies at task
+scope: a fourth round **halts to the escalation queue** rather than looping. A
+round that resolves none of its targeted findings, or whose fixes oscillate,
+halts immediately without consuming the remaining rounds.
+
+**`repo_root` is a `## Run` field**, not a derived value, and P02 carries it in
+`_RUN_KEYS`. P06's fixtures already assume this. It is recorded by
+`initialize_run` and read by `effective_rung` for citation resolution — deriving
+it from run-directory depth is the defect that would silently demote every
+grounded answer below the floor while appearing to work.
+
+**A re-open applies a raised bar, and the bar must be applied, not merely
+recorded.** P03 owns the re-open path. A re-opened question's adoption requires
+the winning cluster's rung to be strictly higher than the rung originally
+adopted — not merely above the floor. Recording the raised bar in the quorum row
+without enforcing it at adoption is a silent no-op, and it is the kind of defect
+that passes every test asserting the row's contents.
+
+**The worker-result template's owner grammar is `- **Owner:** <id>`.** P04 owns
+the template; P06's reviewer-independence check parses owner history out of it.
+Independence is checked against every owner that appears in any task's history,
+including released and superseded attempts — not against current owners only, or
+a worker released after finishing a task can be assigned to review it.
+
+**Section column tuples are pinned by P02's committed fixture**, not by any
+later phase's assumption. Read them from
+`plugins/superb/skills/pipeline-auto/tests/fixtures/valid-progress.md` rather
+than restating them — a restatement is a second source of truth that drifts. As
+built:
+
+| Section | Columns |
+| --- | --- |
+| `## Intent` | ID, Kind, State, Owner, Result, Conflicts |
+| `## Questions` | ID, Origin, Slot, State, Decision |
+| `## Quorum` | QID, Axis, Phase, State, Owners, Payload Digest, Context Digest, Responses, Depth, Rung, Outcome, Decision |
+| `## Escalations` | ID, QID, Blast, State, Batch, Resolution |
+| `## Tasks` | ID, Phase, Kind, State, Owner, Attempt, Result, Checkpoints, Source Ref, Commits, Artifacts, Integration, Verification, Question, Decisions, Provisional |
+| `## Task Review` | Task, Round, Intensity, State, Reviewer, Package, Report, Critical, Important, Minor, Adversarial, Adversarial Verdict, Open, Evidence |
+| `## Phases` | ID, State, Verification, Review Class, Class Source, Ratchet, Gate |
+| `## Gates` | ID, Type, Phase, State, Base, Head, Assignments, Reports, Verification, Findings |
+
+Note `## Quorum` carries **three** digest-bearing columns. `Payload Digest` is
+per brain index, not per question — the three brains receive different reading
+assignments, so there is no single payload.
+
+**`integrate_task` is public and belongs to P04.** The spec assigns integration
+and the ancestry predicate to the task lifecycle, but the interface block named
+no transition, so P04 built it privately. A private integration transition cannot
+be called by P05's gate or exercised by P06's tests. Add it to the P04 surface:
+
+```python
+def integrate_task(run_dir: str, *, task_id: str, merge_commit: str) -> dict: ...
+```
+
+**`initialize_run` seeds artifact references and an empty `## Tasks`.** P04 found
+it seeds neither, while the lifecycle needs both. `phase_plans`, `decisions`,
+`findings` and `repo_root` are `## Run` fields written at init; task rows are
+appended by the phase-plan import, which is P04's, not P02's.
+
+**`EVIDENCE_PURPOSES` is extended by the phase that needs a purpose**, and the
+validator rejects an unlisted one. P04 ships `task-test`, `task-integration`,
+`phase`. P05 adds `task-review` and `adversarial`; P06 adds `branch-review`,
+`completeness` and `final`. A phase that writes an evidence record under a
+purpose it did not register fails parse — which is the intended behaviour, since
+a purpose nobody declared is a record nobody validates.
 
 ---
 

@@ -637,6 +637,16 @@ worthless; a rule that cannot be enforced does not deliver that. `Read`, `Grep`
 and `Glob` cover everything grounding actually needs — resolving a citation to a
 file and a line, and searching for exemplars — so the capability is not missed.
 
+**The same restriction binds `pipeline-auto-intent-reader`, for the same
+reason.** It reads and reports and never designs, and what it produces is the
+intent brief that every later `consistent_with` citation anchors to — so a shell
+there rewrites the anchor rather than the record, which is worse, not better.
+Both agents declare exactly `{Read, Grep, Glob}`.
+
+Assert the tool set as an **exact set**, never as a blacklist. An exact-set
+assertion fails on a tool nobody thought to forbid; a blacklist only fails on the
+ones somebody remembered.
+
 This makes every leg of the boundary mechanically testable, which is the point:
 `tests/test_skill_structure.py` asserts the agent's `tools:` set is exactly
 `{Read, Grep, Glob}`. Today's `brainstorm-architect` runs
@@ -745,7 +755,7 @@ plugins/superb/skills/pipeline-auto/
 
 plugins/superb/agents/
 ├── pipeline-auto-brain.md      (tools: Read, Grep, Glob — nothing else)
-└── pipeline-auto-intent-reader.md
+└── pipeline-auto-intent-reader.md  (same three tools, same reason)
 ```
 
 `plugins/superb/skills/pipeline/` is not modified.

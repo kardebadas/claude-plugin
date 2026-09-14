@@ -2469,3 +2469,1495 @@ git commit -m "feat(pipeline-auto): gate task resume on an explicit task.resume 
 ```
 
 ---
+
+### Task 8: `verify_source_range` — the baseline-anchored range proof (faults F3, F4)
+
+A source task completes implementation only when its resolved source head contains exactly the complete, ordered, nonempty `baseline..source-head` range, every changed path is inside its approved typed write scope, and no commit in the range is empty. The baseline is the one persisted at reservation. `HEAD~1` is the wrong baseline: it silently truncates a multi-commit task to its last commit, and every earlier commit escapes the scope check entirely.
+
+The implementation range is linear by construction — one worktree per implementer, merged only at integration — so a merge commit inside the range is a contradiction, not a variation.
+
+**Files:**
+- Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
+- Test: `plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py`
+
+**Interfaces:**
+- Consumes: `_git`, `_git_out`, `_resolved_commit`, `_path_in_scope`, `_scope_parts`.
+- Produces: `_commit_parents(repo, commit) -> tuple`; `verify_source_range(repo, *, baseline, head, scopes) -> dict` returning `{"baseline", "head", "commits", "changed_paths"}`.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py`:
+
+```python
+# --------------------------------------------------------------------------
+# Task 8 tests -- faults F3 and F4
+# --------------------------------------------------------------------------
+
+def commit_file(repo, relative: str, text: str, message: str) -> str:
+    path = Path(repo) / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", message)
+    return git(repo, "rev-parse", "HEAD")
+
+
+class SourceRangeTests(TempDirTestCase):
+
+    def three_commit_branch(self):
+        repo = make_repo(self.tmp)
+        baseline = git(repo, "rev-parse", "target")
+        git(repo, "checkout", "-q", "-b", "task/T1", "target")
+        commits = tuple(
+            commit_file(repo, "src/a1.py", f"value = {index}\n", f"step {index}")
+            for index in range(1, 4)
+        )
+        return repo, baseline, commits
+
+    def test_accepts_the_complete_ordered_range(self):
+        repo, baseline, commits = self.three_commit_branch()
+        proof = state.verify_source_range(
+            repo, baseline=baseline, head=commits[-1], scopes=["file:src/a1.py"]
+        )
+        self.assertEqual(proof["baseline"], baseline)
+        self.assertEqual(proof["head"], commits[-1])
+        self.assertEqual(proof["commits"], commits)
+        self.assertEqual(proof["changed_paths"], ("src/a1.py",))
+
+    def test_head_tilde_one_baseline_truncates_a_multi_commit_task(self):
+        """F3: HEAD~1 is not the review baseline. It silently drops the earlier
+        commits, which then escape every scope and range check."""
+        repo, baseline, commits = self.three_commit_branch()
+        persisted = state.verify_source_range(
+            repo, baseline=baseline, head=commits[-1], scopes=["file:src/a1.py"]
+        )
+        truncated = state.verify_source_range(
+            repo, baseline=commits[-2], head=commits[-1], scopes=["file:src/a1.py"]
+        )
+        self.assertEqual(len(persisted["commits"]), 3)
+        self.assertEqual(len(truncated["commits"]), 1)
+        self.assertNotEqual(truncated["commits"], persisted["commits"])
+        self.assertLess(set(truncated["commits"]), set(persisted["commits"]))
+
+    def test_rejects_an_empty_commit(self):
+        """F4: no diff is not an artifact completion and not a reason for an
+        empty commit."""
+        repo, baseline, commits = self.three_commit_branch()
+        git(repo, "commit", "-q", "--allow-empty", "-m", "nothing happened")
+        head = git(repo, "rev-parse", "HEAD")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.verify_source_range(
+                repo, baseline=baseline, head=head, scopes=["file:src/a1.py"]
+            )
+        self.assertIn("empty commit", str(caught.exception))
+
+    def test_rejects_an_empty_range(self):
+        repo, baseline, _ = self.three_commit_branch()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.verify_source_range(
+                repo, baseline=baseline, head=baseline, scopes=["file:src/a1.py"]
+            )
+        self.assertIn("empty", str(caught.exception))
+
+    def test_rejects_a_head_that_does_not_descend_the_baseline(self):
+        """F4: an unrelated commit proves nothing about this task."""
+        repo, baseline, _ = self.three_commit_branch()
+        git(repo, "checkout", "-q", "--orphan", "unrelated")
+        git(repo, "rm", "-rqf", ".")
+        unrelated = commit_file(repo, "other.py", "x = 1\n", "unrelated history")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.verify_source_range(
+                repo, baseline=baseline, head=unrelated, scopes=["file:other.py"]
+            )
+        self.assertIn("ancestor", str(caught.exception))
+
+    def test_rejects_a_merge_inside_the_implementation_range(self):
+        """One worktree per implementer means the implementation range is
+        linear. A merge inside it belongs to integration, not to the task."""
+        repo, baseline, _ = self.three_commit_branch()
+        git(repo, "checkout", "-q", "-b", "side", baseline)
+        commit_file(repo, "src/side.py", "side = 1\n", "side work")
+        git(repo, "checkout", "-q", "task/T1")
+        git(repo, "merge", "-q", "--no-ff", "-m", "merge side", "side")
+        head = git(repo, "rev-parse", "HEAD")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.verify_source_range(
+                repo, baseline=baseline, head=head,
+                scopes=["file:src/a1.py", "file:src/side.py"],
+            )
+        self.assertIn("linear", str(caught.exception))
+
+    def test_rejects_an_out_of_scope_path(self):
+        repo, baseline, _ = self.three_commit_branch()
+        head = commit_file(repo, "src/escaped.py", "escaped = 1\n", "out of scope")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.verify_source_range(
+                repo, baseline=baseline, head=head, scopes=["file:src/a1.py"]
+            )
+        self.assertIn("src/escaped.py", str(caught.exception))
+
+    def test_accepts_a_tree_scope_covering_every_changed_path(self):
+        repo, baseline, _ = self.three_commit_branch()
+        head = commit_file(repo, "src/deep/nested.py", "nested = 1\n", "in a tree")
+        proof = state.verify_source_range(
+            repo, baseline=baseline, head=head, scopes=["tree:src"]
+        )
+        self.assertIn("src/deep/nested.py", proof["changed_paths"])
+
+    def test_rejects_untyped_or_absent_scopes(self):
+        repo, baseline, commits = self.three_commit_branch()
+        with self.assertRaises(state.PlanMetadataError):
+            state.verify_source_range(
+                repo, baseline=baseline, head=commits[-1], scopes=["src/a1.py"]
+            )
+        with self.assertRaises(state.TrackerValidationError):
+            state.verify_source_range(
+                repo, baseline=baseline, head=commits[-1], scopes=[]
+            )
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k SourceRangeTests`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'verify_source_range'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+Append to `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`:
+
+```python
+# ---------------------------------------------------------------------------
+# P04: the baseline-anchored source-range proof
+#
+# The baseline is the one PERSISTED AT RESERVATION. HEAD~1 silently truncates a
+# multi-commit task to its last commit and every earlier commit escapes the
+# scope check.
+# ---------------------------------------------------------------------------
+
+def _commit_parents(repo, commit: str) -> tuple:
+    return tuple(_git_out(repo, "rev-list", "--parents", "-n", "1", commit).split()[1:])
+
+
+def verify_source_range(repo, *, baseline: str, head: str, scopes) -> dict:
+    """Prove one task's implementation range against its persisted baseline."""
+    repo = Path(repo)
+    scopes = tuple(scopes)
+    if not scopes:
+        raise TrackerValidationError("a source range needs at least one write scope")
+    for scope in scopes:
+        _scope_parts(scope)                      # rejects untyped/unsafe scopes
+    base = _resolved_commit(repo, baseline)
+    tip = _resolved_commit(repo, head)
+    if base == tip:
+        raise TrackerValidationError(
+            "source range is empty: the head equals the recorded baseline"
+        )
+    if not _git(repo, "merge-base", "--is-ancestor", base, tip):
+        raise TrackerValidationError(
+            "the recorded baseline is not an ancestor of the source head; an "
+            "unrelated commit proves nothing about this task"
+        )
+    commits = tuple(
+        line for line in
+        _git_out(repo, "rev-list", "--reverse", f"{base}..{tip}").splitlines() if line
+    )
+    if not commits:
+        raise TrackerValidationError("source range contains no commits")
+    for commit in commits:
+        parents = _commit_parents(repo, commit)
+        if len(parents) != 1:
+            raise TrackerValidationError(
+                f"the implementation range must be linear; {commit} has "
+                f"{len(parents)} parents and merges belong to integration"
+            )
+        if not _git_out(repo, "diff", "--name-only", parents[0], commit).strip():
+            raise TrackerValidationError(
+                f"source range contains an empty commit: {commit}"
+            )
+    changed = tuple(
+        line for line in
+        _git_out(repo, "diff", "--name-only", base, tip).splitlines() if line
+    )
+    if not changed:
+        raise TrackerValidationError("source range changed no repository path")
+    outside = tuple(
+        path for path in changed
+        if not any(_path_in_scope(path, scope) for scope in scopes)
+    )
+    if outside:
+        raise TrackerValidationError(
+            f"source range changed paths outside its approved write scope "
+            f"{scopes}: {', '.join(outside)}"
+        )
+    return {"baseline": base, "head": tip, "commits": commits,
+            "changed_paths": changed}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`
+Expected: OK
+
+- [ ] **Step 5: Commit**
+
+```bash
+git diff --name-only -- plugins/superb/skills/pipeline/    # must print nothing
+git add plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py \
+        plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py
+git commit -m "feat(pipeline-auto): prove source ranges against the reserved baseline"
+```
+
+---
+
+### Task 9: `publish_worker_result`
+
+A worker publishes its own immutable result and nothing else. Publication is atomic and no-clobber: republishing byte-identical content is an idempotent no-op, and any other content at the same path is conflicting evidence, not an update. `publish_immutable` returns the sha256 hex digest, so `publish_worker_result` computes the repository-relative path itself and checks the returned digest against the content it rendered.
+
+**Files:**
+- Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
+- Test: `plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py`
+
+**Interfaces:**
+- Consumes: P02's `publish_immutable` (returns a digest), `validate_run`, `repo_root`; `render_worker_result`.
+- Produces: `worker_result_path(run_dir, *, task_id, attempt) -> Path`; `publish_worker_result(run_dir, *, result: dict) -> str`.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py`:
+
+```python
+# --------------------------------------------------------------------------
+# Task 9 tests
+# --------------------------------------------------------------------------
+
+class PublishWorkerResultTests(TempDirTestCase):
+
+    def test_writes_a_canonical_immutable_file(self):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        relative = state.publish_worker_result(run_dir, result=worker_result())
+        self.assertFalse(Path(relative).is_absolute())
+        self.assertIn("agent-output", relative)
+        published = repo / relative
+        self.assertTrue(published.is_file())
+        self.assertEqual(
+            state.parse_worker_result(published.read_text(encoding="utf-8")),
+            worker_result(),
+        )
+
+    def test_content_digest_matches_what_publish_immutable_reported(self):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        relative = state.publish_worker_result(run_dir, result=worker_result())
+        expected = hashlib.sha256((repo / relative).read_bytes()).hexdigest()
+        rendered = state.render_worker_result(worker_result())
+        self.assertEqual(
+            hashlib.sha256(rendered.encode("utf-8")).hexdigest(), expected
+        )
+
+    def test_is_idempotent_for_identical_content(self):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        first = state.publish_worker_result(run_dir, result=worker_result())
+        before = (repo / first).read_bytes()
+        second = state.publish_worker_result(run_dir, result=worker_result())
+        self.assertEqual(second, first)
+        self.assertEqual((repo / first).read_bytes(), before)
+
+    def test_refuses_to_overwrite_conflicting_content(self):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        relative = state.publish_worker_result(run_dir, result=worker_result())
+        before = (repo / relative).read_bytes()
+        with self.assertRaises(state.TrackerValidationError):
+            state.publish_worker_result(
+                run_dir, result=worker_result(concerns="changed my mind")
+            )
+        self.assertEqual((repo / relative).read_bytes(), before)
+
+    def test_validates_before_writing_anything(self):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        with self.assertRaises(state.TrackerValidationError):
+            state.publish_worker_result(
+                run_dir, result=quorum_result("NEEDS_CONTEXT", question_record="-")
+            )
+        self.assertFalse((run_dir / "agent-output").exists())
+
+    def test_result_path_is_attempt_scoped(self):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        first = state.worker_result_path(run_dir, task_id="T1", attempt=1)
+        second = state.worker_result_path(run_dir, task_id="T1", attempt=2)
+        self.assertNotEqual(first, second)
+        self.assertEqual(first.parent, second.parent)
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k PublishWorkerResultTests`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'publish_worker_result'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+Append to `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`:
+
+```python
+# ---------------------------------------------------------------------------
+# P04: immutable result publication
+#
+# The one helper a worker may call. Only the controller imports.
+# ---------------------------------------------------------------------------
+
+def worker_result_path(run_dir, *, task_id: str, attempt: int) -> Path:
+    if not _TOKEN.fullmatch(task_id):
+        raise TrackerValidationError("task_id must be an identifier token")
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+        raise TrackerValidationError("attempt must be a positive integer")
+    return (Path(run_dir) / "agent-output" / task_id.replace("/", "-")
+            / f"attempt-{attempt}.md")
+
+
+def publish_worker_result(run_dir, *, result: dict) -> str:
+    """Publish one immutable attempt result; return its repository-relative path."""
+    content = render_worker_result(result)          # validates before any write
+    path = worker_result_path(
+        run_dir, task_id=result["task_id"], attempt=result["attempt"]
+    )
+    if path.exists():
+        if path.read_text(encoding="utf-8") != content:
+            raise TrackerValidationError(
+                f"a conflicting immutable result already exists at {path}"
+            )
+    else:
+        digest = publish_immutable(str(path), content)   # returns the sha256 digest
+        if digest != hashlib.sha256(content.encode("utf-8")).hexdigest():
+            raise TrackerValidationError(
+                "published content digest does not match the rendered result"
+            )
+    repo = _repo_dir(validate_run(run_dir))
+    return path.resolve().relative_to(repo).as_posix()
+```
+
+`publish_immutable` is P02's no-clobber atomic publication and returns the content digest. The pre-check above turns its clobber refusal into the documented distinction between an idempotent replay and conflicting evidence; the digest comparison proves the bytes on disk are the bytes that were validated.
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`
+Expected: OK
+
+- [ ] **Step 5: Commit**
+
+```bash
+git diff --name-only -- plugins/superb/skills/pipeline/    # must print nothing
+git add plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py \
+        plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py
+git commit -m "feat(pipeline-auto): publish attempt-scoped immutable worker results"
+```
+
+---
+
+### Task 10: `import_worker_result` — identity, routing, and completion (faults F3–F6)
+
+A worker saying `DONE` is not completion evidence. The controller imports a result only after validating its immutable four-part identity, the approved task definition, the required files, the Git facts, and the digest-bound typed PASS record. All five statuses and both kinds undergo the same four-part assignment check.
+
+Routing is where pipeline-auto departs from `superb:pipeline`: `NEEDS_CONTEXT` and `PLAN_CONFLICT` park the attempt at `[?]` with a **quorum** marker and a resolvable question record; `BLOCKED` parks it at `[?]` with a **halt** marker. The controller reads the marker; it never infers the route from the wording.
+
+**Files:**
+- Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
+- Test: `plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py`
+
+**Interfaces:**
+- Consumes: `parse_worker_result`, `verify_source_range`, `resolve_evidence`, `_approved_definition`, `_repo_dir`, `_attempt_baseline`, P02's `locked_tracker_update`, `derive_next_action`.
+- Produces: `QUORUM_ROUTE = "quorum"`, `HALT_ROUTE = "halt"`; `_attempt_baseline(row, attempt) -> str`; `_result_identity(path, content, repo) -> tuple[str, str]`; `_validate_task_test_evidence(...)`; `import_worker_result(run_dir, *, result_path) -> dict`.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py`:
+
+```python
+# --------------------------------------------------------------------------
+# Task 10 tests -- faults F3, F4, F5, F6
+# --------------------------------------------------------------------------
+
+class ImportWorkerResultTests(TempDirTestCase):
+
+    def reserved_run(self, *, worker_limit: int = 6):
+        repo, run_dir, plan = make_run(
+            self.tmp, three_disjoint_tasks(), worker_limit=worker_limit
+        )
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        return repo, run_dir
+
+    def implement(self, repo, count: int = 2):
+        """Commit `count` in-scope commits on a task branch; return its commits."""
+        git(repo, "checkout", "-q", "-b", "task/T1", "target")
+        return tuple(
+            commit_file(repo, "src/a1.py", f"value = {index}\n", f"step {index}")
+            for index in range(1, count + 1)
+        )
+
+    def done_result(self, repo, run_dir, commits, **overrides) -> dict:
+        digest = write_evidence(
+            run_dir / "evidence", code_state=commits[-1],
+            commands='["python3 -m unittest -k T1"]',
+        )
+        return worker_result(
+            source_ref=commits[-1], commits=commits,
+            tests=("python3 -m unittest -k T1",),
+            evidence=(f"evidence/T1.md#sha256={digest}",),
+            **overrides,
+        )
+
+    def publish(self, repo, run_dir, result) -> Path:
+        return repo / state.publish_worker_result(run_dir, result=result)
+
+    def test_imports_a_complete_source_result(self):
+        repo, run_dir = self.reserved_run()
+        commits = self.implement(repo)
+        path = self.publish(repo, run_dir, self.done_result(repo, run_dir, commits))
+        tracker = state.import_worker_result(run_dir, result_path=path)
+        row = task_row(tracker, "T1")
+        self.assertEqual(row["state"], "[x]")
+        self.assertEqual(row["source_ref"], commits[-1])
+        self.assertEqual(row["commits"], ",".join(commits))
+        self.assertEqual(row["integration"], "-")
+        self.assertIn("completed:1", row["checkpoints"])
+        self.assertTrue(state.derive_next_action(tracker))
+
+    def test_rejects_every_four_part_identity_mismatch(self):
+        """F6: run_id + task_id + attempt + owner must match the controller's
+        persisted assignment exactly."""
+        cases = (
+            {"run_id": "run-other"},
+            {"task_id": "T2"},
+            {"attempt": 2},
+            {"owner": "impl-9"},
+        )
+        for override in cases:
+            with self.subTest(override=override):
+                repo, run_dir = self.reserved_run()
+                commits = self.implement(repo)
+                result = self.done_result(repo, run_dir, commits, **override)
+                path = self.publish(repo, run_dir, result)
+                before = (run_dir / "progress.md").read_bytes()
+                with self.assertRaises(state.TrackerValidationError):
+                    state.import_worker_result(run_dir, result_path=path)
+                self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_rejects_a_head_tilde_one_truncated_commit_list(self):
+        """F3: the persisted baseline, not HEAD~1. A truncated list drops the
+        earlier commits from every check."""
+        repo, run_dir = self.reserved_run()
+        commits = self.implement(repo, count=3)
+        result = self.done_result(repo, run_dir, commits)
+        result["commits"] = commits[-1:]            # what HEAD~1 would have yielded
+        path = self.publish(repo, run_dir, result)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.import_worker_result(run_dir, result_path=path)
+        self.assertIn("complete ordered", str(caught.exception))
+
+    def test_rejects_an_extra_pre_baseline_commit(self):
+        """F4: a pre-baseline commit is not part of this task's range."""
+        repo, run_dir = self.reserved_run()
+        baseline = git(repo, "rev-parse", "target")
+        commits = self.implement(repo)
+        result = self.done_result(repo, run_dir, commits)
+        result["commits"] = (baseline,) + commits
+        path = self.publish(repo, run_dir, result)
+        with self.assertRaises(state.TrackerValidationError):
+            state.import_worker_result(run_dir, result_path=path)
+
+    def test_rejects_evidence_bound_to_a_different_code_state(self):
+        repo, run_dir = self.reserved_run()
+        commits = self.implement(repo)
+        digest = write_evidence(
+            run_dir / "evidence", code_state=commits[0],   # not the source head
+            commands='["python3 -m unittest -k T1"]',
+        )
+        result = worker_result(
+            source_ref=commits[-1], commits=commits,
+            tests=("python3 -m unittest -k T1",),
+            evidence=(f"evidence/T1.md#sha256={digest}",),
+        )
+        path = self.publish(repo, run_dir, result)
+        with self.assertRaises(state.TrackerValidationError):
+            state.import_worker_result(run_dir, result_path=path)
+
+    def test_rejects_evidence_naming_a_different_command_tuple(self):
+        repo, run_dir = self.reserved_run()
+        commits = self.implement(repo)
+        digest = write_evidence(
+            run_dir / "evidence", code_state=commits[-1],
+            commands='["python3 -m unittest -k something-else"]',
+        )
+        result = worker_result(
+            source_ref=commits[-1], commits=commits,
+            tests=("python3 -m unittest -k T1",),
+            evidence=(f"evidence/T1.md#sha256={digest}",),
+        )
+        path = self.publish(repo, run_dir, result)
+        with self.assertRaises(state.TrackerValidationError):
+            state.import_worker_result(run_dir, result_path=path)
+
+    def test_quorum_statuses_park_the_attempt_with_a_quorum_marker(self):
+        """F5: the question record must exist and match its digest."""
+        for status in state.QUORUM_STATUSES:
+            with self.subTest(status=status):
+                repo, run_dir = self.reserved_run()
+                digest = (run_dir / "questions").mkdir(parents=True, exist_ok=True)
+                content = f"# Question for {status}\n"
+                (run_dir / "questions" / "q1.md").write_text(content, encoding="utf-8")
+                digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                reference = f"questions/q1.md#sha256={digest}"
+                result = quorum_result(status, question_record=reference)
+                path = self.publish(repo, run_dir, result)
+                tracker = state.import_worker_result(run_dir, result_path=path)
+                row = task_row(tracker, "T1")
+                self.assertEqual(row["state"], "[?]")
+                self.assertEqual(row["question"], f"{state.QUORUM_ROUTE}:{reference}")
+
+    def test_quorum_status_with_an_unresolvable_question_record_is_rejected(self):
+        repo, run_dir = self.reserved_run()
+        result = quorum_result(
+            "NEEDS_CONTEXT", question_record=f"questions/absent.md#sha256={DIGEST}"
+        )
+        path = self.publish(repo, run_dir, result)
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.TrackerValidationError):
+            state.import_worker_result(run_dir, result_path=path)
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_blocked_parks_the_attempt_with_a_halt_marker(self):
+        repo, run_dir = self.reserved_run()
+        result = worker_result(
+            status="BLOCKED", source_ref="-", commits=(), evidence=(),
+            blocking_reason="no staging credential",
+        )
+        path = self.publish(repo, run_dir, result)
+        tracker = state.import_worker_result(run_dir, result_path=path)
+        row = task_row(tracker, "T1")
+        self.assertEqual(row["state"], "[?]")
+        self.assertEqual(row["question"],
+                         f"{state.HALT_ROUTE}:no staging credential")
+
+    def test_import_replay_is_an_idempotent_no_op(self):
+        repo, run_dir = self.reserved_run()
+        commits = self.implement(repo)
+        path = self.publish(repo, run_dir, self.done_result(repo, run_dir, commits))
+        state.import_worker_result(run_dir, result_path=path)
+        snapshot = (run_dir / "progress.md").read_bytes()
+        tracker = state.import_worker_result(run_dir, result_path=path)
+        self.assertEqual((run_dir / "progress.md").read_bytes(), snapshot)
+        self.assertEqual(task_row(tracker, "T1")["state"], "[x]")
+
+    def test_changed_content_under_an_accepted_identity_is_conflicting(self):
+        repo, run_dir = self.reserved_run()
+        commits = self.implement(repo)
+        path = self.publish(repo, run_dir, self.done_result(repo, run_dir, commits))
+        state.import_worker_result(run_dir, result_path=path)
+        tampered = path.read_text(encoding="utf-8").replace(
+            "| concerns | - |", "| concerns | quietly edited |"
+        )
+        path.write_text(tampered, encoding="utf-8")
+        with self.assertRaises(state.TrackerValidationError):
+            state.import_worker_result(run_dir, result_path=path)
+
+    def test_artifact_result_must_name_the_exact_approved_outputs(self):
+        body = task_block("T1", kind="artifact", write_scope="tree:docs",
+                          outputs="docs/out.md")
+        repo, run_dir, _ = make_run(self.tmp, body, worker_limit=6)
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        (repo / "docs").mkdir(exist_ok=True)
+        (repo / "docs" / "out.md").write_text("output\n", encoding="utf-8")
+        digest = write_evidence(
+            run_dir / "evidence", code_state=git(repo, "rev-parse", "target"),
+            subject="task/T1", commands='["python3 -m unittest -k T1"]',
+        )
+        wrong = worker_result(
+            kind="artifact", source_ref="-", commits=(),
+            artifacts=("docs/other.md",), tests=("python3 -m unittest -k T1",),
+            evidence=(f"evidence/T1.md#sha256={digest}",),
+        )
+        path = self.publish(repo, run_dir, wrong)
+        with self.assertRaises(state.TrackerValidationError):
+            state.import_worker_result(run_dir, result_path=path)
+
+    def test_rejects_a_result_for_a_task_that_is_not_active(self):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        result = worker_result(
+            status="BLOCKED", source_ref="-", commits=(), evidence=(),
+            blocking_reason="never started",
+        )
+        path = self.publish(repo, run_dir, result)
+        with self.assertRaises(state.TrackerValidationError):
+            state.import_worker_result(run_dir, result_path=path)
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k ImportWorkerResultTests`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'import_worker_result'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+Append to `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`:
+
+```python
+# ---------------------------------------------------------------------------
+# P04: controller-side result import
+#
+# A worker saying DONE is not completion evidence. All five statuses and both
+# kinds undergo the same four-part identity check. Routing is explicit:
+# NEEDS_CONTEXT / PLAN_CONFLICT -> quorum, BLOCKED -> halt.
+# ---------------------------------------------------------------------------
+
+QUORUM_ROUTE = "quorum"
+HALT_ROUTE = "halt"
+
+
+def _attempt_baseline(row: dict, attempt: int) -> str:
+    prefix = f"baseline:{attempt}@"
+    matches = [
+        item.removeprefix(prefix) for item in _csv(row["checkpoints"])
+        if item.startswith(prefix)
+    ]
+    if len(matches) != 1 or not _COMMIT.fullmatch(matches[0]):
+        raise TrackerValidationError(
+            "a source attempt needs exactly one recorded full-commit baseline"
+        )
+    return matches[0]
+
+
+def _result_identity(result_path: Path, content: bytes, repo: Path):
+    try:
+        relative = result_path.resolve().relative_to(repo.resolve()).as_posix()
+    except ValueError as exc:
+        raise TrackerValidationError(
+            "worker result is outside the repository root"
+        ) from exc
+    if any(character in relative for character in ",|#"):
+        raise TrackerValidationError(
+            "worker result path contains an unsupported identity delimiter"
+        )
+    return f"{relative}#sha256={hashlib.sha256(content).hexdigest()}", relative
+
+
+def _validate_task_test_evidence(run_dir, tracker: dict, result: dict,
+                                 definition: dict, code_state: str) -> None:
+    records = [
+        resolve_evidence(run_dir, _repo_dir(tracker), reference)
+        for reference in result["evidence"]
+    ]
+    matching = [
+        record for record in records
+        if record["purpose"] == "task-test"
+        and record["run_id"] == result["run_id"]
+        and record["subject"] == f"task/{result['task_id']}"
+        and record["attempt"] == str(result["attempt"])
+    ]
+    if len(matching) != 1:
+        raise TrackerValidationError(
+            "a task needs exactly one digest-bound task-test PASS record naming "
+            "its run, task, and attempt"
+        )
+    record = matching[0]
+    if record["code_state"] != code_state:
+        raise TrackerValidationError(
+            "task-test evidence is bound to a different code state than the "
+            "result it accompanies"
+        )
+    if record["commands"] != definition["commands"] or tuple(result["tests"]) \
+            != definition["commands"]:
+        raise TrackerValidationError(
+            "task-test evidence must name the exact ordered approved task suite"
+        )
+
+
+def import_worker_result(run_dir, *, result_path) -> dict:
+    """Validate an immutable result against its active assignment and import once."""
+    result_path = Path(result_path)
+    try:
+        content = result_path.read_bytes()
+        published = parse_worker_result(content.decode("utf-8"))
+    except (OSError, UnicodeError) as exc:
+        raise TrackerValidationError(
+            f"worker result is unreadable: {result_path}: {exc}"
+        ) from exc
+    digest = hashlib.sha256(content).hexdigest()
+    transition = f"import-{published['task_id']}-{published['attempt']}-{digest}"
+
+    def mutate(tracker: dict) -> dict:
+        repo = _repo_dir(tracker)
+        current = result_path.read_bytes()
+        result = parse_worker_result(current.decode("utf-8"))
+        identity, relative = _result_identity(result_path, current, repo)
+        row = _task_row(tracker, result["task_id"])
+        accepted = _csv(row["result"])
+        if identity in accepted:
+            return tracker                           # exact replay: inert
+        if any(entry.split("#sha256=", 1)[0] == relative for entry in accepted):
+            raise TrackerValidationError(
+                "an accepted result path now carries conflicting content"
+            )
+        if result["run_id"] != _run_field(tracker, "run_id"):
+            raise TrackerValidationError("result run identity does not match the tracker")
+        if row["state"] != "[~]" or row["attempt"] != str(result["attempt"]):
+            raise TrackerValidationError(
+                "result attempt is not the current active attempt"
+            )
+        if result["owner"] != row["owner"]:
+            raise TrackerValidationError(
+                "result owner does not match the controller-assigned owner"
+            )
+        definition = _approved_definition(run_dir, tracker, row["id"])
+        if result["kind"] != row["kind"] or result["kind"] != definition["kind"]:
+            raise TrackerValidationError(
+                "result kind does not match the approved plan"
+            )
+
+        updated = dict(row)
+        updated["result"] = _append_history(row["result"], identity)
+        updated["verification"] = _append_history(
+            row["verification"], f"tests:{','.join(result['tests']) or '-'}"
+        )
+        for checkpoint in result["checkpoints"]:
+            updated["checkpoints"] = _append_history(
+                updated["checkpoints"],
+                f"worker:{result['attempt']}:{checkpoint['id']}:"
+                f"{checkpoint['status']}@{checkpoint['evidence']}",
+            )
+
+        if result["status"] in COMPLETION_STATUSES:
+            if result["kind"] == "source":
+                proof = verify_source_range(
+                    repo,
+                    baseline=_attempt_baseline(row, result["attempt"]),
+                    head=result["source_ref"],
+                    scopes=definition["write_scope"],
+                )
+                if tuple(result["commits"]) != proof["commits"]:
+                    raise TrackerValidationError(
+                        "implementation commits must equal the complete ordered "
+                        "baseline-to-source range"
+                    )
+                _validate_task_test_evidence(
+                    run_dir, tracker, result, definition, proof["head"]
+                )
+                updated.update(source_ref=proof["head"],
+                               commits=",".join(proof["commits"]),
+                               artifacts="-", integration="-")
+            else:
+                if tuple(result["artifacts"]) != definition["outputs"]:
+                    raise TrackerValidationError(
+                        "artifact result does not name the exact approved outputs"
+                    )
+                for output in result["artifacts"]:
+                    if not (repo / output).is_file():
+                        raise TrackerValidationError(
+                            f"artifact output is missing: {output}"
+                        )
+                _validate_task_test_evidence(
+                    run_dir, tracker, result, definition,
+                    _resolved_commit(repo, _run_field(tracker, "target_branch")),
+                )
+                updated.update(source_ref="-", commits="-",
+                               artifacts=",".join(result["artifacts"]),
+                               integration="N/A")
+            updated["state"] = "[x]"
+            updated["checkpoints"] = _append_history(
+                updated["checkpoints"], f"completed:{result['attempt']}"
+            )
+        else:
+            if result["status"] in QUORUM_STATUSES:
+                resolve_question_record(run_dir, tracker, result["question_record"])
+                marker = f"{QUORUM_ROUTE}:{result['question_record']}"
+            else:
+                marker = f"{HALT_ROUTE}:{result['blocking_reason']}"
+            updated["state"] = "[?]"
+            updated["question"] = marker
+            updated["checkpoints"] = _append_history(
+                updated["checkpoints"], f"blocked:{result['attempt']}@{marker}"
+            )
+        return _replace_task(tracker, updated)
+
+    return locked_tracker_update(run_dir, transition_id=transition, mutate=mutate)
+
+
+def resolve_question_record(run_dir, tracker: dict, reference: str) -> str:
+    """Resolve a quorum-raising result's question record and verify its digest."""
+    relative, digest = _digest_reference(reference)
+    for candidate in (Path(run_dir) / relative, _repo_dir(tracker) / relative):
+        if not candidate.is_file():
+            continue
+        if hashlib.sha256(candidate.read_bytes()).hexdigest() != digest:
+            raise TrackerValidationError(
+                f"question record digest does not match its content: {reference}"
+            )
+        return relative
+    raise TrackerValidationError(f"question record is missing: {reference}")
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`
+Expected: OK
+
+- [ ] **Step 5: Commit**
+
+```bash
+git diff --name-only -- plugins/superb/skills/pipeline/    # must print nothing
+git add plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py \
+        plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py
+git commit -m "feat(pipeline-auto): route quorum-raising results and validate result identity"
+```
+
+---
+
+### Task 11: `--no-ff` integration, the merge-conflict hard stop, and the ancestry predicate (faults F9, F10)
+
+Worktree granularity is one per concurrently dispatched implementer, merged `--no-ff` in task order. `--no-ff` is **load-bearing, not stylistic**: a fast-forward collapses the merge commit, and with it the boundary clause 2 of the ancestry predicate checks. Because the merge commit exists, `git rev-list --reverse <merge>^1..<merge>^2` yields the exact task commit set directly.
+
+**A merge conflict is a hard stop.** Under typed write-scope validation a conflict should be impossible, so a conflict is evidence the scope declaration was wrong. Redoing the task alone papers over a broken declaration and lets the next task hit the same collision. The merge is aborted, nothing is recorded, and the error names **both task ids and both declared scopes**.
+
+The conflict scenario is constructed directly at the Git level in the test. A correct declaration should make it unreachable through the full validated path — which is precisely why reaching it must stop the run rather than recover.
+
+**Files:**
+- Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
+- Test: `plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py`
+
+**Interfaces:**
+- Consumes: `_git`, `_git_out`, `_resolved_commit`, `_repo_dir`, `_approved_definition`, `resolve_evidence`, `_task_row`, `_csv`.
+- Produces: `_git_run(repo, *args)`; `_conflicting_task(run_dir, tracker, task_id, paths)`; `_integration_ancestry(repo, *, commits, branch_tip, merge_commit, target_branch) -> tuple`; `_integrate_task_branch(run_dir, *, task_id, branch, evidence) -> dict`.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py`:
+
+```python
+# --------------------------------------------------------------------------
+# Task 11 tests -- faults F9 and F10
+# --------------------------------------------------------------------------
+
+class IntegrationTests(TempDirTestCase):
+
+    def two_task_run(self, *, scopes=("file:src/a1.py", "file:src/a2.py")):
+        body = (
+            task_block("T1", order=1, batch="b1", write_scope=scopes[0])
+            + task_block("T2", order=2, batch="b2", write_scope=scopes[1])
+        )
+        repo, run_dir, plan = make_run(self.tmp, body, worker_limit=8)
+        return repo, run_dir
+
+    def branch(self, repo, name: str, relative: str, text: str):
+        git(repo, "checkout", "-q", "-b", name, "target")
+        head = commit_file(repo, relative, text, f"{name} work")
+        git(repo, "checkout", "-q", "target")
+        return head
+
+    def integration_evidence(self, run_dir, merge_commit: str, task_id: str) -> str:
+        digest = write_evidence(
+            run_dir / "evidence", name=f"{task_id}-integration.md",
+            purpose="task-integration", subject=f"task/{task_id}",
+            code_state=merge_commit, commands='["git merge --no-ff"]',
+        )
+        return f"evidence/{task_id}-integration.md#sha256={digest}"
+
+    def test_no_ff_merge_creates_the_boundary_the_predicate_checks(self):
+        repo, run_dir = self.two_task_run()
+        tip = self.branch(repo, "task/T1", "src/a1.py", "one = 1\n")
+        merge = git(repo, "merge", "-q", "--no-ff", "--no-edit",
+                    "-m", "integrate T1", "task/T1") or git(repo, "rev-parse", "HEAD")
+        parents = state._commit_parents(repo, merge)
+        self.assertEqual(len(parents), 2)
+        self.assertEqual(parents[1], tip)
+        walked = tuple(
+            line for line in git(
+                repo, "rev-list", "--reverse", f"{merge}^1..{merge}^2"
+            ).splitlines() if line
+        )
+        self.assertEqual(walked, (tip,))
+        state._integration_ancestry(
+            repo, commits=(tip,), branch_tip=tip, merge_commit=merge,
+            target_branch="target",
+        )
+
+    def test_a_fast_forward_integration_is_rejected(self):
+        """F10: --no-ff is load-bearing. A fast-forward collapses the merge
+        commit and destroys the boundary clause 2 checks."""
+        repo, run_dir = self.two_task_run()
+        tip = self.branch(repo, "task/T1", "src/a1.py", "one = 1\n")
+        git(repo, "merge", "-q", "--ff-only", "task/T1")
+        head = git(repo, "rev-parse", "HEAD")
+        self.assertEqual(head, tip)                       # fast-forwarded
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._integration_ancestry(
+                repo, commits=(tip,), branch_tip=tip, merge_commit=head,
+                target_branch="target",
+            )
+        self.assertIn("--no-ff", str(caught.exception))
+
+    def test_clause_one_rejects_a_commit_outside_the_branch_tip(self):
+        repo, run_dir = self.two_task_run()
+        tip = self.branch(repo, "task/T1", "src/a1.py", "one = 1\n")
+        stray = self.branch(repo, "task/T2", "src/a2.py", "two = 2\n")
+        merge = (git(repo, "merge", "-q", "--no-ff", "--no-edit",
+                     "-m", "integrate T1", "task/T1")
+                 or git(repo, "rev-parse", "HEAD"))
+        with self.assertRaises(state.TrackerValidationError):
+            state._integration_ancestry(
+                repo, commits=(tip, stray), branch_tip=tip, merge_commit=merge,
+                target_branch="target",
+            )
+
+    def test_clause_two_rejects_a_merge_outside_the_target_branch(self):
+        repo, run_dir = self.two_task_run()
+        tip = self.branch(repo, "task/T1", "src/a1.py", "one = 1\n")
+        git(repo, "checkout", "-q", "-b", "elsewhere", "target")
+        git(repo, "merge", "-q", "--no-ff", "--no-edit", "-m", "off target", "task/T1")
+        merge = git(repo, "rev-parse", "HEAD")
+        git(repo, "checkout", "-q", "target")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._integration_ancestry(
+                repo, commits=(tip,), branch_tip=tip, merge_commit=merge,
+                target_branch="target",
+            )
+        self.assertIn("target", str(caught.exception))
+
+    def test_merge_conflict_is_a_hard_stop_naming_both_tasks_and_both_scopes(self):
+        """F9: a conflict proves the scope declaration was wrong. Redoing the
+        task alone papers over that and lets the next task collide again."""
+        repo, run_dir = self.two_task_run()
+        # Both branches touch src/shared.py, which NEITHER declared. Constructed
+        # directly: a correct declaration should make this unreachable.
+        first = self.branch(repo, "task/T1", "src/shared.py", "shared = 1\n")
+        second = self.branch(repo, "task/T2", "src/shared.py", "shared = 2\n")
+        git(repo, "merge", "-q", "--no-ff", "--no-edit", "-m", "integrate T1",
+            "task/T1")
+        merged = git(repo, "rev-parse", "HEAD")
+        set_task_state(run_dir, "T1", state="[x]", commits=first,
+                       source_ref=first, integration=merged)
+        set_task_state(run_dir, "T2", state="[x]", commits=second,
+                       source_ref=second, owner="impl-2", attempt="1")
+
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._integrate_task_branch(
+                run_dir, task_id="T2", branch="task/T2", evidence="-"
+            )
+        message = str(caught.exception)
+        for fragment in ("T1", "T2", "file:src/a1.py", "file:src/a2.py",
+                         "src/shared.py"):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, message)
+
+        # Hard stop: the merge was aborted, nothing was recorded, and no retry
+        # or redo-alone happened.
+        self.assertEqual(git(repo, "status", "--short"), "")
+        self.assertEqual(git(repo, "rev-parse", "HEAD"), merged)
+        tracker = state.validate_run(run_dir)
+        self.assertEqual(task_row(tracker, "T2")["integration"], "-")
+
+    def test_clean_integration_records_the_merge_commit_and_its_evidence(self):
+        repo, run_dir = self.two_task_run()
+        tip = self.branch(repo, "task/T1", "src/a1.py", "one = 1\n")
+        set_task_state(run_dir, "T1", state="[x]", commits=tip, source_ref=tip,
+                       owner="impl-1", attempt="1")
+        merge_preview = None
+        tracker = state._integrate_task_branch(
+            run_dir, task_id="T1", branch="task/T1", evidence=None
+        )
+        merge_preview = task_row(tracker, "T1")["integration"]
+        self.assertEqual(len(state._commit_parents(repo, merge_preview)), 2)
+        self.assertEqual(git(repo, "rev-parse", "target"), merge_preview)
+
+    def test_integration_evidence_must_name_the_merge_commit(self):
+        repo, run_dir = self.two_task_run()
+        tip = self.branch(repo, "task/T1", "src/a1.py", "one = 1\n")
+        set_task_state(run_dir, "T1", state="[x]", commits=tip, source_ref=tip,
+                       owner="impl-1", attempt="1")
+        bad = self.integration_evidence(run_dir, tip, "T1")   # branch tip, not merge
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._integrate_task_branch(
+                run_dir, task_id="T1", branch="task/T1", evidence=bad
+            )
+        self.assertIn("merge commit", str(caught.exception))
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k IntegrationTests`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute '_integration_ancestry'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+Append to `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`:
+
+```python
+# ---------------------------------------------------------------------------
+# P04: integration
+#
+# One worktree per concurrently dispatched implementer, merged --no-ff in task
+# order. --no-ff is LOAD-BEARING: a fast-forward collapses the merge commit and
+# destroys the boundary clause 2 checks. A conflict is a HARD STOP, because
+# under typed write-scope validation a conflict should be impossible and is
+# therefore evidence the scope declaration was wrong.
+# ---------------------------------------------------------------------------
+
+def _git_run(repo, *args: str):
+    return subprocess.run(
+        ("git", "-C", str(repo), *args), capture_output=True, text=True, check=False
+    )
+
+
+def _integration_ancestry(repo, *, commits, branch_tip: str, merge_commit: str,
+                          target_branch: str) -> tuple:
+    """Check the three-clause ancestry predicate for the worktree topology."""
+    repo = Path(repo)
+    commits = tuple(commits)
+    if not commits:
+        raise TrackerValidationError("integration needs at least one recorded commit")
+    parents = _commit_parents(repo, merge_commit)
+    if len(parents) != 2:
+        raise TrackerValidationError(
+            "integration must be a --no-ff merge with exactly two parents; a "
+            "fast-forward collapses the merge commit the predicate depends on"
+        )
+    if parents[1] != branch_tip:
+        raise TrackerValidationError(
+            "the merge commit's second parent must be the task branch tip"
+        )
+    # Clause 1: every recorded commit is an ancestor of its own branch tip, and
+    # the second-parent walk yields exactly that ordered set.
+    for commit in commits:
+        if not _git(repo, "merge-base", "--is-ancestor", commit, branch_tip):
+            raise TrackerValidationError(
+                f"recorded commit {commit} is not an ancestor of the task branch tip"
+            )
+    walked = tuple(
+        line for line in _git_out(
+            repo, "rev-list", "--reverse", f"{merge_commit}^1..{merge_commit}^2"
+        ).splitlines() if line
+    )
+    if walked != commits:
+        raise TrackerValidationError(
+            "the merge's second-parent walk does not equal the recorded ordered "
+            f"task commit set: {walked} != {commits}"
+        )
+    # Clause 2: branch tip -> merge commit -> target branch.
+    if not _git(repo, "merge-base", "--is-ancestor", branch_tip, merge_commit):
+        raise TrackerValidationError(
+            "the task branch tip is not an ancestor of the merge commit"
+        )
+    if not _git(repo, "merge-base", "--is-ancestor", merge_commit, target_branch):
+        raise TrackerValidationError(
+            f"the merge commit is not an ancestor of the target branch "
+            f"{target_branch}"
+        )
+    return walked
+
+
+def _conflicting_task(run_dir, tracker: dict, task_id: str, paths) -> tuple:
+    """Name the other task whose recorded commits touched a conflicting path."""
+    repo = _repo_dir(tracker)
+    for path in paths:
+        for row in tracker.get("tasks", ()):
+            if row["id"] == task_id:
+                continue
+            for commit in _csv(row["commits"]):
+                touched = _git_out(
+                    repo, "show", "--pretty=format:", "--name-only", commit
+                ).split()
+                if path in touched:
+                    other = _approved_definition(run_dir, tracker, row["id"])
+                    return row["id"], other["write_scope"], path
+    return "unknown", (), (tuple(paths) or ("unknown",))[0]
+
+
+def _integrate_task_branch(run_dir, *, task_id: str, branch: str, evidence) -> dict:
+    """Merge one task branch --no-ff into the target branch, or stop hard."""
+
+    def mutate(tracker: dict) -> dict:
+        repo = _repo_dir(tracker)
+        target = _run_field(tracker, "target_branch")
+        row = _task_row(tracker, task_id)
+        if row["state"] != "[x]" or row["kind"] != "source":
+            raise TrackerValidationError(
+                "only a completed source task is integrated"
+            )
+        if row["integration"] not in {"-", ""}:
+            raise TrackerValidationError(f"task {task_id} is already integrated")
+        definition = _approved_definition(run_dir, tracker, task_id)
+        commits = _csv(row["commits"])
+        branch_tip = _resolved_commit(repo, branch)
+
+        if not _git(repo, "checkout", "-q", target):
+            raise TrackerValidationError(f"cannot check out target branch {target}")
+        merge = _git_run(repo, "merge", "--no-ff", "--no-edit",
+                         "-m", f"integrate {task_id}", branch)
+        if merge.returncode != 0:
+            unmerged = tuple(
+                line for line in _git_out(
+                    repo, "diff", "--name-only", "--diff-filter=U"
+                ).splitlines() if line
+            )
+            _git(repo, "merge", "--abort")
+            other_id, other_scope, path = _conflicting_task(
+                run_dir, tracker, task_id, unmerged
+            )
+            raise TrackerValidationError(
+                "HARD STOP: integration merge conflicted, which proves a write "
+                "scope declaration was wrong. Not redoing the task alone -- that "
+                "papers over the broken declaration and the next task collides "
+                f"again. Colliding paths: {', '.join(unmerged) or path}. "
+                f"Task {task_id} declared {definition['write_scope']}; "
+                f"task {other_id} declared {other_scope}."
+            )
+        merge_commit = _resolved_commit(repo, "HEAD")
+        _integration_ancestry(
+            repo, commits=commits, branch_tip=branch_tip,
+            merge_commit=merge_commit, target_branch=target,
+        )
+        if evidence not in (None, "-"):
+            record = resolve_evidence(run_dir, repo, evidence)
+            if (record["purpose"] != "task-integration"
+                    or record["subject"] != f"task/{task_id}"
+                    or record["code_state"] != merge_commit):
+                raise TrackerValidationError(
+                    "task-integration evidence must name this task and the merge "
+                    "commit as its code state"
+                )
+        updated = dict(row)
+        updated["integration"] = merge_commit
+        updated["verification"] = _append_history(
+            row["verification"], f"integration:{evidence or merge_commit}"
+        )
+        return _replace_task(tracker, updated)
+
+    return locked_tracker_update(
+        run_dir, transition_id=f"integrate-{task_id}-{branch}", mutate=mutate
+    )
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`
+Expected: OK
+
+- [ ] **Step 5: Commit**
+
+```bash
+git diff --name-only -- plugins/superb/skills/pipeline/    # must print nothing
+git add plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py \
+        plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py
+git commit -m "feat(pipeline-auto): stop hard on an integration merge conflict"
+```
+
+---
+
+### Task 12: `reconcile_run` — file-first recovery (fault F7)
+
+After a compaction, restart, or interruption, the run reconstructs its next action from files and Git, never from conversation memory. A commit that appeared immediately before the interruption is neither automatic success nor grounds to repeat five hours of work. A **missing** result is neither.
+
+**Files:**
+- Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
+- Test: `plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py`
+
+**Interfaces:**
+- Consumes: `validate_run`, `parse_worker_result`, `import_worker_result`, `_integration_ancestry`, `_repo_dir`, `WORKER_RESULT_MARKER`.
+- Produces: `reconcile_run(run_dir) -> dict` returning `{"actions": tuple, "questions": tuple, "diagnostics": tuple}`.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py`:
+
+```python
+# --------------------------------------------------------------------------
+# Task 12 tests -- fault F7
+# --------------------------------------------------------------------------
+
+class ReconcileRunTests(TempDirTestCase):
+
+    def active_run(self):
+        repo, run_dir, plan = make_run(
+            self.tmp, three_disjoint_tasks(), worker_limit=6
+        )
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        return repo, run_dir
+
+    def test_a_missing_result_is_neither_completion_nor_grounds_to_repeat(self):
+        """F7: an active attempt with no result stays exactly as it is."""
+        repo, run_dir = self.active_run()
+        before = (run_dir / "progress.md").read_bytes()
+        report = state.reconcile_run(run_dir)
+        self.assertIn("await-or-check-live-owner:T1:1:impl-1", report["actions"])
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+        tracker = state.validate_run(run_dir)
+        row = task_row(tracker, "T1")
+        self.assertEqual(row["state"], "[~]")
+        self.assertEqual(row["attempt"], "1")        # no new attempt invented
+        self.assertNotIn("[x]", row["state"])
+
+    def test_a_commit_without_a_result_does_not_complete_the_task(self):
+        repo, run_dir = self.active_run()
+        git(repo, "checkout", "-q", "-b", "task/T1", "target")
+        commit_file(repo, "src/a1.py", "one = 1\n", "work that was never published")
+        report = state.reconcile_run(run_dir)
+        self.assertIn("await-or-check-live-owner:T1:1:impl-1", report["actions"])
+        self.assertEqual(task_row(state.validate_run(run_dir), "T1")["state"], "[~]")
+
+    def test_a_matching_result_is_imported_once(self):
+        repo, run_dir = self.active_run()
+        git(repo, "checkout", "-q", "-b", "task/T1", "target")
+        commits = (commit_file(repo, "src/a1.py", "one = 1\n", "step 1"),)
+        digest = write_evidence(
+            run_dir / "evidence", code_state=commits[-1],
+            commands='["python3 -m unittest -k T1"]',
+        )
+        state.publish_worker_result(run_dir, result=worker_result(
+            source_ref=commits[-1], commits=commits,
+            tests=("python3 -m unittest -k T1",),
+            evidence=(f"evidence/T1.md#sha256={digest}",),
+        ))
+        report = state.reconcile_run(run_dir)
+        self.assertIn("imported:T1:1", report["actions"])
+        self.assertEqual(task_row(state.validate_run(run_dir), "T1")["state"], "[x]")
+        again = state.reconcile_run(run_dir)
+        self.assertNotIn("imported:T1:1", again["actions"])
+
+    def test_a_result_with_a_contradicting_owner_raises_a_question(self):
+        repo, run_dir = self.active_run()
+        git(repo, "checkout", "-q", "-b", "task/T1", "target")
+        commits = (commit_file(repo, "src/a1.py", "one = 1\n", "step 1"),)
+        digest = write_evidence(
+            run_dir / "evidence", code_state=commits[-1],
+            commands='["python3 -m unittest -k T1"]',
+        )
+        state.publish_worker_result(run_dir, result=worker_result(
+            owner="impostor", source_ref=commits[-1], commits=commits,
+            tests=("python3 -m unittest -k T1",),
+            evidence=(f"evidence/T1.md#sha256={digest}",),
+        ))
+        before = (run_dir / "progress.md").read_bytes()
+        report = state.reconcile_run(run_dir)
+        self.assertTrue(
+            any(item.startswith("result-owner-contradiction:T1:1")
+                for item in report["questions"])
+        )
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_a_malformed_result_candidate_becomes_a_diagnostic_not_a_state_change(self):
+        repo, run_dir = self.active_run()
+        broken = state.worker_result_path(run_dir, task_id="T1", attempt=1)
+        broken.parent.mkdir(parents=True, exist_ok=True)
+        broken.write_text(
+            state.WORKER_RESULT_MARKER + "\n| Field | Value |\n", encoding="utf-8"
+        )
+        report = state.reconcile_run(run_dir)
+        self.assertTrue(
+            any(item.startswith("partial-or-malformed-result")
+                for item in report["diagnostics"])
+        )
+        self.assertEqual(task_row(state.validate_run(run_dir), "T1")["state"], "[~]")
+
+    def test_a_completed_unintegrated_source_task_reports_integration_pending(self):
+        repo, run_dir = self.active_run()
+        git(repo, "checkout", "-q", "-b", "task/T1", "target")
+        tip = commit_file(repo, "src/a1.py", "one = 1\n", "step 1")
+        set_task_state(run_dir, "T1", state="[x]", commits=tip, source_ref=tip)
+        report = state.reconcile_run(run_dir)
+        self.assertIn("integration-pending:T1", report["actions"])
+
+    def test_a_recorded_integration_outside_the_target_raises_a_question(self):
+        repo, run_dir = self.active_run()
+        git(repo, "checkout", "-q", "-b", "task/T1", "target")
+        tip = commit_file(repo, "src/a1.py", "one = 1\n", "step 1")
+        git(repo, "checkout", "-q", "-b", "elsewhere", "target")
+        git(repo, "merge", "-q", "--no-ff", "--no-edit", "-m", "off target", "task/T1")
+        merge = git(repo, "rev-parse", "HEAD")
+        git(repo, "checkout", "-q", "target")
+        set_task_state(run_dir, "T1", state="[x]", commits=tip, source_ref=tip,
+                       integration=merge)
+        report = state.reconcile_run(run_dir)
+        self.assertTrue(
+            any(item.startswith("integration-contradiction:T1")
+                for item in report["questions"])
+        )
+
+    def test_a_blocked_task_surfaces_its_route(self):
+        repo, run_dir = self.active_run()
+        set_task_state(run_dir, "T1", state="[?]",
+                       question=f"{state.QUORUM_ROUTE}:questions/q1.md#sha256={DIGEST}")
+        report = state.reconcile_run(run_dir)
+        self.assertTrue(
+            any(item.startswith(f"await-{state.QUORUM_ROUTE}:T1")
+                for item in report["actions"])
+        )
+        set_task_state(run_dir, "T1", question=f"{state.HALT_ROUTE}:no credential")
+        report = state.reconcile_run(run_dir)
+        self.assertTrue(
+            any(item.startswith(f"await-{state.HALT_ROUTE}:T1")
+                for item in report["actions"])
+        )
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k ReconcileRunTests`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'reconcile_run'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+Append to `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`:
+
+```python
+# ---------------------------------------------------------------------------
+# P04: file-first reconciliation
+#
+# A commit that appeared immediately before an interruption is neither
+# automatic success nor grounds to repeat five hours of work. A MISSING result
+# is neither. Partial, stale, or contradictory evidence preserves the current
+# state and produces a diagnostic or a question.
+# ---------------------------------------------------------------------------
+
+def reconcile_run(run_dir) -> dict:
+    """Rebuild the next recovery action from authoritative files and Git evidence."""
+    run_dir = Path(run_dir)
+    tracker = validate_run(run_dir)
+    repo = _repo_dir(tracker)
+    target = _run_field(tracker, "target_branch")
+    actions: list = []
+    questions: list = []
+    diagnostics: list = []
+
+    parse_plan_metadata(_active_phase_plan(run_dir, tracker))
+
+    candidates: list = []
+    output_dir = run_dir / "agent-output"
+    if output_dir.is_dir():
+        for path in sorted(item for item in output_dir.rglob("*") if item.is_file()):
+            try:
+                content = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                diagnostics.append(f"unreadable-result-candidate:{path}:{exc}")
+                continue
+            if not content.startswith(WORKER_RESULT_MARKER):
+                continue
+            try:
+                candidates.append((path, parse_worker_result(content)))
+            except TrackerValidationError as exc:
+                diagnostics.append(f"partial-or-malformed-result:{path}:{exc}")
+
+    for row in tracker.get("tasks", ()):
+        if row["state"] != "[~]":
+            continue
+        matches = [
+            (path, result) for path, result in candidates
+            if result["run_id"] == _run_field(tracker, "run_id")
+            and result["task_id"] == row["id"]
+            and str(result["attempt"]) == row["attempt"]
+        ]
+        if len(matches) > 1:
+            questions.append(f"conflicting-results:{row['id']}:{row['attempt']}")
+            continue
+        if matches:
+            path, result = matches[0]
+            if result["owner"] != row["owner"]:
+                questions.append(
+                    f"result-owner-contradiction:{row['id']}:{row['attempt']}:{path}"
+                )
+                continue
+            try:
+                import_worker_result(run_dir, result_path=path)
+            except TrackerError as exc:
+                questions.append(
+                    f"result-evidence-contradiction:{row['id']}:{row['attempt']}:{exc}"
+                )
+            else:
+                actions.append(f"imported:{row['id']}:{row['attempt']}")
+            continue
+        stale = [
+            str(path) for path, result in candidates
+            if result["run_id"] == _run_field(tracker, "run_id")
+            and result["task_id"] == row["id"]
+        ]
+        if stale:
+            questions.append(
+                f"superseded-or-conflicting-result:{row['id']}:{row['attempt']}:"
+                f"{','.join(stale)}"
+            )
+        # A missing result is NOT completion and NOT grounds to repeat the work.
+        actions.append(
+            f"await-or-check-live-owner:{row['id']}:{row['attempt']}:{row['owner']}"
+        )
+
+    tracker = validate_run(run_dir)
+    for row in tracker.get("tasks", ()):
+        if row["state"] == "[x]" and row["kind"] == "source":
+            if row["integration"] in {"-", ""}:
+                actions.append(f"integration-pending:{row['id']}")
+                continue
+            try:
+                _integration_ancestry(
+                    repo, commits=_csv(row["commits"]),
+                    branch_tip=_resolved_commit(repo, row["source_ref"]),
+                    merge_commit=row["integration"], target_branch=target,
+                )
+            except TrackerError as exc:
+                questions.append(f"integration-contradiction:{row['id']}:{exc}")
+        elif row["state"] == "[x]" and row["kind"] == "artifact":
+            if row["integration"] != "N/A":
+                questions.append(f"artifact-integration-contradiction:{row['id']}")
+        elif row["state"] == "[?]":
+            route, _, detail = row["question"].partition(":")
+            if route not in {QUORUM_ROUTE, HALT_ROUTE}:
+                questions.append(f"unroutable-block:{row['id']}:{row['question']}")
+            else:
+                actions.append(f"await-{route}:{row['id']}:{detail}")
+
+    return {"actions": tuple(actions), "questions": tuple(questions),
+            "diagnostics": tuple(diagnostics)}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`
+Expected: OK — the whole P04 suite
+
+- [ ] **Step 5: Commit**
+
+```bash
+git diff --name-only -- plugins/superb/skills/pipeline/    # must print nothing
+git add plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py \
+        plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py
+git commit -m "feat(pipeline-auto): reconcile interrupted runs from files and Git"
+```
+
+---
+
+## Self-review
+
+**Spec coverage.** P04's row in the spec's phase table reads "Task lifecycle carry-over — reserve/start/resume, typed scopes, result identity, baseline range proof, integration ancestry, reconciliation". Reserve is Task 6; resume is Task 7; typed scopes are Tasks 2, 3, and 6; result identity is Tasks 4, 9, and 10; the baseline range proof is Task 8; integration ancestry is Task 11; reconciliation is Task 12. The spec's "Cost blowup" mitigation (`worker_limit - 3`, brains as three unique owners) is Task 6. The quorum contract's "A worker never dispatches brains… `BLOCKED` still means halt" is Tasks 4 and 10. The recorded default for worktree granularity and the merge-conflict hard stop is Task 11. The master plan's `parse_plan_metadata` is Tasks 1 and 2, and the two templates are Tasks 4 and 5. Every "P04 produces" signature has a task.
+
+**Placeholder scan.** No TBDs, no "add appropriate error handling", no "similar to Task N". Every step carries the actual test or implementation code. Every `Run:` line names `python3 -m unittest discover`; there is no `pytest` invocation, import, decorator, or fixture anywhere in this plan.
+
+**Type consistency.** `parse_plan_metadata` returns `{"phase": dict, "tasks": list[dict]}` and every consumer (`_approved_definition`, `reconcile_run`) indexes those dicts by string key, never by attribute. `verify_source_range` returns a dict with `commits` as a `tuple[str, ...]`, and `import_worker_result` compares `tuple(result["commits"])` against it. `implementation_slot_cap` returns an `int`. `scopes_overlap` takes two single scope **strings**; `_scope_sets_overlap` takes two iterables of them — the reservation guard calls the set form, and Task 3 tests both. `publish_worker_result` returns a repository-relative path **string**; `publish_immutable` returns a **digest**, and Task 9 keeps them distinct. Attempts are `int` in every P04 signature and rendered as `str` in tracker cells and result documents; `_require_fresh_attempt` and every comparison use `str(attempt)`. `_repo_dir` returns a `Path` built from P02's `repo_root(tracker)` and nothing walks for `.git`.
+
+**One deliberate redundancy.** The quorum/halt routing rule is enforced twice: in the codec (Task 4, so a malformed result cannot be published) and at import (Task 10, so a hand-written file cannot be imported). That is not duplication to remove — the publisher and the importer are different trust boundaries.
+
+---
+
+## Unresolved — reported, not invented
+
+Each item below is something P04 needs that the spec and master plan do not contain. Nothing here was invented into an interface; where P04 had to act, it did so behind a private helper and the item names what should be pinned.
+
+1. **`initialize_run` seeds no artifact references and no task rows.** Its signature is `(run_dir, *, run_id, base_commit, target_branch, worker_limit, repo_root)`, yet P04 must resolve a task's approved definition from `tracker["run"]["phase_plans"]`, validate a resume against `tracker["run"]["decisions"]`, and mutate `## Tasks` rows that must already exist. The test harness writes `phase_plans`, the active phase, and the task rows through one explicit `locked_tracker_update` using P02's `append_row`. **Needed:** a named owner for seeding those fields and rows in production — either extra `initialize_run` parameters or an explicit stage-06/07 transition.
+
+2. **No evidence-specific exception type.** P02's block declares `TrackerError`, `ForeignSchemaError`, `TrackerValidationError`, `TrackerWriteError`, `UpdateOutcomeUncertain`, `PlanMetadataError`. P04 raises `TrackerValidationError` for every lifecycle and evidence rejection rather than invent one. **Needed if** P05 or P06 must distinguish "this evidence contradicts the tracker" from "this tracker is internally impossible": add `EvidenceError(TrackerError)` to the P02 block.
+
+3. **No public integration transition in "P04 produces".** The spec assigns integration ancestry to P04, and the merge-conflict hard stop is now P04's too, but the signature block names neither. P04 implements `_integration_ancestry` and `_integrate_task_branch` as private, fully tested functions called by `reconcile_run` and by Task 11's tests. **Needed:** add `integrate_task(run_dir, *, task_id, branch, evidence) -> dict` to the master plan's P04 block so P05 and P06 have a public name to call, or state who owns integration instead.
+
+4. **`## Quorum` column names are unpinned.** `_quorum_owners` reads `qid`, `state`, and `owners`, and treats `state == "in_flight"` as occupying a worker slot — the three-phase record the spec describes. P02 owns `SECTIONS`, so those three column names must appear there. If P03 names them differently, `_quorum_owners` is the single point of change, but the mismatch would be silent until a slot-cap test failed.
+
+5. **The full `## Tasks` column tuple is unpinned.** P04 reads and writes `id, state, kind, owner, attempt, deps, checkpoints, result, source_ref, commits, artifacts, integration, verification, question, provisional`. The spec names only the *addition* (`Provisional`) and the master plan names only `section_columns`. P02's `SECTIONS["Tasks"]` must contain exactly this set.
+
+6. **`derive_next_action`'s vocabulary for the two new routes.** The spec names `await-escalation-batch` for the escalation queue but no action string for "a task is parked pending a quorum" versus "the run has halted". P04 persists an unambiguous `quorum:<question-record>` or `halt:<reason>` marker in the task's `question` cell and asserts only that `derive_next_action` returns a nonempty string. **Needed:** the action strings themselves, owned by P02/P03.
+
+7. **Document marker strings for the two new templates.** The spec pins the tracker marker (`<!-- pipeline-auto/v1 -->`) but not the worker-result or verification-evidence markers. P04 uses `<!-- pipeline-auto-worker-result/v1 -->` and `<!-- pipeline-auto-verification-evidence/v1 -->`, chosen by direct analogy. Same for the phase-plan comment prefixes `pipeline-auto-phase` / `pipeline-auto-task` and their `-suite` variants. Confirm or correct before P05 depends on them.
+
+8. **Artifact-task evidence binding.** `superb:pipeline` binds an artifact task's `task-test` record to a JSON array of `<path>#sha256=<digest>` for each approved output. The pipeline-auto spec does not restate this. P04 validates that every approved output exists on disk and binds `code_state` to the target-branch tip, leaving `inputs` unconstrained. **Needed if** P05 or P06 re-validates artifact digests at phase verification: specify the `inputs` form.
+
+9. **Evidence purposes after `## Remediation` was dropped.** The spec removes the `## Remediation` section entirely, so P04 uses `("task-test", "task-integration", "phase")` and no `remediation` purpose. P05 introduces `## Fix Rounds`; if a fix round needs its own typed evidence purpose, it must be added to `EVIDENCE_PURPOSES` by P05 rather than assumed here.

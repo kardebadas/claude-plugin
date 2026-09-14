@@ -63,7 +63,9 @@ This is written here on purpose, against this phase, so that a later reviewer sc
 Its named faults, both real and both likely:
 
 1. **A renamed reference.** Someone splits `references/quorum.md` or renames it and does not update the routing table. Nothing fails at author time. The failure appears at runtime, mid-run, at the moment a controller tries to open the reference for the active stage — the worst possible moment, in the least reproducible way. No other test in this repository catches it.
-2. **A widened brain.** Someone adds `Write` to `pipeline-auto-brain.md` so it can "record its own answer", or adds `Agent` so it can "check something". Either one silently destroys a load-bearing guarantee: a brain with `Write` can edit `decisions.md` and the audit trail becomes worthless; a brain with `Agent` can spawn and depth-1-by-construction becomes depth-unbounded-by-hope. The frontmatter is the enforcement point, so the frontmatter is what gets asserted.
+2. **A widened agent.** Someone adds `Write` to `pipeline-auto-brain.md` so it can "record its own answer", adds `Agent` so it can "check something", or — most likely of all — adds `Bash` back to either agent because "it only needs to run `git log`". Each silently destroys a load-bearing guarantee. A brain with `Write` can edit `decisions.md` and the audit trail becomes worthless; a brain with `Agent` can spawn and depth-1-by-construction becomes depth-unbounded-by-hope; an intent reader with either can rewrite the intent brief that every later `consistent_with` citation anchors to. And any of them with `Bash` has `Write`, because frontmatter allowlists tools and not commands. The frontmatter is the enforcement point, so the frontmatter is what gets asserted — as an **exact set** per agent, in **two separate test classes**, each naming its own agent.
+
+**Both tool boundaries are fully asserted. Nothing about either is prose-only.** An earlier draft of this phase conceded one unenforced leg — "read-only Bash", which frontmatter cannot express — and that concession is retired, not restated: the tool was removed from both agents instead. If you are reading this looking for the known hole, there isn't one, and the correct response to that is not to relax the assertion.
 
 Everything else in this phase is judged by reading it.
 
@@ -88,8 +90,8 @@ Everything else in this phase is judged by reading it.
 | `plugins/superb/skills/pipeline-auto/templates/completeness-proposals.md` | The frozen `MISSING-FROM-SPEC` ledger | Create |
 | `plugins/superb/skills/pipeline-auto/scripts/task-brief` | Extract one task's text from a phase plan into a uniquely named file. Inlined from SDD, re-pointed at the run's `scratch/` | Create (mode 755) |
 | `plugins/superb/skills/pipeline-auto/scripts/review-package` | Build commit list + stat + full diff for a range into one file. Inlined from SDD, re-pointed at the run's `scratch/` | Create (mode 755) |
-| `plugins/superb/agents/pipeline-auto-brain.md` | **Security boundary.** `tools: Read, Grep, Glob, Bash`. No Agent, no Write, no Edit | Create |
-| `plugins/superb/agents/pipeline-auto-intent-reader.md` | Stage-01 reader. Strict JSON hypothesis out, no design proposals | Create |
+| `plugins/superb/agents/pipeline-auto-brain.md` | **Security boundary.** `tools: Read, Grep, Glob` — exactly three. No Bash, no Agent, no Write, no Edit | Create |
+| `plugins/superb/agents/pipeline-auto-intent-reader.md` | **Security boundary.** `tools: Read, Grep, Glob` — exactly three. Stage-01 reader; strict JSON hypothesis out, no design proposals | Create |
 | `plugins/superb/skills/pipeline-auto/tests/test_skill_structure.py` | The one mechanical test this phase owns | Create |
 
 Not P07's, and not to be created here: `scripts/pipeline_auto_state.py` and `scripts/sdd-workspace` (P02), `templates/progress.md` and `templates/decisions.md` (P02), `templates/findings.md` (P03), `templates/worker-result.md` and `templates/verification-evidence.md` (P04 — see Unresolved), `examples/controller_walkthrough.py` (P09).
@@ -183,10 +185,12 @@ Named faults it catches:
    dead route surfaces at runtime, mid-run, when the controller opens the
    reference for the active stage. No other test catches it.
 2. The pipeline-auto-brain agent's tool allowlist widened. A brain with
-   Write can edit decisions.md and the audit trail is worthless; a brain
-   with Agent can spawn and the depth-1-by-construction guarantee is gone.
-   The frontmatter is the enforcement point, so the frontmatter is what
-   gets asserted.
+   Write -- or with Bash, which is Write with extra steps -- can edit
+   decisions.md and the audit trail is worthless; a brain with Agent can
+   spawn and the depth-1-by-construction guarantee is gone. The frontmatter
+   is the enforcement point, so the frontmatter is what gets asserted, and
+   the assertion is on the exact set rather than on the absence of a
+   blacklist.
 
 Do NOT add assertions here about the *wording* of the prose. A grep for a
 sentence passes the moment the sentence exists and catches no mistake
@@ -224,9 +228,28 @@ MASTER_PLAN_TEMPLATES = (
 )
 
 BRAIN_AGENT = AGENTS_DIR / "pipeline-auto-brain.md"
-BRAIN_TOOLS_EXACT = ("Bash", "Glob", "Grep", "Read")
-FORBIDDEN_BRAIN_TOOLS = (
-    "Agent", "Task", "Write", "Edit", "MultiEdit", "NotebookEdit", "AskUserQuestion",
+# Exactly three tools, and Bash is not one of them. Frontmatter allowlists
+# tools, not commands, so "read-only Bash" is not something the platform can
+# grant: a brain holding Bash can run `echo > decisions.md` as easily as
+# `git log`. Keeping it would have left the audit-trail guarantee resting on
+# prose the brain could ignore. Read/Grep/Glob cover everything grounding
+# actually needs -- resolve a citation to a file and a line, search for
+# exemplars -- so the narrowing costs nothing and closes the last leg.
+BRAIN_TOOLS_EXACT = ("Glob", "Grep", "Read")
+
+INTENT_READER_AGENT = AGENTS_DIR / "pipeline-auto-intent-reader.md"
+# The same three, for a sharper reason. The brain can corrupt the record; the
+# intent reader writes the intent brief that every later `consistent_with`
+# citation anchors to. A shell there corrupts the anchor, and every downstream
+# grounding claim inherits the corruption while still resolving cleanly -- a
+# citation that resolves to a line that is there, in a file that was rewritten.
+INTENT_READER_TOOLS_EXACT = ("Glob", "Grep", "Read")
+
+# Shared by both boundaries. Asserted as an EXACT SET, not as the absence of
+# these names: a blacklist only fails on the tools somebody remembered.
+FORBIDDEN_AGENT_TOOLS = (
+    "Agent", "Task", "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit",
+    "AskUserQuestion",
 )
 
 MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)#]+)(?:#[^)]*)?\)")
@@ -370,30 +393,60 @@ class Agents(unittest.TestCase):
         self.assertTrue((AGENTS_DIR / "pipeline-auto-intent-reader.md").is_file())
 
 
-class BrainToolBoundary(unittest.TestCase):
-    """The brain's tool allowlist is a security boundary, not configuration."""
+def declared_tools(case, path):
+    """The agent's declared tool set, sorted. Fails loudly if absent."""
+    _, fields, _ = split_frontmatter(read(path))
+    case.assertIn("tools", fields, f"{path.name} declares no tools: field")
+    return tuple(sorted(
+        tool.strip() for tool in fields["tools"].split(",") if tool.strip()
+    ))
 
-    def tools(self):
-        _, fields, _ = split_frontmatter(read(BRAIN_AGENT))
-        self.assertIn("tools", fields, "pipeline-auto-brain.md declares no tools: field")
-        return tuple(sorted(
-            tool.strip() for tool in fields["tools"].split(",") if tool.strip()
-        ))
+
+# Two boundaries, two test classes, each naming its own agent. Deliberately not
+# one test looping over a list of agents: a loop whose list is empty -- or whose
+# list someone shortens -- passes silently, and a boundary that can pass by
+# disappearing is not a boundary.
+class BrainToolBoundary(unittest.TestCase):
+    """pipeline-auto-brain's allowlist is a security boundary, not configuration."""
 
     def test_brain_agent_exists(self):
         self.assertTrue(BRAIN_AGENT.is_file(), f"missing {BRAIN_AGENT}")
 
-    def test_brain_tools_are_exactly_the_read_only_set(self):
-        self.assertEqual(self.tools(), BRAIN_TOOLS_EXACT)
+    def test_brain_tools_are_exactly_read_grep_glob(self):
+        self.assertEqual(declared_tools(self, BRAIN_AGENT), BRAIN_TOOLS_EXACT)
 
-    def test_brain_cannot_write_edit_or_spawn(self):
-        declared = set(self.tools())
-        for tool in FORBIDDEN_BRAIN_TOOLS:
+    def test_brain_cannot_write_edit_spawn_or_shell(self):
+        declared = set(declared_tools(self, BRAIN_AGENT))
+        for tool in FORBIDDEN_AGENT_TOOLS:
             with self.subTest(tool=tool):
                 self.assertNotIn(
                     tool, declared,
                     f"{tool} in pipeline-auto-brain.md destroys a load-bearing "
-                    f"guarantee; see references/quorum.md",
+                    f"guarantee; see references/quorum.md. Bash counts: a shell "
+                    f"is write access wearing a read-only description.",
+                )
+
+
+class IntentReaderToolBoundary(unittest.TestCase):
+    """pipeline-auto-intent-reader's allowlist protects the anchor, not the record."""
+
+    def test_intent_reader_agent_exists(self):
+        self.assertTrue(INTENT_READER_AGENT.is_file(), f"missing {INTENT_READER_AGENT}")
+
+    def test_intent_reader_tools_are_exactly_read_grep_glob(self):
+        self.assertEqual(
+            declared_tools(self, INTENT_READER_AGENT), INTENT_READER_TOOLS_EXACT
+        )
+
+    def test_intent_reader_cannot_write_edit_spawn_or_shell(self):
+        declared = set(declared_tools(self, INTENT_READER_AGENT))
+        for tool in FORBIDDEN_AGENT_TOOLS:
+            with self.subTest(tool=tool):
+                self.assertNotIn(
+                    tool, declared,
+                    f"{tool} in pipeline-auto-intent-reader.md lets the stage-01 "
+                    f"reader rewrite the intent brief every later consistent_with "
+                    f"citation anchors to; see references/quorum.md",
                 )
 
 
@@ -437,7 +490,7 @@ git commit -m "test(pipeline-auto): structure validator for the skill routing su
 
 **Interfaces:**
 - Consumes: the brain response schema and `build_payload` key set from P03 (see Interface contracts).
-- Produces: two agent types dispatchable by name — `pipeline-auto-brain` and `pipeline-auto-intent-reader`. `references/quorum.md` (Task 7) and `references/planning.md` (Task 8) dispatch them by exactly these names.
+- Produces: two agent types dispatchable by name — `pipeline-auto-brain` and `pipeline-auto-intent-reader`, **each declaring exactly `tools: Read, Grep, Glob`**. `references/quorum.md` (Task 7) and `references/planning.md` (Task 8) dispatch them by exactly these names. No registration step exists or is needed: `plugins/superb/agents/` is discovered by directory, which is how `architecture-discovery` and `bug-investigator` are already found.
 
 These two files are written first, before any prose, because they are the only deliverables in this phase that carry enforcement rather than instruction.
 
@@ -446,11 +499,17 @@ These two files are written first, before any prose, because they are the only d
 - **No `Write`, no `Edit`.** A brain that can write can edit `decisions.md`. `decisions.md` is the audit trail that makes every quorum-adopted decision attributable and permanent; a participant in the vote that can also edit the record makes the entire trail worthless — not degraded, worthless, because nobody reading it afterwards can tell which entries the brains wrote.
 - **No `Agent`.** A brain that can spawn can open a quorum inside a quorum. The spec's guarantee is that at most one quorum is in flight per run and that *a quorum cannot trigger a quorum*, and it is true **by construction** rather than by a depth counter. Give the brain `Agent` and that sentence becomes a hope.
 
+- **No `Bash`.** This one is a deliberate narrowing from the design's first draft, which said "Read/Grep/Glob and read-only Bash". **Read-only Bash is not a thing the platform can give us.** Frontmatter allowlists *tools*, not *commands*, so a brain holding `Bash` can run `echo > decisions.md` as easily as `git log` — and the entire justification for restricting brains is that one with write access makes the audit trail worthless. Keeping `Bash` would have left the central guarantee resting on a sentence in the prompt that a brain is free to ignore. `Read`, `Grep` and `Glob` cover everything grounding actually needs: resolve a citation to a file and a line, and search for exemplars. Nothing is lost, and the boundary goes from three legs enforced out of four to **all four enforced**.
+
 The third leg is the response schema: **there is no field a brain can use to raise a question of its own.** The only exit is `blocker`. That is how unbounded recursion is prevented at the type level rather than with a counter — a counter can be raised, a missing field cannot be filled in.
 
-`Bash` is present and is read-only **by prose only**. Agent frontmatter allowlists tools, not commands, so "read-only Bash" cannot be declared; it is stated as a rule in the agent body and is the one part of this boundary the validator cannot assert. See Unresolved.
+Because every leg is now declarative, `tests/test_skill_structure.py` asserts the **exact** tool set rather than the absence of a blacklist. An exact-set assertion fails on a tool nobody thought to forbid; a blacklist only fails on the ones somebody remembered.
 
 `pipeline-auto-intent-reader` exists because `brainstorm-architect` is the wrong agent for stage 01. It runs with all tools, and — by its own description — explores options, evaluates trade-offs and recommends. Pointed at "read this idea and tell me what it says", it starts proposing, and a stage-01 reader that proposes has contaminated the intent brief with design before the human has answered a single question.
+
+**The intent reader is a security boundary too, and a sharper one.** It declares the same exact three tools, for a reason that is worse rather than milder: the brain can corrupt the **record**, while the intent reader writes the **anchor**. Every adopted answer in this run must cite a spec line or a stage-03 decision in `consistent_with`, and the intent brief is what those citations rest on. A shell there corrupts the anchor, and every downstream grounding claim inherits the corruption **while still resolving cleanly** — a citation that points at a line that really is there, in a file that was quietly rewritten. Citation verification cannot catch that, because the citation is true. Nothing downstream can catch it. So it is prevented at the only point where prevention works: the tool declaration.
+
+Two agents, two exact sets, **two separate test classes** in the validator. Not one test looping over a list — a loop whose list is empty, or whose list somebody shortens, passes silently, and a boundary that can pass by disappearing is not a boundary.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -458,7 +517,7 @@ Already written in Task 1. The relevant classes are `Agents` and `BrainToolBound
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k BrainToolBoundary -k Agents`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k BrainToolBoundary -k IntentReaderToolBoundary -k Agents`
 
 Expected: FAIL — `missing agent file .../pipeline-auto-brain.md`.
 
@@ -476,7 +535,7 @@ name: pipeline-auto-brain
 description: Use only when superb:pipeline-auto opens a quorum on one blocking question. One of three independently-briefed readers; returns one strict JSON answer with a grounding rung and nothing else. Never dispatched by a human, never dispatched outside a quorum.
 model: opus
 color: yellow
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob
 ---
 
 You answer exactly one question, in writing, from evidence you can cite.
@@ -486,21 +545,28 @@ starting material. You will not see what the others say, and they will not see
 what you say. There is no argmax to win: your answer is judged on the quality of
 its grounding, not on whether it agrees with anyone.
 
-## Your tools, and why they are the ones you have
+## Your tools, and why they are the only three
 
-`Read`, `Grep`, `Glob`, and `Bash`.
-
-**`Bash` is read-only.** Inspect, search, and list. `git log`, `git show`,
-`git diff`, `rg`, `cat`, `ls`, `sed -n`. You must not run anything that
-writes, moves, deletes, installs, fetches, checks out, commits, or executes a
-build. If you are unsure whether a command writes, do not run it.
+`Read`, `Grep`, `Glob`. That is the whole list, and it is deliberate.
 
 You have no `Write` and no `Edit` because you are a participant in a decision
 whose record must stay attributable — a reader who can also edit the record
-makes the record worth nothing. You have no ability to dispatch another agent
-because a reader who can dispatch can open a question inside a question, and the
-run's guarantee that this cannot happen is structural, not a counter someone
-remembered to increment.
+makes the record worth nothing.
+
+You have **no `Bash`**, for the same reason rather than a different one. A shell
+is write access wearing a read-only description: `echo > decisions.md` is as
+available from a shell as `git log` is, and no amount of instruction closes that.
+The restriction had to be declarative to be a restriction at all.
+
+You have no way to dispatch another agent, because a reader who can dispatch can
+open a question inside a question, and the run's guarantee that this cannot
+happen is structural rather than a counter somebody remembered to increment.
+
+**Nothing is missing.** Grounding needs two things: resolving a citation to a
+file and a line, which is `Read`; and finding exemplars, which is `Grep` and
+`Glob`. If you catch yourself wanting to run a command, what you actually want is
+to read a file — do that. If the answer genuinely depends on executing something,
+that is not a question you can settle: set `blocker` and say so.
 
 ## What you receive
 
@@ -607,7 +673,9 @@ question that needed a person.
 ## What you must not do
 
 - Do not write, edit, move, delete, or commit anything, anywhere, ever.
-- Do not run a build, a test that writes, an installer, or a network fetch.
+- Do not ask for a shell, a command runner, or any tool you were not given.
+  A request for wider access is not a blocker — it is an answer you cannot
+  support, and the honest response is a lower rung or a `blocker`.
 - Do not dispatch, spawn, or ask for another agent.
 - Do not answer a question you were not asked, or widen the one you were.
 - Do not restate the question, narrate your search, or explain your process.
@@ -625,7 +693,7 @@ name: pipeline-auto-intent-reader
 description: Use only at superb:pipeline-auto stage 01, to read what the user actually asked for and return it as a strict JSON hypothesis. One of three independent readers. Reads and reports; never designs, never proposes, never chooses a stack.
 model: opus
 color: cyan
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob
 ---
 
 You read a request and write down what it says.
@@ -636,6 +704,24 @@ sketching a structure, you have started designing and must stop and delete it.
 
 You are one of several readers doing this independently. Your value is that you
 read the request without having seen anyone else's reading of it.
+
+## Your tools, and why they are the only three
+
+`Read`, `Grep`, `Glob`. That is the whole list.
+
+You have no `Write`, no `Edit`, no `Bash`, and no way to dispatch another agent.
+This is not caution about a reader that happens to have no reason to write — it
+is because of what you produce. The intent brief is the **anchor**: every
+decision this run makes later must cite a spec line or a stage-03 answer, and
+those citations rest on what you wrote down. Corrupt the record and someone
+notices a contradiction; corrupt the anchor and every downstream claim inherits
+it **while still checking out perfectly**, because the citation really does point
+at a line that really is there, in a file that was quietly changed.
+
+Nothing downstream can catch that, so it is prevented here, by not giving you the
+capability. `Read`, `Grep` and `Glob` are everything reading a request and
+searching a repository needs. If you find yourself wanting to run a command, what
+you want is to read a file.
 
 ## What you receive
 
@@ -703,13 +789,19 @@ the more sensible side has destroyed the signal that there was a conflict.
 
 **Do not rank, prioritise, estimate, or phase the work.** No "first we should",
 no "this is the core", no sizing.
+
+**Do not write, edit, move, or create anything**, and do not ask for a tool you
+were not given. If you cannot establish a fact by reading and searching, it is
+not a fact you can report: leave it out, or put the question in `unstated`.
 ```
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k BrainToolBoundary`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k BrainToolBoundary -k IntentReaderToolBoundary`
 
-Expected: PASS — all three `BrainToolBoundary` tests.
+Expected: PASS — all three `BrainToolBoundary` tests and all three
+`IntentReaderToolBoundary` tests. Six, not three: confirm the count, because a
+`-k` pattern that matches nothing also reports success.
 
 `Agents::test_every_agent_named_in_the_prose_exists_as_a_file` still fails: no prose names them yet. It goes green in Task 12.
 
@@ -2168,6 +2260,61 @@ foreign schema. A contradicting question becomes a **re-open at a raised bar, at
 most once per D-ID per run**; a second challenge halts. This is the
 anti-oscillation rule that stops a run spending its budget arguing with itself.
 
+## Why both agents have exactly three tools
+
+`pipeline-auto-brain` and `pipeline-auto-intent-reader` each declare `Read`,
+`Grep` and `Glob`. No `Write`, no `Edit`, no `Agent`, and — the part that looks
+like an oversight and is not — **no `Bash`**.
+
+**There is no such thing as read-only Bash.** Agent frontmatter allowlists
+*tools*, not *commands*, so an agent holding a shell can run
+`echo > decisions.md` exactly as easily as `git log`. An earlier draft of this
+design said "read-only Bash" and carried the restriction in prose. That version
+had three of its four legs enforced and one asking nicely, which is the same as
+having three legs.
+
+The two agents are restricted for related but distinct reasons, and the second is
+the worse one:
+
+- **The brain can corrupt the record.** The whole case for restricting a brain is
+  that a decision record a voter can edit is not a record. `decisions.md` is what
+  makes every adopted answer attributable and permanent.
+- **The intent reader can corrupt the anchor.** Every response must cite a spec
+  line or a stage-03 answer in `consistent_with`, and the intent brief is what
+  those citations rest on. Corrupt the record and someone eventually notices a
+  contradiction. Corrupt the anchor and every downstream grounding claim inherits
+  it **while still resolving cleanly** — the citation points at a line that
+  genuinely is there, in a file that was quietly rewritten. Citation verification
+  cannot catch it, because the citation is true. Nothing downstream can.
+
+Nothing is lost by the narrowing. Grounding needs to resolve a citation to a file
+and a line and to find exemplars; reading a request needs the same. That is
+`Read`, `Grep`, `Glob`. A question that genuinely requires executing a command is
+not a question three readers can settle — it is a **fact**, and facts go to one
+adjudicator (`references/review.md`), never to a quorum.
+
+**Do not restore a tool to either agent as a convenience.** "It only needs
+`git log`" is the argument that will be made, and it is true right up until it is
+not. `tests/test_skill_structure.py` asserts each agent's exact tool set, so the
+restoration fails a test rather than shipping.
+
+### Write boundaries as exact sets, not blacklists
+
+A general lesson, recorded here because this skill contains two instances of it
+and the next maintainer will write a third.
+
+**An exact-set assertion fails on a tool nobody thought to forbid; a blacklist
+only fails on the ones somebody remembered.** A forbidden-names list is a
+rolling guess about the future — it cannot know about the tool that ships next
+quarter, and it passes the moment that tool is the one added. Declaring the
+permitted set closes the question permanently, because anything not on the list
+fails by default rather than by having been anticipated.
+
+The same reasoning rules out one test looping over both agents. A loop whose list
+is empty — or whose list somebody shortens while tidying — passes silently, and a
+boundary that can pass by disappearing is not a boundary. **Two boundaries, two
+tests, each naming its own agent.**
+
 ## Never ask a brain to reconsider
 
 The controller must **never** ask a brain to reconsider its confidence, its rung,
@@ -3201,7 +3348,7 @@ git commit -m "docs(pipeline-auto): persistence and recovery reference"
 
 **Files:**
 - Create: `plugins/superb/skills/pipeline-auto/SKILL.md`
-- Read: `plugins/superb/skills/pipeline-auto/tests/pressure/RED-baseline.md` (P01)
+- Read: `plugins/superb/skills/pipeline-auto/tests/pressure/RED-baseline.md` — P01's committed curated record, path confirmed. (P01's `scoring.md` is deliberately uncommitted and is not this file.)
 - Test: `plugins/superb/skills/pipeline-auto/tests/test_skill_structure.py`
 
 **Interfaces:**
@@ -3398,14 +3545,24 @@ Two more, from the same family:
 | --- | --- |
 | **Send a fact to the quorum** | "Can line 41 be null" is settled by running the test, not by a vote. One adjudicator, read-only. Routing facts to the quorum is how it degrades into an ask-three-models-when-unsure reflex |
 | **Convert a `MISSING-FROM-SPEC` proposal into work** | Quorum exists to unblock, not to enlarge. "Should we also handle X" has no ceiling and three brains will say yes, because yes is always defensible. It is frozen, and after stage 06 it is also impossible |
-| **Write a verification command into a plan without running it here first** | A command that is correct in general can be unrunnable in this repository. One hyphen in a directory name is enough to break test discovery; a runner that is standard everywhere else can be absent here. "It obviously works" is not evidence, and a bad tuple propagates into every phase that copies it. Run it, then write it down |
+| **Write a verification command into a plan without running it here first** | A command that is correct in general can be unrunnable in this repository. One hyphen in a directory name is enough to break test discovery; a runner that is standard everywhere else can be absent here. "It obviously works" is not evidence, and a bad tuple propagates into every phase that copies it |
+| **Restore a tool to `pipeline-auto-brain` because it "only needs" one command** | Frontmatter allowlists tools, not commands. A shell is write access wearing a read-only description, and the audit trail is the thing it writes to |
 
-**That last one is not a style note.** A verification tuple is the only thing
-standing between "the work is done" and "the work is claimed to be done. If the
-tuple cannot execute, every phase downstream of it inherits a gate that never
-closes, and the defect is discovered by an implementer who assumes the fault is
-theirs. `superpowers:verification-before-completion` states the general rule —
-evidence before assertions, always. This is that rule applied to the plan itself.
+**The verification one is not a style note, and it names a specific person.**
+**The author of the plan runs the tuple, in this repository, before writing it
+into the plan.** Not the implementer who runs it later and discovers it is
+broken — by then it looks like their fault, they lose a round working out that it
+is not, and every other phase that copied the tuple is broken too. The author is
+the only one who can catch it cheaply, and the author is the one who has not run
+it.
+
+This build produced three instances in a row: a test runner that was not
+installed, a discovery flag that cannot work with a hyphenated skill directory,
+and a grep that forbade a word the prose needed to teach. Each looked obviously
+correct. Each would have shipped into every phase's verification tuple.
+`superpowers:verification-before-completion` states the general rule — evidence
+before assertions, always. This is that rule applied to the plan itself, and a
+plan is exactly the kind of document whose claims nobody re-checks.
 
 ## Stop checks
 
@@ -3440,12 +3597,34 @@ run made without asking.
 | `prompts/task-reviewer.md` | the per-task gate |
 | `prompts/adversarial-reviewer.md` | whenever a trigger fires, at any `review_class` |
 
-`pipeline-auto-brain` runs with `Read`, `Grep`, `Glob` and read-only `Bash` and
-**nothing else**. No `Agent`, no `Write`, no `Edit`. A brain that can write can
-edit `decisions.md`, and the audit trail becomes worthless. A brain that can
-spawn breaks the depth-1-by-construction guarantee. Its response schema has no
-field for raising a question — that is how unbounded recursion is prevented at
-the type level rather than with a counter.
+`pipeline-auto-brain` runs with `Read`, `Grep` and `Glob`. **Three tools. That
+is the whole list.** No `Write`, no `Edit`, no `Agent`, and no `Bash`.
+
+A brain that can write can edit `decisions.md`, and the audit trail becomes
+worthless. A brain that can spawn breaks the depth-1-by-construction guarantee.
+Its response schema has no field for raising a question, which is how unbounded
+recursion is prevented at the type level rather than with a counter.
+
+`pipeline-auto-intent-reader` declares **the same exact three tools**, for a
+sharper reason. The brain can corrupt the record; the intent reader writes the
+**anchor** every later `consistent_with` citation rests on. Corrupt the record
+and someone notices a contradiction. Corrupt the anchor and every downstream
+grounding claim inherits it while still resolving cleanly — a citation pointing
+at a line that really is there, in a file that was quietly rewritten. Nothing
+downstream can catch that, so it is prevented at the tool declaration.
+
+**The absence of `Bash` from both is a deliberate narrowing, not an omission.**
+An earlier draft said "read-only Bash". There is no such thing: frontmatter
+allowlists tools, not commands, so an agent with a shell can run
+`echo > decisions.md` as easily as `git log`, and the guarantee would have rested
+on prose the agent is free to ignore. `Read`, `Grep` and `Glob` cover what
+grounding and reading actually need, so nothing was lost and every leg of both
+boundaries is declarative and tested. **Do not restore a tool to either agent as
+a convenience**; `tests/test_skill_structure.py` asserts each exact set, in two
+separate tests, and the restoration will fail one of them.
+
+Why exact sets and not a forbidden list: see *Write boundaries as exact sets, not
+blacklists* in [references/quorum.md](references/quorum.md).
 
 Do not substitute `brainstorm-architect` for either agent. It runs with all tools
 and it is built to propose.
@@ -3559,6 +3738,21 @@ defect this build shipped in its own master plan. `references/execution.md` now
 routes it as a `PLAN_CONFLICT` rather than a silent runner substitution, and
 `references/planning.md` makes discovering the runner part of stage 06.
 
+**Third gap found and closed — it changed the design, twice.** The first draft of
+this plan carried the spec's phrase "read-only Bash" into `pipeline-auto-brain.md`
+and then reported, honestly, that the validator could not assert it. The right
+response was not to accept an unenforceable leg but to remove the tool. Reporting
+it also surfaced that the identical argument applied to
+`pipeline-auto-intent-reader`, and more sharply: the brain can corrupt the
+record, the intent reader corrupts the anchor every later citation rests on, and
+an anchor corruption is invisible downstream because the citations still resolve.
+
+Both agents now declare exactly `{Read, Grep, Glob}`. Both are asserted as exact
+sets, in **two separate test classes** rather than one loop — a loop over an
+empty or shortened list passes silently. No tool boundary in this skill is
+prose-only, and the section *Why this phase has almost no tests* says so plainly
+rather than leaving a retired concession that reads like a known hole.
+
 **Placeholder scan.** No TBDs. Every file is present in full, not described.
 Every prompt lists its complete placeholder set with the source of each value.
 No step says "similar to Task N".
@@ -3578,62 +3772,66 @@ looks like a gap in.
 
 ---
 
+## Resolved by the coordinator — recorded so the reasoning travels
+
+Eight items were reported from this plan's first draft. All eight are settled;
+they are kept here because a later reader will otherwise re-open them.
+
+1. **`templates/worker-result.md` and `verification-evidence.md` are P04's.**
+   P07 does not create them. `tests/test_skill_structure.py` keeps asserting that
+   **all eight** master-plan templates exist, so a gap in any phase fails loudly
+   here rather than shipping silently.
+2. **`templates/decisions.md` is P02's**, not P07's, despite
+   `phase-03-quorum-contract.md:67` calling it P07's. P07 creates no
+   `decisions.md` template.
+3. **`scripts/sdd-workspace` is P02's.** It was moved there because P05's
+   per-task gate needs it before P07 exists. P07 ships **two** scripts —
+   `task-brief` and `review-package` — and documents the third. The master plan's
+   phase table saying "three inlined scripts" is superseded by its own
+   self-review.
+4. **Both agents' tool sets are `{Read, Grep, Glob}` — `Bash` removed from
+   each.** This changed the design rather than merely resolving a question. The
+   reasoning is written into both agent files, `references/quorum.md` (*Why both
+   agents have exactly three tools*), `SKILL.md` and the validator's comments:
+   frontmatter allowlists tools and not commands, so "read-only Bash" is not
+   something the platform can grant. The brain with a shell can rewrite the audit
+   trail it is voting into; the intent reader with a shell can rewrite the anchor
+   every later `consistent_with` citation rests on, and that corruption is
+   invisible downstream because the citations still resolve. Each boundary went
+   from three legs enforced and one asking nicely, to four enforced.
+
+   Asserted as **exact sets in two separate test classes**, never one loop. The
+   general principle — an exact-set assertion fails on a tool nobody thought to
+   forbid; a blacklist only fails on the ones somebody remembered — is promoted
+   into `references/quorum.md` as prose, because it is a lesson about writing
+   security boundaries rather than a note about this test.
+5. **No agent registration step exists or is needed.** `plugins/superb/agents/`
+   is discovered by directory; `plugin.json` carries no `agents` array, and the
+   two existing agents are picked up the same way. The validator asserts file
+   existence, which is the real contract.
+6. **`model: opus` for both agents**, from the most-capable-model policy the dial
+   may never switch off.
+7. **`examples/controller_walkthrough.py` is P09's**, and P09 adds the paragraph
+   about it to `references/persistence.md`. Leaving it out here was correct: this
+   phase's own validator would have flagged it as a dead route.
+8. **P01's curated RED baseline is
+   `plugins/superb/skills/pipeline-auto/tests/pressure/RED-baseline.md`**, used
+   by Task 12. `scoring.md` is deliberately uncommitted and is not it.
+
+---
+
 ## Unresolved — reported, not invented
 
-1. **Template ownership for `worker-result.md` and `verification-evidence.md`.**
-   The master plan's File Structure names eight templates. P02's plan claims
-   `progress.md` and `decisions.md`; P03's claims `findings.md`. P04's and P06's
-   phase plans **do not exist yet**, so this plan infers — by symmetry with P02
-   and P03, each of which created the template its own parser consumes — that
-   P04 creates `worker-result.md` and `verification-evidence.md`. That inference
-   is not confirmed anywhere. P07 therefore does **not** create them, and
-   `tests/test_skill_structure.py` asserts all eight exist so a gap fails loudly
-   rather than shipping. If P04 does not own them, say so and they move here.
+**None.** Every item this plan raised has been answered by the coordinator and
+folded into the tasks above.
 
-2. **`templates/decisions.md` is claimed by two phases.** P02's plan lists it
-   under "Owned" (`phase-02-schema-core.md:43`). P03's plan calls it "P07's"
-   (`phase-03-quorum-contract.md:67`). Both cannot be right. This plan follows
-   P02, which states ownership directly rather than in passing, and P07 creates
-   no `decisions.md` template. Confirm.
+The one that mattered is recorded rather than quietly absorbed: this plan's first
+draft reported that "read-only Bash" could not be enforced, and reported it
+instead of inventing a fix. That report is what turned an unenforceable line in
+the spec into a narrowed tool set on **both** agents, and then into two exact-set
+assertions. A phase worker that had guessed — either by silently dropping the
+tool or by silently keeping it and writing a test around the gap — would have
+produced a plan that looked complete and shipped a hole.
 
-3. **`scripts/sdd-workspace` is claimed by two documents.** The master plan's
-   phase table says P07 delivers "three inlined scripts"; the master plan's own
-   self-review says `sdd-workspace` moved to P02 as a prerequisite for P05, and
-   P02's plan claims it. This plan follows the self-review and P02: P07 delivers
-   **two** scripts and documents the third. Confirm.
-
-4. **"Read-only Bash" cannot be enforced in agent frontmatter.** The `tools:`
-   field allowlists tools, not commands. `pipeline-auto-brain` therefore declares
-   `Bash` and forbids writing commands **in prose only**, and
-   `tests/test_skill_structure.py` cannot assert it. Every other part of that
-   boundary is enforced and asserted. If a command-level restriction mechanism
-   exists in this runtime, name it and the agent file should use it; otherwise
-   this is a known, stated gap rather than an oversight.
-
-5. **No agent-registration surface was found.** `plugins/superb/.claude-plugin/plugin.json`
-   and `.codex-plugin/plugin.json` carry no `agents` array, and existing agents
-   (`architecture-discovery`, `bug-investigator`) appear to be discovered from
-   `plugins/superb/agents/` by convention. This plan therefore adds no
-   registration step and the structure validator asserts file existence rather
-   than registration. If registration is required for a plugin agent to be
-   dispatchable by name, that is a missing task and must be added before P09.
-
-6. **Agent `model:` for the two new agents is derived, not specified.** Neither
-   the spec nor the master plan names a model for `pipeline-auto-brain` or
-   `pipeline-auto-intent-reader`. This plan uses `opus`, derived from the
-   most-capable-model policy the dial may never switch off, and from P01's plan
-   making the same derivation for its baseline dispatches. Confirm or replace.
-
-7. **`references/persistence.md` documents `examples/controller_walkthrough.py`
-   indirectly.** P09 creates it. This plan's persistence reference does **not**
-   mention it, to avoid a dead route in the structure validator. If the skill is
-   meant to point at the walkthrough the way `pipeline/references/persistence.md`
-   does, that paragraph must be added in P09, not here — and P09's plan needs to
-   know that.
-
-8. **P01's `RED-baseline.md` path.** P01's plan places the curated record at
-   `tests/pressure/RED-baseline.md` per the master plan's interface contract, but
-   also names `docs/superpowers/runs/pipeline-auto-p01-red-baselines.md` in its
-   own File Structure. Task 12 reads "P01's curated RED baseline"; if the
-   committed path differs from the master plan's, Task 12's Read line needs the
-   actual path before execution.
+**A later worker finding something this plan does not settle should do the same
+thing: report it here, and do not invent it.**

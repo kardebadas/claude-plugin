@@ -52,6 +52,7 @@ each is a rule a reasonable engineer would "simplify" into a bug.
 5. Rung *names* may appear in a brain payload. Rung *values*, the adoption floor, the budget, the raiser's identity, and the raiser's candidate answers may not.
 6. Escalation never decrements the drift budget. Only adoption does.
 7. The controller never asks a brain to reconsider its confidence, never dispatches a fourth brain, and never synthesises an answer of its own.
+8. **Never compute a repository root.** It is a `## Run` field; read it with P02's `repo_root(tracker)` and pass it to `effective_rung(response, repo_root)`. Deriving it from directory depth is a guess about where a run directory sits relative to the repository, and today that guess is wrong — runs live at `docs/superpowers/runs/<run-id>/`, which is `parents[3]`. **The failure shape is why this is a standing rule rather than a detail:** a wrong root resolves no citation, so every `specified` and `code-evidenced` answer demotes to `engineering-judgement` at 0.55, so everything lands below the 0.85 floor, so the run escalates every single question — while looking like a correctly cautious quorum. No error, no exception, no failing test. The skill would appear to work and would be useless.
 
 ---
 
@@ -110,12 +111,19 @@ def initialize_run(run_dir: str, *, run_id: str, base_commit: str,
 def locked_tracker_update(run_dir: str, *, transition_id: str, mutate) -> dict: ...
 def publish_immutable(path: str, content: str) -> str: ...
 def derive_next_action(tracker: dict) -> str: ...
+
+def repo_root(tracker: dict) -> str: ...            # the `## Run` field; NEVER derived
+def section_columns(name: str) -> tuple[str, ...]: ...
+def append_row(tracker: dict, section: str, row: dict) -> dict: ...
 ```
 
-Two behaviours P03 depends on and must not re-implement:
+Three behaviours P03 depends on and must not re-implement:
 
 - `locked_tracker_update` validates, takes an exclusive lock, re-reads, revalidates, applies `mutate`, renders, reparses, atomically replaces. **A replayed `transition_id` returns current state without calling `mutate` at all.** That is what makes `finalize_quorum` replay-inert.
 - `publish_immutable(path, content)` writes once; a byte-identical second call is a no-op returning the same path; a differing second call raises. That is what makes every response file and `final.json` a single-assignment cell.
+- `repo_root(tracker)` returns the `## Run` field that `initialize_run` recorded. **P03 never computes a repository root** — not by `parents[N]`, not by walking for `.git`. See the standing rule below; this is the single most dangerous line in the phase.
+
+P03 owns the quorum lifecycle, so **P03 writes its own `## Quorum` and `## Escalations` rows**, through `section_columns` and `append_row`, inside `locked_tracker_update`. No phase writes another phase's rows and no phase re-declares another phase's columns: every row P03 builds is checked against `section_columns(...)` before the write, so a column change in P02 breaks loudly at the seam instead of drifting into a mismatched write.
 
 ### Produces — consumed by P05 and P06
 
@@ -163,7 +171,7 @@ def quorum_needs_redispatch(run_dir: str, *, qid: str) -> list[str]: ...  # (P03
 def quorum_events(run_dir: str) -> list[dict]: ...                   # (P03)
 def quorum_budget(run_dir: str, *, phase: str) -> dict: ...          # (P03)
 def current_floor(run_dir: str) -> dict: ...                         # (P03)
-def quorum_tracker_rows(run_dir: str) -> list[dict]: ...             # (P03)
+def quorum_tracker_rows(run_dir: str) -> list[dict]: ...             # (P03) built against section_columns("Quorum")
 ```
 
 **Type notes for downstream implementers.** `effective_rung` and `cluster_rung` return a **rung name** (`str`), never a float; callers look the value up in `RUNGS`. `check_contradiction` returns the offending **D-ID** or `None`, never a boolean. `classify_quorum().state` is one of `finalised`, `ready-to-finalise`, `awaiting-responses`, `redispatch`, `stale-context`. `finalize_quorum().status` is one of `adopted`, `escalated`, `rejected-contradicts-human`, `rejected-contradicts-quorum`, `question-not-decidable`. `open_quorum().status` is one of `in_flight`, `adopted`, `escalated`.
@@ -286,15 +294,25 @@ BASE = "0" * 40
 
 
 def new_run(stack):
-    """A fresh initialized run directory plus a repo root evidence can resolve against."""
+    """A run at its REAL depth under a repo root, with repo_root asserted.
+
+    The layout is the production one — docs/superpowers/runs/<run-id>/ — so any
+    phase tempted to derive the root from directory depth gets `parents[3]`, not
+    `parents[0]`, and the assertion below is the seam where a disagreement with
+    P02 surfaces immediately instead of silently demoting every citation.
+    """
     root = Path(stack.enter_context(tempfile.TemporaryDirectory()))
-    run_dir = root / "run"
-    run_dir.mkdir()
+    (root / ".git").mkdir()
+    run_dir = root / "docs" / "superpowers" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
     pipeline_auto_state.initialize_run(
         str(run_dir), run_id=RUN_ID, base_commit=BASE,
         target_branch="feat/pipeline-auto", worker_limit=4,
     )
     (run_dir / "decisions.md").write_text("<!-- pipeline-auto-decisions/v1 -->\n", encoding="utf-8")
+    recorded = pipeline_auto_state.repo_root(pipeline_auto_state.validate_run(str(run_dir)))
+    assert Path(recorded).resolve() == root.resolve(), (
+        f"P02 recorded repo_root {recorded!r}; the tests assume {str(root)!r}")
     return root, run_dir
 
 
@@ -738,6 +756,33 @@ class EffectiveRung(unittest.TestCase):
         payload = response(rung="speculation", evidence=[], what_would_change_my_mind="")
         self.assertEqual(self.rung(payload), "speculation")
 
+    def test_a_wrong_repo_root_silently_demotes_every_grounded_answer(self):
+        """THE TEST BETWEEN THIS DESIGN AND A SILENT TOTAL FAILURE.
+
+        With the wrong root nothing resolves, so every `specified` and
+        `code-evidenced` answer falls to 0.55, every cluster lands below the 0.85
+        floor, and the run escalates every question while looking like a
+        correctly cautious quorum. No error, no exception, nothing else in the
+        suite goes red. The root is a `## Run` field and is never computed.
+        """
+        payload = response()
+        self.assertEqual(pipeline_auto_state.effective_rung(payload, str(self.root)),
+                         "code-evidenced")
+        self.assertEqual(pipeline_auto_state.effective_rung(payload, str(self.root / "db")),
+                         "engineering-judgement")
+        self.assertEqual(pipeline_auto_state.effective_rung(payload, str(self.root.parent)),
+                         "engineering-judgement")
+
+    def test_the_recorded_repo_root_is_the_one_citations_resolve_against(self):
+        with contextlib.ExitStack() as stack:
+            root, run_dir = new_run(stack)
+            write_repo(root, "db/engine.py", "class PostgresEngine:\n")
+            recorded = pipeline_auto_state.repo_root(pipeline_auto_state.validate_run(str(run_dir)))
+            self.assertEqual(pipeline_auto_state.effective_rung(response(), recorded),
+                             "code-evidenced")
+            # The run sits three directories deep; a derived root would be wrong.
+            self.assertNotEqual(Path(recorded).resolve(), run_dir.resolve())
+
     def test_an_unknown_rung_raises_and_is_never_defaulted(self):
         # Defeats RUNGS.get(rung, 0.55): 0.55 is a legal value arriving through
         # an illegal door, and nothing downstream could tell the difference.
@@ -837,7 +882,7 @@ def effective_rung(response: dict, repo_root: str) -> str:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k EffectiveRung -v`
-Expected: PASS (11 tests)
+Expected: PASS (13 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -1980,6 +2025,7 @@ def open_quorum(run_dir: str, *, question_record: str) -> dict:
                       "adopted": budget["adopted"], "dispatched": False,
                       "context_digest": _context_digest(run_dir)}
         publish_immutable(str(final_path), _dumps(escalation))
+        _mirror_terminal(run_dir, escalation)
         return escalation
 
     decisions_path = run_dir / "decisions.md"
@@ -2617,11 +2663,6 @@ def current_floor(run_dir: str) -> dict:
     return {"floor_rung": rung, "floor_value": RUNGS[rung]}
 
 
-def _repo_root(run_dir) -> str:
-    """Evidence paths resolve against the repository, not the run directory."""
-    return str(Path(run_dir).resolve().parents[0])
-
-
 def finalize_quorum(run_dir: str, *, qid: str) -> dict:
     """Phase 3, through the tracker lock with transition_id "quorum-"+qid.
 
@@ -2637,9 +2678,10 @@ def finalize_quorum(run_dir: str, *, qid: str) -> dict:
     holder = {}
 
     def mutate(tracker):
-        holder["result"] = _compute_quorum_result(run_dir, qid)
+        # repo_root comes from the tracker, never from directory arithmetic.
+        holder["result"] = _compute_quorum_result(run_dir, qid, tracker)
         publish_immutable(str(final_path), _dumps(holder["result"]))
-        return tracker
+        return _mirror_quorum(tracker, holder["result"])
 
     locked_tracker_update(str(run_dir), transition_id=f"quorum-{qid}", mutate=mutate)
     result = holder.get("result") or _load_json(final_path)
@@ -2647,7 +2689,7 @@ def finalize_quorum(run_dir: str, *, qid: str) -> dict:
     return result
 
 
-def _compute_quorum_result(run_dir, qid: str) -> dict:
+def _compute_quorum_result(run_dir, qid: str, tracker: dict) -> dict:
     opened = _open_record(run_dir, qid)
     base = {"qid": qid, "axis": opened["axis"], "phase": opened["phase"],
             "context_digest": opened["context_digest"], "decision_id": None,
@@ -2672,10 +2714,12 @@ def _compute_quorum_result(run_dir, qid: str) -> dict:
         return dict(base, status="escalated", reason="incomplete-quorum", invalid_owners=invalid)
 
     # ORDER IS LOAD-BEARING: resolve every citation from disk BEFORE comparing.
-    repo_root = _repo_root(run_dir)
+    # The root is the `## Run` field. Deriving it here would demote every
+    # grounded answer to 0.55 and escalate the entire run, silently.
+    root = repo_root(tracker)
     rungs = {}
     for owner, payload in latest:
-        rungs[owner] = effective_rung(payload, repo_root)
+        rungs[owner] = effective_rung(payload, root)
     base["effective_rungs"] = rungs
 
     if sum(1 for _owner, payload in latest if payload.get("blocker")) >= 2:
@@ -2788,7 +2832,7 @@ git commit -m "feat(pipeline-auto): adopt only on a strictly higher cluster rung
 
 ---
 
-### Task 12: The rejection gates and the tracker mirror
+### Task 12: The rejection gates and P03's own tracker rows
 
 **Files:**
 - Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
@@ -2796,13 +2840,15 @@ git commit -m "feat(pipeline-auto): adopt only on a strictly higher cluster rung
 
 **Interfaces:**
 - Consumes: `check_contradiction`, `decision_depth`, `IRREVERSIBLE_AXES`, `DEPTH_CAP`, `parse_decisions`
-- Produces: `_apply_adoption_gates` (full), `quorum_tracker_rows(run_dir) -> list[dict]`
+- Produces: `_apply_adoption_gates` (full), `_row_for`, `_quorum_row`, `_escalation_row`, `_mirror_quorum`, `quorum_tracker_rows(run_dir) -> list[dict]`
 
 A quorum may decide an open question. **It may never overrule a recorded one.** A candidate contradicting a `Provenance: human` decision is rejected and escalated at any rung, and the rejection is **recorded, not discarded**: a run with several `rejected-contradicts-*` events is a run whose brains keep pulling away from what the user asked for, and that count is the earliest drift warning available.
 
 The irreversible-axis list is closed and enumerated, and no confidence buys past it. `forecloses` is required precisely so that asking what an answer *destroys* can surface risk that asking what it *achieves* never does.
 
 The drift budget is deliberately **not** re-checked here. It tripped at raise time; charging it again at adoption would double-count, and a budget charged on escalation teaches the run not to ask.
+
+P03 also writes its **own** `## Quorum` and `## Escalations` rows here, through P02's `section_columns` and `append_row`, inside the same locked transition that publishes `final.json`. No phase writes another phase's rows and no phase re-declares another phase's columns. The column names below are asserted against `section_columns(...)` on every write, so if P02's grammar differs the very first run of this task names the mismatch — no guess survives silently, which is the whole point of routing the write through the primitive instead of a local tuple.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2900,11 +2946,45 @@ class QuorumTrackerRows(unittest.TestCase):
                        decision_id="Q-aaaaaaaaaaaa")
             seed_final(run_dir, "bbbbbbbbbbbb", status="rejected-contradicts-human", phase="P04")
             rows = pipeline_auto_state.quorum_tracker_rows(str(run_dir))
-        self.assertEqual([row["qid"] for row in rows], ["aaaaaaaaaaaa", "bbbbbbbbbbbb"])
-        self.assertEqual(rows[0]["provenance"], "quorum")
-        self.assertEqual(rows[0]["decision"], "Q-aaaaaaaaaaaa")
-        self.assertEqual(rows[1]["status"], "rejected-contradicts-human")
-        self.assertEqual(rows[1]["decision"], "-")
+        self.assertEqual([row["QID"] for row in rows], ["aaaaaaaaaaaa", "bbbbbbbbbbbb"])
+        self.assertEqual(rows[0]["Provenance"], "quorum")
+        self.assertEqual(rows[0]["Decision"], "Q-aaaaaaaaaaaa")
+        self.assertEqual(rows[1]["Status"], "rejected-contradicts-human")
+        self.assertEqual(rows[1]["Decision"], "-")
+
+    def test_rows_are_ordered_by_p02s_columns_and_break_loudly_on_a_mismatch(self):
+        columns = pipeline_auto_state.section_columns("Quorum")
+        with contextlib.ExitStack() as stack:
+            _root, run_dir = new_run(stack)
+            seed_final(run_dir, "aaaaaaaaaaaa", status="adopted", phase="P04",
+                       decision_id="Q-aaaaaaaaaaaa")
+            row = pipeline_auto_state.quorum_tracker_rows(str(run_dir))[0]
+        self.assertEqual(tuple(row), columns)
+        with self.assertRaises(pipeline_auto_state.QuorumError):
+            pipeline_auto_state._row_for("Quorum", {"QID": "x"})
+
+    def test_an_escalation_is_mirrored_into_the_escalations_section(self):
+        with contextlib.ExitStack() as stack:
+            root, run_dir = new_run(stack)
+            write_repo(root, "db/engine.py", "class PostgresEngine:\n")
+            write_repo(root, "db/pool.py", "PostgresEngine pool\n")
+            (run_dir / "decisions.md").write_text(
+                HUMAN.replace("- **Axis:** storage-engine", "- **Axis:** unrelated-axis"),
+                encoding="utf-8")
+            path = run_dir / "question.json"
+            path.write_text(json.dumps(QUESTION), encoding="utf-8")
+            qid = pipeline_auto_state.open_quorum(
+                str(run_dir), question_record=str(path))["qid"]
+            for owner, key in zip(QUESTION["owners"], ("postgres", "sqlite", "duckdb")):
+                pipeline_auto_state.record_brain_response(
+                    str(run_dir), qid=qid, owner=owner,
+                    payload=dict(graded(root, key, "convention-cited"), qid=qid))
+            result = pipeline_auto_state.finalize_quorum(str(run_dir), qid=qid)
+            tracker = pipeline_auto_state.validate_run(str(run_dir))
+        self.assertEqual(result["status"], "escalated")
+        escalations = tracker["escalations"]
+        self.assertEqual(escalations[-1]["QID"], qid)
+        self.assertEqual(escalations[-1]["State"], "pending")
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -2970,23 +3050,71 @@ def _apply_adoption_gates(run_dir, base, winner, best, winner_rung) -> dict:
                 decision_id=f"Q-{base['qid']}")
 
 
-def quorum_tracker_rows(run_dir: str) -> list[dict]:
-    """The `## Quorum` mirror. Provenance must be visible in three places —
-    the decision record, the tracker index, and the terminal report. A
-    provenance field read only by a validator has informed nobody.
+def _row_for(section: str, values: dict) -> dict:
+    """Order one row by P02's columns, loudly.
+
+    P02 owns the column grammar and P03 owns the quorum lifecycle, so P03 writes
+    its own rows and re-declares nobody's columns. Checking against
+    `section_columns` means a column change in P02 fails here at the seam rather
+    than drifting into a mismatched write nothing notices.
     """
-    rows = []
-    for event in quorum_events(run_dir):
-        winner = event.get("winner") or {}
-        rows.append({
-            "qid": event["qid"], "axis": event.get("axis", "-"), "phase": event.get("phase", "-"),
-            "status": event["status"], "provenance": "quorum",
-            "rung": winner.get("rung", "-"),
-            "runner_up_rung": event.get("runner_up_rung") or "-",
-            "decision": event.get("decision_id") or "-",
-            "reason": event.get("reason") or "-",
-        })
-    return rows
+    columns = section_columns(section)
+    missing = [column for column in columns if column not in values]
+    unexpected = [key for key in values if key not in columns]
+    if missing or unexpected:
+        raise QuorumError(
+            f"{section} row does not match P02's columns "
+            f"(missing {missing}, unexpected {unexpected}); reconcile with section_columns()")
+    return {column: values[column] for column in columns}
+
+
+def _quorum_row(event: dict) -> dict:
+    winner = event.get("winner") or {}
+    return _row_for("Quorum", {
+        "QID": event["qid"],
+        "Axis": event.get("axis", "-"),
+        "Phase": event.get("phase", "-"),
+        "Status": event["status"],
+        "Provenance": "quorum",
+        "Rung": winner.get("rung", "-"),
+        "Runner-up": event.get("runner_up_rung") or "-",
+        "Decision": event.get("decision_id") or "-",
+        "Reopen Of": event.get("reopen_of") or "-",
+        "Raised Bar": event.get("raised_bar_rung") or "-",
+        "Payload Digest": event.get("payload_digest", "-"),
+        "Reason": event.get("reason") or "-",
+    })
+
+
+def _escalation_row(event: dict) -> dict:
+    winner = event.get("winner") or {}
+    return _row_for("Escalations", {
+        "ID": f"E-{event['qid']}",
+        "QID": event["qid"],
+        "Axis": event.get("axis", "-"),
+        "Phase": event.get("phase", "-"),
+        "Reason": event.get("reason") or event["status"],
+        "Blast": ", ".join(winner.get("blast") or ()) or "-",
+        "State": "pending",
+    })
+
+
+def _mirror_quorum(tracker: dict, event: dict) -> dict:
+    """Write P03's own rows. Called only from inside a locked transition."""
+    tracker = append_row(tracker, "Quorum", _quorum_row(event))
+    if event["status"] != "adopted":
+        tracker = append_row(tracker, "Escalations", _escalation_row(event))
+    return tracker
+
+
+def quorum_tracker_rows(run_dir: str) -> list[dict]:
+    """The `## Quorum` mirror, re-derived for the terminal report.
+
+    Provenance must be visible in three places — the decision record, the tracker
+    index, and the terminal report. A provenance field read only by a validator
+    has informed nobody.
+    """
+    return [_quorum_row(event) for event in quorum_events(run_dir)]
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -3150,6 +3278,16 @@ Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribut
 Add the identity helper and the lineage check:
 
 ```python
+def _mirror_terminal(run_dir, event: dict) -> None:
+    """Mirror a record that terminated without ever reaching finalize_quorum.
+
+    Uses the spec's mandated transition id, so a replay after a compaction is
+    inert exactly as it is for an ordinary finalisation.
+    """
+    locked_tracker_update(str(run_dir), transition_id=f"quorum-{event['qid']}",
+                          mutate=lambda tracker: _mirror_quorum(tracker, event))
+
+
 def derive_reopen_qid(question: str, axis: str, original_decision_id: str) -> str:
     """A re-open needs its own identity.
 
@@ -3214,6 +3352,7 @@ In `open_quorum`, immediately after the admissibility check, replace the qid der
                     "decision_id": None, "winner": None, "dispatched": False,
                     "context_digest": _context_digest(run_dir)}
             publish_immutable(str(final_path), _dumps(halt))
+            _mirror_terminal(run_dir, halt)
             return halt
         raised_bar_rung = _adopted_rung(run_dir, challenged)
 ```
@@ -3282,12 +3421,11 @@ In `_compute_quorum_result`, carry the lineage into the record and apply the bar
     return _apply_adoption_gates(run_dir, base, winner, best, winner_rung)
 ```
 
-Finally extend `quorum_tracker_rows` so the mirror shows the lineage:
-
-```python
-            "reopen_of": event.get("reopen_of") or "-",
-            "raised_bar_rung": event.get("raised_bar_rung") or "-",
-```
+`_quorum_row` already carries `Reopen Of` and `Raised Bar`, so the mirror shows
+the lineage as soon as `_compute_quorum_result` puts them in `base`. No change is
+needed there — but if `section_columns("Quorum")` does not yet contain those two
+columns, `_row_for` raises immediately and P02 owns adding them. That is the seam
+working as intended: a missing column fails at the write, never silently.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -3354,6 +3492,17 @@ Every step carries the code it needs. The one forward reference —
 `_apply_adoption_gates` in Task 11 — is a working stub with real behaviour that
 Task 12 replaces, not a placeholder, and Task 11's tests pass against it.
 
+**Fifth gap, ruled by the coordinator and closed in Tasks 3, 11 and 12.**
+`_repo_root` is deleted. The root is a `## Run` field read with P02's
+`repo_root(tracker)` and passed to `effective_rung(response, repo_root)`; nothing
+in the phase computes it. The named test
+`test_a_wrong_repo_root_silently_demotes_every_grounded_answer` guards the one
+failure in this design with no error, no exception and no other failing test:
+a wrong root resolves nothing, so every grounded answer falls to 0.55, so the run
+escalates every question while looking correctly cautious. `new_run` now builds
+the run at its production depth and asserts the recorded root, so a disagreement
+with P02 surfaces at the seam.
+
 **One-sided-assertion scan.** Every task that makes a bar *stricter* pairs its
 rejection case with a case that must still be accepted: Task 3's
 `test_convention_cited_needs_two_exemplars` asserts both the demotion and the
@@ -3393,13 +3542,14 @@ guessed at in code beyond the minimum noted; each needs a ruling.
    different from the one it first received. `test_one_digest_binds_all_three_
    and_rebuilds_each_byte_for_byte` is the guard.
 
-2. **P02 publishes no `## Quorum` / `## Escalations` row grammar.** The spec
-   assigns those tracker sections to the state schema (P02), but P02's produced
-   signatures expose no column order, so P03 cannot render them. P03 therefore
-   keeps the quorum record entirely in files and offers `quorum_tracker_rows()`
-   for whoever owns the mirror. **Someone must own writing those rows** — most
-   likely P05, which already touches the tracker — or the provenance-in-three-
-   places invariant has only two places.
+2. ~~P02 publishes no `## Quorum` / `## Escalations` row grammar.~~
+   **Settled.** P02 owns the column grammar and exposes `section_columns(name)`
+   and `append_row(tracker, section, row)`; P03 owns the quorum lifecycle and so
+   writes its own rows through those, inside `locked_tracker_update`. No phase
+   writes another phase's rows; no phase re-declares another phase's columns.
+   `quorum_tracker_rows()` builds against `section_columns("Quorum")` rather than
+   a local tuple, so a column change in P02 breaks loudly at the seam. `reopen_of`
+   and `raised_bar_rung` are carried as `Reopen Of` and `Raised Bar`.
 
 3. **The tie-break by strict consequence subset can never produce an adoption.**
    The spec lists it between "higher rung wins" and "escalate", but it also says
@@ -3435,13 +3585,15 @@ guessed at in code beyond the minimum noted; each needs a ruling.
    layout, `_context_digest`, `_ensure_decision_recorded` and `open_quorum` need
    the real path.
 
-8. **Evidence paths resolve against `Path(run_dir).parents[0]`.** The spec says
-   run artifacts live at `docs/superpowers/runs/<run-id>/`, which would make the
-   repository root `parents[3]`, not `parents[0]`. `_repo_root` is a placeholder
-   for whatever P02 records as the repository root; if P02 stores it in `## Run`,
-   read it from there instead. **This is the one line in the phase most likely to
-   be wrong in a real run** and it is called out rather than buried.
+8. ~~Evidence paths resolve against `Path(run_dir).parents[0]`.~~
+   **Settled, and the function is deleted.** `repo_root` is a `## Run` field
+   written by `initialize_run` and read back with P02's `repo_root(tracker)`;
+   P03 computes no repository root by any means. Standing rule 8 states the
+   failure shape and Task 3 carries the test.
 
 9. **The findings ledger marker `pipeline-auto-findings/v1` is derived, not
    specified.** It follows the schema family name; the spec fixes only the
-   tracker marker.
+   tracker marker. This is the only item still open, and it is cosmetic.
+
+Items 1, 2 and 8 are closed by coordinator ruling. Items 3–7 and 9 remain
+reported; none blocks execution of this phase.

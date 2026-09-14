@@ -349,6 +349,42 @@ A soft threshold on the second escalates *reporting* the overrun; a hard one
 stops the run resumably. Never a silent intensity downgrade — the dial is
 upward-only.
 
+### Dispatch budget, adopted by quorum
+
+Recorded as `Q-dispatch-budget` in the run's decisions file. Unanimous on shape,
+all three brains at `engineering-judgement` — below the floor, so the quorum
+escalated and the decision was taken under controller delegation, not adopted on
+its own evidence. It is a first estimate and is labelled as one.
+
+At the close of stage 07, when phase plans exist and task counts are real,
+compute and **freeze** into `## Run`:
+
+```
+dispatch_projection   = 7 × total_tasks + 3 × drift_budget_run + 5
+dispatch_soft_ceiling = ceil(1.25 × dispatch_projection)
+dispatch_hard_ceiling = 2 × dispatch_projection
+```
+
+**Every phase is priced at the `required`-plus-adversarial ceiling of 7
+regardless of its recorded review class.** That is what makes the projection
+frozen rather than recomputed: an upward ratchet can never consume budget it was
+not granted, so a safety mechanism can never push a run into its own stop.
+
+Check before every dispatch. At soft: dispatch anyway, enqueue exactly one
+non-blocking `dispatch-overrun` escalation, and make `status` and the terminal
+report lead with the overrun. At hard: refuse that dispatch, let in-flight
+workers finish, publish and import to `[x]` while holding only integration, set
+`next_action = await-dispatch-budget`, and stop resumably until a
+`dispatch.extend-budget` decision with `Provenance: human` raises it — at most
+twice, then terminal.
+
+**One enumerated exemption proceeds over the hard ceiling**, recorded
+`over-hard`: re-dispatching the missing brain indices of an already `in_flight`
+quorum. Refusing it strands a partial quorum, and a partial quorum is never
+evaluated — so the refusal would deadlock the run permanently rather than stop it
+resumably. This is the same shape as the `worker_limit` deadlock and was found
+the same way.
+
 **The budget trips at raise time, before dispatch.** The triggering question is
 never sent to brains.
 
@@ -690,7 +726,9 @@ provenance stays legible even if a field is lost. The file is **append-only**;
 the only legal in-place mutation is `Adopted → Superseded`.
 
 Decision actions narrow to
-`task.resume | quorum.adopt | quorum.extend-budget | none`. The
+`task.resume | quorum.adopt | quorum.extend-budget | dispatch.extend-budget |
+none`. Two budgets mean two authorities; sharing one action would let a grant
+against one refill the other. The
 generic-approval rejection carries over unchanged: a quorum answer of "proceed"
 is as empty as a human's.
 

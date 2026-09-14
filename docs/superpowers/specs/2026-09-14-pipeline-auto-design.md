@@ -624,8 +624,22 @@ user's product and starts building its own.
 
 **Unbounded quorum depth.** Brains cannot raise questions — the response schema
 has no field for one; the only exit is a blocker. Brains cannot spawn: the
-`pipeline-auto-brain` agent is restricted to Read/Grep/Glob and read-only Bash,
-with **no Agent tool, no Write, no Edit**. Today's `brainstorm-architect` runs
+`pipeline-auto-brain` agent is restricted to **`Read`, `Grep` and `Glob` only** —
+no `Bash`, no `Agent`, no `Write`, no `Edit`.
+
+**`Bash` is excluded deliberately, and the reason is that "read-only Bash" is not
+a thing the platform can give us.** Agent frontmatter allowlists *tools*, not
+*commands*: a brain holding `Bash` can run `echo > decisions.md` as easily as
+`git log`, so the restriction would be prose a brain could ignore rather than a
+boundary a validator can assert. The entire justification for restricting brains
+is that one with write access can edit the audit trail and make the whole record
+worthless; a rule that cannot be enforced does not deliver that. `Read`, `Grep`
+and `Glob` cover everything grounding actually needs — resolving a citation to a
+file and a line, and searching for exemplars — so the capability is not missed.
+
+This makes every leg of the boundary mechanically testable, which is the point:
+`tests/test_skill_structure.py` asserts the agent's `tools:` set is exactly
+`{Read, Grep, Glob}`. Today's `brainstorm-architect` runs
 with all tools, and a brain with Write can edit `decisions.md`, which makes the
 entire audit trail worthless. At most one quorum is in flight per run, which
 makes "a quorum cannot trigger a quorum" true by construction.
@@ -730,7 +744,7 @@ plugins/superb/skills/pipeline-auto/
 └── tests/{test_pipeline_auto_state.py,fixtures/}
 
 plugins/superb/agents/
-├── pipeline-auto-brain.md      (Read/Grep/Glob + read-only Bash ONLY)
+├── pipeline-auto-brain.md      (tools: Read, Grep, Glob — nothing else)
 └── pipeline-auto-intent-reader.md
 ```
 

@@ -6,7 +6,7 @@
 
 **Architecture:** The controller's behaviour lives in prose that routes; the state module built in P02–P06 enforces it. `SKILL.md` is a router and a Red Flags list, never a manual: it carries the invocation table, the zero-assumption reversal, the twelve-stage routing table, and the rules most likely to be "simplified" away. Each reference owns one stage band and is loaded only for that band. The two agent files are security boundaries expressed as frontmatter: the brain's `tools:` allowlist is what makes depth-1-by-construction and an unforgeable audit trail true, not the prose asking nicely. The SDD review protocol is **inlined** — copied, re-pointed at this skill's run directory, and credited — because a review protocol an unrelated plugin update can overwrite is not reproducible.
 
-**Tech Stack:** Markdown for every deliverable. Bash for the two inlined scripts. Python 3.11 standard library only (`unittest`, `pathlib`, `re`, `os`) for `tests/test_skill_structure.py`. **There is no pytest on this machine** — `python3 -c "import pytest"` raises `ModuleNotFoundError`. Tests are `unittest.TestCase`, discovered with `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`, matching P02's convention.
+**Tech Stack:** Markdown for every deliverable. Bash for the two inlined scripts. Python 3.11 standard library only (`unittest`, `pathlib`, `re`, `os`) for `tests/test_skill_structure.py`. **There is no pytest on this machine** — `python3 -c "import pytest"` raises `ModuleNotFoundError`. Tests are `unittest.TestCase`, discovered with `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v`, matching P02's convention.
 
 **Spec:** `docs/superpowers/specs/2026-09-14-pipeline-auto-design.md`
 
@@ -31,8 +31,10 @@
 - Implementation tasks may occupy at most `worker_limit - 3` slots. `worker_limit >= 4` is required for concurrency.
 - Exactly three brains per quorum, exactly three readers at stage 01. A count is never reduced to fit capacity.
 - Python: standard library only. No new dependencies in any phase.
-- **The test runner is `unittest`, not `pytest`.** `pytest` is not installed here. Every test this phase writes is a `unittest.TestCase`, and every `Run:` line in this plan and in every file it produces uses `python3 -m unittest discover -s <tests-dir> -t . -v`. The inlined SDD material assumes pytest in places; adapt the command, never copy it.
-- **A plan that names a test runner nobody verified is installed is a plan failure.** The runner is discovered from the target repository — its CI config, its manifest, its existing test files — and recorded, never assumed from habit. This constraint exists because this very build shipped `pytest` in its own master plan's Tech Stack while its Global Constraints said standard library only, and nothing caught it until someone tried to run it.
+- **The test runner is `unittest`, not `pytest`.** `pytest` is not installed here — `python3 -c "import pytest"` raises `ModuleNotFoundError` on this machine's Python 3.11.2. Every test this phase writes is a `unittest.TestCase`. The inlined SDD material assumes pytest in places; adapt the command, never copy it.
+- **The discovery command is `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v`, with no `-t`.** `-t .` raises `ImportError: Start directory is not importable` here, because `pipeline-auto` is hyphenated and top-level-relative discovery tries to import `plugins.superb.skills.pipeline-auto.tests`, which is not a legal Python package name. An `__init__.py` does not fix it. Also: `unittest` takes repeated `-k A -k B` and ORs them; it does not accept pytest's `-k "A or B"`.
+- **The project's test runner is discovered, never assumed.** Read the target repository's CI config, manifest and existing test files, and record what you find. A plan naming a runner that is not installed is a plan failure — and the failure does not surface until an implementer tries to run it, by which point it looks like the implementer's problem.
+- **A verification command is not verified until it has been executed once in this repository.** A command that looks correct, and is correct in general, can still be unrunnable here: one hyphen in a directory name is enough. The plan author runs the tuple, in this repository, before writing it into the plan. This build learned it the expensive way — a runner that was not installed, then a discovery flag that cannot work with a hyphenated skill directory, both of which would have shipped into all seven phases' verification tuples.
 - **No absolute home-directory paths in any committed file.** Repository-relative paths, `~`, or `$HOME` expanded at runtime only. This phase writes more committed prose than any other, so it is the phase most likely to break the rule.
 - No push, no publish, no PR, no merge into `main`/`master`.
 
@@ -160,7 +162,7 @@ Twelve tasks. Task 1 writes the test, which stays RED until Task 12 — that is 
 
 **Interfaces:**
 - Consumes: nothing. This file imports no project code — importing the state module would couple the routing check to the spine and make a spine failure look like a routing failure.
-- Produces: `tests/test_skill_structure.py`, discovered by `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v` and added to the run-wide verification suite from this phase onward. It is a `unittest.TestCase` module with no third-party import, so it runs on a stdlib-only Python 3.11.
+- Produces: `tests/test_skill_structure.py`, discovered by `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v` and added to the run-wide verification suite from this phase onward. It is a `unittest.TestCase` module with no third-party import, so it runs on a stdlib-only Python 3.11.
 
 Write the whole validator now, against files that do not exist yet. It fails completely. That is the point: every later task is measured by which of these tests it turns green, and a test written after the prose would be a test written to fit the prose.
 
@@ -401,7 +403,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v`
 
 Expected: every test in `SkillFrontmatter`, `RoutingTable`, `Prompts`, `Agents` and `BrainToolBoundary` ERRORs or FAILs — `SKILL.md`, the references, the prompts and both agent files do not exist. `Templates` fails on `task-brief`, `worker-report` and `completeness-proposals`. `Scripts::test_every_script_exists_and_is_executable` fails on `task-brief` and `review-package`.
 
@@ -413,7 +415,7 @@ There is nothing to implement. The validator is the deliverable; Tasks 2–12 ar
 
 - [ ] **Step 4: Confirm the expected-failure inventory is recorded**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v 2>&1 | tail -30`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v 2>&1 | tail -30`
 
 Expected: the failure list matches Step 2. Paste it into the commit body so a later reader can see which failures were expected at this point.
 
@@ -456,9 +458,13 @@ Already written in Task 1. The relevant classes are `Agents` and `BrainToolBound
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k BrainToolBoundary -k Agents`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k BrainToolBoundary -k Agents`
 
 Expected: FAIL — `missing agent file .../pipeline-auto-brain.md`.
+
+`unittest` accepts repeated `-k` flags and ORs them. It does **not** accept
+pytest's `-k "A or B"`, and there is no `-t` flag in any command here: `-t .`
+cannot work with a hyphenated skill directory.
 
 - [ ] **Step 3: Write the two agent files**
 
@@ -701,7 +707,7 @@ no "this is the core", no sizing.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k BrainToolBoundary`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k BrainToolBoundary`
 
 Expected: PASS — all three `BrainToolBoundary` tests.
 
@@ -737,7 +743,7 @@ Already written in Task 1: `Scripts::test_every_script_exists_and_is_executable`
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k Scripts`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k Scripts`
 
 Expected: FAIL — `missing .../scripts/task-brief`.
 
@@ -856,7 +862,7 @@ chmod 755 plugins/superb/skills/pipeline-auto/scripts/task-brief \
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k Scripts`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k Scripts`
 
 Expected: PASS — both `Scripts` tests.
 
@@ -896,7 +902,7 @@ Already written in Task 1: `Prompts::test_every_required_prompt_exists`.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k Prompts`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k Prompts`
 
 Expected: FAIL — `prompts/brain.md` missing.
 
@@ -1033,7 +1039,7 @@ you want an escalation.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k test_every_required_prompt_exists`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k test_every_required_prompt_exists`
 
 Expected: still FAIL on the other three prompts; the `brain` subtest passes. Confirm with `-v` that `[prompt=brain]` is the one that no longer errors.
 
@@ -1070,7 +1076,7 @@ Already written in Task 1: `Prompts` and `Templates`.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k Prompts -k Templates`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k Prompts -k Templates`
 
 Expected: FAIL on `[prompt=implementer]`, `[template=task-brief]`, `[template=worker-report]`.
 
@@ -1358,7 +1364,7 @@ tainting decision explicitly.>
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k Templates`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k Templates`
 
 Expected: PASS — `task-brief` and `worker-report` subtests now pass. `completeness-proposals` still fails; it lands in Task 10.
 
@@ -1395,7 +1401,7 @@ Already written in Task 1: `Prompts::test_every_required_prompt_exists`.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k Prompts`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k Prompts`
 
 Expected: FAIL on `[prompt=task-reviewer]` and `[prompt=adversarial-reviewer]`.
 
@@ -1696,7 +1702,7 @@ evidence than one model running the test.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k test_every_required_prompt_exists`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k test_every_required_prompt_exists`
 
 Expected: PASS — all four prompt subtests. `test_every_prompt_is_referenced_by_some_prose_file` still fails until Task 12.
 
@@ -1728,7 +1734,7 @@ Already written in Task 1: `RoutingTable::test_every_required_reference_exists`.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k RoutingTable`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k RoutingTable`
 
 Expected: FAIL on `[reference=quorum]`.
 
@@ -2172,7 +2178,7 @@ another round of asking.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k test_every_required_reference_exists`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k test_every_required_reference_exists`
 
 Expected: the `[reference=quorum]` subtest passes; the other four still fail.
 
@@ -2208,7 +2214,7 @@ Already written in Task 1.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k test_every_required_reference_exists`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k test_every_required_reference_exists`
 
 Expected: FAIL on `[reference=planning]`.
 
@@ -2410,7 +2416,7 @@ here is quorum or escalation.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k test_every_required_reference_exists`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k test_every_required_reference_exists`
 
 Expected: `[reference=planning]` and `[reference=quorum]` pass; three still fail.
 
@@ -2444,7 +2450,7 @@ Already written in Task 1.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k test_every_required_reference_exists`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k test_every_required_reference_exists`
 
 Expected: FAIL on `[reference=execution]`.
 
@@ -2676,7 +2682,7 @@ completion.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k test_every_required_reference_exists`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k test_every_required_reference_exists`
 
 Expected: `execution`, `planning` and `quorum` pass.
 
@@ -2713,7 +2719,7 @@ Already written in Task 1.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k Templates`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k Templates`
 
 Expected: FAIL on `[template=completeness-proposals]`.
 
@@ -2939,7 +2945,7 @@ question with no natural ceiling and a systematic bias toward yes.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k Templates -k test_every_required_reference_exists`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k Templates -k test_every_required_reference_exists`
 
 Expected: all eight `Templates` subtests pass; `[reference=review]` passes; only `[reference=persistence]` still fails.
 
@@ -2978,7 +2984,7 @@ Already written in Task 1.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k test_every_required_reference_exists`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k test_every_required_reference_exists`
 
 Expected: FAIL on `[reference=persistence]`.
 
@@ -3175,7 +3181,7 @@ persisted `complete`.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k test_every_required_reference_exists`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k test_every_required_reference_exists`
 
 Expected: PASS — all five reference subtests.
 
@@ -3190,3 +3196,444 @@ git commit -m "docs(pipeline-auto): persistence and recovery reference"
 ```
 
 ---
+
+### Task 12: `SKILL.md` — the router, and the whole validator green
+
+**Files:**
+- Create: `plugins/superb/skills/pipeline-auto/SKILL.md`
+- Read: `plugins/superb/skills/pipeline-auto/tests/pressure/RED-baseline.md` (P01)
+- Test: `plugins/superb/skills/pipeline-auto/tests/test_skill_structure.py`
+
+**Interfaces:**
+- Consumes: every file Tasks 2–11 produced, and P01's curated RED baseline.
+- Produces: the skill's entry point. After this task the structure validator is entirely green and P08 can begin.
+
+`SKILL.md` is written last because a routing table written before its targets is
+a table of guesses. Every path in it is now a path that exists.
+
+**Before writing the Red Flags table, read `tests/pressure/RED-baseline.md`.**
+P01 recorded, verbatim, the rationalizations agents actually reached for when
+this prose was absent. Each Red Flag row's "the rationalization" column must
+answer one of those recorded quotes — not one you imagined. Where P01 recorded a
+rationalization no row below covers, add a row. Where P01 marked a scenario
+`NON_DISCRIMINATING` — the control agent behaved correctly without any skill —
+**write nothing for it.** `superpowers:writing-skills` is explicit: if the
+control did not exhibit the failure, there is nothing to fix.
+
+- [ ] **Step 1: Write the failing test**
+
+Already written in Task 1. The classes still red are `SkillFrontmatter`,
+`RoutingTable`, `Agents::test_every_agent_named_in_the_prose_exists_as_a_file`,
+and `Prompts::test_every_prompt_is_referenced_by_some_prose_file`.
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v`
+
+Expected: FAIL — `missing .../SKILL.md`, plus the unrouted-prompt and unnamed-agent failures.
+
+- [ ] **Step 3: Write `SKILL.md`**
+
+Create `plugins/superb/skills/pipeline-auto/SKILL.md`:
+
+````markdown
+---
+name: pipeline-auto
+description: Use when the user asks to take a substantial feature from an initial idea through implementation in one run with as little interruption as possible — "just build it", "don't keep asking me", "run it autonomously". Not for a run where the user wants to be consulted at each decision; that is superb:pipeline.
+argument-hint: "[resume|status]"
+---
+
+# Superb Pipeline Auto
+
+## The rule this skill reverses
+
+`plugins/superb/skills/pipeline/references/planning.md:177-181` forbids adding to
+the pipeline:
+
+> retired lane/wave authority, reviewer arithmetic, per-task formal review,
+> one-agent-per-task execution, recursive fix mode, **a Brain Agent that decides
+> user requirements**, or another scheduler.
+
+**This skill is that Brain Agent.** Built deliberately, with guardrails the
+author of that clause did not think were sufficient.
+
+The zero-assumption law (`pipeline/SKILL.md:40-71`) held that another agent may
+investigate facts and explain options but cannot decide an unresolved
+requirement. This skill inverts it. Everything below exists to answer the
+objection that clause was making — so read the answer before changing any part
+of it:
+
+| The objection | This skill's answer |
+| --- | --- |
+| A machine will decide what it prefers | It decides only what the **spec or the code entails**. `convention-cited` sits below the adoption floor: a machine may not decide by imitation |
+| Three agents agreeing proves nothing | Correct. They are one prior sampled three times, so agreement is not the bar — **grounding rung** is, and the three get different reading assignments to decorrelate them |
+| It will decide more and more | Three adoptions per phase, ten per run, checked before dispatch, extendable at most twice and only by a human who is shown the list |
+| It will overrule the user | It cannot. A candidate contradicting a `Provenance: human` decision is rejected and escalated at any confidence |
+| It will build things nobody asked for | The phase set is immutable after stage 06. Scope expansion is not forbidden, it is structurally impossible |
+| It will drift a long way from the request | Depth cap of 2. Three layers of inference from the last thing a human said is where the run stops building the user's product and starts building its own |
+| It will grade its own homework | Every adopted decision is labelled forever, in three places, and the terminal report **leads** with them, weakest first |
+
+**A maintainer changing a threshold, a budget, or an escalation route in this
+skill is loosening that answer.** The reversal is stated here so the trade is
+visible rather than inherited.
+
+If you want a run where the user is consulted at each unresolved decision, that
+skill already exists and works: `superb:pipeline`. This one is not a better
+version of it. It is a different trade.
+
+## Invocation
+
+Trim whitespace from this complete argument string, then select exactly one mode:
+
+`$ARGUMENTS`
+
+| Argument | Mode |
+| --- | --- |
+| empty | Full run: begin at stage 01. |
+| `resume` | Resume one compatible `pipeline-auto/v1` run from its files and Git evidence. Never create or replace a run. |
+| `status` | Strictly read-only inspection. Do not lock, write, reconcile, dispatch, test, fix, or initialize. |
+| anything else | Stop and ask what the user meant. Do not guess a verb. |
+
+Use the whole argument string, never an indexed positional placeholder.
+
+For `resume` or `status`, use [references/persistence.md](references/persistence.md).
+If no run is identifiable, report that. If several qualify, ask which. Recency is
+not selection authority.
+
+## The one gate
+
+**Stage 03 asks at most four questions in a single `AskUserQuestion` call. Those
+answers are the only requirements this run may treat as unimpeachable.**
+
+Every later decision is a quorum adoption or an escalation. There is no third
+outcome, no controller override, and no second approval step.
+
+## Files are the authority
+
+Conversation memory is never authoritative. Reconstruct the next action from
+`progress.md`, `decisions.md`, immutable worker results, evidence digests, and
+Git. A stale `next_action` never overrides the underlying facts.
+
+The schema is `pipeline-auto/v1`. **There is no migration from `pipeline-run/v1`
+or `/v2`, in either direction, ever.** Foreign, missing, malformed, or unknown is
+a read-only stop: preserve the directory, change no files, dispatch nothing, and
+say plainly that the two skills do not interoperate.
+
+## Stage routing
+
+Load only the reference the active stage needs.
+
+| Stage | Work | Route |
+| --- | --- | --- |
+| 01–07 | Intent read, question synthesis, the gate, design and gate classification, spec, master plan, phase fan-out | [references/planning.md](references/planning.md) |
+| any | A question raised, a quorum open or finalising, the drift budget, an escalation | [references/quorum.md](references/quorum.md) |
+| 08–10 | The dial, per-task gate, TDD, scopes, evidence, integration, debugging | [references/execution.md](references/execution.md) |
+| 11–12 | Master gate, contradiction routing, completeness freeze, final verification | [references/review.md](references/review.md) |
+| any | Tracker operations, status, resume, results, recovery | [references/persistence.md](references/persistence.md) |
+
+## The dial
+
+`review_class ∈ {final-only, required}`, fixed at stage 04, **upward-ratchet
+only**. `required` buys the full per-task gate; `final-only` buys mechanical
+verification with stage 11 as the net.
+
+**The dial controls whether a reviewer runs. It never controls what bar that
+reviewer applies.** The list of things it may never switch off — the adversarial
+trigger check, typed scopes, digest-bound evidence, the range proof, result
+identity, RED-before-GREEN, the most-capable-model policy, and the
+zero-open-findings bar — is in [references/execution.md](references/execution.md).
+
+## Rungs are schema constants, not run configuration
+
+`specified` 0.95 · `code-evidenced` 0.85 · `convention-cited` 0.70 ·
+`engineering-judgement` 0.55 · `speculation` 0.30. Adoption floor:
+`code-evidenced`.
+
+They live in the state module. They are **not** in `## Run` and must never be
+moved there, because **a controller that can tune its own bar will.** Not
+maliciously — every individual lowering looks locally reasonable when the run is
+otherwise blocked, and the run is always otherwise blocked when the question
+comes up. It is the same class of self-serving move as reclassifying a phase
+downward, and it is structurally unavailable for the same reason.
+
+The floor actually applied is persisted per run. Neither the floor nor the values
+ever appear in a brain's payload: **a brain that knows the bar clears the bar.**
+
+The values are frozen, but they are not calibrated. Log every event's rung,
+runner-up rung and outcome, and revisit after three real runs. The drift budget
+is the same: its existence is principled, its exact value is a first estimate.
+
+## Escalations are free. Adoptions are not.
+
+An escalation costs one question in a batch a human was going to read anyway. An
+adoption spends a unit of the run's finite machine authority and lands
+permanently in `decisions.md` with this run's name on it.
+
+So **escalating is never the discouraged path.** A controller weighing "adopt at
+a thin margin" against "escalate" is weighing something scarce against something
+free. Escalations never consume the drift budget; only adoptions do. If you find
+yourself looking for a reading of the rules that lets you adopt, you have already
+found the answer: escalate.
+
+## Red Flags
+
+Each of these is a rule someone will otherwise "simplify" away. The middle column
+is the argument that will be used. It is always plausible. That is the problem.
+
+| Never | The rationalization | Why it is wrong |
+| --- | --- | --- |
+| **Adopt on headcount instead of rung** | "Two out of three agreed" | Two brains sharing one prior are not two pieces of evidence. The bar is grounding, not votes. This is the rule most likely to become majority voting |
+| **Average member rungs** | "The cluster's average confidence is fairer" | Averaging punishes a correct lone expert and lets two weak agreers manufacture a majority. A cluster's rung is its **maximum** |
+| **Dispatch a fourth brain** | "The three were split; one more would break the tie" | That is a retry-until-you-like-it loop wearing a quorum's clothes. One more sample from the same prior is not more evidence. Escalate |
+| **Tell a brain the adoption floor** | "It should know what standard to meet" | A brain that knows the bar clears the bar. It would tune its rung to the threshold, and the rung would stop describing its evidence |
+| **Tell a brain it is one of three** | "It's just context" | A brain that knows the panel size can reason about what it takes to win a plurality. "One of several" is deliberate; a count is not |
+| **Re-ask a brain to reconsider** | "I'll just ask it to double-check" | A request to think again is a pressure signal. It moves the number without moving the evidence. If the result is not adoptable, the outcome is an escalation |
+| **Degrade a quorum to fit capacity or budget** | "We only have two slots free" | Then the brains run sequentially. A count is never reduced to fit capacity. Escalate or halt; never run a smaller quorum and call it one |
+| **Switch off an adversarial trigger** | "It's only 10 lines" / "the task reviewer already approved it" | Triggers are independent and any one fires. **A 10-line auth change is high-risk.** The task reviewer's approval is exactly the assumption this pass exists to attack |
+| **Reclassify a phase downward** | "This turned out simpler than we thought" | The ratchet is one-way by construction. A phase's class was fixed at stage 04 precisely so it could not be set to fit the plan that followed |
+
+Two more, from the same family:
+
+| Never | Why |
+| --- | --- |
+| **Send a fact to the quorum** | "Can line 41 be null" is settled by running the test, not by a vote. One adjudicator, read-only. Routing facts to the quorum is how it degrades into an ask-three-models-when-unsure reflex |
+| **Convert a `MISSING-FROM-SPEC` proposal into work** | Quorum exists to unblock, not to enlarge. "Should we also handle X" has no ceiling and three brains will say yes, because yes is always defensible. It is frozen, and after stage 06 it is also impossible |
+| **Write a verification command into a plan without running it here first** | A command that is correct in general can be unrunnable in this repository. One hyphen in a directory name is enough to break test discovery; a runner that is standard everywhere else can be absent here. "It obviously works" is not evidence, and a bad tuple propagates into every phase that copies it. Run it, then write it down |
+
+**That last one is not a style note.** A verification tuple is the only thing
+standing between "the work is done" and "the work is claimed to be done. If the
+tuple cannot execute, every phase downstream of it inherits a gate that never
+closes, and the defect is discovered by an implementer who assumes the fault is
+theirs. `superpowers:verification-before-completion` states the general rule —
+evidence before assertions, always. This is that rule applied to the plan itself.
+
+## Stop checks
+
+Stop and read the authoritative files when you are about to:
+
+- choose behaviour from convention, convenience, configurability, or an
+  undocumented "safe default";
+- adopt a quorum answer whose rung ties the runner-up's, or whose cluster you
+  computed a second time;
+- tell a brain anything the payload builder does not carry;
+- dispatch without a persisted assignment, or from a stale readiness result;
+- treat available capacity as permission for conflicting, dependent, early or
+  duplicate work;
+- infer that a missing result means work is complete, or must be repeated;
+- advance past failed verification or an unresolved gate;
+- create a phase, a task, or a write scope after stage 06 closed;
+- run a test command with a runner nobody confirmed is installed;
+- write an absolute home-directory path into a file that gets committed;
+- perform a remote, PR, publish, or `main`/`master` mutation.
+
+**No push, publish, pull request, or merge into `main`/`master`.** Success leaves
+a clean committed feature branch and a report that leads with every decision this
+run made without asking.
+
+## Agents and prompts this skill dispatches
+
+| Agent / template | Used at |
+| --- | --- |
+| `pipeline-auto-intent-reader` | stage 01, three of them |
+| `pipeline-auto-brain` with `prompts/brain.md` | stage 02 and every quorum, three of them |
+| `prompts/implementer.md` | stage 09, one fresh per task |
+| `prompts/task-reviewer.md` | the per-task gate |
+| `prompts/adversarial-reviewer.md` | whenever a trigger fires, at any `review_class` |
+
+`pipeline-auto-brain` runs with `Read`, `Grep`, `Glob` and read-only `Bash` and
+**nothing else**. No `Agent`, no `Write`, no `Edit`. A brain that can write can
+edit `decisions.md`, and the audit trail becomes worthless. A brain that can
+spawn breaks the depth-1-by-construction guarantee. Its response schema has no
+field for raising a question — that is how unbounded recursion is prevented at
+the type level rather than with a counter.
+
+Do not substitute `brainstorm-architect` for either agent. It runs with all tools
+and it is built to propose.
+
+## What this skill does not use
+
+Do not invoke `superpowers:subagent-driven-development`. Its protocol is
+**inlined** here — its references, its four prompt templates, and its
+`task-brief`, `review-package` and `sdd-workspace` scripts are carried in this
+directory, with SDD credited in each. `subagent-driven-development/SKILL.md:12`
+says the plugin-cache copy is a mirror and that "a superpowers plugin update will
+silently overwrite that mirror". A skill whose review protocol an unrelated
+plugin update can replace is not reproducible, and this skill modifies the
+protocol anyway.
+
+Do not use `superpowers:finishing-a-development-branch` or an interactive
+completion menu.
+````
+
+- [ ] **Step 4: Run the whole validator to verify it passes**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v`
+
+Expected: **OK** — every test in the module passes, including
+`RoutingTable::test_every_reference_on_disk_is_routed_from_skill_md` and
+`Prompts::test_every_prompt_is_referenced_by_some_prose_file`.
+
+If `test_every_path_named_in_skill_md_resolves` fails, a route in the table is
+dead — fix the table or the file, never the test.
+
+Then the constraint checks:
+
+Run: `grep -rn -- "-m pytest" plugins/superb/skills/pipeline-auto/ plugins/superb/agents/pipeline-auto-*.md`
+Expected: no output.
+
+Grep for the **invocation**, not the word. `references/planning.md` says
+"Do not assume `pytest`" on purpose, and a check that forbids the word forbids
+the lesson. What must not appear anywhere in this skill is an instruction to
+*run* it.
+
+Run: `grep -rn "/home/" plugins/superb/skills/pipeline-auto/ plugins/superb/agents/pipeline-auto-*.md`
+Expected: no output.
+
+Run: `git diff --name-only c8bddd610119f52b54bf077d284c7f5d8362ae77..HEAD -- plugins/superb/skills/pipeline/`
+Expected: no output.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add plugins/superb/skills/pipeline-auto/SKILL.md
+git commit -m "docs(pipeline-auto): SKILL.md router, reversal statement and red flags"
+```
+
+---
+
+## Verification suite for this phase
+
+Exact ordered command tuple:
+
+```bash
+python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v
+! grep -rn -- "-m pytest" plugins/superb/skills/pipeline-auto plugins/superb/agents/pipeline-auto-brain.md plugins/superb/agents/pipeline-auto-intent-reader.md
+! grep -rn -- "/home/" plugins/superb/skills/pipeline-auto plugins/superb/agents/pipeline-auto-brain.md plugins/superb/agents/pipeline-auto-intent-reader.md
+git diff --name-only c8bddd610119f52b54bf077d284c7f5d8362ae77..HEAD -- plugins/superb/skills/pipeline/
+git status --short
+```
+
+The fourth command must print **nothing**: any output means `skills/pipeline/`
+was modified and the phase fails. The fifth must also print nothing.
+
+`! grep` inverts the exit status so a match fails the command — a plain `grep`
+that finds nothing exits 1 and would fail the suite for the wrong reason.
+
+**The discovery command in this tuple was executed in this repository before
+being written down**, against a throwaway hyphenated-directory fixture: the bare
+form runs, `-t .` raises `ImportError: Start directory is not importable`, and
+repeated `-k A -k B` ORs correctly. Do the same for any command added to this
+tuple later.
+
+---
+
+## Self-review
+
+**1. Spec coverage.** Walked every spec section against a task:
+
+| Spec section | Where it lands |
+| --- | --- |
+| The rule this skill reverses | Task 12 — `SKILL.md` opening, quoting `planning.md:177-181` verbatim, with the guardrail table as its answer |
+| Governing invariants 1–7 | Task 8 (1, 6), Task 7 (2, 3, 5), Task 11 (4), Task 10 (6, 7) |
+| Composition / inlining | Task 3 (script provenance headers), Tasks 5–6 (prompt provenance), Task 12 (the "what this skill does not use" section) |
+| Stages 01–12 | Tasks 8, 9, 10 |
+| Quorum contract — admissibility, independence, payload, rungs, comparison, adoption, budget, extension, escalation, replay | Task 7 |
+| Review-intensity dial, adversarial triggers, ratchet | Task 9 |
+| Contradiction routing, adjudicator | Task 10 |
+| Completeness proposals | Task 10 |
+| Failure modes — drift, inflation, contradiction, cascading, depth, unbounded depth, cost | Task 7 (most), Task 2 (unbounded depth, enforced in frontmatter) |
+| State schema, tracker sections, decisions grammar | Task 11 |
+| Deliverables | the File Structure table |
+| Recorded defaults | Task 8 (intent brief immutable), Task 7 (clustering frozen), Task 9 (worktree granularity, merge conflict hard stop), Task 10 (zero-open-findings at the master gate), Task 11 (unclassified filesystem, `scratch/` cleanliness) |
+| Unknowns flagged rather than hidden | Task 7 and Task 12 both say the rung values and the budget are uncalibrated first estimates |
+
+**Gap found and closed.** The spec's "never re-run a quorum to check" and "never
+ask a brain to reconsider" were in different sections and would have landed in
+different files. Both are in `references/quorum.md`, and the reconsider rule is
+repeated in `prompts/brain.md`'s re-dispatch section, because that is where a
+controller is standing when it is tempted.
+
+**Second gap found and closed.** Nothing in the spec told an implementer what to
+do when the plan's recorded test runner is not installed. That is exactly the
+defect this build shipped in its own master plan. `references/execution.md` now
+routes it as a `PLAN_CONFLICT` rather than a silent runner substitution, and
+`references/planning.md` makes discovering the runner part of stage 06.
+
+**Placeholder scan.** No TBDs. Every file is present in full, not described.
+Every prompt lists its complete placeholder set with the source of each value.
+No step says "similar to Task N".
+
+**Type and name consistency.** `review_class` throughout — never `review_gate`,
+which is v2's name. `pipeline-auto-phase` / `pipeline-auto-task` metadata
+comments, never `pipeline-v2-*`. `reserve_task` in Task 9 matches P04's produced
+name (v2's `start_task` is not used). `adversarial_required` returns a trigger
+name, so the prose says "returns a trigger", never "returns true".
+`publish_immutable` returns a digest, stated once in Task 11 and nowhere
+contradicted. `Decision action` vocabulary is the five-value set in Task 11 and
+is not restated with a different membership anywhere else.
+
+**Test-count honesty.** One test module, and the section "Why this phase has
+almost no tests" argues against adding more. That section is the deliverable it
+looks like a gap in.
+
+---
+
+## Unresolved — reported, not invented
+
+1. **Template ownership for `worker-result.md` and `verification-evidence.md`.**
+   The master plan's File Structure names eight templates. P02's plan claims
+   `progress.md` and `decisions.md`; P03's claims `findings.md`. P04's and P06's
+   phase plans **do not exist yet**, so this plan infers — by symmetry with P02
+   and P03, each of which created the template its own parser consumes — that
+   P04 creates `worker-result.md` and `verification-evidence.md`. That inference
+   is not confirmed anywhere. P07 therefore does **not** create them, and
+   `tests/test_skill_structure.py` asserts all eight exist so a gap fails loudly
+   rather than shipping. If P04 does not own them, say so and they move here.
+
+2. **`templates/decisions.md` is claimed by two phases.** P02's plan lists it
+   under "Owned" (`phase-02-schema-core.md:43`). P03's plan calls it "P07's"
+   (`phase-03-quorum-contract.md:67`). Both cannot be right. This plan follows
+   P02, which states ownership directly rather than in passing, and P07 creates
+   no `decisions.md` template. Confirm.
+
+3. **`scripts/sdd-workspace` is claimed by two documents.** The master plan's
+   phase table says P07 delivers "three inlined scripts"; the master plan's own
+   self-review says `sdd-workspace` moved to P02 as a prerequisite for P05, and
+   P02's plan claims it. This plan follows the self-review and P02: P07 delivers
+   **two** scripts and documents the third. Confirm.
+
+4. **"Read-only Bash" cannot be enforced in agent frontmatter.** The `tools:`
+   field allowlists tools, not commands. `pipeline-auto-brain` therefore declares
+   `Bash` and forbids writing commands **in prose only**, and
+   `tests/test_skill_structure.py` cannot assert it. Every other part of that
+   boundary is enforced and asserted. If a command-level restriction mechanism
+   exists in this runtime, name it and the agent file should use it; otherwise
+   this is a known, stated gap rather than an oversight.
+
+5. **No agent-registration surface was found.** `plugins/superb/.claude-plugin/plugin.json`
+   and `.codex-plugin/plugin.json` carry no `agents` array, and existing agents
+   (`architecture-discovery`, `bug-investigator`) appear to be discovered from
+   `plugins/superb/agents/` by convention. This plan therefore adds no
+   registration step and the structure validator asserts file existence rather
+   than registration. If registration is required for a plugin agent to be
+   dispatchable by name, that is a missing task and must be added before P09.
+
+6. **Agent `model:` for the two new agents is derived, not specified.** Neither
+   the spec nor the master plan names a model for `pipeline-auto-brain` or
+   `pipeline-auto-intent-reader`. This plan uses `opus`, derived from the
+   most-capable-model policy the dial may never switch off, and from P01's plan
+   making the same derivation for its baseline dispatches. Confirm or replace.
+
+7. **`references/persistence.md` documents `examples/controller_walkthrough.py`
+   indirectly.** P09 creates it. This plan's persistence reference does **not**
+   mention it, to avoid a dead route in the structure validator. If the skill is
+   meant to point at the walkthrough the way `pipeline/references/persistence.md`
+   does, that paragraph must be added in P09, not here — and P09's plan needs to
+   know that.
+
+8. **P01's `RED-baseline.md` path.** P01's plan places the curated record at
+   `tests/pressure/RED-baseline.md` per the master plan's interface contract, but
+   also names `docs/superpowers/runs/pipeline-auto-p01-red-baselines.md` in its
+   own File Structure. Task 12 reads "P01's curated RED baseline"; if the
+   committed path differs from the master plan's, Task 12's Read line needs the
+   actual path before execution.

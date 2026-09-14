@@ -974,3 +974,1498 @@ git commit -m "feat(pipeline-auto): carry the ancestor branch in scope conflict 
 ```
 
 ---
+
+### Task 4: Worker-result template and codec — the reversed status semantics (fault F5)
+
+The vocabulary is unchanged from `superb:pipeline`. The routing is not. `NEEDS_CONTEXT` and `PLAN_CONFLICT` raise a quorum question and therefore **must** carry a resolvable, digest-bound `question_record`; `BLOCKED` still halts and must carry a `blocking_reason`. The codec enforces this at render and at parse, so a malformed result cannot even be published.
+
+**Files:**
+- Create: `plugins/superb/skills/pipeline-auto/templates/worker-result.md`
+- Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
+- Test: `plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py`
+
+**Interfaces:**
+- Consumes: `TASK_KINDS`, `_TOKEN`, `_safe_relative`, `TrackerValidationError`.
+- Produces: `WORKER_RESULT_MARKER`; `COMPLETION_STATUSES`, `QUORUM_STATUSES`, `HALT_STATUSES`, `WORKER_STATUSES`; `WORKER_RESULT_FIELDS`; `_COMMIT`; `_table_safe`, `_digest_reference`, `_split_row`, `_cell`; `render_worker_result(result: dict) -> str`; `parse_worker_result(text: str) -> dict`.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py`:
+
+```python
+# --------------------------------------------------------------------------
+# Task 4 tests -- fault F5
+# --------------------------------------------------------------------------
+
+DIGEST = "a" * 64
+COMMIT = "b" * 40
+
+
+def worker_result(**overrides) -> dict:
+    result = {
+        "run_id": "run-1",
+        "task_id": "T1",
+        "attempt": 1,
+        "owner": "impl-1",
+        "kind": "source",
+        "status": "DONE",
+        "source_ref": COMMIT,
+        "commits": (COMMIT,),
+        "artifacts": (),
+        "tests": ("python3 -m unittest -k T1",),
+        "evidence": (f"docs/superpowers/runs/run-1/evidence/T1.md#sha256={DIGEST}",),
+        "concerns": "-",
+        "question_record": "-",
+        "blocking_reason": "-",
+        "checkpoints": (),
+    }
+    result.update(overrides)
+    return result
+
+
+def quorum_result(status: str, **overrides) -> dict:
+    return worker_result(
+        status=status, source_ref="-", commits=(), evidence=(),
+        question_record=f"docs/superpowers/runs/run-1/questions/q1.md#sha256={DIGEST}",
+        **overrides,
+    )
+
+
+class WorkerResultCodecTests(unittest.TestCase):
+
+    def test_round_trips(self):
+        original = worker_result(checkpoints=(
+            {"id": "c1", "status": "complete",
+             "evidence": f"docs/superpowers/runs/run-1/evidence/T1.md#sha256={DIGEST}"},
+        ))
+        text = state.render_worker_result(original)
+        self.assertTrue(text.startswith(state.WORKER_RESULT_MARKER))
+        self.assertEqual(state.parse_worker_result(text), original)
+
+    def test_field_order_is_pinned_in_the_rendered_document(self):
+        text = state.render_worker_result(worker_result())
+        rendered = [
+            line.split("|")[1].strip()
+            for line in text.splitlines()
+            if line.startswith("| ") and line.count("|") == 3
+        ]
+        self.assertEqual(
+            [name for name in rendered if name in state.WORKER_RESULT_FIELDS],
+            list(state.WORKER_RESULT_FIELDS),
+        )
+
+    def test_rejects_a_foreign_marker(self):
+        text = state.render_worker_result(worker_result()).replace(
+            state.WORKER_RESULT_MARKER, "<!-- pipeline-worker-result/v2 -->"
+        )
+        with self.assertRaises(state.TrackerValidationError):
+            state.parse_worker_result(text)
+
+    def test_rejects_reordered_fields(self):
+        lines = state.render_worker_result(worker_result()).splitlines()
+        index = next(i for i, line in enumerate(lines) if line.startswith("| owner "))
+        lines[index], lines[index - 1] = lines[index - 1], lines[index]
+        with self.assertRaises(state.TrackerValidationError):
+            state.parse_worker_result("\n".join(lines) + "\n")
+
+    def test_quorum_status_without_a_question_record_is_rejected(self):
+        """F5: a quorum-raising result missing its question record is rejected,
+        exactly as a result with a missing owner is rejected."""
+        for status in state.QUORUM_STATUSES:
+            with self.subTest(status=status):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.render_worker_result(
+                        quorum_result(status, question_record="-")
+                    )
+
+    def test_quorum_status_with_a_digest_bound_question_record_is_accepted(self):
+        for status in state.QUORUM_STATUSES:
+            with self.subTest(status=status):
+                result = quorum_result(status)
+                self.assertEqual(
+                    state.parse_worker_result(state.render_worker_result(result)),
+                    result,
+                )
+
+    def test_quorum_question_record_must_be_digest_bound(self):
+        for status in state.QUORUM_STATUSES:
+            with self.subTest(status=status):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.render_worker_result(quorum_result(
+                        status,
+                        question_record="docs/superpowers/runs/run-1/questions/q1.md",
+                    ))
+
+    def test_quorum_status_may_not_also_carry_a_blocking_reason(self):
+        for status in state.QUORUM_STATUSES:
+            with self.subTest(status=status):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.render_worker_result(
+                        quorum_result(status, blocking_reason="also blocked")
+                    )
+
+    def test_blocked_requires_a_blocking_reason_and_no_question_record(self):
+        base = dict(source_ref="-", commits=(), evidence=())
+        with self.assertRaises(state.TrackerValidationError):
+            state.render_worker_result(
+                worker_result(status="BLOCKED", blocking_reason="-", **base)
+            )
+        with self.assertRaises(state.TrackerValidationError):
+            state.render_worker_result(worker_result(
+                status="BLOCKED", blocking_reason="no staging credential",
+                question_record=f"docs/q.md#sha256={DIGEST}", **base,
+            ))
+        accepted = worker_result(
+            status="BLOCKED", blocking_reason="no staging credential", **base
+        )
+        self.assertEqual(
+            state.parse_worker_result(state.render_worker_result(accepted)), accepted
+        )
+
+    def test_completion_status_carries_neither_routing_field(self):
+        with self.assertRaises(state.TrackerValidationError):
+            state.render_worker_result(
+                worker_result(question_record=f"docs/q.md#sha256={DIGEST}")
+            )
+        with self.assertRaises(state.TrackerValidationError):
+            state.render_worker_result(worker_result(blocking_reason="why"))
+
+    def test_status_vocabulary_is_exactly_five_values(self):
+        self.assertEqual(state.WORKER_STATUSES, (
+            "DONE", "DONE_WITH_CONCERNS", "NEEDS_CONTEXT", "PLAN_CONFLICT", "BLOCKED",
+        ))
+        self.assertEqual(state.QUORUM_STATUSES, ("NEEDS_CONTEXT", "PLAN_CONFLICT"))
+        self.assertEqual(state.HALT_STATUSES, ("BLOCKED",))
+        with self.assertRaises(state.TrackerValidationError):
+            state.render_worker_result(worker_result(status="OK"))
+
+    def test_rejects_unsafe_scalars(self):
+        for override in ({"owner": "impl|1"}, {"concerns": "a|b"}, {"attempt": 0},
+                         {"attempt": "1"}, {"kind": "binary"}, {"run_id": ""},
+                         {"commits": ("short",)}, {"source_ref": "nope"}):
+            with self.subTest(override=override):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.render_worker_result(worker_result(**override))
+
+    def test_template_matches_the_codec_fields(self):
+        template = (
+            Path(state.__file__).resolve().parents[1] / "templates" / "worker-result.md"
+        ).read_text(encoding="utf-8")
+        self.assertTrue(template.startswith(state.WORKER_RESULT_MARKER))
+        for field in state.WORKER_RESULT_FIELDS:
+            with self.subTest(field=field):
+                self.assertIn(f"| {field} | ", template)
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k WorkerResultCodecTests`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'render_worker_result'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+Create `plugins/superb/skills/pipeline-auto/templates/worker-result.md`:
+
+```markdown
+<!-- pipeline-auto-worker-result/v1 -->
+# Pipeline Auto — Worker Result
+
+## Result
+| Field | Value |
+| --- | --- |
+| run_id | <run_id> |
+| task_id | <task_id> |
+| attempt | <positive_integer> |
+| owner | <controller_assigned_owner> |
+| kind | <source_or_artifact> |
+| status | <DONE_DONE_WITH_CONCERNS_NEEDS_CONTEXT_PLAN_CONFLICT_or_BLOCKED> |
+| source_ref | <full_source_head_sha_or_dash> |
+| commits | <ordered_full_shas_or_dash> |
+| artifacts | <exact_approved_outputs_or_dash> |
+| tests | <exact_ordered_task_suite_or_dash> |
+| evidence | <path#sha256=digest_list_or_dash> |
+| concerns | <concerns_or_dash> |
+| question_record | <path#sha256=digest_or_dash> |
+| blocking_reason | <blocking_reason_or_dash> |
+
+## Checkpoints
+| ID | Status | Evidence |
+| --- | --- | --- |
+| <checkpoint_id> | <complete_in_progress_or_blocked> | <path#sha256=digest> |
+
+`question_record` is REQUIRED for `NEEDS_CONTEXT` and `PLAN_CONFLICT`: those
+statuses raise a quorum question, and a result naming no question record is
+rejected. `blocking_reason` is REQUIRED for `BLOCKED`, which still halts the
+run — three brains cannot conjure an API key. A completion status carries
+neither.
+```
+
+Append to `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`:
+
+```python
+# ---------------------------------------------------------------------------
+# P04: immutable worker-result codec
+#
+# The status vocabulary is unchanged from superb:pipeline. The ROUTING is not:
+# NEEDS_CONTEXT and PLAN_CONFLICT now raise a quorum question, so they must
+# carry a resolvable digest-bound question record. Only BLOCKED still halts.
+# ---------------------------------------------------------------------------
+
+WORKER_RESULT_MARKER = "<!-- pipeline-auto-worker-result/v1 -->"
+
+COMPLETION_STATUSES = ("DONE", "DONE_WITH_CONCERNS")
+QUORUM_STATUSES = ("NEEDS_CONTEXT", "PLAN_CONFLICT")
+HALT_STATUSES = ("BLOCKED",)
+WORKER_STATUSES = COMPLETION_STATUSES + QUORUM_STATUSES + HALT_STATUSES
+
+WORKER_RESULT_FIELDS = (
+    "run_id", "task_id", "attempt", "owner", "kind", "status", "source_ref",
+    "commits", "artifacts", "tests", "evidence", "concerns",
+    "question_record", "blocking_reason",
+)
+_TUPLE_FIELDS = ("commits", "artifacts", "tests", "evidence")
+_CHECKPOINT_STATES = ("complete", "in_progress", "blocked")
+_DIGEST_REFERENCE = re.compile(r"(?P<path>[^#]+)#sha256=(?P<digest>[0-9a-f]{64})\Z")
+_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
+
+
+def _table_safe(value, *, field: str) -> str:
+    if not isinstance(value, str) or not value or "|" in value or "\n" in value:
+        raise TrackerValidationError(f"{field} must be a nonempty table-safe string")
+    return value
+
+
+def _digest_reference(value: str):
+    match = _DIGEST_REFERENCE.fullmatch(_table_safe(value, field="reference"))
+    if match is None:
+        raise TrackerValidationError(
+            f"reference must be <repository-relative-path>#sha256=<digest>: {value!r}"
+        )
+    try:
+        path = _safe_relative(match.group("path"))
+    except PlanMetadataError as exc:
+        raise TrackerValidationError(str(exc)) from exc
+    return path.as_posix(), match.group("digest")
+
+
+def _validate_worker_result(result: dict) -> dict:
+    missing = [
+        field for field in (*WORKER_RESULT_FIELDS, "checkpoints")
+        if field not in result
+    ]
+    if missing:
+        raise TrackerValidationError(f"worker result is missing fields: {missing}")
+    for field in ("run_id", "task_id", "owner", "concerns"):
+        _table_safe(result[field], field=field)
+    if not _TOKEN.fullmatch(result["owner"]) or not _TOKEN.fullmatch(result["task_id"]):
+        raise TrackerValidationError("owner and task_id must be identifier tokens")
+    attempt = result["attempt"]
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+        raise TrackerValidationError("attempt must be a positive integer")
+    if result["kind"] not in TASK_KINDS:
+        raise TrackerValidationError(f"unknown task kind: {result['kind']!r}")
+    status = result["status"]
+    if status not in WORKER_STATUSES:
+        raise TrackerValidationError(f"unknown worker status: {status!r}")
+    for field in _TUPLE_FIELDS:
+        values = tuple(result[field])
+        for value in values:
+            _table_safe(value, field=field)
+        if len(set(values)) != len(values):
+            raise TrackerValidationError(f"duplicate {field} entry")
+    for reference in tuple(result["evidence"]):
+        _digest_reference(reference)
+    if result["source_ref"] != "-" and not _COMMIT.fullmatch(result["source_ref"]):
+        raise TrackerValidationError("source_ref must be a full 40-hex commit or '-'")
+    if any(not _COMMIT.fullmatch(commit) for commit in result["commits"]):
+        raise TrackerValidationError("commits must be full 40-hex shas")
+
+    question_record = _table_safe(result["question_record"], field="question_record")
+    blocking_reason = _table_safe(result["blocking_reason"], field="blocking_reason")
+    if status in QUORUM_STATUSES:
+        if question_record == "-":
+            raise TrackerValidationError(
+                f"{status} raises a quorum question and must name a question record"
+            )
+        _digest_reference(question_record)
+        if blocking_reason != "-":
+            raise TrackerValidationError(
+                f"{status} routes to a quorum, not a halt; blocking_reason must be '-'"
+            )
+    elif status in HALT_STATUSES:
+        if blocking_reason == "-":
+            raise TrackerValidationError("BLOCKED result needs a blocking reason")
+        if question_record != "-":
+            raise TrackerValidationError(
+                "BLOCKED halts the run and must not name a question record"
+            )
+    elif question_record != "-" or blocking_reason != "-":
+        raise TrackerValidationError(
+            "a completion status carries neither question record nor blocking reason"
+        )
+
+    for checkpoint in tuple(result["checkpoints"]):
+        if set(checkpoint) != {"id", "status", "evidence"}:
+            raise TrackerValidationError("checkpoint needs exactly id/status/evidence")
+        if not _TOKEN.fullmatch(checkpoint["id"]):
+            raise TrackerValidationError("checkpoint id must be an identifier token")
+        if checkpoint["status"] not in _CHECKPOINT_STATES:
+            raise TrackerValidationError(
+                f"unknown checkpoint state: {checkpoint['status']!r}"
+            )
+        _digest_reference(checkpoint["evidence"])
+    return result
+
+
+def _cell(value) -> str:
+    if isinstance(value, (tuple, list)):
+        return ",".join(value) if value else "-"
+    return str(value)
+
+
+def _split_row(line: str) -> list:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def render_worker_result(result: dict) -> str:
+    """Render one validated immutable worker result in canonical field order."""
+    _validate_worker_result(result)
+    lines = [
+        WORKER_RESULT_MARKER,
+        "# Pipeline Auto — Worker Result",
+        "",
+        "## Result",
+        "| Field | Value |",
+        "| --- | --- |",
+    ]
+    lines += [f"| {field} | {_cell(result[field])} |" for field in WORKER_RESULT_FIELDS]
+    lines += ["", "## Checkpoints", "| ID | Status | Evidence |", "| --- | --- | --- |"]
+    lines += [
+        f"| {item['id']} | {item['status']} | {item['evidence']} |"
+        for item in result["checkpoints"]
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def parse_worker_result(text: str) -> dict:
+    """Parse a canonical worker result, rejecting a foreign or reordered document."""
+    lines = text.splitlines()
+    if not lines or lines[0] != WORKER_RESULT_MARKER:
+        raise TrackerValidationError(
+            "worker result marker is missing or foreign; the two formats do not "
+            "interoperate"
+        )
+    rows = [_split_row(line) for line in lines if line.startswith("| ")]
+    field_rows = [
+        row for row in rows if len(row) == 2 and row[0] not in {"Field", "---"}
+    ]
+    if [row[0] for row in field_rows] != list(WORKER_RESULT_FIELDS):
+        raise TrackerValidationError(
+            "worker result fields are missing, unknown, or reordered"
+        )
+    values = {row[0]: row[1] for row in field_rows}
+    result = {field: values[field] for field in WORKER_RESULT_FIELDS}
+    try:
+        result["attempt"] = int(values["attempt"])
+    except ValueError as exc:
+        raise TrackerValidationError("attempt must be a positive integer") from exc
+    for field in _TUPLE_FIELDS:
+        raw = values[field]
+        result[field] = () if raw == "-" else tuple(raw.split(","))
+    result["checkpoints"] = tuple(
+        {"id": row[0], "status": row[1], "evidence": row[2]}
+        for row in rows
+        if len(row) == 3 and row[0] not in {"ID", "---"}
+    )
+    return _validate_worker_result(result)
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`
+Expected: OK
+
+- [ ] **Step 5: Commit**
+
+```bash
+git diff --name-only -- plugins/superb/skills/pipeline/    # must print nothing
+git add plugins/superb/skills/pipeline-auto/templates/worker-result.md \
+        plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py \
+        plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py
+git commit -m "feat(pipeline-auto): require a question record on quorum-raising results"
+```
+
+---
+
+### Task 5: Verification-evidence template and codec
+
+A digest-bound typed PASS record is the only acceptable proof that a suite ran. It names the run, the subject, the attempt, the full tested commit, and the exact ordered command tuple. `outcome` is the literal `PASS`; there is no other legal value, because a record that is not a PASS is not evidence and is never written.
+
+**Files:**
+- Create: `plugins/superb/skills/pipeline-auto/templates/verification-evidence.md`
+- Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
+- Test: `plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py`
+
+**Interfaces:**
+- Consumes: `_parse_command_suite`, `_digest_reference`, `_COMMIT`, `_split_row`, `TrackerValidationError`.
+- Produces: `EVIDENCE_MARKER`; `EVIDENCE_PURPOSES = ("task-test", "task-integration", "phase")`; `EVIDENCE_FIELDS`; `parse_verification_evidence(text: str) -> dict`; `resolve_evidence(run_dir, repo_dir, reference) -> dict`.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py` (add `import hashlib` beside the other imports at the top of the file):
+
+```python
+# --------------------------------------------------------------------------
+# Task 5 tests
+# --------------------------------------------------------------------------
+
+def evidence_text(**overrides) -> str:
+    fields = {
+        "purpose": "task-test",
+        "run_id": "run-1",
+        "subject": "task/T1",
+        "attempt": "1",
+        "code_state": COMMIT,
+        "outcome": "PASS",
+        "commands": '["python3 -m unittest -k T1"]',
+        "environment": "python3.11-linux",
+        "inputs": "-",
+    }
+    fields.update(overrides)
+    rows = "\n".join(f"| {key} | {value} |" for key, value in fields.items())
+    return f"{state.EVIDENCE_MARKER}\n| Field | Value |\n| --- | --- |\n{rows}\n"
+
+
+def write_evidence(directory, name: str = "T1.md", **overrides) -> str:
+    """Write one evidence file and return its sha256 hex digest."""
+    path = Path(directory) / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = evidence_text(**overrides)
+    path.write_text(content, encoding="utf-8")
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+class VerificationEvidenceCodecTests(TempDirTestCase):
+
+    def test_round_trips(self):
+        record = state.parse_verification_evidence(evidence_text())
+        self.assertEqual(record["purpose"], "task-test")
+        self.assertEqual(record["subject"], "task/T1")
+        self.assertEqual(record["attempt"], "1")
+        self.assertEqual(record["code_state"], COMMIT)
+        self.assertEqual(record["commands"], ("python3 -m unittest -k T1",))
+
+    def test_rejects_a_foreign_marker(self):
+        text = evidence_text().replace(
+            state.EVIDENCE_MARKER, "<!-- pipeline-verification-evidence/v2 -->"
+        )
+        with self.assertRaises(state.TrackerValidationError):
+            state.parse_verification_evidence(text)
+
+    def test_rejects_invalid_records(self):
+        cases = (
+            {"outcome": "FAIL"}, {"outcome": "pass"}, {"purpose": "remediation"},
+            {"purpose": "anything"}, {"code_state": "short"}, {"commands": "[]"},
+            {"commands": "not-json"}, {"environment": "-"}, {"subject": "T1"},
+            {"attempt": "0"}, {"attempt": "later"},
+        )
+        for override in cases:
+            with self.subTest(override=override):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.parse_verification_evidence(evidence_text(**override))
+
+    def test_rejects_reordered_fields(self):
+        lines = evidence_text().splitlines()
+        index = next(i for i, line in enumerate(lines) if line.startswith("| outcome "))
+        lines[index], lines[index - 1] = lines[index - 1], lines[index]
+        with self.assertRaises(state.TrackerValidationError):
+            state.parse_verification_evidence("\n".join(lines) + "\n")
+
+    def test_resolve_evidence_verifies_the_digest(self):
+        run_dir = self.tmp / "run"
+        digest = write_evidence(run_dir / "evidence")
+        record = state.resolve_evidence(
+            run_dir, self.tmp, f"evidence/T1.md#sha256={digest}"
+        )
+        self.assertEqual(record["subject"], "task/T1")
+        with self.assertRaises(state.TrackerValidationError):
+            state.resolve_evidence(
+                run_dir, self.tmp, f"evidence/T1.md#sha256={'c' * 64}"
+            )
+        with self.assertRaises(state.TrackerValidationError):
+            state.resolve_evidence(
+                run_dir, self.tmp, f"evidence/absent.md#sha256={digest}"
+            )
+
+    def test_template_matches_the_codec_fields(self):
+        template = (
+            Path(state.__file__).resolve().parents[1]
+            / "templates" / "verification-evidence.md"
+        ).read_text(encoding="utf-8")
+        self.assertTrue(template.startswith(state.EVIDENCE_MARKER))
+        for field in state.EVIDENCE_FIELDS:
+            with self.subTest(field=field):
+                self.assertIn(f"| {field} | ", template)
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k VerificationEvidenceCodecTests`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'EVIDENCE_MARKER'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+Create `plugins/superb/skills/pipeline-auto/templates/verification-evidence.md`:
+
+```markdown
+<!-- pipeline-auto-verification-evidence/v1 -->
+| Field | Value |
+| --- | --- |
+| purpose | <task-test_task-integration_or_phase> |
+| run_id | <run_id> |
+| subject | <task_or_phase>/<stable-id> |
+| attempt | <positive_integer_or_N/A> |
+| code_state | <full_tested_commit> |
+| outcome | PASS |
+| commands | ["<exact-command>","<next-command>"] |
+| environment | <applicable_environment_identity> |
+| inputs | <artifact_JSON_path_sha256_array_or_dash> |
+
+`outcome` has exactly one legal value. A record that is not a PASS is not
+evidence, so it is never written. For `task-integration` the `code_state` is
+the `--no-ff` merge commit, not the task branch tip.
+```
+
+Append to `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`:
+
+```python
+# ---------------------------------------------------------------------------
+# P04: digest-bound typed PASS evidence
+# ---------------------------------------------------------------------------
+
+import hashlib
+
+EVIDENCE_MARKER = "<!-- pipeline-auto-verification-evidence/v1 -->"
+EVIDENCE_PURPOSES = ("task-test", "task-integration", "phase")
+EVIDENCE_FIELDS = (
+    "purpose", "run_id", "subject", "attempt", "code_state", "outcome",
+    "commands", "environment", "inputs",
+)
+
+
+def parse_verification_evidence(text: str) -> dict:
+    """Parse one typed PASS record, rejecting a foreign or reordered document."""
+    lines = text.splitlines()
+    if not lines or lines[0] != EVIDENCE_MARKER:
+        raise TrackerValidationError(
+            "verification evidence marker is missing or foreign"
+        )
+    rows = [
+        _split_row(line) for line in lines
+        if line.startswith("| ") and line.count("|") == 3
+    ]
+    field_rows = [row for row in rows if row[0] not in {"Field", "---"}]
+    if [row[0] for row in field_rows] != list(EVIDENCE_FIELDS):
+        raise TrackerValidationError(
+            "verification evidence fields are missing, unknown, or reordered"
+        )
+    record = {row[0]: row[1] for row in field_rows}
+    if record["purpose"] not in EVIDENCE_PURPOSES:
+        raise TrackerValidationError(f"unknown evidence purpose: {record['purpose']!r}")
+    if record["outcome"] != "PASS":
+        raise TrackerValidationError("a record that is not PASS is not evidence")
+    if not _COMMIT.fullmatch(record["code_state"]):
+        raise TrackerValidationError("code_state must be a full 40-hex commit")
+    if "/" not in record["subject"] or not record["subject"].split("/", 1)[1]:
+        raise TrackerValidationError("subject must be <kind>/<stable-id>")
+    for field in ("run_id", "environment"):
+        if record[field] in {"", "-"}:
+            raise TrackerValidationError(f"{field} is required on evidence")
+    if record["attempt"] != "N/A":
+        try:
+            if int(record["attempt"]) < 1:
+                raise ValueError
+        except ValueError as exc:
+            raise TrackerValidationError(
+                "evidence attempt must be a positive integer or N/A"
+            ) from exc
+    record["commands"] = _parse_command_suite(record["commands"])
+    return record
+
+
+def resolve_evidence(run_dir, repo_dir, reference: str) -> dict:
+    """Resolve a digest-bound evidence reference and verify its content digest."""
+    relative, digest = _digest_reference(reference)
+    for candidate in (Path(run_dir) / relative, Path(repo_dir) / relative):
+        if not candidate.is_file():
+            continue
+        content = candidate.read_bytes()
+        if hashlib.sha256(content).hexdigest() != digest:
+            raise TrackerValidationError(
+                f"evidence digest does not match its content: {reference}"
+            )
+        return parse_verification_evidence(content.decode("utf-8"))
+    raise TrackerValidationError(f"evidence is missing: {reference}")
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`
+Expected: OK
+
+- [ ] **Step 5: Commit**
+
+```bash
+git diff --name-only -- plugins/superb/skills/pipeline/    # must print nothing
+git add plugins/superb/skills/pipeline-auto/templates/verification-evidence.md \
+        plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py \
+        plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py
+git commit -m "feat(pipeline-auto): add digest-bound typed PASS evidence codec"
+```
+
+---
+
+### Task 6: Tracker accessors, Git helpers, and `reserve_task` — the slot cap (faults F1, F2)
+
+This is the strongest test in the phase. `worker_limit - 3` is not a tuning knob: three slots are held for a quorum, and without the reserve a blocked task holds the slot needed to dispatch the brains that would unblock it, so the run deadlocks permanently. No existing test covers it, because `superb:pipeline` has no brains.
+
+A blocked `[?]` task still occupies its implementation slot — the spec's rationale says so in as many words — so the cap counts `[~]` and `[?]` alike.
+
+**Files:**
+- Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
+- Test: `plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py`
+
+**Interfaces:**
+- Consumes: P02's `initialize_run`, `validate_run`, `locked_tracker_update`, `append_row`, `section_columns`, `repo_root`; `parse_plan_metadata`, `_scope_sets_overlap`, `TrackerValidationError`.
+- Produces: `QUORUM_SLOT_RESERVE = 3`; `implementation_slot_cap(worker_limit: int) -> int`; `_run_field`, `_current_field`, `_task_row`, `_replace_task`, `_quorum_owners`, `_csv`, `_append_history`; `_implementation_owners(tracker)`, `_active_owners(tracker)`; `_repo_dir(tracker) -> Path`; `_git`, `_git_out`, `_resolved_commit`; `_active_phase_plan(run_dir, tracker) -> Path`; `_approved_definition(run_dir, tracker, task_id) -> dict`; `_require_dependencies_complete`, `_require_no_scope_conflict`, `_require_capacity`, `_require_fresh_attempt`, `_validate_assignment`; `reserve_task(run_dir, *, task_id, owner, attempt) -> dict`.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py`:
+
+```python
+# --------------------------------------------------------------------------
+# Run harness -- reused by tasks 6 through 12
+# --------------------------------------------------------------------------
+
+def git(repo, *args: str) -> str:
+    return subprocess.run(
+        ("git", "-C", str(repo), *args),
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+def make_repo(root) -> Path:
+    repo = Path(root) / "repo"
+    repo.mkdir(parents=True)
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "test@example.invalid")
+    git(repo, "config", "user.name", "test")
+    (repo / "src").mkdir()
+    (repo / "src" / "seed.py").write_text("seed = 1\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "seed")
+    git(repo, "branch", "-f", "target", "HEAD")
+    return repo
+
+
+def make_run(root, tasks_body: str, *, worker_limit: int = 4):
+    """Return (repo, run_dir, phase_plan).
+
+    P02's initialize_run takes no artifact references and seeds no task rows, so
+    the harness writes `phase_plans`, the active phase, and the `## Tasks` rows
+    through one explicit locked update using P02's append_row. See "Unresolved".
+    """
+    repo = make_repo(root)
+    run_dir = repo / "docs" / "superpowers" / "runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    plan = write_phase_plan(run_dir, tasks_body)
+    state.initialize_run(
+        run_dir, run_id="run-1", base_commit=git(repo, "rev-parse", "HEAD"),
+        target_branch="target", worker_limit=worker_limit, repo_root=str(repo),
+    )
+    relative_plan = plan.relative_to(repo).as_posix()
+    tasks = state.parse_plan_metadata(plan)["tasks"]
+
+    def mutate(tracker: dict) -> dict:
+        tracker["run"]["phase_plans"] = relative_plan
+        tracker["current"]["phase"] = "P04"
+        state.append_row(tracker, "Phases", {
+            "id": "P04", "state": "active", "review_class": "required",
+            "class_source": "plan", "ratchet": "-",
+        })
+        for task in tasks:
+            row = {column: "-" for column in state.section_columns("Tasks")}
+            row.update(id=task["id"], state="[ ]", kind=task["kind"],
+                       deps=",".join(task["deps"]) or "-", provisional="no")
+            state.append_row(tracker, "Tasks", row)
+        return tracker
+
+    state.locked_tracker_update(run_dir, transition_id="seed-p04", mutate=mutate)
+    return repo, run_dir, plan
+
+
+def three_disjoint_tasks() -> str:
+    return "".join(
+        task_block(f"T{index}", order=index, batch=f"b{index}",
+                   write_scope=f"file:src/a{index}.py")
+        for index in range(1, 4)
+    )
+
+
+def open_quorum_row(run_dir, owners=("brain-1", "brain-2", "brain-3")) -> None:
+    """Stand in for P03's open_quorum: one in_flight record with three owners."""
+    def mutate(tracker: dict) -> dict:
+        row = {column: "-" for column in state.section_columns("Quorum")}
+        row.update(qid="q0001", state="in_flight", owners=",".join(owners))
+        return state.append_row(tracker, "Quorum", row)
+
+    state.locked_tracker_update(run_dir, transition_id="test-open-quorum", mutate=mutate)
+
+
+def task_row(tracker: dict, task_id: str) -> dict:
+    return next(row for row in tracker["tasks"] if row["id"] == task_id)
+
+
+def set_task_state(run_dir, task_id: str, **fields) -> None:
+    def mutate(tracker: dict) -> dict:
+        task_row(tracker, task_id).update(fields)
+        return tracker
+
+    state.locked_tracker_update(
+        run_dir, transition_id=f"test-set-{task_id}-{sorted(fields)}", mutate=mutate
+    )
+
+
+# --------------------------------------------------------------------------
+# Task 6 tests -- faults F1 and F2
+# --------------------------------------------------------------------------
+
+class SlotCapTests(unittest.TestCase):
+
+    def test_cap_holds_three_slots_for_a_quorum(self):
+        self.assertEqual(state.QUORUM_SLOT_RESERVE, 3)
+        self.assertEqual(state.implementation_slot_cap(4), 1)
+        self.assertEqual(state.implementation_slot_cap(6), 3)
+        self.assertEqual(state.implementation_slot_cap(10), 7)
+
+    def test_cap_floors_at_one_so_tasks_serialise_rather_than_stall(self):
+        # Below four the cap floors at ONE, not zero: tasks serialise and the
+        # brain slots stay free. Flooring at zero would stop the run instead.
+        self.assertEqual(state.implementation_slot_cap(3), 1)
+        self.assertEqual(state.implementation_slot_cap(1), 1)
+
+    def test_cap_rejects_a_nonpositive_limit(self):
+        for value in (0, -1, True, "4"):
+            with self.subTest(value=value):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.implementation_slot_cap(value)
+
+
+class ReserveTaskTests(TempDirTestCase):
+
+    def test_worker_limit_four_reserves_one_task_and_a_quorum_still_fits(self):
+        """F2: reserving up to worker_limit deadlocks the run permanently --
+        the blocked task holds the slot needed to dispatch the brains that
+        would unblock it."""
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=4)
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.reserve_task(run_dir, task_id="T2", owner="impl-2", attempt=1)
+        self.assertIn("quorum", str(caught.exception))
+
+        tracker = state.validate_run(run_dir)
+        self.assertEqual(
+            [row["id"] for row in tracker["tasks"] if row["state"] == "[~]"], ["T1"]
+        )
+        self.assertEqual(state._implementation_owners(tracker), {"impl-1"})
+
+        # The three held slots are really available: a quorum opened afterwards
+        # takes them and the run sits AT its limit, not over it.
+        open_quorum_row(run_dir)
+        tracker = state.validate_run(run_dir)
+        self.assertEqual(
+            state._quorum_owners(tracker), {"brain-1", "brain-2", "brain-3"}
+        )
+        self.assertEqual(len(state._active_owners(tracker)), 4)
+        self.assertEqual(int(tracker["run"]["worker_limit"]), 4)
+
+        with self.assertRaises(state.TrackerValidationError):
+            state.reserve_task(run_dir, task_id="T2", owner="impl-2", attempt=1)
+
+    def test_worker_limit_six_reserves_three_tasks_then_refuses_a_fourth(self):
+        body = three_disjoint_tasks() + task_block(
+            "T4", order=4, batch="b4", write_scope="file:src/a4.py"
+        )
+        repo, run_dir, _ = make_run(self.tmp, body, worker_limit=6)
+        for index in range(1, 4):
+            state.reserve_task(
+                run_dir, task_id=f"T{index}", owner=f"impl-{index}", attempt=1
+            )
+        tracker = state.validate_run(run_dir)
+        self.assertEqual(len(state._implementation_owners(tracker)), 3)
+        with self.assertRaises(state.TrackerValidationError):
+            state.reserve_task(run_dir, task_id="T4", owner="impl-4", attempt=1)
+
+    def test_a_blocked_task_still_occupies_its_implementation_slot(self):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=4)
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        set_task_state(run_dir, "T1", state="[?]",
+                       question=f"quorum:docs/q.md#sha256={DIGEST}")
+        tracker = state.validate_run(run_dir)
+        self.assertEqual(state._implementation_owners(tracker), {"impl-1"})
+        with self.assertRaises(state.TrackerValidationError):
+            state.reserve_task(run_dir, task_id="T2", owner="impl-2", attempt=1)
+
+    def test_overlapping_scopes_never_reserve_together_despite_spare_capacity(self):
+        """F1: tree:src and file:src/a.py must never both be active."""
+        body = (
+            task_block("T1", order=1, batch="b1", write_scope="tree:src")
+            + task_block("T2", order=2, batch="b2", write_scope="file:src/a.py")
+        )
+        repo, run_dir, _ = make_run(self.tmp, body, worker_limit=12)
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.reserve_task(run_dir, task_id="T2", owner="impl-2", attempt=1)
+        self.assertIn("write scope", str(caught.exception))
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_reservation_persists_the_baseline_for_a_source_task(self):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        target = git(repo, "rev-parse", "target")
+        tracker = state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        row = task_row(tracker, "T1")
+        self.assertEqual(row["state"], "[~]")
+        self.assertEqual(row["owner"], "impl-1")
+        self.assertEqual(row["attempt"], "1")
+        self.assertIn("started:1", row["checkpoints"])
+        self.assertIn(f"baseline:1@{target}", row["checkpoints"])
+
+    def test_artifact_task_reservation_records_no_baseline(self):
+        body = task_block("T1", kind="artifact", write_scope="tree:docs",
+                          outputs="docs/out.md")
+        repo, run_dir, _ = make_run(self.tmp, body, worker_limit=6)
+        tracker = state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        self.assertNotIn("baseline:", task_row(tracker, "T1")["checkpoints"])
+
+    def test_handles_the_first_start_only(self):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        with self.assertRaises(state.TrackerValidationError):
+            state.reserve_task(run_dir, task_id="T1", owner="impl-9", attempt=2)
+
+    def test_refuses_an_incomplete_dependency(self):
+        body = (
+            task_block("T1", order=1, batch="b1", write_scope="file:src/a1.py")
+            + task_block("T2", deps="T1", order=2, batch="b2",
+                         write_scope="file:src/a2.py")
+        )
+        repo, run_dir, _ = make_run(self.tmp, body, worker_limit=8)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.reserve_task(run_dir, task_id="T2", owner="impl-2", attempt=1)
+        self.assertIn("dependency", str(caught.exception))
+
+    def test_rejects_bad_identity_and_a_reused_attempt(self):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        cases = (
+            {"task_id": "T1", "owner": "impl|1", "attempt": 1},
+            {"task_id": "T1", "owner": "impl-1", "attempt": 0},
+            {"task_id": "T1", "owner": "impl-1", "attempt": "1"},
+            {"task_id": "TX", "owner": "impl-1", "attempt": 1},
+        )
+        for kwargs in cases:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.reserve_task(run_dir, **kwargs)
+
+    def test_replay_of_the_same_transition_is_inert(self):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        first = state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        snapshot = (run_dir / "progress.md").read_bytes()
+        replay = state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        self.assertEqual((run_dir / "progress.md").read_bytes(), snapshot)
+        self.assertEqual(
+            task_row(replay, "T1")["attempt"], task_row(first, "T1")["attempt"]
+        )
+
+    def test_repository_root_comes_from_the_tracker_not_from_run_dir_depth(self):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        tracker = state.validate_run(run_dir)
+        self.assertEqual(state._repo_dir(tracker), repo.resolve())
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k SlotCapTests`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'QUORUM_SLOT_RESERVE'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+Append to `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`:
+
+```python
+# ---------------------------------------------------------------------------
+# P04: tracker accessors
+#
+# Every P04 read of the tracker dict goes through these five functions. If
+# P02's shape differs from the documented assumption, this is the only code
+# that changes.
+# ---------------------------------------------------------------------------
+
+import subprocess
+
+
+def _run_field(tracker: dict, field: str) -> str:
+    try:
+        return tracker["run"][field]
+    except (KeyError, TypeError) as exc:
+        raise TrackerValidationError(f"tracker run field is missing: {field}") from exc
+
+
+def _current_field(tracker: dict, field: str) -> str:
+    try:
+        return tracker["current"][field]
+    except (KeyError, TypeError) as exc:
+        raise TrackerValidationError(
+            f"tracker current field is missing: {field}"
+        ) from exc
+
+
+def _task_row(tracker: dict, task_id: str) -> dict:
+    for row in tracker.get("tasks", ()):
+        if row["id"] == task_id:
+            return row
+    raise TrackerValidationError(f"unknown task: {task_id}")
+
+
+def _replace_task(tracker: dict, replacement: dict) -> dict:
+    tracker["tasks"] = [
+        replacement if row["id"] == replacement["id"] else row
+        for row in tracker["tasks"]
+    ]
+    return tracker
+
+
+def _quorum_owners(tracker: dict) -> set:
+    owners: set = set()
+    for row in tracker.get("quorum", ()) or ():
+        if row.get("state") != "in_flight":
+            continue
+        owners.update(
+            value for value in str(row.get("owners", "-")).split(",")
+            if value and value != "-"
+        )
+    return owners
+
+
+def _csv(value: str) -> tuple:
+    return () if value in {"", "-"} else tuple(value.split(","))
+
+
+def _append_history(value: str, entry: str) -> str:
+    return entry if value in {"", "-"} else f"{value},{entry}"
+
+
+# ---------------------------------------------------------------------------
+# P04: capacity arithmetic
+#
+# Three slots are held for a quorum. Reserving up to worker_limit deadlocks the
+# run permanently: a blocked task holds the slot needed to dispatch the brains
+# that would unblock it. A blocked [?] task therefore still occupies its slot.
+# ---------------------------------------------------------------------------
+
+QUORUM_SLOT_RESERVE = 3
+_OCCUPYING_STATES = ("[~]", "[?]")
+
+
+def implementation_slot_cap(worker_limit) -> int:
+    """Return how many slots implementation tasks may occupy at once."""
+    if (not isinstance(worker_limit, int) or isinstance(worker_limit, bool)
+            or worker_limit < 1):
+        raise TrackerValidationError("worker_limit must be a positive integer")
+    return max(1, worker_limit - QUORUM_SLOT_RESERVE)
+
+
+def _implementation_owners(tracker: dict) -> set:
+    return {
+        row["owner"] for row in tracker.get("tasks", ())
+        if row["state"] in _OCCUPYING_STATES and row["owner"] != "-"
+    }
+
+
+def _active_owners(tracker: dict) -> set:
+    return _implementation_owners(tracker) | _quorum_owners(tracker)
+
+
+# ---------------------------------------------------------------------------
+# P04: Git facts
+#
+# The repository root is the one recorded at init. It is NEVER derived from
+# run_dir depth: a run directory nested at an unexpected depth would otherwise
+# silently bind the run to the wrong repository.
+# ---------------------------------------------------------------------------
+
+def _repo_dir(tracker: dict) -> Path:
+    return Path(repo_root(tracker)).resolve()
+
+
+def _git(repo, *args: str) -> bool:
+    return subprocess.run(
+        ("git", "-C", str(repo), *args),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+    ).returncode == 0
+
+
+def _git_out(repo, *args: str) -> str:
+    completed = subprocess.run(
+        ("git", "-C", str(repo), *args), capture_output=True, text=True, check=False,
+    )
+    if completed.returncode != 0:
+        raise TrackerValidationError(
+            f"git {' '.join(args)} failed: {completed.stderr.strip()}"
+        )
+    return completed.stdout
+
+
+def _resolved_commit(repo, ref: str) -> str:
+    resolved = _git_out(repo, "rev-parse", "--verify", f"{ref}^{{commit}}").strip()
+    if not _COMMIT.fullmatch(resolved):
+        raise TrackerValidationError(f"reference did not resolve to one commit: {ref}")
+    return resolved
+
+
+# ---------------------------------------------------------------------------
+# P04: approved task definitions and reservation guards
+# ---------------------------------------------------------------------------
+
+def _active_phase_plan(run_dir, tracker: dict) -> Path:
+    paths = _csv(_run_field(tracker, "phase_plans"))
+    phase_ids = [row["id"] for row in tracker.get("phases", ())]
+    current = _current_field(tracker, "phase")
+    if len(paths) != len(phase_ids) or current not in phase_ids:
+        raise TrackerValidationError(
+            "the current phase does not resolve to exactly one approved phase plan"
+        )
+    return _repo_dir(tracker) / _safe_relative(paths[phase_ids.index(current)])
+
+
+def _approved_definition(run_dir, tracker: dict, task_id: str) -> dict:
+    tasks = parse_plan_metadata(_active_phase_plan(run_dir, tracker))["tasks"]
+    definition = next((task for task in tasks if task["id"] == task_id), None)
+    if definition is None:
+        raise TrackerValidationError(
+            f"task {task_id} is not defined by the approved phase plan"
+        )
+    row = _task_row(tracker, task_id)
+    if row["kind"] != definition["kind"] or _csv(row["deps"]) != definition["deps"]:
+        raise TrackerValidationError(
+            "task metadata does not match the authoritative approved plan"
+        )
+    return definition
+
+
+def _require_dependencies_complete(tracker: dict, definition: dict) -> None:
+    for dependency in definition["deps"]:
+        if _task_row(tracker, dependency)["state"] != "[x]":
+            raise TrackerValidationError(f"dependency {dependency} is not complete")
+
+
+def _require_no_scope_conflict(run_dir, tracker: dict, definition: dict) -> None:
+    for row in tracker.get("tasks", ()):
+        if row["id"] == definition["id"] or row["state"] not in _OCCUPYING_STATES:
+            continue
+        other = _approved_definition(run_dir, tracker, row["id"])
+        if _scope_sets_overlap(definition["write_scope"], other["write_scope"]):
+            raise TrackerValidationError(
+                f"write scope conflict: {definition['id']} "
+                f"{definition['write_scope']} overlaps active {other['id']} "
+                f"{other['write_scope']}"
+            )
+
+
+def _require_capacity(tracker: dict, owner: str) -> None:
+    limit = int(_run_field(tracker, "worker_limit"))
+    cap = implementation_slot_cap(limit)
+    owners = _implementation_owners(tracker)
+    if owner not in owners and len(owners) + 1 > cap:
+        raise TrackerValidationError(
+            f"implementation slots exhausted: {len(owners)} of {cap} in use "
+            f"(worker_limit {limit} minus {QUORUM_SLOT_RESERVE} held for a quorum)"
+        )
+    if len(_active_owners(tracker) | {owner}) > limit:
+        raise TrackerValidationError(
+            f"global worker_limit {limit} is exhausted, including quorum owners"
+        )
+
+
+def _require_fresh_attempt(row: dict, attempt: int) -> None:
+    used = set(_csv(row["attempt"]))
+    for history in (row["checkpoints"], row["result"]):
+        for entry in _csv(history):
+            used.update(re.findall(r"(?<![0-9])[0-9]+(?![0-9])", entry))
+    if str(attempt) in used:
+        raise TrackerValidationError(f"task attempt {attempt} has already been used")
+
+
+def _validate_assignment(owner, attempt) -> None:
+    if not isinstance(owner, str) or not _TOKEN.fullmatch(owner) or "|" in owner:
+        raise TrackerValidationError("owner must be a table-safe identifier token")
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+        raise TrackerValidationError("attempt must be a positive integer")
+
+
+def reserve_task(run_dir, *, task_id: str, owner: str, attempt: int) -> dict:
+    """Persist the first `[ ] -> [~]` assignment, with its baseline, before dispatch."""
+    _validate_assignment(owner, attempt)
+
+    def mutate(tracker: dict) -> dict:
+        row = _task_row(tracker, task_id)
+        if row["state"] != "[ ]":
+            raise TrackerValidationError("reserve_task handles the first start only")
+        definition = _approved_definition(run_dir, tracker, task_id)
+        _require_dependencies_complete(tracker, definition)
+        _require_fresh_attempt(row, attempt)
+        _require_no_scope_conflict(run_dir, tracker, definition)
+        _require_capacity(tracker, owner)
+        checkpoint = f"started:{attempt}"
+        if definition["kind"] == "source":
+            baseline = _resolved_commit(
+                _repo_dir(tracker), _run_field(tracker, "target_branch")
+            )
+            checkpoint = f"{checkpoint},baseline:{attempt}@{baseline}"
+        row = dict(row)
+        row.update(state="[~]", owner=owner, attempt=str(attempt),
+                   checkpoints=_append_history(row["checkpoints"], checkpoint))
+        return _replace_task(tracker, row)
+
+    return locked_tracker_update(
+        run_dir, transition_id=f"reserve-{task_id}-{attempt}", mutate=mutate
+    )
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`
+Expected: OK
+
+- [ ] **Step 5: Commit**
+
+```bash
+git diff --name-only -- plugins/superb/skills/pipeline/    # must print nothing
+git add plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py \
+        plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py
+git commit -m "feat(pipeline-auto): hold three worker slots for a quorum when reserving tasks"
+```
+
+---
+
+### Task 7: `resume_task`
+
+An answered blocked attempt moves `[?] -> [~]`. The prior attempt must match, the new attempt must be distinct and unused, and `decision_ref` must resolve to an explicit adopted answer whose `Decision action` is `task.resume` and whose scope names the task. Context compaction or a restarted controller is not a blocked-task retry and creates no new attempt.
+
+**Files:**
+- Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
+- Test: `plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py`
+
+**Interfaces:**
+- Consumes: everything Task 6 produced; `_split_row`.
+- Produces: `RESUME_ACTION = "task.resume"`; `_decision_sections(text) -> dict`; `_decision_fields(lines) -> dict`; `_validate_decision(run_dir, tracker, decision_ref, task_id)`; `resume_task(run_dir, *, task_id, prior_attempt, new_owner, new_attempt, decision_ref) -> dict`.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py`:
+
+```python
+# --------------------------------------------------------------------------
+# Task 7 tests
+# --------------------------------------------------------------------------
+
+RESUME_DECISION = """# Decisions
+
+## Q-0001
+| Field | Value |
+| --- | --- |
+| Question | Which serialiser does T1 use? |
+| Answer | The standard-library json module. |
+| Provenance | quorum |
+| Status | Adopted |
+| Scope | T1 |
+| Decision action | task.resume |
+"""
+
+
+def write_decisions(run_dir, body: str) -> None:
+    (Path(run_dir) / "decisions.md").write_text(body, encoding="utf-8")
+
+    def mutate(tracker: dict) -> dict:
+        tracker["run"]["decisions"] = "decisions.md"
+        return tracker
+
+    state.locked_tracker_update(
+        run_dir, transition_id=f"test-decisions-{len(body)}", mutate=mutate
+    )
+
+
+class ResumeTaskTests(TempDirTestCase):
+
+    def blocked(self, *, worker_limit: int = 6):
+        repo, run_dir, plan = make_run(
+            self.tmp, three_disjoint_tasks(), worker_limit=worker_limit
+        )
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        set_task_state(run_dir, "T1", state="[?]",
+                       question=f"quorum:docs/q.md#sha256={DIGEST}")
+        write_decisions(run_dir, RESUME_DECISION)
+        return repo, run_dir
+
+    def test_moves_an_answered_block_back_to_active(self):
+        repo, run_dir = self.blocked()
+        tracker = state.resume_task(
+            run_dir, task_id="T1", prior_attempt=1, new_owner="impl-2",
+            new_attempt=2, decision_ref="Q-0001",
+        )
+        row = task_row(tracker, "T1")
+        self.assertEqual(row["state"], "[~]")
+        self.assertEqual(row["owner"], "impl-2")
+        self.assertEqual(row["attempt"], "2")
+        self.assertIn("resumed:1->2@Q-0001", row["checkpoints"])
+        self.assertEqual(row["question"], "resolved:Q-0001")
+
+    def test_records_a_fresh_baseline_for_a_source_task(self):
+        repo, run_dir = self.blocked()
+        (repo / "src" / "later.py").write_text("later = 1\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-qm", "target moved")
+        git(repo, "branch", "-f", "target", "HEAD")
+        moved = git(repo, "rev-parse", "target")
+        tracker = state.resume_task(
+            run_dir, task_id="T1", prior_attempt=1, new_owner="impl-2",
+            new_attempt=2, decision_ref="Q-0001",
+        )
+        self.assertIn(f"baseline:2@{moved}", task_row(tracker, "T1")["checkpoints"])
+
+    def test_requires_the_matching_blocked_attempt(self):
+        repo, run_dir = self.blocked()
+        with self.assertRaises(state.TrackerValidationError):
+            state.resume_task(
+                run_dir, task_id="T1", prior_attempt=9, new_owner="impl-2",
+                new_attempt=2, decision_ref="Q-0001",
+            )
+
+    def test_requires_a_distinct_unused_attempt(self):
+        repo, run_dir = self.blocked()
+        with self.assertRaises(state.TrackerValidationError):
+            state.resume_task(
+                run_dir, task_id="T1", prior_attempt=1, new_owner="impl-2",
+                new_attempt=1, decision_ref="Q-0001",
+            )
+
+    def test_rejects_a_decision_without_the_task_resume_action(self):
+        repo, run_dir = self.blocked()
+        write_decisions(run_dir, RESUME_DECISION.replace("task.resume", "none"))
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.resume_task(
+                run_dir, task_id="T1", prior_attempt=1, new_owner="impl-2",
+                new_attempt=2, decision_ref="Q-0001",
+            )
+        self.assertIn("task.resume", str(caught.exception))
+
+    def test_rejects_a_decision_scoped_to_another_task(self):
+        repo, run_dir = self.blocked()
+        write_decisions(
+            run_dir, RESUME_DECISION.replace("| Scope | T1 |", "| Scope | T3 |")
+        )
+        with self.assertRaises(state.TrackerValidationError):
+            state.resume_task(
+                run_dir, task_id="T1", prior_attempt=1, new_owner="impl-2",
+                new_attempt=2, decision_ref="Q-0001",
+            )
+
+    def test_rejects_a_superseded_or_missing_decision(self):
+        repo, run_dir = self.blocked()
+        write_decisions(run_dir, RESUME_DECISION.replace("Adopted", "Superseded"))
+        with self.assertRaises(state.TrackerValidationError):
+            state.resume_task(
+                run_dir, task_id="T1", prior_attempt=1, new_owner="impl-2",
+                new_attempt=2, decision_ref="Q-0001",
+            )
+        write_decisions(run_dir, RESUME_DECISION)
+        with self.assertRaises(state.TrackerValidationError):
+            state.resume_task(
+                run_dir, task_id="T1", prior_attempt=1, new_owner="impl-2",
+                new_attempt=2, decision_ref="Q-0404",
+            )
+
+    def test_rejects_a_generic_approval_as_an_answer(self):
+        repo, run_dir = self.blocked()
+        write_decisions(
+            run_dir,
+            RESUME_DECISION.replace(
+                "| Answer | The standard-library json module. |", "| Answer | - |"
+            ),
+        )
+        with self.assertRaises(state.TrackerValidationError):
+            state.resume_task(
+                run_dir, task_id="T1", prior_attempt=1, new_owner="impl-2",
+                new_attempt=2, decision_ref="Q-0001",
+            )
+
+    def test_refuses_an_active_task(self):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        write_decisions(run_dir, RESUME_DECISION)
+        with self.assertRaises(state.TrackerValidationError):
+            state.resume_task(
+                run_dir, task_id="T1", prior_attempt=1, new_owner="impl-2",
+                new_attempt=2, decision_ref="Q-0001",
+            )
+
+    def test_still_honours_the_implementation_slot_cap(self):
+        repo, run_dir = self.blocked(worker_limit=4)
+        open_quorum_row(run_dir)
+        with self.assertRaises(state.TrackerValidationError):
+            state.resume_task(
+                run_dir, task_id="T1", prior_attempt=1, new_owner="impl-2",
+                new_attempt=2, decision_ref="Q-0001",
+            )
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k ResumeTaskTests`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'resume_task'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+Append to `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`:
+
+```python
+# ---------------------------------------------------------------------------
+# P04: resume an answered block
+#
+# Transition authority comes from an explicit `Decision action: task.resume`
+# scoped to this task, never from the wording of an answer.
+# ---------------------------------------------------------------------------
+
+RESUME_ACTION = "task.resume"
+_DECISION_HEADING = re.compile(r"^## ((?:H|Q|D)-[0-9A-Za-z]+)(?:\s|$)")
+
+
+def _decision_sections(text: str) -> dict:
+    sections: dict = {}
+    current = None
+    for line in text.splitlines():
+        match = _DECISION_HEADING.match(line)
+        if match:
+            current = match.group(1)
+            if current in sections:
+                raise TrackerValidationError(f"duplicate decision {current}")
+            sections[current] = []
+        elif current is not None and not line.startswith("## "):
+            sections[current].append(line)
+    return sections
+
+
+def _decision_fields(lines) -> dict:
+    fields: dict = {}
+    for line in lines:
+        if not line.startswith("| "):
+            continue
+        cells = _split_row(line)
+        if len(cells) == 2 and cells[0] not in {"Field", "---"}:
+            fields[cells[0]] = cells[1]
+    return fields
+
+
+def _validate_decision(run_dir, tracker: dict, decision_ref: str, task_id: str) -> None:
+    relative = _safe_relative(_run_field(tracker, "decisions"))
+    candidates = (Path(run_dir) / relative, _repo_dir(tracker) / relative)
+    path = next((item for item in candidates if item.is_file()), None)
+    if path is None:
+        raise TrackerValidationError(f"decisions file is missing: {relative}")
+    try:
+        sections = _decision_sections(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise TrackerValidationError(f"decisions file is unreadable: {exc}") from exc
+    if decision_ref not in sections:
+        raise TrackerValidationError(f"decision {decision_ref} does not resolve")
+    fields = _decision_fields(sections[decision_ref])
+    if fields.get("Status") != "Adopted":
+        raise TrackerValidationError(f"decision {decision_ref} is not Adopted")
+    if fields.get("Decision action") != RESUME_ACTION:
+        raise TrackerValidationError(
+            f"decision {decision_ref} does not carry "
+            f"'Decision action: {RESUME_ACTION}'"
+        )
+    if task_id not in _csv(fields.get("Scope", "-")):
+        raise TrackerValidationError(
+            f"decision {decision_ref} is not scoped to task {task_id}"
+        )
+    answer = fields.get("Answer", "").strip()
+    if not answer or answer == "-":
+        raise TrackerValidationError(
+            f"decision {decision_ref} carries no explicit answer"
+        )
+
+
+def resume_task(run_dir, *, task_id: str, prior_attempt: int, new_owner: str,
+                new_attempt: int, decision_ref: str) -> dict:
+    """Persist an answered `[?] -> [~]` assignment before redispatch."""
+    _validate_assignment(new_owner, new_attempt)
+    if (not isinstance(prior_attempt, int) or isinstance(prior_attempt, bool)
+            or prior_attempt < 1):
+        raise TrackerValidationError("prior_attempt must be a positive integer")
+    if not decision_ref or "|" in decision_ref:
+        raise TrackerValidationError("decision_ref is required and must be table-safe")
+    if new_attempt == prior_attempt:
+        raise TrackerValidationError("the new attempt must be distinct")
+    marker = f"resumed:{prior_attempt}->{new_attempt}@{decision_ref}"
+
+    def mutate(tracker: dict) -> dict:
+        row = _task_row(tracker, task_id)
+        if row["state"] != "[?]" or row["attempt"] != str(prior_attempt):
+            raise TrackerValidationError("resume requires the matching blocked attempt")
+        _require_fresh_attempt(row, new_attempt)
+        _validate_decision(run_dir, tracker, decision_ref, task_id)
+        definition = _approved_definition(run_dir, tracker, task_id)
+        _require_dependencies_complete(tracker, definition)
+        _require_no_scope_conflict(run_dir, tracker, definition)
+        _require_capacity(tracker, new_owner)
+        checkpoint = marker
+        if definition["kind"] == "source":
+            baseline = _resolved_commit(
+                _repo_dir(tracker), _run_field(tracker, "target_branch")
+            )
+            checkpoint = f"{checkpoint},baseline:{new_attempt}@{baseline}"
+        row = dict(row)
+        row.update(state="[~]", owner=new_owner, attempt=str(new_attempt),
+                   checkpoints=_append_history(row["checkpoints"], checkpoint),
+                   question=f"resolved:{decision_ref}")
+        return _replace_task(tracker, row)
+
+    return locked_tracker_update(
+        run_dir,
+        transition_id=f"resume-{task_id}-{prior_attempt}-{new_attempt}-{decision_ref}",
+        mutate=mutate,
+    )
+```
+
+`_require_capacity` counts the resuming owner against the same `worker_limit - 3` cap: an answered block does not buy extra capacity, so a run whose brains are still in flight waits rather than over-subscribing.
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`
+Expected: OK
+
+- [ ] **Step 5: Commit**
+
+```bash
+git diff --name-only -- plugins/superb/skills/pipeline/    # must print nothing
+git add plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py \
+        plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py
+git commit -m "feat(pipeline-auto): gate task resume on an explicit task.resume decision"
+```
+
+---

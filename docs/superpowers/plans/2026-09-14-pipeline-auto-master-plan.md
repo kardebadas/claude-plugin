@@ -54,7 +54,7 @@
 | `examples/controller_walkthrough.py` | Executable end-to-end proof in a foreign empty repo |
 | `tests/test_pipeline_auto_state.py` | Unit tests, re-derived against this skill's own faults |
 | `tests/fixtures/` | Valid and invalid trackers, phase plans, worker results, brain responses |
-| `plugins/superb/agents/pipeline-auto-brain.md` | Read/Grep/Glob + read-only Bash **only**. No Agent, no Write, no Edit |
+| `plugins/superb/agents/pipeline-auto-brain.md` | `tools:` exactly `{Read, Grep, Glob}`. **No `Bash`** — frontmatter allowlists tools, not commands, so "read-only Bash" is unenforceable and a brain holding `Bash` can rewrite `decisions.md`. No `Agent`, no `Write`, no `Edit` |
 | `plugins/superb/agents/pipeline-auto-intent-reader.md` | Stage-01 reader; strict JSON hypothesis out, no design proposals |
 
 ---

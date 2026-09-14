@@ -77,7 +77,8 @@ P03 creates **no** prose, **no** agent file, **no** prompt template. `prompts/br
     ├── extensions.json               # pinned, human-granted budget extensions
     └── <qid>/
         ├── open.json                 # phase 1: owners, digests, context digest — BEFORE dispatch
-        ├── payload-<owner>.json      # the exact bytes that brain received
+        ├── payload-<owner>.json      # the exact bytes that brain received;
+        │                              # one digest in open.json binds all three
         ├── responses/
         │   ├── <owner>__1.json       # phase 2: one immutable file per response
         │   └── <owner>__2.json       # exists only after the single permitted re-dispatch
@@ -133,7 +134,8 @@ MAX_EXTENSIONS = 2                                                   # (master p
 def derive_qid(question: str, axis: str) -> str: ...                 # (master plan)
 def effective_rung(response: dict, repo_root: str) -> str: ...       # (master plan) returns a RUNG NAME
 def cluster_rung(cluster: list) -> str: ...                          # (master plan) MAX member rung
-def build_payload(qid: str, brain_index: int, *, run_dir: str) -> dict: ...  # (master plan + run_dir, see Unresolved)
+def build_payload(qid: str, brain_index: int, *, run_dir: str) -> dict: ...  # (master plan) pure w.r.t. brain_index
+def payload_digest(qid: str, *, run_dir: str) -> str: ...            # (P03) ONE digest binding all three
 def project_decisions(decisions: dict) -> str: ...                   # (master plan)
 def open_quorum(run_dir: str, *, question_record: str) -> dict: ...  # (master plan)
 def record_brain_response(run_dir: str, *, qid: str, owner: str,
@@ -1271,7 +1273,9 @@ git commit -m "feat(pipeline-auto): detect axis contradictions structurally and 
 
 Three instances of one model reading one payload are **not three independent samples — they are one prior sampled three times.** Shared weights plus a shared prompt produce correlated error, so agreement is far weaker evidence than it looks. Independence has to be manufactured: all three get the **identical verbatim question**, which fair comparison requires, and **different reading assignments**, which biases each toward a *source* and never toward an answer. It also makes the rung distribution informative — three brains that each looked somewhere different and none found grounding is the mechanical signature of drift.
 
-`build_payload` is a **whitelist constructor**. It names every key it emits, so the prohibited material is not filtered out, it is never reachable: the raiser's identity, candidate answers and recommendation, the adoption floor, the budget, every rung value, and any elapsed-time or cost signal. A filter can be defeated by a new field; a whitelist cannot.
+The three payloads are bound by **one digest over the shared payload**, not by three. The reading assignment is a *constant rule* rather than data — index 0 grounds in the spec and intent brief, index 1 in repository code and tests, index 2 in the decisions record and phase plan — and `build_payload` is pure with respect to the index, so brain n's payload is fully determined by `(shared payload, n)` and a re-dispatch of index n is reproducible from `(payload_digest, n)`. That is precisely the property the partial-quorum recovery path rests on, and it is the reason the assignment rule lives in the module's frozen constants beside `RUNGS` rather than in `## Run`: a controller that can write its own assignment rule can change what a brain was asked after the fact.
+
+`_shared_payload` is a **whitelist constructor**. It names every key it emits, so the prohibited material is not filtered out, it is never reachable: the raiser's identity, candidate answers and recommendation, the adoption floor, the budget, every rung value, and any elapsed-time or cost signal. A filter can be defeated by a new field; a whitelist cannot.
 
 Admissibility is enforced only where it can be enforced mechanically. Criteria 2 ("decidable from the repository") and 5 ("one decision, not several") are judgment calls carried by P07's prose and the raiser's own declaration; criteria 1, 3 and 4 are checked here. Criterion 4 reuses the options test from `plugins/superb/agents/architecture-discovery.md:54-73`: blank the title, keep the options, and a reader can still tell what is being decided — mechanically, adjectives are not options.
 
@@ -1365,6 +1369,30 @@ class BuildPayload(unittest.TestCase):
     def test_a_brain_index_outside_the_three_is_refused(self):
         with self.assertRaises(pipeline_auto_state.QuorumError):
             pipeline_auto_state.build_payload(self.qid, 3, run_dir=str(self.run_dir))
+
+    def test_the_three_payloads_differ_only_in_the_assignment_block(self):
+        shared = []
+        for payload in self.payloads:
+            stripped = dict(payload)
+            stripped.pop("reading_assignment")
+            shared.append(json.dumps(stripped, indent=2, sort_keys=True))
+        self.assertEqual(len(set(shared)), 1)
+
+    def test_one_digest_binds_all_three_and_rebuilds_each_byte_for_byte(self):
+        # THE ASSERTION THE PARTIAL-RECOVERY RULE RESTS ON, and nothing else in
+        # the design checks it: a re-dispatch of brain n must be reproducible
+        # from (payload_digest, n). It stops holding the moment build_payload
+        # reads anything from the tracker or from run state.
+        digest = pipeline_auto_state.payload_digest(self.qid, run_dir=str(self.run_dir))
+        rendered = [json.dumps(payload, indent=2, sort_keys=True) for payload in self.payloads]
+        for index in range(3):
+            rebuilt = pipeline_auto_state.build_payload(self.qid, index, run_dir=str(self.run_dir))
+            self.assertEqual(json.dumps(rebuilt, indent=2, sort_keys=True), rendered[index])
+        self.assertEqual(pipeline_auto_state.payload_digest(self.qid, run_dir=str(self.run_dir)), digest)
+
+    def test_the_assignment_rule_is_frozen(self):
+        with self.assertRaises(TypeError):
+            pipeline_auto_state.READING_ASSIGNMENTS[0]["read"] = ("repo",)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1380,10 +1408,18 @@ Also write `tests/fixtures/quorum/question-record.json` containing the `QUESTION
 # Three assignments, each biased toward a SOURCE and never toward an answer.
 # Shared weights plus a shared prompt produce correlated error; a different
 # place to look is what actually decorrelates three instances of one model.
+# The assignment is a constant RULE, not data, and it is frozen beside RUNGS for
+# the same reason those are: a controller that can write its own assignment rule
+# can change what a brain was asked after the fact. Because the rule is constant
+# and build_payload is pure, brain n's payload is fully determined by
+# (shared payload, n) — which is what lets ONE digest bind all three.
 READING_ASSIGNMENTS = (
-    {"index": 0, "label": "spec-and-intent", "read": ("spec", "intent-brief")},
-    {"index": 1, "label": "code-and-tests", "read": ("repo", "tests")},
-    {"index": 2, "label": "decisions-and-plan", "read": ("decisions-effective", "phase-plan")},
+    MappingProxyType({"index": 0, "label": "spec-and-intent",
+                      "read": ("spec", "intent-brief")}),
+    MappingProxyType({"index": 1, "label": "code-and-tests",
+                      "read": ("repo", "tests")}),
+    MappingProxyType({"index": 2, "label": "decisions-and-plan",
+                      "read": ("decisions-effective", "phase-plan")}),
 )
 
 # Adjectives describe how someone feels about a choice instead of naming it, and
@@ -1435,40 +1471,71 @@ def _question_record(run_dir: str, qid: str) -> dict:
         raise QuorumError(f"no question record for {qid}: {exc}") from exc
 
 
-def build_payload(qid: str, brain_index: int, *, run_dir: str) -> dict:
-    """The exact material one brain receives.
+def _shared_payload(qid: str, run_dir: str) -> dict:
+    """The index-INDEPENDENT half of every brain's payload.
 
     A WHITELIST constructor. Every key emitted is named here, so the raiser's
     identity, candidate answers and recommendation, the adoption floor, the drift
     budget, every rung value, and any elapsed-time or cost signal are not
     filtered out — they are unreachable. A filter can be defeated by a new field.
     """
-    if not isinstance(brain_index, int) or isinstance(brain_index, bool) or not 0 <= brain_index < 3:
-        raise QuorumError(f"brain_index {brain_index!r} is outside the three-brain quorum")
     record = _question_record(run_dir, qid)
-    assignment = READING_ASSIGNMENTS[brain_index]
-    roots = record.get("reading_roots") or {}
     return {
         "qid": qid,
         "question": record["question"],          # identical verbatim for all three
         "axis": record["axis"],
         "options": [{"key": option["key"]} for option in record.get("options") or ()],
-        "reading_assignment": {
-            "label": assignment["label"],
-            "read": [{"source": source, "root": roots.get(source, "")}
-                     for source in assignment["read"]],
-        },
+        "reading_roots": dict(record.get("reading_roots") or {}),
         "decisions_effective": "decisions-effective.md",
         "rungs": list(RUNG_ORDER),               # NAMES only, never values
         "response_schema": _RESPONSE_SCHEMA_DOC,
         "you_are_one_of_several": True,
+        # Empty except on a re-open (Task 13), which carries the challenging
+        # evidence but never the challenged answer's rung or its owner.
+        "challenge": [dict(item) for item in record.get("challenge_evidence") or ()],
     }
+
+
+def payload_digest(qid: str, *, run_dir: str) -> str:
+    """ONE digest binding all three brains' payloads.
+
+    It covers the shared payload and the decisions projection. That is
+    sufficient — and not a shortcut — because the reading assignment is a
+    constant rule rather than data and build_payload is pure with respect to the
+    index, so a re-dispatch of brain n is reproducible from (payload_digest, n).
+    It stops binding the moment anything about the assignment is read from the
+    tracker or from run state, at which point the recovery path would silently
+    re-send a brain a different payload than it first received.
+    """
+    projection = Path(run_dir) / "decisions-effective.md"
+    text = projection.read_text(encoding="utf-8") if projection.exists() else ""
+    return _digest(_dumps(_shared_payload(qid, run_dir)) + "\x00" + text)
+
+
+def build_payload(qid: str, brain_index: int, *, run_dir: str) -> dict:
+    """The exact material one brain receives: the shared payload plus its rule.
+
+    Pure with respect to `brain_index`. Nothing here consults the tracker or any
+    run state; the only inputs are the question record, the projection, and the
+    frozen assignment rule.
+    """
+    if not isinstance(brain_index, int) or isinstance(brain_index, bool) or not 0 <= brain_index < 3:
+        raise QuorumError(f"brain_index {brain_index!r} is outside the three-brain quorum")
+    assignment = READING_ASSIGNMENTS[brain_index]
+    payload = _shared_payload(qid, run_dir)
+    roots = payload["reading_roots"]
+    payload["reading_assignment"] = {
+        "label": assignment["label"],
+        "read": [{"source": source, "root": roots.get(source, "")}
+                 for source in assignment["read"]],
+    }
+    return payload
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k "CheckAdmissible or BuildPayload" -v`
-Expected: PASS (12 tests)
+Expected: PASS (15 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -1783,8 +1850,8 @@ class OpenQuorum(unittest.TestCase):
         directory = self.run_dir / "quorum" / self.qid
         record = json.loads((directory / "open.json").read_text(encoding="utf-8"))
         self.assertEqual(record["owners"], QUESTION["owners"])
-        self.assertEqual([entry["brain_index"] for entry in record["payload_digests"]], [0, 1, 2])
-        self.assertEqual(len({entry["digest"] for entry in record["payload_digests"]}), 3)
+        self.assertEqual(record["payload_digest"],
+                         pipeline_auto_state.payload_digest(self.qid, run_dir=str(self.run_dir)))
         self.assertTrue(record["question_digest"])
         self.assertTrue(record["context_digest"])
         self.assertEqual(list((directory / "responses").iterdir()), [])
@@ -1920,20 +1987,19 @@ def open_quorum(run_dir: str, *, question_record: str) -> dict:
         else {"decisions": {}, "axis_index": {}}
     (run_dir / "decisions-effective.md").write_text(project_decisions(parsed), encoding="utf-8")
 
-    # Per BRAIN INDEX, not per question: the three brains receive different
-    # reading assignments, so there is no single payload to digest.
-    payload_digests = []
+    # ONE digest, over the shared payload and the projection. The three brains
+    # differ only by a constant rule applied to the index, so (digest, n)
+    # reproduces brain n's bytes exactly — which is what a re-dispatch needs.
     for index, owner in enumerate(record["owners"]):
-        payload = build_payload(qid, index, run_dir=str(run_dir))
-        rendered = _dumps(payload)
-        (directory / f"payload-{owner}.json").write_text(rendered, encoding="utf-8")
-        payload_digests.append({"brain_index": index, "owner": owner, "digest": _digest(rendered)})
+        (directory / f"payload-{owner}.json").write_text(
+            _dumps(build_payload(qid, index, run_dir=str(run_dir))), encoding="utf-8")
+    digest = payload_digest(qid, run_dir=str(run_dir))
 
     opened = {
         "qid": qid, "status": "in_flight", "axis": record["axis"], "phase": record["phase"],
         "owners": list(record["owners"]),
         "question_digest": _digest(_squash(record["question"])),
-        "payload_digests": payload_digests,
+        "payload_digest": digest,
         "context_digest": _context_digest(run_dir),
         "options_supplied": bool(record.get("options_supplied")),
         "blocks": list(record.get("blocks") or ()),
@@ -2156,7 +2222,7 @@ class ClassifyQuorum(unittest.TestCase):
         self.assertEqual(verdict["state"], "redispatch")
         self.assertEqual(sorted(verdict["owners"]), sorted(QUESTION["owners"]))
         opened = json.loads((self.run_dir / "quorum" / self.qid / "open.json").read_text(encoding="utf-8"))
-        self.assertEqual(verdict["payload_digests"], opened["payload_digests"])
+        self.assertEqual(verdict["payload_digest"], opened["payload_digest"])
 
     def test_three_responses_is_ready_to_finalise_and_never_redispatched(self):
         for owner in QUESTION["owners"]:
@@ -2230,8 +2296,10 @@ def classify_quorum(run_dir: str, *, qid: str, live_owners: list) -> dict:
         return {"state": "awaiting-responses", "qid": qid, "owners": live}
     missing = [owner for owner in opened["owners"]
                if not _owner_attempts(run_dir, qid, owner)]
+    # The identical payload, its single digest proving identity: brain n is
+    # rebuilt from (payload_digest, n).
     return {"state": "redispatch", "qid": qid, "owners": sorted(set(owed) | set(missing)),
-            "payload_digests": opened["payload_digests"]}
+            "payload_digest": opened["payload_digest"]}
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -2943,6 +3011,304 @@ git commit -m "feat(pipeline-auto): reject quorum answers that overrule a human,
 
 ---
 
+### Task 13: Consuming a re-open's raised bar
+
+**Files:**
+- Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
+- Test: `plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py`
+
+**Interfaces:**
+- Consumes: `open_quorum`, `_compute_quorum_result`, `build_payload`, `quorum_events`, `derive_qid`, `RUNG_ORDER`
+- Produces: `derive_reopen_qid(question, axis, original_decision_id) -> str`, re-open handling inside `open_quorum`, `build_payload` and `_compute_quorum_result`
+
+P06 found the gap: a re-open records a raised bar and **nothing consumes it**. That is the nastiest shape of defect in this design, because every test asserting the quorum row's contents passes — the bar is right there in the data — while adoption never reads it. A silent no-op in a guardrail is worse than an absent guardrail, because the absent one gets noticed.
+
+Three rules, each with its own failure if dropped:
+
+- **A re-opened question adopts only on a rung strictly higher than the one originally adopted** — not merely at or above the floor. A `code-evidenced` answer re-opening a `code-evidenced` decision does not adopt, even unanimous, even clearing the floor. Re-deciding at the same quality of evidence is not new information; it is the run rolling the dice again.
+- **At most one re-open per decision lineage per run.** A second challenge to the same D-ID halts rather than opening a third quorum. This is the anti-oscillation rule; without it a run spends its budget arguing with itself.
+- **The re-open payload carries the challenging evidence but never the original rung or who chose it.** A brain that learns the prior answer was adopted at `code-evidenced` treats it as soft; a brain that sees only the question and the challenge treats it on its merits. The prior *answer* stays visible through `decisions-effective.md`, which is deliberate — brains must not re-litigate settled ground by accident — but the projection carries no value and no owner, so nothing there prices it either.
+
+A re-open needs its own identity: the original qid is settled, and `open_quorum` would return the replay. `derive_reopen_qid` namespaces the axis with the challenged D-ID, so the identity stays deterministic — a compaction mid-re-open replays inert exactly like any other quorum — while the lineage stays legible in the qid's input.
+
+**The test below is three cases, and case 3 is what makes the other two mean anything.** Without the control, cases 1 and 2 both pass against an implementation that escalates everything: you would have proven the strict path rejects without ever proving the lenient path accepts. A one-sided assertion is satisfied by a stuck implementation. Apply this shape wherever a rule makes a bar *stricter* — always pair it with an unchanged case that must still pass.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+class ReopenRaisedBar(unittest.TestCase):
+    def setUp(self):
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+        self.root, self.run_dir = new_run(self.stack)
+        write_repo(self.root, "db/engine.py", "class PostgresEngine:\n")
+        write_repo(self.root, "db/pool.py", "PostgresEngine pool\n")
+        write_repo(self.root, "spec.md", "The session table is the run's own store.\n")
+        (self.run_dir / "decisions.md").write_text(
+            HUMAN.replace("- **Axis:** storage-engine", "- **Axis:** unrelated-axis"),
+            encoding="utf-8")
+        # An adopted quorum decision at code-evidenced, for the challenge to aim at.
+        self.original = self.settle("storage-engine", "postgres", "code-evidenced")
+
+    def settle(self, axis, answer_key, rung):
+        record = dict(QUESTION, axis=axis, question=f"Which engine for {axis}?")
+        result = self.run_quorum(record, [graded(self.root, answer_key, rung),
+                                          graded(self.root, answer_key, rung),
+                                          graded(self.root, "duckdb", "speculation")])
+        self.assertEqual(result["status"], "adopted")
+        return result
+
+    def run_quorum(self, record, payloads):
+        path = self.run_dir / f"q-{record['axis'].replace('#', '_').replace(':', '_')}.json"
+        path.write_text(json.dumps(record), encoding="utf-8")
+        opened = pipeline_auto_state.open_quorum(str(self.run_dir), question_record=str(path))
+        if opened["status"] != "in_flight":
+            return opened
+        for owner, payload in zip(record["owners"], payloads):
+            pipeline_auto_state.record_brain_response(
+                str(self.run_dir), qid=opened["qid"], owner=owner,
+                payload=dict(payload, qid=opened["qid"]))
+        return pipeline_auto_state.finalize_quorum(str(self.run_dir), qid=opened["qid"])
+
+    def reopen_record(self, axis="storage-engine"):
+        return dict(QUESTION, axis=axis, question=f"Which engine for {axis}?",
+                    reopen_of=self.original["decision_id"],
+                    challenge_evidence=[{"kind": "repo", "path": "db/pool.py", "line": 1,
+                                         "quote": "PostgresEngine"}])
+
+    # --- case 1: the same rung does not clear a raised bar -------------------
+    def test_code_evidenced_unanimity_does_not_adopt_on_a_reopened_question(self):
+        result = self.run_quorum(self.reopen_record(),
+                                 [graded(self.root, "sqlite", "code-evidenced")] * 3)
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "raised-bar-not-cleared")
+        self.assertEqual(result["raised_bar_rung"], "code-evidenced")
+        self.assertEqual(result["reopen_of"], self.original["decision_id"])
+
+    # --- case 2: a strictly higher rung does clear it ------------------------
+    def test_specified_adopts_on_the_same_reopened_question(self):
+        result = self.run_quorum(self.reopen_record(),
+                                 [graded(self.root, "sqlite", "specified"),
+                                  graded(self.root, "sqlite", "specified"),
+                                  graded(self.root, "duckdb", "speculation")])
+        self.assertEqual(result["status"], "adopted")
+        self.assertEqual(result["winner"]["rung"], "specified")
+        self.assertEqual(result["reopen_of"], self.original["decision_id"])
+
+    # --- case 3: THE CONTROL. Without it, an implementation that escalates
+    # everything passes cases 1 and 2 and the raised bar is still a no-op.
+    def test_the_same_code_evidenced_answer_adopts_on_a_question_never_reopened(self):
+        record = dict(QUESTION, axis="log-format", question="Which engine for log-format?")
+        result = self.run_quorum(record, [graded(self.root, "sqlite", "code-evidenced")] * 3)
+        self.assertEqual(result["status"], "adopted")
+        self.assertEqual(result["winner"]["rung"], "code-evidenced")
+        self.assertIsNone(result["raised_bar_rung"])
+
+    # --- anti-oscillation ----------------------------------------------------
+    def test_a_second_challenge_to_the_same_decision_halts_without_dispatch(self):
+        self.run_quorum(self.reopen_record(),
+                        [graded(self.root, "sqlite", "code-evidenced")] * 3)
+        second = self.run_quorum(self.reopen_record(),
+                                 [graded(self.root, "duckdb", "specified")] * 3)
+        self.assertEqual(second["status"], "halted-second-challenge")
+        self.assertFalse(second["dispatched"])
+        qid = pipeline_auto_state.derive_reopen_qid(
+            "Which engine for storage-engine?", "storage-engine", self.original["decision_id"])
+        self.assertEqual(list((self.run_dir / "quorum" / qid).glob("payload-*.json")), [])
+
+    def test_a_reopen_gets_its_own_deterministic_identity(self):
+        first = pipeline_auto_state.derive_reopen_qid("q", "axis", "Q-aaaaaaaaaaaa")
+        self.assertEqual(first, pipeline_auto_state.derive_reopen_qid("q", "axis", "Q-aaaaaaaaaaaa"))
+        self.assertNotEqual(first, pipeline_auto_state.derive_qid("q", "axis"))
+        self.assertNotEqual(first, pipeline_auto_state.derive_reopen_qid("q", "axis", "Q-bbbbbbbbbbbb"))
+
+    # --- what the brains may and may not see ---------------------------------
+    def test_the_reopen_payload_carries_the_challenge_but_never_the_prior_rung(self):
+        record = self.reopen_record()
+        path = self.run_dir / "q-reopen-payload.json"
+        path.write_text(json.dumps(record), encoding="utf-8")
+        opened = pipeline_auto_state.open_quorum(str(self.run_dir), question_record=str(path))
+        for index in range(3):
+            payload = pipeline_auto_state.build_payload(
+                opened["qid"], index, run_dir=str(self.run_dir))
+            rendered = json.dumps(payload)
+            self.assertIn("db/pool.py", rendered)
+            self.assertNotIn("code-evidenced", rendered)
+            self.assertNotIn(self.original["winner"]["owner"], rendered)
+            self.assertNotIn("raised_bar", rendered)
+            for leak in ("0.95", "0.85", "0.70", "0.55", "0.30"):
+                self.assertNotIn(leak, rendered)
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k ReopenRaisedBar -v`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'derive_reopen_qid'`, and case 1 fails with `'adopted' != 'escalated'` once that is added, which is the gap itself.
+
+- [ ] **Step 3: Write the implementation**
+
+Add the identity helper and the lineage check:
+
+```python
+def derive_reopen_qid(question: str, axis: str, original_decision_id: str) -> str:
+    """A re-open needs its own identity.
+
+    The original qid is settled, so open_quorum would return its replay. The
+    challenged D-ID namespaces the axis, which keeps the identity deterministic —
+    a compaction mid-re-open replays inert like any other quorum — and keeps the
+    lineage legible in the qid's own input.
+    """
+    return derive_qid(question, f"{axis}#reopen:{original_decision_id}")
+
+
+def _reopen_lineage_root(run_dir, decision_id: str) -> str:
+    """Follow the challenge chain back to the decision it all started from."""
+    by_decision = {event["decision_id"]: event for event in quorum_events(run_dir)
+                   if event.get("decision_id")}
+    seen, current = set(), decision_id
+    while current in by_decision and by_decision[current].get("reopen_of"):
+        if current in seen:
+            break
+        seen.add(current)
+        current = by_decision[current]["reopen_of"]
+    return current
+
+
+def _prior_reopens(run_dir, root: str) -> list[dict]:
+    return [event for event in quorum_events(run_dir)
+            if event.get("reopen_of") and _reopen_lineage_root(run_dir, event["reopen_of"]) == root]
+```
+
+In `open_quorum`, immediately after the admissibility check, replace the qid derivation with the re-open-aware form and add the lineage gate:
+
+```python
+    challenged = str(record.get("reopen_of") or "")
+    if challenged:
+        qid = derive_reopen_qid(record["question"], record["axis"], challenged)
+    else:
+        qid = derive_qid(record["question"], record["axis"])
+    directory = _quorum_root(run_dir) / qid
+    final_path = directory / "final.json"
+
+    if final_path.exists():
+        settled = _load_json(final_path)
+        return dict(settled, replay=True, qid=qid)
+    if (directory / "open.json").exists():
+        return dict(_load_json(directory / "open.json"), status="in_flight", replay=True, qid=qid)
+
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "responses").mkdir(exist_ok=True)
+    (directory / "question.json").write_text(_dumps(record), encoding="utf-8")
+
+    raised_bar_rung = None
+    if challenged:
+        # At most one re-open per lineage per run. A second challenge halts
+        # rather than opening a third quorum: without this the run spends its
+        # budget arguing with itself.
+        root = _reopen_lineage_root(run_dir, challenged)
+        if _prior_reopens(run_dir, root):
+            halt = {"qid": qid, "status": "halted-second-challenge",
+                    "reason": f"{challenged} has already been re-opened once in this run",
+                    "phase": record["phase"], "axis": record["axis"],
+                    "reopen_of": challenged, "lineage_root": root,
+                    "decision_id": None, "winner": None, "dispatched": False,
+                    "context_digest": _context_digest(run_dir)}
+            publish_immutable(str(final_path), _dumps(halt))
+            return halt
+        raised_bar_rung = _adopted_rung(run_dir, challenged)
+```
+
+with the rung lookup, which reads the *record*, never the payload:
+
+```python
+def _adopted_rung(run_dir, decision_id: str) -> str:
+    for event in quorum_events(run_dir):
+        if event.get("decision_id") == decision_id and event["status"] == "adopted":
+            return event["winner"]["rung"]
+    decisions_path = Path(run_dir) / "decisions.md"
+    if decisions_path.exists():
+        record = parse_decisions(decisions_path.read_text(encoding="utf-8"))["decisions"].get(decision_id)
+        if record and record.get("grounding_rung") in RUNGS:
+            return record["grounding_rung"]
+    raise QuorumError(f"cannot re-open {decision_id}: it has no adopted rung on record")
+```
+
+Carry the bar into `open.json` by extending the `opened` dict built later in the same function:
+
+```python
+    opened = {
+        "qid": qid, "status": "in_flight", "axis": record["axis"], "phase": record["phase"],
+        "owners": list(record["owners"]),
+        "question_digest": _digest(_squash(record["question"])),
+        "payload_digest": digest,
+        "context_digest": _context_digest(run_dir),
+        "options_supplied": bool(record.get("options_supplied")),
+        "blocks": list(record.get("blocks") or ()),
+        "reopen_of": challenged or None,
+        "raised_bar_rung": raised_bar_rung,
+    }
+```
+
+No change is needed in `build_payload`: `_shared_payload` already whitelists
+`challenge` from the question record's `challenge_evidence`, and the prior rung
+and the prior owner are simply never named there, so they cannot leak. Keeping
+the challenge inside the *shared* payload is also what preserves the single-digest
+binding — a challenge added per-index would break the `(payload_digest, n)`
+reproduction the recovery path depends on.
+
+In `_compute_quorum_result`, carry the lineage into the record and apply the bar immediately after the strictness test, before `_apply_adoption_gates`:
+
+```python
+    base = {"qid": qid, "axis": opened["axis"], "phase": opened["phase"],
+            "context_digest": opened["context_digest"], "decision_id": None,
+            "winner": None, "runner_up_rung": None, "effective_rungs": {}, "dispatched": True,
+            "payload_digest": opened["payload_digest"],
+            "reopen_of": opened.get("reopen_of"),
+            "raised_bar_rung": opened.get("raised_bar_rung")}
+```
+
+```python
+    # A re-open adopts only on evidence STRICTLY BETTER than the decision it
+    # challenges. Re-deciding at the same quality of evidence is not new
+    # information; it is the run rolling the dice again. Nothing else consumes
+    # this field, so an implementation that records the bar and ignores it here
+    # passes every row-content assertion in the suite.
+    raised = base["raised_bar_rung"]
+    if raised is not None and RUNG_ORDER.index(winner_rung) >= RUNG_ORDER.index(raised):
+        return dict(base, status="escalated", reason="raised-bar-not-cleared",
+                    winner_rung=winner_rung)
+
+    best = max(winner, key=lambda member: (RUNG_ORDER.index(member["effective_rung"]) * -1,))
+    return _apply_adoption_gates(run_dir, base, winner, best, winner_rung)
+```
+
+Finally extend `quorum_tracker_rows` so the mirror shows the lineage:
+
+```python
+            "reopen_of": event.get("reopen_of") or "-",
+            "raised_bar_rung": event.get("raised_bar_rung") or "-",
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+```bash
+python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -v
+git diff --name-only c8bddd610119f52b54bf077d284c7f5d8362ae77..HEAD -- plugins/superb/skills/pipeline/
+git status --short
+```
+
+Expected: all tests PASS, including all three `ReopenRaisedBar` cases; the second command prints nothing. P06's `RaisedBarIsApplied` — which drives this same path through `open_quorum`, three `record_brain_response` calls, and `finalize_quorum` — goes green from the other side once this lands.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py \
+        plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py
+git commit -m "feat(pipeline-auto): make a re-open's raised bar actually gate adoption"
+```
+
+---
+
 ## Self-review
 
 **Spec coverage.** Every clause of "The quorum contract" maps to a task.
@@ -2975,10 +3341,25 @@ corrupted audit trail.
 entirely. With it in both places, three brains are dispatched and *then* refused,
 which is the spend the budget exists to prevent.
 
+**Fourth gap, found by P06 and closed in Task 13.** The re-open path recorded a
+raised bar that nothing read. Every assertion about the quorum row's *contents*
+passed — the bar was in the data — while adoption never consulted it, which is
+the worst shape a guardrail defect can take, because an absent guardrail gets
+noticed and a silent one does not. Task 13 consumes it in
+`_compute_quorum_result`, and its three-case test carries the control that makes
+the other two cases mean anything.
+
 **Placeholder scan.** No TBDs, no "add error handling", no "similar to Task N".
 Every step carries the code it needs. The one forward reference —
 `_apply_adoption_gates` in Task 11 — is a working stub with real behaviour that
 Task 12 replaces, not a placeholder, and Task 11's tests pass against it.
+
+**One-sided-assertion scan.** Every task that makes a bar *stricter* pairs its
+rejection case with a case that must still be accepted: Task 3's
+`test_convention_cited_needs_two_exemplars` asserts both the demotion and the
+two-exemplar pass; Task 11 pairs the unanimous `convention-cited` escalation with
+the unanimous `code-evidenced` adoption; Task 13 carries P06's explicit control.
+A stuck implementation that refuses everything fails all three.
 
 **Type consistency.** `effective_rung` and `cluster_rung` both return rung
 *names*; every comparison in the module uses `RUNG_ORDER.index`, and the only
@@ -2999,11 +3380,18 @@ guessed at in code beyond the minimum noted; each needs a ruling.
 1. ~~`build_payload(qid, brain_index)` has no way to find the run.~~
    **Settled.** `build_payload(qid, brain_index, *, run_dir)` is the pinned
    signature; the question record is read from
-   `<run_dir>/quorum/<qid>/question.json`. Likewise settled: `## Quorum`'s
-   `Payload Digest` is recorded **per brain index**, not per question, because
-   the three brains receive different reading assignments and there is no single
-   payload to digest. `open.json` carries
-   `[{"brain_index", "owner", "digest"}, ...]` in brain-index order.
+   `<run_dir>/quorum/<qid>/question.json`. Also settled, after a correction from
+   the coordinator that P04 caught against the committed fixture: `## Quorum`'s
+   `Payload Digest` is **one digest, not three** — over the shared payload plus
+   the decisions projection. It binds all three brains because the reading
+   assignment is a constant rule rather than data and `build_payload` is pure
+   with respect to the index, so brain n is reproducible from
+   `(payload_digest, n)`. **The condition under which this stops holding** is
+   named in the code: if anything about the assignment is ever read from the
+   tracker or from run state, the single digest no longer binds and the
+   partial-recovery path would silently re-dispatch a brain with a payload
+   different from the one it first received. `test_one_digest_binds_all_three_
+   and_rebuilds_each_byte_for_byte` is the guard.
 
 2. **P02 publishes no `## Quorum` / `## Escalations` row grammar.** The spec
    assigns those tracker sections to the state schema (P02), but P02's produced

@@ -105,19 +105,37 @@ Three consequences P04 must honour:
 - The repository root comes from `repo_root(tracker)`. P04 contains **no** `.git`-walking function.
 - P02 owns every section's column grammar. P04 writes rows through `append_row` and reads column names through `section_columns`, so `## Tasks` and `## Quorum` cannot drift from their validator.
 
-**Assumed tracker dict shape.** P02's signatures name `dict` but not its nesting. P04 touches the tracker through exactly five private accessors — `_run_field`, `_current_field`, `_task_row`, `_replace_task`, `_quorum_owners`. If P02's shape differs, those five functions are the only code that changes.
+## Tracker column contract — read it from the fixture, not from here
 
-```python
-tracker = {
-    "run": {"run_id", "base_commit", "target_branch", "worker_limit",
-            "repo_root", "revision", "spec", "master_plan", "phase_plans",
-            "decisions", "findings"},              # str -> str
-    "current": {"stage", "phase", "next_action"},  # str -> str
-    "phases": [ {...} ],   # columns from section_columns("Phases")
-    "tasks":  [ {...} ],   # columns from section_columns("Tasks")
-    "quorum": [ {...} ],   # columns from section_columns("Quorum")
-}
+The authority is P02's committed fixture, `plugins/superb/skills/pipeline-auto/tests/fixtures/valid-progress.md`. Open it before writing Task 6. The transcription below is for orientation only; where the two disagree, **the fixture wins**.
+
+`## Tasks` — 16 columns, in this order:
+
+```text
+ID | Phase | Kind | State | Owner | Attempt | Result | Checkpoints |
+Source Ref | Commits | Artifacts | Integration | Verification | Question |
+Decisions | Provisional
 ```
+
+Two consequences that bite immediately:
+
+- **There is no `Deps` column.** Dependencies live in the phase-plan metadata and nowhere else, so `_approved_definition` compares only `Kind` against the plan and reads `deps` from `parse_plan_metadata`. A task row that carried its own copy of `deps` would be a second, divergable source of truth.
+- **`Attempt` is a token, not a bare integer**: the fixture shows `attempt-001`, `attempt-002`. Every P04 signature takes `attempt: int`; every tracker cell, checkpoint marker, and result document renders it as `attempt-%03d`. `_attempt_token(attempt)` is the single conversion point.
+
+`## Quorum` — 12 columns, in this order:
+
+```text
+QID | Axis | Phase | State | Owners | Payload Digest | Context Digest |
+Responses | Depth | Rung | Outcome | Decision
+```
+
+P04 reads exactly three of them — `QID`, `State`, `Owners` — and treats `State == "in_flight"` as occupying three worker slots. It writes none: the whole section belongs to P03.
+
+`## Phases` — 7 columns: `ID | State | Verification | Review Class | Class Source | Ratchet | Gate`.
+
+`## Run` fields P04 reads: `run_id`, `target_branch`, `worker_limit`, `phase_plans`, `decisions`. The repository root comes from P02's `repo_root(tracker)` **function**, never from a run field and never from `run_dir` depth.
+
+**Key form.** Column headers are title-case with spaces (`Source Ref`, `Payload Digest`); P04 addresses rows by the snake_case form of the header (`source_ref`, `payload_digest`) through `_field(row, "Source Ref")`, which accepts either spelling. That one function is the whole coupling to P02's key convention.
 
 Every cell is a table-safe string; `-` is the empty marker; multi-valued cells are comma-separated. `worker_limit` is read with `int(...)`.
 
@@ -131,25 +149,52 @@ def resume_task(run_dir: str, *, task_id: str, prior_attempt: int,
                 new_owner: str, new_attempt: int, decision_ref: str) -> dict: ...
 def scopes_overlap(a: str, b: str) -> bool: ...
 def parse_plan_metadata(path: str) -> dict: ...
+def import_phase_plan(run_dir: str, *, phase_plan: str) -> dict: ...
 def publish_worker_result(run_dir: str, *, result: dict) -> str: ...
 def import_worker_result(run_dir: str, *, result_path: str) -> dict: ...
 def verify_source_range(repo: str, *, baseline: str, head: str, scopes: list) -> dict: ...
+def integrate_task(run_dir: str, *, task_id: str, merge_commit: str) -> dict: ...
 def reconcile_run(run_dir: str) -> dict: ...
 ```
 
 Plus `templates/worker-result.md` and `templates/verification-evidence.md`.
+
+## Pinned marker and comment strings
+
+P05 and P06 cite these rather than re-deriving them:
+
+| Constant | Value |
+| --- | --- |
+| `WORKER_RESULT_MARKER` | `<!-- pipeline-auto-worker-result/v1 -->` |
+| `EVIDENCE_MARKER` | `<!-- pipeline-auto-verification-evidence/v1 -->` |
+| phase metadata comment | `<!-- pipeline-auto-phase: id=…; deps=…; review_class=…; review_reason=… -->` |
+| phase suite comment | `<!-- pipeline-auto-phase-suite: id=…; commands=[…] -->` |
+| task metadata comment | `<!-- pipeline-auto-task: id=…; deps=…; kind=…; batch=…; order=…; write_scope=…; outputs=… -->` |
+| task suite comment | `<!-- pipeline-auto-task-suite: id=…; commands=[…] -->` |
+| `EVIDENCE_PURPOSES` | `("task-test", "task-integration", "phase")` |
+| `QUORUM_ROUTE` / `HALT_ROUTE` | `"quorum"` / `"halt"` |
+| `REVIEW_CLASSES` | `("required", "final-only")` |
+| `WORKER_STATUSES` | `("DONE", "DONE_WITH_CONCERNS", "NEEDS_CONTEXT", "PLAN_CONFLICT", "BLOCKED")` |
+
+`EVIDENCE_PURPOSES` is **extended by the phase that needs the purpose**, never pre-populated here. P04 ships three; P05 appends `task-review` and `adversarial`; P06 appends `branch-review`, `completeness`, `final`. The validator rejecting an unregistered purpose is the point: a purpose nobody declared is a record nobody validates.
 
 ## Phase verification suite
 
 The exact ordered command tuple for P04:
 
 ```bash
-python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v
+python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v
 git diff --name-only c8bddd610119f52b54bf077d284c7f5d8362ae77..HEAD -- plugins/superb/skills/pipeline/
 git status --short
 ```
 
 The second command must print nothing. Every task below re-runs the first command, narrowed with `unittest`'s own `-k` filter. There is no `pytest` anywhere in this plan.
+
+**Three verified facts about this command. Run it; do not reason about it.**
+
+- **No `-t`.** `pipeline-auto` is hyphenated, so `-t .` makes discovery resolve the start directory as the module path `plugins.superb.skills.pipeline-auto.tests`, which is not a legal Python identifier. With `-t .` the command dies with `ImportError: Start directory is not importable`. Without `-t`, discovery uses the start directory as its own top level and the suite runs.
+- **`-k` ORs when repeated.** `-k A -k B` selects both. unittest does **not** accept pytest's `-k "A or B"` — that pattern matches nothing.
+- **A `-k` that matches nothing reports `OK` and exits 0.** So every sub-suite step below asserts the reported `Ran N tests` count, not the exit status. A step whose count is wrong has selected the wrong tests even when it says OK.
 
 ---
 
@@ -174,7 +219,7 @@ Create `plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py`:
 
 Standard library only: pytest is not installed. Run with
 
-    python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v
+    python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v
 """
 from __future__ import annotations
 
@@ -201,7 +246,7 @@ def phase_header(
     deps: str = "none",
     review_class: str = "required",
     review_reason: str = "task lifecycle is security-relevant",
-    commands: str = '["python3 -m unittest discover -s tests -t ."]',
+    commands: str = '["python3 -m unittest discover -s tests"]',
 ) -> str:
     return (
         f"<!-- pipeline-auto-phase: id={phase_id}; deps={deps}; "
@@ -275,7 +320,7 @@ class PhaseHeaderGrammarTests(TempDirTestCase):
         self.assertEqual(header["review_reason"],
                          "task lifecycle is security-relevant")
         self.assertEqual(header["commands"],
-                         ("python3 -m unittest discover -s tests -t .",))
+                         ("python3 -m unittest discover -s tests",))
 
     def test_rejects_reordered_keys(self):
         header = (
@@ -370,8 +415,8 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k PhaseHeaderGrammarTests`
-Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute '_parse_phase_header'`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k PhaseHeaderGrammarTests`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute '_parse_phase_header'` The run must still report `Ran 12 tests`. A `-k` pattern that matches nothing still reports OK and exits 0, so the count is the assertion, not the exit status.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -496,8 +541,8 @@ def _parse_phase_header(lines: list[str]) -> dict:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k PhaseHeaderGrammarTests`
-Expected: OK — 12 tests
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k PhaseHeaderGrammarTests`
+Expected: OK — `Ran 12 tests`. A `-k` pattern that matches nothing still reports OK and exits 0, so the count is the assertion, not the exit status.
 
 - [ ] **Step 5: Commit**
 
@@ -658,8 +703,8 @@ class TaskMetadataGrammarTests(TempDirTestCase):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k TaskMetadataGrammarTests`
-Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'parse_plan_metadata'`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k TaskMetadataGrammarTests`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'parse_plan_metadata'` The run must still report `Ran 15 tests`. A `-k` pattern that matches nothing still reports OK and exits 0, so the count is the assertion, not the exit status.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -814,7 +859,7 @@ def parse_plan_metadata(path) -> dict:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v`
 Expected: OK
 
 - [ ] **Step 5: Commit**
@@ -910,8 +955,8 @@ class ScopeAlgebraTests(unittest.TestCase):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k ScopeAlgebraTests`
-Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'scopes_overlap'`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k ScopeAlgebraTests`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'scopes_overlap'` The run must still report `Ran 5 tests`. A `-k` pattern that matches nothing still reports OK and exits 0, so the count is the assertion, not the exit status.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -961,7 +1006,7 @@ def _path_in_scope(path: str, scope: str) -> bool:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v`
 Expected: OK
 
 - [ ] **Step 5: Commit**
@@ -1159,8 +1204,8 @@ class WorkerResultCodecTests(unittest.TestCase):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k WorkerResultCodecTests`
-Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'render_worker_result'`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k WorkerResultCodecTests`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'render_worker_result'` The run must still report `Ran 13 tests`. A `-k` pattern that matches nothing still reports OK and exits 0, so the count is the assertion, not the exit status.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -1175,7 +1220,7 @@ Create `plugins/superb/skills/pipeline-auto/templates/worker-result.md`:
 | --- | --- |
 | run_id | <run_id> |
 | task_id | <task_id> |
-| attempt | <positive_integer> |
+| attempt | <attempt-NNN> |
 | owner | <controller_assigned_owner> |
 | kind | <source_or_artifact> |
 | status | <DONE_DONE_WITH_CONCERNS_NEEDS_CONTEXT_PLAN_CONFLICT_or_BLOCKED> |
@@ -1338,7 +1383,11 @@ def render_worker_result(result: dict) -> str:
         "| Field | Value |",
         "| --- | --- |",
     ]
-    lines += [f"| {field} | {_cell(result[field])} |" for field in WORKER_RESULT_FIELDS]
+    lines += [
+        f"| {field} | "
+        f"{_attempt_token(result[field]) if field == 'attempt' else _cell(result[field])} |"
+        for field in WORKER_RESULT_FIELDS
+    ]
     lines += ["", "## Checkpoints", "| ID | Status | Evidence |", "| --- | --- | --- |"]
     lines += [
         f"| {item['id']} | {item['status']} | {item['evidence']} |"
@@ -1365,10 +1414,11 @@ def parse_worker_result(text: str) -> dict:
         )
     values = {row[0]: row[1] for row in field_rows}
     result = {field: values[field] for field in WORKER_RESULT_FIELDS}
-    try:
-        result["attempt"] = int(values["attempt"])
-    except ValueError as exc:
-        raise TrackerValidationError("attempt must be a positive integer") from exc
+    if not _ATTEMPT_TOKEN.fullmatch(values["attempt"]):
+        raise TrackerValidationError(
+            "attempt must be rendered as an attempt token such as attempt-001"
+        )
+    result["attempt"] = int(values["attempt"].removeprefix("attempt-"))
     for field in _TUPLE_FIELDS:
         raw = values[field]
         result[field] = () if raw == "-" else tuple(raw.split(","))
@@ -1382,7 +1432,7 @@ def parse_worker_result(text: str) -> dict:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v`
 Expected: OK
 
 - [ ] **Step 5: Commit**
@@ -1424,7 +1474,7 @@ def evidence_text(**overrides) -> str:
         "purpose": "task-test",
         "run_id": "run-1",
         "subject": "task/T1",
-        "attempt": "1",
+        "attempt": "attempt-001",
         "code_state": COMMIT,
         "outcome": "PASS",
         "commands": '["python3 -m unittest -k T1"]',
@@ -1451,7 +1501,7 @@ class VerificationEvidenceCodecTests(TempDirTestCase):
         record = state.parse_verification_evidence(evidence_text())
         self.assertEqual(record["purpose"], "task-test")
         self.assertEqual(record["subject"], "task/T1")
-        self.assertEqual(record["attempt"], "1")
+        self.assertEqual(record["attempt"], "attempt-001")
         self.assertEqual(record["code_state"], COMMIT)
         self.assertEqual(record["commands"], ("python3 -m unittest -k T1",))
 
@@ -1467,7 +1517,7 @@ class VerificationEvidenceCodecTests(TempDirTestCase):
             {"outcome": "FAIL"}, {"outcome": "pass"}, {"purpose": "remediation"},
             {"purpose": "anything"}, {"code_state": "short"}, {"commands": "[]"},
             {"commands": "not-json"}, {"environment": "-"}, {"subject": "T1"},
-            {"attempt": "0"}, {"attempt": "later"},
+            {"attempt": "0"}, {"attempt": "later"}, {"attempt": "1"},
         )
         for override in cases:
             with self.subTest(override=override):
@@ -1510,8 +1560,8 @@ class VerificationEvidenceCodecTests(TempDirTestCase):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k VerificationEvidenceCodecTests`
-Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'EVIDENCE_MARKER'`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k VerificationEvidenceCodecTests`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'EVIDENCE_MARKER'` The run must still report `Ran 6 tests`. A `-k` pattern that matches nothing still reports OK and exits 0, so the count is the assertion, not the exit status.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -1524,7 +1574,7 @@ Create `plugins/superb/skills/pipeline-auto/templates/verification-evidence.md`:
 | purpose | <task-test_task-integration_or_phase> |
 | run_id | <run_id> |
 | subject | <task_or_phase>/<stable-id> |
-| attempt | <positive_integer_or_N/A> |
+| attempt | <attempt-NNN_or_N/A> |
 | code_state | <full_tested_commit> |
 | outcome | PASS |
 | commands | ["<exact-command>","<next-command>"] |
@@ -1544,6 +1594,8 @@ Append to `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`:
 # ---------------------------------------------------------------------------
 
 import hashlib
+
+_ATTEMPT_TOKEN = re.compile(r"attempt-[0-9]{3,}\Z")
 
 EVIDENCE_MARKER = "<!-- pipeline-auto-verification-evidence/v1 -->"
 EVIDENCE_PURPOSES = ("task-test", "task-integration", "phase")
@@ -1581,14 +1633,10 @@ def parse_verification_evidence(text: str) -> dict:
     for field in ("run_id", "environment"):
         if record[field] in {"", "-"}:
             raise TrackerValidationError(f"{field} is required on evidence")
-    if record["attempt"] != "N/A":
-        try:
-            if int(record["attempt"]) < 1:
-                raise ValueError
-        except ValueError as exc:
-            raise TrackerValidationError(
-                "evidence attempt must be a positive integer or N/A"
-            ) from exc
+    if record["attempt"] != "N/A" and not _ATTEMPT_TOKEN.fullmatch(record["attempt"]):
+        raise TrackerValidationError(
+            "evidence attempt must be an attempt token such as attempt-001, or N/A"
+        )
     record["commands"] = _parse_command_suite(record["commands"])
     return record
 
@@ -1610,7 +1658,7 @@ def resolve_evidence(run_dir, repo_dir, reference: str) -> dict:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v`
 Expected: OK
 
 - [ ] **Step 5: Commit**
@@ -1637,7 +1685,7 @@ A blocked `[?]` task still occupies its implementation slot — the spec's ratio
 
 **Interfaces:**
 - Consumes: P02's `initialize_run`, `validate_run`, `locked_tracker_update`, `append_row`, `section_columns`, `repo_root`; `parse_plan_metadata`, `_scope_sets_overlap`, `TrackerValidationError`.
-- Produces: `QUORUM_SLOT_RESERVE = 3`; `implementation_slot_cap(worker_limit: int) -> int`; `_run_field`, `_current_field`, `_task_row`, `_replace_task`, `_quorum_owners`, `_csv`, `_append_history`; `_implementation_owners(tracker)`, `_active_owners(tracker)`; `_repo_dir(tracker) -> Path`; `_git`, `_git_out`, `_resolved_commit`; `_active_phase_plan(run_dir, tracker) -> Path`; `_approved_definition(run_dir, tracker, task_id) -> dict`; `_require_dependencies_complete`, `_require_no_scope_conflict`, `_require_capacity`, `_require_fresh_attempt`, `_validate_assignment`; `reserve_task(run_dir, *, task_id, owner, attempt) -> dict`.
+- Produces: `_key`, `_field`, `_set_field`, `_run_field`, `_task_row`, `_replace_task`, `_quorum_owners`, `_csv`, `_append_history`, `_attempt_token`; `QUORUM_SLOT_RESERVE = 3`; `implementation_slot_cap(worker_limit: int) -> int`; `_implementation_owners(tracker)`, `_active_owners(tracker)`; `_repo_dir(tracker) -> Path`; `_git`, `_git_out`, `_resolved_commit`; `_phase_plan_path(tracker, phase_id) -> Path`; `_approved_definition(run_dir, tracker, task_id) -> dict`; `import_phase_plan(run_dir, *, phase_plan) -> dict`; `_require_dependencies_complete`, `_require_no_scope_conflict`, `_require_capacity`, `_require_fresh_attempt`, `_validate_assignment`; `reserve_task(run_dir, *, task_id, owner, attempt) -> dict`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1672,36 +1720,22 @@ def make_repo(root) -> Path:
 def make_run(root, tasks_body: str, *, worker_limit: int = 4):
     """Return (repo, run_dir, phase_plan).
 
-    P02's initialize_run takes no artifact references and seeds no task rows, so
-    the harness writes `phase_plans`, the active phase, and the `## Tasks` rows
-    through one explicit locked update using P02's append_row. See "Unresolved".
+    initialize_run writes the `## Run` artifact references and an EMPTY
+    `## Tasks`. The task rows are appended by import_phase_plan, which is P04's.
     """
     repo = make_repo(root)
     run_dir = repo / "docs" / "superpowers" / "runs" / "run-1"
     run_dir.mkdir(parents=True)
     plan = write_phase_plan(run_dir, tasks_body)
+    relative_plan = plan.relative_to(repo).as_posix()
     state.initialize_run(
         run_dir, run_id="run-1", base_commit=git(repo, "rev-parse", "HEAD"),
         target_branch="target", worker_limit=worker_limit, repo_root=str(repo),
+        phase_plans=relative_plan,
+        decisions="docs/superpowers/runs/run-1/decisions.md",
+        findings="docs/superpowers/runs/run-1/findings.md",
     )
-    relative_plan = plan.relative_to(repo).as_posix()
-    tasks = state.parse_plan_metadata(plan)["tasks"]
-
-    def mutate(tracker: dict) -> dict:
-        tracker["run"]["phase_plans"] = relative_plan
-        tracker["current"]["phase"] = "P04"
-        state.append_row(tracker, "Phases", {
-            "id": "P04", "state": "active", "review_class": "required",
-            "class_source": "plan", "ratchet": "-",
-        })
-        for task in tasks:
-            row = {column: "-" for column in state.section_columns("Tasks")}
-            row.update(id=task["id"], state="[ ]", kind=task["kind"],
-                       deps=",".join(task["deps"]) or "-", provisional="no")
-            state.append_row(tracker, "Tasks", row)
-        return tracker
-
-    state.locked_tracker_update(run_dir, transition_id="seed-p04", mutate=mutate)
+    state.import_phase_plan(run_dir, phase_plan=plan)
     return repo, run_dir, plan
 
 
@@ -1713,11 +1747,17 @@ def three_disjoint_tasks() -> str:
     )
 
 
+def blank_row(section: str) -> dict:
+    """An all-'-' row with exactly P02's committed columns for that section."""
+    return {state._key(column): "-" for column in state.section_columns(section)}
+
+
 def open_quorum_row(run_dir, owners=("brain-1", "brain-2", "brain-3")) -> None:
     """Stand in for P03's open_quorum: one in_flight record with three owners."""
     def mutate(tracker: dict) -> dict:
-        row = {column: "-" for column in state.section_columns("Quorum")}
-        row.update(qid="q0001", state="in_flight", owners=",".join(owners))
+        row = blank_row("Quorum")
+        row.update(qid="3f2a1b0c9d8e", axis="new", phase="P04",
+                   state="in_flight", owners=",".join(owners))
         return state.append_row(tracker, "Quorum", row)
 
     state.locked_tracker_update(run_dir, transition_id="test-open-quorum", mutate=mutate)
@@ -1740,6 +1780,65 @@ def set_task_state(run_dir, task_id: str, **fields) -> None:
 # --------------------------------------------------------------------------
 # Task 6 tests -- faults F1 and F2
 # --------------------------------------------------------------------------
+
+class ImportPhasePlanTests(TempDirTestCase):
+
+    def test_appends_one_row_per_planned_task_with_the_committed_columns(self):
+        repo, run_dir, plan = make_run(self.tmp, three_disjoint_tasks())
+        tracker = state.validate_run(run_dir)
+        self.assertEqual([row["id"] for row in tracker["tasks"]],
+                         ["T1", "T2", "T3"])
+        expected = {state._key(c) for c in state.section_columns("Tasks")}
+        for row in tracker["tasks"]:
+            with self.subTest(task=row["id"]):
+                self.assertEqual(set(row), expected)
+                self.assertEqual(row["state"], "[ ]")
+                self.assertEqual(row["phase"], "P04")
+                self.assertEqual(row["kind"], "source")
+                self.assertEqual(row["owner"], "-")
+                self.assertEqual(row["attempt"], "-")
+                self.assertEqual(row["provisional"], "no")
+
+    def test_task_rows_carry_no_dependency_column(self):
+        """Dependencies live in the phase plan and nowhere else; a second copy
+        on the row would be a divergable source of truth."""
+        repo, run_dir, plan = make_run(self.tmp, three_disjoint_tasks())
+        tracker = state.validate_run(run_dir)
+        self.assertNotIn("deps", tracker["tasks"][0])
+        self.assertNotIn("dependencies", tracker["tasks"][0])
+
+    def test_records_the_phase_with_its_plan_declared_review_class(self):
+        repo, run_dir, plan = make_run(self.tmp, three_disjoint_tasks())
+        tracker = state.validate_run(run_dir)
+        phase = next(row for row in tracker["phases"] if row["id"] == "P04")
+        self.assertEqual(phase["review_class"], "required")
+        self.assertEqual(phase["class_source"], "plan")
+        self.assertEqual(phase["ratchet"], "-")
+
+    def test_refuses_to_import_the_same_phase_twice(self):
+        repo, run_dir, plan = make_run(self.tmp, three_disjoint_tasks())
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.TrackerValidationError):
+            state.import_phase_plan(run_dir, phase_plan=plan)
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_a_malformed_plan_imports_nothing(self):
+        repo = make_repo(self.tmp)
+        run_dir = repo / "docs" / "superpowers" / "runs" / "run-1"
+        run_dir.mkdir(parents=True)
+        plan = write_phase_plan(run_dir, task_block("T1"),
+                                header=phase_header(review_class="medium"))
+        state.initialize_run(
+            run_dir, run_id="run-1", base_commit=git(repo, "rev-parse", "HEAD"),
+            target_branch="target", worker_limit=6, repo_root=str(repo),
+            phase_plans=plan.relative_to(repo).as_posix(),
+            decisions="docs/superpowers/runs/run-1/decisions.md",
+            findings="docs/superpowers/runs/run-1/findings.md",
+        )
+        with self.assertRaises(state.PlanMetadataError):
+            state.import_phase_plan(run_dir, phase_plan=plan)
+        self.assertEqual(state.validate_run(run_dir)["tasks"], [])
+
 
 class SlotCapTests(unittest.TestCase):
 
@@ -1839,9 +1938,9 @@ class ReserveTaskTests(TempDirTestCase):
         row = task_row(tracker, "T1")
         self.assertEqual(row["state"], "[~]")
         self.assertEqual(row["owner"], "impl-1")
-        self.assertEqual(row["attempt"], "1")
-        self.assertIn("started:1", row["checkpoints"])
-        self.assertIn(f"baseline:1@{target}", row["checkpoints"])
+        self.assertEqual(row["attempt"], "attempt-001")
+        self.assertIn("started:attempt-001", row["checkpoints"])
+        self.assertIn(f"baseline:attempt-001@{target}", row["checkpoints"])
 
     def test_artifact_task_reservation_records_no_baseline(self):
         body = task_block("T1", kind="artifact", write_scope="tree:docs",
@@ -1898,8 +1997,8 @@ class ReserveTaskTests(TempDirTestCase):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k SlotCapTests`
-Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'QUORUM_SLOT_RESERVE'`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k ImportPhasePlanTests -k SlotCapTests -k ReserveTaskTests`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'import_phase_plan'` The run must still report `Ran 19 tests` (5 + 3 + 11); repeated `-k` flags OR together, and unittest does NOT accept pytest's `-k "A or B"`. A `-k` pattern that matches nothing still reports OK and exits 0, so the count is the assertion, not the exit status.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -1909,12 +2008,33 @@ Append to `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`:
 # ---------------------------------------------------------------------------
 # P04: tracker accessors
 #
-# Every P04 read of the tracker dict goes through these five functions. If
-# P02's shape differs from the documented assumption, this is the only code
-# that changes.
+# The column tuples are P02's, committed at tests/fixtures/valid-progress.md.
+# `_field` is the ONLY place that knows how a column header becomes a dict key,
+# so a change in P02's key convention costs one function, not a rewrite.
+#
+# For a one-word header the key and the header agree once lower-cased, so the
+# bodies below index rows directly (row["state"], row["source_ref"]). `_field`
+# is used wherever the header is multi-word or where tolerance matters.
 # ---------------------------------------------------------------------------
 
 import subprocess
+
+
+def _key(column: str) -> str:
+    """Map a committed column header ('Source Ref') to its dict key."""
+    return column.strip().lower().replace(" ", "_")
+
+
+def _field(row: dict, column: str) -> str:
+    for candidate in (_key(column), column):
+        if candidate in row:
+            return row[candidate]
+    raise TrackerValidationError(f"row is missing the {column!r} column")
+
+
+def _set_field(row: dict, column: str, value: str) -> dict:
+    row[_key(column) if _key(column) in row or column not in row else column] = value
+    return row
 
 
 def _run_field(tracker: dict, field: str) -> str:
@@ -1924,37 +2044,31 @@ def _run_field(tracker: dict, field: str) -> str:
         raise TrackerValidationError(f"tracker run field is missing: {field}") from exc
 
 
-def _current_field(tracker: dict, field: str) -> str:
-    try:
-        return tracker["current"][field]
-    except (KeyError, TypeError) as exc:
-        raise TrackerValidationError(
-            f"tracker current field is missing: {field}"
-        ) from exc
-
-
 def _task_row(tracker: dict, task_id: str) -> dict:
     for row in tracker.get("tasks", ()):
-        if row["id"] == task_id:
+        if _field(row, "ID") == task_id:
             return row
     raise TrackerValidationError(f"unknown task: {task_id}")
 
 
 def _replace_task(tracker: dict, replacement: dict) -> dict:
+    target = _field(replacement, "ID")
     tracker["tasks"] = [
-        replacement if row["id"] == replacement["id"] else row
+        replacement if _field(row, "ID") == target else row
         for row in tracker["tasks"]
     ]
     return tracker
 
 
 def _quorum_owners(tracker: dict) -> set:
+    """Owners held by an in-flight quorum. P04 reads QID/State/Owners and
+    writes nothing here: `## Quorum` belongs entirely to P03."""
     owners: set = set()
     for row in tracker.get("quorum", ()) or ():
-        if row.get("state") != "in_flight":
+        if _field(row, "State") != "in_flight":
             continue
         owners.update(
-            value for value in str(row.get("owners", "-")).split(",")
+            value for value in str(_field(row, "Owners")).split(",")
             if value and value != "-"
         )
     return owners
@@ -1966,6 +2080,14 @@ def _csv(value: str) -> tuple:
 
 def _append_history(value: str, entry: str) -> str:
     return entry if value in {"", "-"} else f"{value},{entry}"
+
+
+def _attempt_token(attempt: int) -> str:
+    """The tracker renders an attempt as `attempt-001`; P04 signatures take an
+    int. This is the single conversion point."""
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+        raise TrackerValidationError("attempt must be a positive integer")
+    return f"attempt-{attempt:03d}"
 
 
 # ---------------------------------------------------------------------------
@@ -2040,30 +2162,75 @@ def _resolved_commit(repo, ref: str) -> str:
 # P04: approved task definitions and reservation guards
 # ---------------------------------------------------------------------------
 
-def _active_phase_plan(run_dir, tracker: dict) -> Path:
+def _phase_plan_path(tracker: dict, phase_id: str) -> Path:
+    """The master plan is the exact ordered authority for its phase-plan paths,
+    so a phase's plan is the `phase_plans` entry at that phase's index."""
     paths = _csv(_run_field(tracker, "phase_plans"))
-    phase_ids = [row["id"] for row in tracker.get("phases", ())]
-    current = _current_field(tracker, "phase")
-    if len(paths) != len(phase_ids) or current not in phase_ids:
+    phase_ids = [_field(row, "ID") for row in tracker.get("phases", ())]
+    if len(paths) != len(phase_ids) or phase_id not in phase_ids:
         raise TrackerValidationError(
-            "the current phase does not resolve to exactly one approved phase plan"
+            f"phase {phase_id} does not resolve to exactly one approved phase plan"
         )
-    return _repo_dir(tracker) / _safe_relative(paths[phase_ids.index(current)])
+    return _repo_dir(tracker) / _safe_relative(paths[phase_ids.index(phase_id)])
 
 
 def _approved_definition(run_dir, tracker: dict, task_id: str) -> dict:
-    tasks = parse_plan_metadata(_active_phase_plan(run_dir, tracker))["tasks"]
+    row = _task_row(tracker, task_id)
+    plan = _phase_plan_path(tracker, _field(row, "Phase"))
+    tasks = parse_plan_metadata(plan)["tasks"]
     definition = next((task for task in tasks if task["id"] == task_id), None)
     if definition is None:
         raise TrackerValidationError(
             f"task {task_id} is not defined by the approved phase plan"
         )
-    row = _task_row(tracker, task_id)
-    if row["kind"] != definition["kind"] or _csv(row["deps"]) != definition["deps"]:
+    # There is no Deps column: dependencies live in the phase plan and nowhere
+    # else, so only Kind is cross-checked against the row.
+    if _field(row, "Kind") != definition["kind"]:
         raise TrackerValidationError(
-            "task metadata does not match the authoritative approved plan"
+            "task kind does not match the authoritative approved plan"
         )
     return definition
+
+
+# ---------------------------------------------------------------------------
+# P04: phase-plan import
+#
+# initialize_run writes the `## Run` artifact references and an EMPTY
+# `## Tasks`. Appending the task rows is P04's, because the row set is a
+# projection of the phase-plan metadata grammar and of nothing else.
+# ---------------------------------------------------------------------------
+
+def import_phase_plan(run_dir, *, phase_plan) -> dict:
+    """Append one approved phase plan's task rows; idempotent per phase."""
+    metadata = parse_plan_metadata(phase_plan)
+    phase_id = metadata["phase"]["id"]
+
+    def mutate(tracker: dict) -> dict:
+        existing = {_field(row, "ID") for row in tracker.get("tasks", ())}
+        if any(_field(row, "ID") == phase_id for row in tracker.get("phases", ())):
+            raise TrackerValidationError(f"phase {phase_id} is already imported")
+        phase = {_key(column): "-" for column in section_columns("Phases")}
+        phase.update({
+            _key("ID"): phase_id, _key("State"): "[ ]",
+            _key("Review Class"): metadata["phase"]["review_class"],
+            _key("Class Source"): "plan",
+        })
+        append_row(tracker, "Phases", phase)
+        for task in metadata["tasks"]:
+            if task["id"] in existing:
+                raise TrackerValidationError(f"duplicate task id: {task['id']}")
+            row = {_key(column): "-" for column in section_columns("Tasks")}
+            row.update({
+                _key("ID"): task["id"], _key("Phase"): phase_id,
+                _key("Kind"): task["kind"], _key("State"): "[ ]",
+                _key("Provisional"): "no",
+            })
+            append_row(tracker, "Tasks", row)
+        return tracker
+
+    return locked_tracker_update(
+        run_dir, transition_id=f"import-phase-plan-{phase_id}", mutate=mutate
+    )
 
 
 def _require_dependencies_complete(tracker: dict, definition: dict) -> None:
@@ -2101,19 +2268,16 @@ def _require_capacity(tracker: dict, owner: str) -> None:
 
 
 def _require_fresh_attempt(row: dict, attempt: int) -> None:
-    used = set(_csv(row["attempt"]))
-    for history in (row["checkpoints"], row["result"]):
-        for entry in _csv(history):
-            used.update(re.findall(r"(?<![0-9])[0-9]+(?![0-9])", entry))
-    if str(attempt) in used:
-        raise TrackerValidationError(f"task attempt {attempt} has already been used")
+    token = _attempt_token(attempt)
+    history = ",".join((row["attempt"], row["checkpoints"], row["result"]))
+    if token in history:
+        raise TrackerValidationError(f"task {token} has already been used")
 
 
 def _validate_assignment(owner, attempt) -> None:
     if not isinstance(owner, str) or not _TOKEN.fullmatch(owner) or "|" in owner:
         raise TrackerValidationError("owner must be a table-safe identifier token")
-    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
-        raise TrackerValidationError("attempt must be a positive integer")
+    _attempt_token(attempt)          # rejects a non-positive or non-int attempt
 
 
 def reserve_task(run_dir, *, task_id: str, owner: str, attempt: int) -> dict:
@@ -2129,14 +2293,15 @@ def reserve_task(run_dir, *, task_id: str, owner: str, attempt: int) -> dict:
         _require_fresh_attempt(row, attempt)
         _require_no_scope_conflict(run_dir, tracker, definition)
         _require_capacity(tracker, owner)
-        checkpoint = f"started:{attempt}"
+        token = _attempt_token(attempt)
+        checkpoint = f"started:{token}"
         if definition["kind"] == "source":
             baseline = _resolved_commit(
                 _repo_dir(tracker), _run_field(tracker, "target_branch")
             )
-            checkpoint = f"{checkpoint},baseline:{attempt}@{baseline}"
+            checkpoint = f"{checkpoint},baseline:{token}@{baseline}"
         row = dict(row)
-        row.update(state="[~]", owner=owner, attempt=str(attempt),
+        row.update(state="[~]", owner=owner, attempt=token,
                    checkpoints=_append_history(row["checkpoints"], checkpoint))
         return _replace_task(tracker, row)
 
@@ -2147,7 +2312,7 @@ def reserve_task(run_dir, *, task_id: str, owner: str, attempt: int) -> dict:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v`
 Expected: OK
 
 - [ ] **Step 5: Commit**
@@ -2229,8 +2394,8 @@ class ResumeTaskTests(TempDirTestCase):
         row = task_row(tracker, "T1")
         self.assertEqual(row["state"], "[~]")
         self.assertEqual(row["owner"], "impl-2")
-        self.assertEqual(row["attempt"], "2")
-        self.assertIn("resumed:1->2@Q-0001", row["checkpoints"])
+        self.assertEqual(row["attempt"], "attempt-002")
+        self.assertIn("resumed:attempt-001->attempt-002@Q-0001", row["checkpoints"])
         self.assertEqual(row["question"], "resolved:Q-0001")
 
     def test_records_a_fresh_baseline_for_a_source_task(self):
@@ -2244,7 +2409,8 @@ class ResumeTaskTests(TempDirTestCase):
             run_dir, task_id="T1", prior_attempt=1, new_owner="impl-2",
             new_attempt=2, decision_ref="Q-0001",
         )
-        self.assertIn(f"baseline:2@{moved}", task_row(tracker, "T1")["checkpoints"])
+        self.assertIn(f"baseline:attempt-002@{moved}",
+                      task_row(tracker, "T1")["checkpoints"])
 
     def test_requires_the_matching_blocked_attempt(self):
         repo, run_dir = self.blocked()
@@ -2334,8 +2500,8 @@ class ResumeTaskTests(TempDirTestCase):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k ResumeTaskTests`
-Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'resume_task'`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k ResumeTaskTests`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'resume_task'` The run must still report `Ran 10 tests`. A `-k` pattern that matches nothing still reports OK and exits 0, so the count is the assertion, not the exit status.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -2421,11 +2587,12 @@ def resume_task(run_dir, *, task_id: str, prior_attempt: int, new_owner: str,
         raise TrackerValidationError("decision_ref is required and must be table-safe")
     if new_attempt == prior_attempt:
         raise TrackerValidationError("the new attempt must be distinct")
-    marker = f"resumed:{prior_attempt}->{new_attempt}@{decision_ref}"
+    marker = (f"resumed:{_attempt_token(prior_attempt)}->"
+              f"{_attempt_token(new_attempt)}@{decision_ref}")
 
     def mutate(tracker: dict) -> dict:
         row = _task_row(tracker, task_id)
-        if row["state"] != "[?]" or row["attempt"] != str(prior_attempt):
+        if row["state"] != "[?]" or row["attempt"] != _attempt_token(prior_attempt):
             raise TrackerValidationError("resume requires the matching blocked attempt")
         _require_fresh_attempt(row, new_attempt)
         _validate_decision(run_dir, tracker, decision_ref, task_id)
@@ -2438,9 +2605,9 @@ def resume_task(run_dir, *, task_id: str, prior_attempt: int, new_owner: str,
             baseline = _resolved_commit(
                 _repo_dir(tracker), _run_field(tracker, "target_branch")
             )
-            checkpoint = f"{checkpoint},baseline:{new_attempt}@{baseline}"
+            checkpoint = f"{checkpoint},baseline:{_attempt_token(new_attempt)}@{baseline}"
         row = dict(row)
-        row.update(state="[~]", owner=new_owner, attempt=str(new_attempt),
+        row.update(state="[~]", owner=new_owner, attempt=_attempt_token(new_attempt),
                    checkpoints=_append_history(row["checkpoints"], checkpoint),
                    question=f"resolved:{decision_ref}")
         return _replace_task(tracker, row)
@@ -2456,7 +2623,7 @@ def resume_task(run_dir, *, task_id: str, prior_attempt: int, new_owner: str,
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v`
 Expected: OK
 
 - [ ] **Step 5: Commit**
@@ -2618,8 +2785,8 @@ class SourceRangeTests(TempDirTestCase):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k SourceRangeTests`
-Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'verify_source_range'`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k SourceRangeTests`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'verify_source_range'` The run must still report `Ran 9 tests`. A `-k` pattern that matches nothing still reports OK and exits 0, so the count is the assertion, not the exit status.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -2695,7 +2862,7 @@ def verify_source_range(repo, *, baseline: str, head: str, scopes) -> dict:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v`
 Expected: OK
 
 - [ ] **Step 5: Commit**
@@ -2789,8 +2956,8 @@ class PublishWorkerResultTests(TempDirTestCase):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k PublishWorkerResultTests`
-Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'publish_worker_result'`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k PublishWorkerResultTests`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'publish_worker_result'` The run must still report `Ran 6 tests`. A `-k` pattern that matches nothing still reports OK and exits 0, so the count is the assertion, not the exit status.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -2837,7 +3004,7 @@ def publish_worker_result(run_dir, *, result: dict) -> str:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v`
 Expected: OK
 
 - [ ] **Step 5: Commit**
@@ -2916,7 +3083,7 @@ class ImportWorkerResultTests(TempDirTestCase):
         self.assertEqual(row["source_ref"], commits[-1])
         self.assertEqual(row["commits"], ",".join(commits))
         self.assertEqual(row["integration"], "-")
-        self.assertIn("completed:1", row["checkpoints"])
+        self.assertIn("completed:attempt-001", row["checkpoints"])
         self.assertTrue(state.derive_next_action(tracker))
 
     def test_rejects_every_four_part_identity_mismatch(self):
@@ -3090,8 +3257,8 @@ class ImportWorkerResultTests(TempDirTestCase):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k ImportWorkerResultTests`
-Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'import_worker_result'`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k ImportWorkerResultTests`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'import_worker_result'` The run must still report `Ran 13 tests`. A `-k` pattern that matches nothing still reports OK and exits 0, so the count is the assertion, not the exit status.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -3111,7 +3278,7 @@ HALT_ROUTE = "halt"
 
 
 def _attempt_baseline(row: dict, attempt: int) -> str:
-    prefix = f"baseline:{attempt}@"
+    prefix = f"baseline:{_attempt_token(attempt)}@"
     matches = [
         item.removeprefix(prefix) for item in _csv(row["checkpoints"])
         if item.startswith(prefix)
@@ -3148,7 +3315,7 @@ def _validate_task_test_evidence(run_dir, tracker: dict, result: dict,
         if record["purpose"] == "task-test"
         and record["run_id"] == result["run_id"]
         and record["subject"] == f"task/{result['task_id']}"
-        and record["attempt"] == str(result["attempt"])
+        and record["attempt"] == _attempt_token(result["attempt"])
     ]
     if len(matching) != 1:
         raise TrackerValidationError(
@@ -3196,7 +3363,7 @@ def import_worker_result(run_dir, *, result_path) -> dict:
             )
         if result["run_id"] != _run_field(tracker, "run_id"):
             raise TrackerValidationError("result run identity does not match the tracker")
-        if row["state"] != "[~]" or row["attempt"] != str(result["attempt"]):
+        if row["state"] != "[~]" or row["attempt"] != _attempt_token(result["attempt"]):
             raise TrackerValidationError(
                 "result attempt is not the current active attempt"
             )
@@ -3218,7 +3385,7 @@ def import_worker_result(run_dir, *, result_path) -> dict:
         for checkpoint in result["checkpoints"]:
             updated["checkpoints"] = _append_history(
                 updated["checkpoints"],
-                f"worker:{result['attempt']}:{checkpoint['id']}:"
+                f"worker:{_attempt_token(result['attempt'])}:{checkpoint['id']}:"
                 f"{checkpoint['status']}@{checkpoint['evidence']}",
             )
 
@@ -3260,7 +3427,7 @@ def import_worker_result(run_dir, *, result_path) -> dict:
                                integration="N/A")
             updated["state"] = "[x]"
             updated["checkpoints"] = _append_history(
-                updated["checkpoints"], f"completed:{result['attempt']}"
+                updated["checkpoints"], f"completed:{_attempt_token(result['attempt'])}"
             )
         else:
             if result["status"] in QUORUM_STATUSES:
@@ -3271,7 +3438,7 @@ def import_worker_result(run_dir, *, result_path) -> dict:
             updated["state"] = "[?]"
             updated["question"] = marker
             updated["checkpoints"] = _append_history(
-                updated["checkpoints"], f"blocked:{result['attempt']}@{marker}"
+                updated["checkpoints"], f"blocked:{_attempt_token(result['attempt'])}@{marker}"
             )
         return _replace_task(tracker, updated)
 
@@ -3294,7 +3461,7 @@ def resolve_question_record(run_dir, tracker: dict, reference: str) -> str:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v`
 Expected: OK
 
 - [ ] **Step 5: Commit**
@@ -3308,11 +3475,11 @@ git commit -m "feat(pipeline-auto): route quorum-raising results and validate re
 
 ---
 
-### Task 11: `--no-ff` integration, the merge-conflict hard stop, and the ancestry predicate (faults F9, F10)
+### Task 11: `integrate_task` — `--no-ff` ancestry and the merge-conflict hard stop (faults F9, F10)
 
-Worktree granularity is one per concurrently dispatched implementer, merged `--no-ff` in task order. `--no-ff` is **load-bearing, not stylistic**: a fast-forward collapses the merge commit, and with it the boundary clause 2 of the ancestry predicate checks. Because the merge commit exists, `git rev-list --reverse <merge>^1..<merge>^2` yields the exact task commit set directly.
+Worktree granularity is one per concurrently dispatched implementer, merged `--no-ff` in task order. `--no-ff` is **load-bearing, not stylistic**: a fast-forward collapses the merge commit, and with it the boundary clause 2 of the ancestry predicate checks. Because the merge commit exists, `git rev-list --reverse <merge>^1..<merge>^2` yields the exact task commit set directly, with no baseline bookkeeping.
 
-**A merge conflict is a hard stop.** Under typed write-scope validation a conflict should be impossible, so a conflict is evidence the scope declaration was wrong. Redoing the task alone papers over a broken declaration and lets the next task hit the same collision. The merge is aborted, nothing is recorded, and the error names **both task ids and both declared scopes**.
+The controller performs the merge; `integrate_task` validates and records it. **A merge conflict is a hard stop.** A conflicted `git merge --no-ff` leaves the repository mid-merge with unmerged paths and no merge commit, so `integrate_task` detects that state before anything else, aborts the merge, records nothing, and raises naming **both task ids and both declared scopes**. It never redoes the task alone, never retries, and never resolves with a strategy flag: under typed write-scope validation a conflict should be impossible, so it is evidence a scope declaration was wrong, and redoing the task alone papers over the broken declaration and lets the next task hit the same collision.
 
 The conflict scenario is constructed directly at the Git level in the test. A correct declaration should make it unreachable through the full validated path — which is precisely why reaching it must stop the run rather than recover.
 
@@ -3321,8 +3488,8 @@ The conflict scenario is constructed directly at the Git level in the test. A co
 - Test: `plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py`
 
 **Interfaces:**
-- Consumes: `_git`, `_git_out`, `_resolved_commit`, `_repo_dir`, `_approved_definition`, `resolve_evidence`, `_task_row`, `_csv`.
-- Produces: `_git_run(repo, *args)`; `_conflicting_task(run_dir, tracker, task_id, paths)`; `_integration_ancestry(repo, *, commits, branch_tip, merge_commit, target_branch) -> tuple`; `_integrate_task_branch(run_dir, *, task_id, branch, evidence) -> dict`.
+- Consumes: `_git`, `_git_out`, `_resolved_commit`, `_repo_dir`, `_approved_definition`, `resolve_evidence`, `_task_row`, `_replace_task`, `_csv`, `_commit_parents`.
+- Produces: `_git_run(repo, *args)`; `_merge_in_progress(repo) -> tuple`; `_colliding_task(tracker, repo, task_id, paths) -> tuple`; `_integration_ancestry(repo, *, commits, branch_tip, merge_commit, target_branch) -> tuple`; `integrate_task(run_dir, *, task_id, merge_commit) -> dict`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3340,41 +3507,32 @@ class IntegrationTests(TempDirTestCase):
             task_block("T1", order=1, batch="b1", write_scope=scopes[0])
             + task_block("T2", order=2, batch="b2", write_scope=scopes[1])
         )
-        repo, run_dir, plan = make_run(self.tmp, body, worker_limit=8)
+        repo, run_dir, _ = make_run(self.tmp, body, worker_limit=8)
         return repo, run_dir
 
-    def branch(self, repo, name: str, relative: str, text: str):
+    def branch(self, repo, name: str, relative: str, text: str) -> str:
         git(repo, "checkout", "-q", "-b", name, "target")
         head = commit_file(repo, relative, text, f"{name} work")
         git(repo, "checkout", "-q", "target")
         return head
 
-    def integration_evidence(self, run_dir, merge_commit: str, task_id: str) -> str:
-        digest = write_evidence(
-            run_dir / "evidence", name=f"{task_id}-integration.md",
-            purpose="task-integration", subject=f"task/{task_id}",
-            code_state=merge_commit, commands='["git merge --no-ff"]',
-        )
-        return f"evidence/{task_id}-integration.md#sha256={digest}"
+    def merge_no_ff(self, repo, branch: str, message: str) -> str:
+        git(repo, "checkout", "-q", "target")
+        git(repo, "merge", "-q", "--no-ff", "--no-edit", "-m", message, branch)
+        return git(repo, "rev-parse", "HEAD")
 
     def test_no_ff_merge_creates_the_boundary_the_predicate_checks(self):
         repo, run_dir = self.two_task_run()
         tip = self.branch(repo, "task/T1", "src/a1.py", "one = 1\n")
-        merge = git(repo, "merge", "-q", "--no-ff", "--no-edit",
-                    "-m", "integrate T1", "task/T1") or git(repo, "rev-parse", "HEAD")
+        merge = self.merge_no_ff(repo, "task/T1", "integrate T1")
         parents = state._commit_parents(repo, merge)
         self.assertEqual(len(parents), 2)
         self.assertEqual(parents[1], tip)
-        walked = tuple(
-            line for line in git(
-                repo, "rev-list", "--reverse", f"{merge}^1..{merge}^2"
-            ).splitlines() if line
-        )
-        self.assertEqual(walked, (tip,))
-        state._integration_ancestry(
+        walked = state._integration_ancestry(
             repo, commits=(tip,), branch_tip=tip, merge_commit=merge,
             target_branch="target",
         )
+        self.assertEqual(walked, (tip,))
 
     def test_a_fast_forward_integration_is_rejected(self):
         """F10: --no-ff is load-bearing. A fast-forward collapses the merge
@@ -3395,9 +3553,7 @@ class IntegrationTests(TempDirTestCase):
         repo, run_dir = self.two_task_run()
         tip = self.branch(repo, "task/T1", "src/a1.py", "one = 1\n")
         stray = self.branch(repo, "task/T2", "src/a2.py", "two = 2\n")
-        merge = (git(repo, "merge", "-q", "--no-ff", "--no-edit",
-                     "-m", "integrate T1", "task/T1")
-                 or git(repo, "rev-parse", "HEAD"))
+        merge = self.merge_no_ff(repo, "task/T1", "integrate T1")
         with self.assertRaises(state.TrackerValidationError):
             state._integration_ancestry(
                 repo, commits=(tip, stray), branch_tip=tip, merge_commit=merge,
@@ -3418,69 +3574,76 @@ class IntegrationTests(TempDirTestCase):
             )
         self.assertIn("target", str(caught.exception))
 
-    def test_merge_conflict_is_a_hard_stop_naming_both_tasks_and_both_scopes(self):
-        """F9: a conflict proves the scope declaration was wrong. Redoing the
-        task alone papers over that and lets the next task collide again."""
+    def test_integrate_task_records_the_merge_commit(self):
+        repo, run_dir = self.two_task_run()
+        tip = self.branch(repo, "task/T1", "src/a1.py", "one = 1\n")
+        set_task_state(run_dir, "T1", state="[x]", commits=tip, source_ref=tip,
+                       owner="impl-1", attempt="attempt-001")
+        merge = self.merge_no_ff(repo, "task/T1", "integrate T1")
+        tracker = state.integrate_task(run_dir, task_id="T1", merge_commit=merge)
+        row = task_row(tracker, "T1")
+        self.assertEqual(row["integration"], merge)
+        self.assertEqual(git(repo, "rev-parse", "target"), merge)
+
+    def test_integrate_task_replay_is_inert(self):
+        repo, run_dir = self.two_task_run()
+        tip = self.branch(repo, "task/T1", "src/a1.py", "one = 1\n")
+        set_task_state(run_dir, "T1", state="[x]", commits=tip, source_ref=tip,
+                       owner="impl-1", attempt="attempt-001")
+        merge = self.merge_no_ff(repo, "task/T1", "integrate T1")
+        state.integrate_task(run_dir, task_id="T1", merge_commit=merge)
+        snapshot = (run_dir / "progress.md").read_bytes()
+        state.integrate_task(run_dir, task_id="T1", merge_commit=merge)
+        self.assertEqual((run_dir / "progress.md").read_bytes(), snapshot)
+
+    def test_a_merge_conflict_is_a_hard_stop_naming_both_tasks_and_scopes(self):
+        """F9: a conflict proves a scope declaration was wrong. Redoing the task
+        alone papers over that and lets the next task collide again."""
         repo, run_dir = self.two_task_run()
         # Both branches touch src/shared.py, which NEITHER declared. Constructed
         # directly: a correct declaration should make this unreachable.
         first = self.branch(repo, "task/T1", "src/shared.py", "shared = 1\n")
         second = self.branch(repo, "task/T2", "src/shared.py", "shared = 2\n")
-        git(repo, "merge", "-q", "--no-ff", "--no-edit", "-m", "integrate T1",
-            "task/T1")
-        merged = git(repo, "rev-parse", "HEAD")
+        merged = self.merge_no_ff(repo, "task/T1", "integrate T1")
         set_task_state(run_dir, "T1", state="[x]", commits=first,
-                       source_ref=first, integration=merged)
+                       source_ref=first, integration=merged,
+                       owner="impl-1", attempt="attempt-001")
         set_task_state(run_dir, "T2", state="[x]", commits=second,
-                       source_ref=second, owner="impl-2", attempt="1")
+                       source_ref=second, owner="impl-2", attempt="attempt-001")
+
+        # The controller attempts the merge; git leaves the tree mid-merge.
+        conflicted = state._git_run(
+            repo, "merge", "--no-ff", "--no-edit", "-m", "integrate T2", "task/T2"
+        )
+        self.assertNotEqual(conflicted.returncode, 0)
 
         with self.assertRaises(state.TrackerValidationError) as caught:
-            state._integrate_task_branch(
-                run_dir, task_id="T2", branch="task/T2", evidence="-"
-            )
+            state.integrate_task(run_dir, task_id="T2", merge_commit=second)
         message = str(caught.exception)
-        for fragment in ("T1", "T2", "file:src/a1.py", "file:src/a2.py",
-                         "src/shared.py"):
+        for fragment in ("HARD STOP", "T1", "T2", "file:src/a1.py",
+                         "file:src/a2.py", "src/shared.py"):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, message)
 
-        # Hard stop: the merge was aborted, nothing was recorded, and no retry
-        # or redo-alone happened.
+        # Hard stop: the merge was aborted, nothing was recorded, no retry and
+        # no redo-alone happened.
         self.assertEqual(git(repo, "status", "--short"), "")
         self.assertEqual(git(repo, "rev-parse", "HEAD"), merged)
         tracker = state.validate_run(run_dir)
         self.assertEqual(task_row(tracker, "T2")["integration"], "-")
 
-    def test_clean_integration_records_the_merge_commit_and_its_evidence(self):
+    def test_integrate_task_refuses_an_unfinished_task(self):
         repo, run_dir = self.two_task_run()
         tip = self.branch(repo, "task/T1", "src/a1.py", "one = 1\n")
-        set_task_state(run_dir, "T1", state="[x]", commits=tip, source_ref=tip,
-                       owner="impl-1", attempt="1")
-        merge_preview = None
-        tracker = state._integrate_task_branch(
-            run_dir, task_id="T1", branch="task/T1", evidence=None
-        )
-        merge_preview = task_row(tracker, "T1")["integration"]
-        self.assertEqual(len(state._commit_parents(repo, merge_preview)), 2)
-        self.assertEqual(git(repo, "rev-parse", "target"), merge_preview)
-
-    def test_integration_evidence_must_name_the_merge_commit(self):
-        repo, run_dir = self.two_task_run()
-        tip = self.branch(repo, "task/T1", "src/a1.py", "one = 1\n")
-        set_task_state(run_dir, "T1", state="[x]", commits=tip, source_ref=tip,
-                       owner="impl-1", attempt="1")
-        bad = self.integration_evidence(run_dir, tip, "T1")   # branch tip, not merge
-        with self.assertRaises(state.TrackerValidationError) as caught:
-            state._integrate_task_branch(
-                run_dir, task_id="T1", branch="task/T1", evidence=bad
-            )
-        self.assertIn("merge commit", str(caught.exception))
+        merge = self.merge_no_ff(repo, "task/T1", "integrate T1")
+        with self.assertRaises(state.TrackerValidationError):
+            state.integrate_task(run_dir, task_id="T1", merge_commit=merge)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k IntegrationTests`
-Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute '_integration_ancestry'`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k IntegrationTests`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute '_integration_ancestry'` The run must still report `Ran 8 tests`. A `-k` pattern that matches nothing still reports OK and exits 0, so the count is the assertion, not the exit status.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -3501,6 +3664,32 @@ def _git_run(repo, *args: str):
     return subprocess.run(
         ("git", "-C", str(repo), *args), capture_output=True, text=True, check=False
     )
+
+
+def _merge_in_progress(repo) -> tuple:
+    """Return the unmerged paths if the repository is mid-merge, else ()."""
+    if _git_run(repo, "rev-parse", "--verify", "MERGE_HEAD").returncode != 0:
+        return ()
+    return tuple(
+        line for line in
+        _git_out(repo, "diff", "--name-only", "--diff-filter=U").splitlines() if line
+    ) or ("<unnamed>",)
+
+
+def _colliding_task(tracker: dict, repo, task_id: str, paths) -> tuple:
+    """Name the other task whose recorded commits touched a conflicting path."""
+    for path in paths:
+        for row in tracker.get("tasks", ()):
+            other_id = _field(row, "ID")
+            if other_id == task_id:
+                continue
+            for commit in _csv(row["commits"]):
+                touched = _git_out(
+                    repo, "show", "--pretty=format:", "--name-only", commit
+                ).split()
+                if path in touched:
+                    return other_id, path
+    return "unknown", (tuple(paths) or ("unknown",))[0]
 
 
 def _integration_ancestry(repo, *, commits, branch_tip: str, merge_commit: str,
@@ -3550,91 +3739,69 @@ def _integration_ancestry(repo, *, commits, branch_tip: str, merge_commit: str,
     return walked
 
 
-def _conflicting_task(run_dir, tracker: dict, task_id: str, paths) -> tuple:
-    """Name the other task whose recorded commits touched a conflicting path."""
-    repo = _repo_dir(tracker)
-    for path in paths:
-        for row in tracker.get("tasks", ()):
-            if row["id"] == task_id:
-                continue
-            for commit in _csv(row["commits"]):
-                touched = _git_out(
-                    repo, "show", "--pretty=format:", "--name-only", commit
-                ).split()
-                if path in touched:
-                    other = _approved_definition(run_dir, tracker, row["id"])
-                    return row["id"], other["write_scope"], path
-    return "unknown", (), (tuple(paths) or ("unknown",))[0]
-
-
-def _integrate_task_branch(run_dir, *, task_id: str, branch: str, evidence) -> dict:
-    """Merge one task branch --no-ff into the target branch, or stop hard."""
+def integrate_task(run_dir, *, task_id: str, merge_commit: str) -> dict:
+    """Record one task's --no-ff integration, or stop hard on a conflict."""
 
     def mutate(tracker: dict) -> dict:
         repo = _repo_dir(tracker)
         target = _run_field(tracker, "target_branch")
         row = _task_row(tracker, task_id)
+        definition = _approved_definition(run_dir, tracker, task_id)
+
+        # The hard stop comes FIRST: a conflicted `git merge --no-ff` leaves the
+        # tree mid-merge with no merge commit to validate.
+        unmerged = _merge_in_progress(repo)
+        if unmerged:
+            other_id, path = _colliding_task(tracker, repo, task_id, unmerged)
+            other_scope = ()
+            if other_id != "unknown":
+                other_scope = _approved_definition(
+                    run_dir, tracker, other_id
+                )["write_scope"]
+            _git(repo, "merge", "--abort")
+            raise TrackerValidationError(
+                "HARD STOP: the integration merge conflicted, which proves a "
+                "write scope declaration was wrong. Not redoing the task alone "
+                "-- that papers over the broken declaration and the next task "
+                f"collides again. Colliding paths: {', '.join(unmerged)} "
+                f"(first: {path}). Task {task_id} declared "
+                f"{definition['write_scope']}; task {other_id} declared "
+                f"{other_scope}."
+            )
+
         if row["state"] != "[x]" or row["kind"] != "source":
             raise TrackerValidationError(
                 "only a completed source task is integrated"
             )
+        resolved = _resolved_commit(repo, merge_commit)
+        if row["integration"] == resolved:
+            return tracker                                   # replay: inert
         if row["integration"] not in {"-", ""}:
-            raise TrackerValidationError(f"task {task_id} is already integrated")
-        definition = _approved_definition(run_dir, tracker, task_id)
-        commits = _csv(row["commits"])
-        branch_tip = _resolved_commit(repo, branch)
-
-        if not _git(repo, "checkout", "-q", target):
-            raise TrackerValidationError(f"cannot check out target branch {target}")
-        merge = _git_run(repo, "merge", "--no-ff", "--no-edit",
-                         "-m", f"integrate {task_id}", branch)
-        if merge.returncode != 0:
-            unmerged = tuple(
-                line for line in _git_out(
-                    repo, "diff", "--name-only", "--diff-filter=U"
-                ).splitlines() if line
-            )
-            _git(repo, "merge", "--abort")
-            other_id, other_scope, path = _conflicting_task(
-                run_dir, tracker, task_id, unmerged
-            )
             raise TrackerValidationError(
-                "HARD STOP: integration merge conflicted, which proves a write "
-                "scope declaration was wrong. Not redoing the task alone -- that "
-                "papers over the broken declaration and the next task collides "
-                f"again. Colliding paths: {', '.join(unmerged) or path}. "
-                f"Task {task_id} declared {definition['write_scope']}; "
-                f"task {other_id} declared {other_scope}."
+                f"task {task_id} is already integrated at {row['integration']}"
             )
-        merge_commit = _resolved_commit(repo, "HEAD")
         _integration_ancestry(
-            repo, commits=commits, branch_tip=branch_tip,
-            merge_commit=merge_commit, target_branch=target,
+            repo, commits=_csv(row["commits"]),
+            branch_tip=_resolved_commit(repo, row["source_ref"]),
+            merge_commit=resolved, target_branch=target,
         )
-        if evidence not in (None, "-"):
-            record = resolve_evidence(run_dir, repo, evidence)
-            if (record["purpose"] != "task-integration"
-                    or record["subject"] != f"task/{task_id}"
-                    or record["code_state"] != merge_commit):
-                raise TrackerValidationError(
-                    "task-integration evidence must name this task and the merge "
-                    "commit as its code state"
-                )
         updated = dict(row)
-        updated["integration"] = merge_commit
+        updated["integration"] = resolved
         updated["verification"] = _append_history(
-            row["verification"], f"integration:{evidence or merge_commit}"
+            row["verification"], f"integration:{resolved}"
         )
         return _replace_task(tracker, updated)
 
     return locked_tracker_update(
-        run_dir, transition_id=f"integrate-{task_id}-{branch}", mutate=mutate
+        run_dir, transition_id=f"integrate-{task_id}-{merge_commit}", mutate=mutate
     )
 ```
 
+P05 and P06 record the matching digest-bound `task-integration` PASS record with `resolve_evidence`; its `code_state` is the **merge commit**, never the task branch tip.
+
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v`
 Expected: OK
 
 - [ ] **Step 5: Commit**
@@ -3683,12 +3850,12 @@ class ReconcileRunTests(TempDirTestCase):
         repo, run_dir = self.active_run()
         before = (run_dir / "progress.md").read_bytes()
         report = state.reconcile_run(run_dir)
-        self.assertIn("await-or-check-live-owner:T1:1:impl-1", report["actions"])
+        self.assertIn("await-or-check-live-owner:T1:attempt-001:impl-1", report["actions"])
         self.assertEqual((run_dir / "progress.md").read_bytes(), before)
         tracker = state.validate_run(run_dir)
         row = task_row(tracker, "T1")
         self.assertEqual(row["state"], "[~]")
-        self.assertEqual(row["attempt"], "1")        # no new attempt invented
+        self.assertEqual(row["attempt"], "attempt-001")        # no new attempt invented
         self.assertNotIn("[x]", row["state"])
 
     def test_a_commit_without_a_result_does_not_complete_the_task(self):
@@ -3696,7 +3863,7 @@ class ReconcileRunTests(TempDirTestCase):
         git(repo, "checkout", "-q", "-b", "task/T1", "target")
         commit_file(repo, "src/a1.py", "one = 1\n", "work that was never published")
         report = state.reconcile_run(run_dir)
-        self.assertIn("await-or-check-live-owner:T1:1:impl-1", report["actions"])
+        self.assertIn("await-or-check-live-owner:T1:attempt-001:impl-1", report["actions"])
         self.assertEqual(task_row(state.validate_run(run_dir), "T1")["state"], "[~]")
 
     def test_a_matching_result_is_imported_once(self):
@@ -3713,10 +3880,10 @@ class ReconcileRunTests(TempDirTestCase):
             evidence=(f"evidence/T1.md#sha256={digest}",),
         ))
         report = state.reconcile_run(run_dir)
-        self.assertIn("imported:T1:1", report["actions"])
+        self.assertIn("imported:T1:attempt-001", report["actions"])
         self.assertEqual(task_row(state.validate_run(run_dir), "T1")["state"], "[x]")
         again = state.reconcile_run(run_dir)
-        self.assertNotIn("imported:T1:1", again["actions"])
+        self.assertNotIn("imported:T1:attempt-001", again["actions"])
 
     def test_a_result_with_a_contradicting_owner_raises_a_question(self):
         repo, run_dir = self.active_run()
@@ -3734,7 +3901,7 @@ class ReconcileRunTests(TempDirTestCase):
         before = (run_dir / "progress.md").read_bytes()
         report = state.reconcile_run(run_dir)
         self.assertTrue(
-            any(item.startswith("result-owner-contradiction:T1:1")
+            any(item.startswith("result-owner-contradiction:T1:attempt-001")
                 for item in report["questions"])
         )
         self.assertEqual((run_dir / "progress.md").read_bytes(), before)
@@ -3796,8 +3963,8 @@ class ReconcileRunTests(TempDirTestCase):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v -k ReconcileRunTests`
-Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'reconcile_run'`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k ReconcileRunTests`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'reconcile_run'` The run must still report `Ran 8 tests`. A `-k` pattern that matches nothing still reports OK and exits 0, so the count is the assertion, not the exit status.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -3823,7 +3990,9 @@ def reconcile_run(run_dir) -> dict:
     questions: list = []
     diagnostics: list = []
 
-    parse_plan_metadata(_active_phase_plan(run_dir, tracker))
+    # Revalidate every approved phase plan before trusting any task row.
+    for phase in tracker.get("phases", ()):
+        parse_plan_metadata(_phase_plan_path(tracker, _field(phase, "ID")))
 
     candidates: list = []
     output_dir = run_dir / "agent-output"
@@ -3848,7 +4017,7 @@ def reconcile_run(run_dir) -> dict:
             (path, result) for path, result in candidates
             if result["run_id"] == _run_field(tracker, "run_id")
             and result["task_id"] == row["id"]
-            and str(result["attempt"]) == row["attempt"]
+            and _attempt_token(result["attempt"]) == row["attempt"]
         ]
         if len(matches) > 1:
             questions.append(f"conflicting-results:{row['id']}:{row['attempt']}")
@@ -3914,7 +4083,7 @@ def reconcile_run(run_dir) -> dict:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v`
 Expected: OK — the whole P04 suite
 
 - [ ] **Step 5: Commit**
@@ -3930,34 +4099,34 @@ git commit -m "feat(pipeline-auto): reconcile interrupted runs from files and Gi
 
 ## Self-review
 
-**Spec coverage.** P04's row in the spec's phase table reads "Task lifecycle carry-over — reserve/start/resume, typed scopes, result identity, baseline range proof, integration ancestry, reconciliation". Reserve is Task 6; resume is Task 7; typed scopes are Tasks 2, 3, and 6; result identity is Tasks 4, 9, and 10; the baseline range proof is Task 8; integration ancestry is Task 11; reconciliation is Task 12. The spec's "Cost blowup" mitigation (`worker_limit - 3`, brains as three unique owners) is Task 6. The quorum contract's "A worker never dispatches brains… `BLOCKED` still means halt" is Tasks 4 and 10. The recorded default for worktree granularity and the merge-conflict hard stop is Task 11. The master plan's `parse_plan_metadata` is Tasks 1 and 2, and the two templates are Tasks 4 and 5. Every "P04 produces" signature has a task.
+**Spec coverage.** P04's row in the spec's phase table reads "Task lifecycle carry-over — reserve/start/resume, typed scopes, result identity, baseline range proof, integration ancestry, reconciliation". Reserve is Task 6; resume is Task 7; typed scopes are Tasks 2, 3, and 6; result identity is Tasks 4, 9, and 10; the baseline range proof is Task 8; integration ancestry is Task 11; reconciliation is Task 12. The spec's "Cost blowup" mitigation (`worker_limit - 3`, brains as three unique owners) is Task 6. The quorum contract's "A worker never dispatches brains… `BLOCKED` still means halt" is Tasks 4 and 10. The recorded default for worktree granularity and the merge-conflict hard stop is Task 11. The master plan's `parse_plan_metadata` is Tasks 1 and 2, `import_phase_plan` is Task 6, `integrate_task` is Task 11, and the two templates are Tasks 4 and 5. Every "P04 produces" signature has a task.
 
-**Placeholder scan.** No TBDs, no "add appropriate error handling", no "similar to Task N". Every step carries the actual test or implementation code. Every `Run:` line names `python3 -m unittest discover`; there is no `pytest` invocation, import, decorator, or fixture anywhere in this plan.
+**Placeholder scan.** No TBDs, no "add appropriate error handling", no "similar to Task N". Every step carries the actual test or implementation code. Every `Run:` line names `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v` with **no `-t`**, and every sub-suite step asserts the reported `Ran N tests`. There is no `pytest` invocation, import, decorator, or fixture anywhere in this plan. Both facts were checked by executing the commands, not by reading them.
 
-**Type consistency.** `parse_plan_metadata` returns `{"phase": dict, "tasks": list[dict]}` and every consumer (`_approved_definition`, `reconcile_run`) indexes those dicts by string key, never by attribute. `verify_source_range` returns a dict with `commits` as a `tuple[str, ...]`, and `import_worker_result` compares `tuple(result["commits"])` against it. `implementation_slot_cap` returns an `int`. `scopes_overlap` takes two single scope **strings**; `_scope_sets_overlap` takes two iterables of them — the reservation guard calls the set form, and Task 3 tests both. `publish_worker_result` returns a repository-relative path **string**; `publish_immutable` returns a **digest**, and Task 9 keeps them distinct. Attempts are `int` in every P04 signature and rendered as `str` in tracker cells and result documents; `_require_fresh_attempt` and every comparison use `str(attempt)`. `_repo_dir` returns a `Path` built from P02's `repo_root(tracker)` and nothing walks for `.git`.
+**Type consistency.** `parse_plan_metadata` returns `{"phase": dict, "tasks": list[dict]}` and every consumer (`_approved_definition`, `reconcile_run`) indexes those dicts by string key, never by attribute. `verify_source_range` returns a dict with `commits` as a `tuple[str, ...]`, and `import_worker_result` compares `tuple(result["commits"])` against it. `_integration_ancestry` returns the same kind of tuple from the second-parent walk and compares it the same way. `implementation_slot_cap` returns an `int`. `scopes_overlap` takes two single scope **strings**; `_scope_sets_overlap` takes two iterables of them — the reservation guard calls the set form, and Task 3 tests both. `publish_worker_result` returns a repository-relative path **string**; `publish_immutable` returns a **digest**, and Task 9 keeps them distinct. **Attempts are `int` in every P04 signature and the token `attempt-NNN` in every tracker cell, checkpoint marker, worker-result document and evidence record**; `_attempt_token` is the one conversion point and every comparison goes through it. `_repo_dir` returns a `Path` built from P02's `repo_root(tracker)`; nothing walks for `.git` and nothing derives the root from `run_dir` depth.
 
 **One deliberate redundancy.** The quorum/halt routing rule is enforced twice: in the codec (Task 4, so a malformed result cannot be published) and at import (Task 10, so a hand-written file cannot be imported). That is not duplication to remove — the publisher and the importer are different trust boundaries.
 
 ---
 
-## Unresolved — reported, not invented
+## Resolved interface questions — settled, with where each one landed
 
-Each item below is something P04 needs that the spec and master plan do not contain. Nothing here was invented into an interface; where P04 had to act, it did so behind a private helper and the item names what should be pinned.
+The nine items P04 originally reported back have all been answered. They are recorded here so a later reader sees the decision rather than re-deriving it.
 
-1. **`initialize_run` seeds no artifact references and no task rows.** Its signature is `(run_dir, *, run_id, base_commit, target_branch, worker_limit, repo_root)`, yet P04 must resolve a task's approved definition from `tracker["run"]["phase_plans"]`, validate a resume against `tracker["run"]["decisions"]`, and mutate `## Tasks` rows that must already exist. The test harness writes `phase_plans`, the active phase, and the task rows through one explicit `locked_tracker_update` using P02's `append_row`. **Needed:** a named owner for seeding those fields and rows in production — either extra `initialize_run` parameters or an explicit stage-06/07 transition.
+| # | Question | Resolution | Where it lands in this plan |
+| --- | --- | --- | --- |
+| 1 | `initialize_run` seeds no artifact references and no task rows | `initialize_run` writes `phase_plans`, `decisions`, `findings`, `repo_root` and an **empty** `## Tasks`; appending task rows is P04's | Task 6, `import_phase_plan` |
+| 2 | No evidence-specific exception type | Reuse `TrackerValidationError`; do **not** invent `EvidenceError` | every rejection path |
+| 3 | No public integration transition | `integrate_task(run_dir, *, task_id, merge_commit) -> dict` is public and P04's; a private helper could not be called by P05's gate or exercised by P06's tests | Task 11 |
+| 4 | `## Quorum` columns unpinned | Pinned by P02's committed fixture: 12 columns. P04 reads `QID`, `State`, `Owners` and writes none | Tracker column contract |
+| 5 | `## Tasks` columns unpinned | Pinned by the same fixture: 16 columns, **no `Deps`**, and `Attempt` is the token `attempt-001` | Tracker column contract, `_attempt_token` |
+| 6 | `derive_next_action` vocabulary for the new routes | P04 persists `quorum:<question-record>` / `halt:<reason>` in the task's `Question` cell; the action strings stay P02/P03's | Task 10 |
+| 7 | Marker and comment strings | Accepted as derived, now pinned in this plan so P05 cites rather than re-derives | Pinned marker and comment strings |
+| 8 | Artifact-task evidence binding | Accepted as derived: exact outputs on disk, `code_state` bound to the target tip | Task 10 |
+| 9 | `EVIDENCE_PURPOSES` after `## Remediation` was dropped | Each phase appends the purposes it needs. P04 ships three; P05 adds `task-review`, `adversarial`; P06 adds `branch-review`, `completeness`, `final`. An unregistered purpose is rejected by design | Task 5, Pinned strings |
 
-2. **No evidence-specific exception type.** P02's block declares `TrackerError`, `ForeignSchemaError`, `TrackerValidationError`, `TrackerWriteError`, `UpdateOutcomeUncertain`, `PlanMetadataError`. P04 raises `TrackerValidationError` for every lifecycle and evidence rejection rather than invent one. **Needed if** P05 or P06 must distinguish "this evidence contradicts the tracker" from "this tracker is internally impossible": add `EvidenceError(TrackerError)` to the P02 block.
+**Two things a P04 implementer must do rather than assume.**
 
-3. **No public integration transition in "P04 produces".** The spec assigns integration ancestry to P04, and the merge-conflict hard stop is now P04's too, but the signature block names neither. P04 implements `_integration_ancestry` and `_integrate_task_branch` as private, fully tested functions called by `reconcile_run` and by Task 11's tests. **Needed:** add `integrate_task(run_dir, *, task_id, branch, evidence) -> dict` to the master plan's P04 block so P05 and P06 have a public name to call, or state who owns integration instead.
+Read `plugins/superb/skills/pipeline-auto/tests/fixtures/valid-progress.md` before writing Task 6. The column transcription in this plan is orientation; the fixture is the authority, and it is the thing that changes.
 
-4. **`## Quorum` column names are unpinned.** `_quorum_owners` reads `qid`, `state`, and `owners`, and treats `state == "in_flight"` as occupying a worker slot — the three-phase record the spec describes. P02 owns `SECTIONS`, so those three column names must appear there. If P03 names them differently, `_quorum_owners` is the single point of change, but the mismatch would be silent until a slot-cap test failed.
-
-5. **The full `## Tasks` column tuple is unpinned.** P04 reads and writes `id, state, kind, owner, attempt, deps, checkpoints, result, source_ref, commits, artifacts, integration, verification, question, provisional`. The spec names only the *addition* (`Provisional`) and the master plan names only `section_columns`. P02's `SECTIONS["Tasks"]` must contain exactly this set.
-
-6. **`derive_next_action`'s vocabulary for the two new routes.** The spec names `await-escalation-batch` for the escalation queue but no action string for "a task is parked pending a quorum" versus "the run has halted". P04 persists an unambiguous `quorum:<question-record>` or `halt:<reason>` marker in the task's `question` cell and asserts only that `derive_next_action` returns a nonempty string. **Needed:** the action strings themselves, owned by P02/P03.
-
-7. **Document marker strings for the two new templates.** The spec pins the tracker marker (`<!-- pipeline-auto/v1 -->`) but not the worker-result or verification-evidence markers. P04 uses `<!-- pipeline-auto-worker-result/v1 -->` and `<!-- pipeline-auto-verification-evidence/v1 -->`, chosen by direct analogy. Same for the phase-plan comment prefixes `pipeline-auto-phase` / `pipeline-auto-task` and their `-suite` variants. Confirm or correct before P05 depends on them.
-
-8. **Artifact-task evidence binding.** `superb:pipeline` binds an artifact task's `task-test` record to a JSON array of `<path>#sha256=<digest>` for each approved output. The pipeline-auto spec does not restate this. P04 validates that every approved output exists on disk and binds `code_state` to the target-branch tip, leaving `inputs` unconstrained. **Needed if** P05 or P06 re-validates artifact digests at phase verification: specify the `inputs` form.
-
-9. **Evidence purposes after `## Remediation` was dropped.** The spec removes the `## Remediation` section entirely, so P04 uses `("task-test", "task-integration", "phase")` and no `remediation` purpose. P05 introduces `## Fix Rounds`; if a fix round needs its own typed evidence purpose, it must be added to `EVIDENCE_PURPOSES` by P05 rather than assumed here.
+Run the verification tuple. Do not reason about it. The `-t .` that this plan carried in its first two drafts came from an instruction, survived a written claim that it had been verified, and never executed once — `pipeline-auto` is hyphenated, so `-t .` makes discovery resolve the start directory as the module path `plugins.superb.skills.pipeline-auto.tests` and die with `ImportError: Start directory is not importable`. A command that has not been executed is not a verified command.

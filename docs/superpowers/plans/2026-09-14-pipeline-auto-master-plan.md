@@ -229,6 +229,21 @@ Independence is checked against every owner that appears in any task's history,
 including released and superseded attempts — not against current owners only, or
 a worker released after finishing a task can be assigned to review it.
 
+**`gate.head` advances with each fix round; sealed reports keep the head they
+were written against.** Entailed, not open: the inlined SDD protocol re-runs the
+final review on *the updated package*, and a gate whose head stayed at the
+initial edge would re-review code that does not contain the fixes — returning the
+same findings every round until the cap halts, which makes the fix loop a
+guaranteed no-op rather than a loop.
+
+So `record_gate_fix_round` advances `gate.head` to the fix commit, and
+`evaluate_master_gate` compares each report against the head **it was written
+against**, not against the current one. A report sealed at the initial edge stays
+bound to that edge — its digest binding is what makes it evidence, and rebinding
+it to a later head would silently claim a reviewer saw code they never read. A
+round therefore has two heads in play, and the distinction is the whole point:
+the gate advances, the evidence does not.
+
 **Section column tuples are pinned by P02's committed fixture**, not by any
 later phase's assumption. Read them from
 `plugins/superb/skills/pipeline-auto/tests/fixtures/valid-progress.md` rather

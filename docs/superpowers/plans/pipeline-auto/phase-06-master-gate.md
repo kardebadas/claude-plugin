@@ -62,10 +62,11 @@ Owned: the stage-06 seal and its guard; `## Gates` master-row transitions; revie
 assignment and independence; the two reviewer packets; the master report block grammar;
 `findings.md` parse/render/upsert; the contradiction routing table; the challenge ledger
 and the raised-bar re-open record; unbiased reconciliation; the completeness critic's two
-classes and the proposals file; evidence-derived master acceptance; the stage-12 run-wide
-suite contract; the terminal report.
+classes and the proposals file; evidence-derived master acceptance; the **master-gate fix
+loop** with its three-round bound, no-progress halt and oscillation halt; the stage-12
+run-wide suite contract; the terminal report.
 
-Not owned: per-task review rows and the fix-round *machinery* (P05 — P06 reads the rows
+Not owned: per-task review rows and the **task-scope** fix loop (P05 — P06 reads those rows
 and writes at most a finding disposition); adversarial triggers and the ratchet (P05);
 quorum dispatch, clustering, rungs, budget (P03 — P06 never opens a quorum, it only
 routes to one); task reserve/resume/integration (P04); the tracker grammar itself (P02).
@@ -197,9 +198,12 @@ def verify_source_range(repo: str, *, baseline: str, head: str, scopes: list) ->
 def open_fix_round(run_dir: str, *, scope: str, findings: list) -> dict: ...
 ```
 
-P06 calls none of these inside a transition. They are named because the controller prose
-in P07 sequences them around this phase's functions, and because Task 7's test asserts
-that a reconciliation leaves P05's fix-round rows untouched.
+P06 calls none of these inside a transition. They are named because the controller prose in
+P07 sequences them around this phase's functions, and because Task 7's test asserts that a
+reconciliation leaves P05's fix-round rows untouched. In particular, **P06 does not call
+`open_fix_round`**: Task 10 owns the gate-scope loop end-to-end, because P05's function is
+shaped for a task scope and a per-task review row. The `## Fix Rounds` grammar is shared and
+P02 validates it for both scopes.
 
 ### Produces — consumed by P07 (prose), P08 (pressure GREEN) and P09 (walkthrough)
 
@@ -230,6 +234,7 @@ def open_master_gate(run_dir: str, *, reviewers: dict) -> dict: ...
 def tainting_decisions(run_dir: str) -> dict: ...
 def build_reviewer_packet(run_dir: str, *, role: str) -> str: ...
 
+def _gate_row(tracker: dict) -> dict: ...
 def parse_findings(text: str) -> list[dict]: ...
 def render_findings(rows: list[dict]) -> str: ...
 def upsert_finding(run_dir: str, row: dict) -> list[dict]: ...
@@ -251,6 +256,15 @@ def record_completeness(run_dir: str, *, items: list) -> dict: ...
 def completeness_proposals(run_dir: str) -> list[dict]: ...
 
 def evaluate_master_gate(run_dir: str) -> dict: ...
+
+MAX_GATE_FIX_ROUNDS = 3
+GATE_HALTS = ("round-cap", "no-progress", "oscillation")
+
+def gate_fix_rounds(run_dir: str) -> list[dict]: ...
+def open_gate_fix_round(run_dir: str, *, fixer: str, findings: list) -> dict: ...
+def record_gate_fix_round(run_dir: str, *, round_number: int, fixer: str, commits: str,
+                          verification: str, re_review: str, remaining: list) -> dict: ...
+
 def final_suite_commands(base_commit: str, project_root: str) -> tuple[tuple[str, ...], ...]: ...
 def record_final_verification(run_dir: str, *, results: list) -> dict: ...
 def derive_terminal_action(run_dir: str) -> str: ...
@@ -263,7 +277,10 @@ def publish_terminal_report(run_dir: str) -> str: ...
 `dispatch_brains` is a bool that is `True` for exactly two routes. `classify_completeness_item`
 returns a member of `CRITIC_CLASSES` or raises — it never returns `None`.
 `evaluate_master_gate` returns `{"accepted": bool, "blockers": list[str]}` and takes no
-verdict. `raised_floor` returns a rung **name**. `owner_history` returns a `frozenset`, so
+verdict. `open_gate_fix_round` and `record_gate_fix_round` both return
+`{"round", "halted", "reason", "dispatch", ...}`; `halted` is a bool and `reason` is a
+`GATE_HALTS` member or `-`, never `None`, so a caller cannot mistake a halt for a quiet
+success. `raised_floor` returns a rung **name**. `owner_history` returns a `frozenset`, so
 a caller cannot mutate the set it checked against.
 
 ---
@@ -1523,13 +1540,20 @@ git commit -m "feat(pipeline-auto): show reviewers every quorum decision with it
 
 **Interfaces:**
 - Consumes: `GateError`, `MASTER_GATE_ID`, the sealed `assignments.json`, P02's `publish_immutable`, `TrackerValidationError`, `_csv`, `_load_json`
-- Produces: `SEVERITIES`, `VERDICT_PARTS`, `MASTER_REPORT_MARKER`, `_SPEC_TRACE`, `_pipe_cells`, `parse_findings`, `render_findings`, `upsert_finding`, `open_findings`, `parse_master_report`, `record_master_report`
+- Produces: `SEVERITIES`, `VERDICT_PARTS`, `MASTER_REPORT_MARKER`, `_SPEC_TRACE`, `_pipe_cells`, `_gate_row`, `parse_findings`, `render_findings`, `upsert_finding`, `open_findings`, `parse_master_report`, `record_master_report`
 
 **Named fault this task catches:** a report whose `head` is not the gate's head. Two
 reviewers over "the same complete edge" is the whole basis of the two-reviewer gate, and a
 reviewer who re-derived the edge themselves — from `HEAD~1`, from a worktree tip, from the
 branch as it stood when they started — produces a report that looks identical and covers
-different code. The second named fault is severity and verdict part being free text: every
+different code.
+
+**Two heads are in play, and keeping them apart is the point.** The gate's head advances
+through fix rounds (Task 10); a sealed report does not. A report is written against the
+gate's **current** edge, published under a head-qualified path, and recorded in
+`report-bindings.json` with the exact edge it was written against. The digest binding is
+what makes it evidence, so rebinding a sealed report to a later head would silently claim a
+reviewer saw code they never read. The second named fault is severity and verdict part being free text: every
 later routing decision in this phase reads those two fields, so an unconstrained value
 silently picks a route.
 
@@ -1582,8 +1606,13 @@ class MasterReportBlock(unittest.TestCase):
     def test_a_clean_report_records(self):
         recorded = publish_report(self.run_dir)
         self.assertEqual(recorded["findings"], [])
-        self.assertTrue((self.run_dir / "gate-master" / "reports" / "master-A.md").exists())
+        self.assertEqual(recorded["head"], HEAD)
+        self.assertTrue(
+            (self.run_dir / "gate-master" / "reports" / f"master-A@{HEAD[:12]}.md").exists())
         self.assertEqual(len(recorded["digest"]), 64)
+        binding = json.loads((self.run_dir / "gate-master" / "report-bindings.json")
+                             .read_text(encoding="utf-8"))
+        self.assertEqual(binding["master-A"]["head"], HEAD)
 
     def test_a_report_with_findings_lands_them_in_the_ledger(self):
         publish_report(self.run_dir, findings=[
@@ -1813,12 +1842,28 @@ def parse_master_report(text: str) -> dict:
     return {**fields, "findings_table": findings, "outcomes": outcomes}
 
 
+def _gate_row(tracker: dict) -> dict:
+    gate = next((row for row in tracker["gates"] if row["id"] == MASTER_GATE_ID), None)
+    if gate is None:
+        raise GateError("the tracker has no master gate row")
+    return gate
+
+
 def record_master_report(run_dir: str, *, assignment: str, report_path: str) -> dict:
-    """Seal one master report and land its findings in the ledger."""
+    """Seal one master report against the gate's CURRENT edge and bind it there.
+
+    The gate's head advances through fix rounds; a sealed report does not. Each
+    report is published under a head-qualified path and recorded in
+    `report-bindings.json` with the exact edge it was written against, because
+    the digest binding is what makes it evidence — rebinding a sealed report to a
+    later head would silently claim a reviewer saw code they never read.
+    """
     directory = Path(run_dir)
     sealed = _load_json(directory / "gate-master" / "assignments.json")
     if assignment not in sealed["assignments"]:
         raise GateError(f"{assignment} is not a sealed master assignment")
+    tracker = parse_tracker((directory / "progress.md").read_text(encoding="utf-8"))
+    gate = _gate_row(tracker)
     text = Path(report_path).read_text(encoding="utf-8")
     block = parse_master_report(text)
     expected = sealed["assignments"][assignment]
@@ -1829,24 +1874,35 @@ def record_master_report(run_dir: str, *, assignment: str, report_path: str) -> 
     if block["reviewer"] != expected["reviewer"]:
         raise GateError(
             f"{assignment} is sealed to {expected['reviewer']}, not {block['reviewer']}")
-    if (block["base"], block["head"]) != (sealed["base"], sealed["head"]):
+    if (block["base"], block["head"]) != (gate["base"], gate["head"]):
         raise GateError(
             "both master reports review the identical gate edge; this one reviewed "
-            f"{block['base']}..{block['head']} rather than "
-            f"{sealed['base']}..{sealed['head']}")
-    digest = publish_immutable(
-        str(directory / "gate-master" / "reports" / f"{assignment}.md"), text)
+            f"{block['base']}..{block['head']} rather than the gate's current "
+            f"{gate['base']}..{gate['head']}")
+
+    relative = f"gate-master/reports/{assignment}@{gate['head'][:12]}.md"
+    digest = publish_immutable(str(directory / relative), text)
+    bindings_path = directory / "gate-master" / "report-bindings.json"
+    bindings = _load_json(bindings_path) if bindings_path.exists() else {}
+    bindings[assignment] = {"base": gate["base"], "head": gate["head"],
+                            "path": relative, "digest": digest}
+    bindings_path.write_text(_dumps(bindings), encoding="utf-8")
+
     for finding in block["findings_table"]:
         upsert_finding(str(directory), {
             "id": finding["id"],
             "scope": MASTER_GATE_ID,
             "severity": finding["severity"],
             "status": "open" if block["outcomes"][finding["id"]] == "Open" else "resolved",
-            "evidence": f"gate-master/reports/{assignment}.md",
+            "evidence": relative,
         })
-    return {"assignment": assignment, "digest": digest,
+    return {"assignment": assignment, "digest": digest, "path": relative,
+            "base": gate["base"], "head": gate["head"],
             "findings": block["findings_table"], "outcomes": block["outcomes"]}
 ```
+
+`report-bindings.json` sits beside `reports/` rather than inside it, so a directory listing
+of `reports/` is exactly the set of sealed reports and nothing else.
 
 Add `import json` to the module imports if P02/P03 have not already.
 
@@ -2147,10 +2203,18 @@ proposes the answer that replaces it. A challenge to a human decision with no st
 consequence is refused for the same reason: consequence is the only form in which the
 objection may travel.
 
-**The raised bar has arithmetic.** "At a raised bar" with no definition is a mood. The
-re-open's floor is one rung above the decision's own grounding rung, clamped at the top of
-the ladder, and the re-open record carries the challenging evidence and **not** the original
-rung, the original answer, or the identities that adopted it.
+**The raised bar has arithmetic, and it must be applied rather than recorded.** "At a
+raised bar" with no definition is a mood. The re-open's floor is one rung above the
+decision's own grounding rung, clamped at the top of the ladder, and the re-open record
+carries the challenging evidence and **not** the original rung, the original answer, or the
+identities that adopted it.
+
+**Third named fault, from the master plan's cross-phase clarifications:** the raised bar
+recorded in the quorum row and never consulted at adoption. That is a silent no-op, and it
+passes every test that inspects the row's contents — which is why `RaisedBarIsApplied` below
+drives the real adoption path and carries a control case. A re-opened question adopts only
+when the winning cluster's rung is **strictly higher than the rung originally adopted**, not
+merely above the floor.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2238,9 +2302,98 @@ class DecisionChallenge(unittest.TestCase):
         self.assertFalse(any(entry["dispatched_brains"] for entry in ledger))
 ```
 
+```python
+class RaisedBarIsApplied(unittest.TestCase):
+    """A raised bar recorded and never applied is a silent no-op, and it passes
+    every test that only inspects the re-open record.
+
+    The master plan's cross-phase clarification is binding: a re-opened
+    question's adoption requires the winning cluster's rung to be **strictly
+    higher than the rung originally adopted**, not merely above the floor. P03
+    owns that path; this is P06's assertion at the seam, and the third test is
+    the control that makes the first two discriminating rather than merely
+    green.
+    """
+
+    QUESTION = "In what order does render_tracker emit the eleven sections?"
+    AXIS = "render-order"
+
+    def reopened(self, stack):
+        root, run_dir = new_run(stack)
+        # `repo_root` is a ## Run field, never derived from run-directory depth:
+        # citation resolution must land on the tree these responses actually cite.
+        text = (run_dir / "progress.md").read_text(encoding="utf-8").replace(
+            "| repo_root | . |", f"| repo_root | {root} |")
+        (run_dir / "progress.md").write_text(text, encoding="utf-8")
+        write_repo(root, "scripts/render.py", "SECTIONS = SCHEMA_ORDER\n")
+        write_repo(root, "spec.md", "The renderer emits sections in schema order.\n")
+        opened_gate(run_dir)
+        pas.record_challenge(str(run_dir), challenge={
+            "kind": "DECISION-CHALLENGE", "decision_id": "Q-7c6b5a4938d2",
+            "reviewer": "reviewer-a", "evidence": "tests/test_render.py:88",
+            "consequence": ""})
+        return root, run_dir
+
+    def question_record(self, run_dir, *, question, axis):
+        record = {"question": question, "axis": axis, "phase": "P02",
+                  "blocks": ["gate-master"], "raiser": "reviewer-a",
+                  "options_supplied": True,
+                  "options": [{"key": "schema-order"}, {"key": "alphabetical"}],
+                  "candidate_answers": [], "recommendation": "-",
+                  "reading_roots": {"repo": ".", "spec": "spec.md"},
+                  "owners": ["brain-7", "brain-8", "brain-9"]}
+        path = Path(run_dir) / "scratch" / f"{axis}-question.json"
+        path.write_text(json.dumps(record), encoding="utf-8")
+        return str(path)
+
+    def run_quorum(self, run_dir, *, question, axis, rung):
+        qid = pas.derive_qid(question, axis)
+        pas.open_quorum(str(run_dir), question_record=self.question_record(
+            run_dir, question=question, axis=axis))
+        evidence = ([{"kind": "spec", "path": "spec.md", "line": 1,
+                      "quote": "schema order"}] if rung == "specified"
+                    else [{"kind": "repo", "path": "scripts/render.py", "line": 1,
+                           "quote": "SCHEMA_ORDER"}])
+        for owner in ("brain-7", "brain-8", "brain-9"):
+            pas.record_brain_response(str(run_dir), qid=qid, owner=owner, payload=response(
+                qid=qid, answer_key="schema-order",
+                answer="Emit the eleven sections in schema order.",
+                rung=rung, evidence=evidence,
+                consequences=[{"kind": "signature", "subject": "render_tracker",
+                               "value": "schema-order"}],
+                consistent_with=[{"kind": "decision", "id": "H-001"}],
+                blast=[axis],
+                alternatives=[{"answer_key": "alphabetical", "rung": "speculation",
+                               "reason": "no reader expects it"}]))
+        return pas.finalize_quorum(str(run_dir), qid=qid)
+
+    def test_a_reopen_refuses_an_answer_that_only_clears_the_floor(self):
+        with contextlib.ExitStack() as stack:
+            _root, run_dir = self.reopened(stack)
+            result = self.run_quorum(run_dir, question=self.QUESTION, axis=self.AXIS,
+                                     rung="code-evidenced")
+            self.assertNotEqual(result["status"], "adopted")
+
+    def test_a_reopen_adopts_only_strictly_above_the_original_rung(self):
+        with contextlib.ExitStack() as stack:
+            _root, run_dir = self.reopened(stack)
+            result = self.run_quorum(run_dir, question=self.QUESTION, axis=self.AXIS,
+                                     rung="specified")
+            self.assertEqual(result["status"], "adopted")
+
+    def test_control_the_same_answer_adopts_on_a_question_never_reopened(self):
+        # Without this control the first test passes against any run that simply
+        # escalates everything, and the raised bar would still be a no-op.
+        with contextlib.ExitStack() as stack:
+            _root, run_dir = self.reopened(stack)
+            result = self.run_quorum(run_dir, question="Which newline does render use?",
+                                     axis="newline", rung="code-evidenced")
+            self.assertEqual(result["status"], "adopted")
+```
+
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k DecisionChallenge`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k DecisionChallenge -k RaisedBarIsApplied`
 Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'raised_floor'`
 
 - [ ] **Step 3: Write the implementation**
@@ -2336,8 +2489,14 @@ def record_challenge(run_dir: str, *, challenge: dict) -> dict:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k DecisionChallenge`
-Expected: PASS (8 tests)
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k DecisionChallenge -k RaisedBarIsApplied`
+Expected: PASS (11 tests)
+
+`RaisedBarIsApplied` exercises P03's adoption path, not P06's code. If it fails
+because `finalize_quorum` ignores `reopen.json`, **that is the defect it exists to
+catch** — the raised bar is recorded and never applied — and the fix belongs in P03,
+not in weakening this test. The three tests reuse P03's `response()` and
+`write_repo()` helpers, already in this module.
 
 - [ ] **Step 5: Commit**
 
@@ -3037,21 +3196,38 @@ def evaluate_master_gate(run_dir: str) -> dict:
     gate. The bar is zero open findings at every severity — the same bar a task
     gate applies, because a master gate that can defer while task gates cannot is
     incoherent.
+
+    Each report is validated against the edge IT was written against, and then
+    separately required to cover the gate's CURRENT edge. Those are two different
+    checks and collapsing them loses one of the two guarantees: validating
+    against the current head would reject a correctly sealed report after the
+    first fix round, and accepting a report bound to an older head would close
+    the gate over code nobody reviewed.
     """
     directory = Path(run_dir)
     tracker = parse_tracker((directory / "progress.md").read_text(encoding="utf-8"))
     assert_phase_set_intact(str(directory), tracker)
     sealed = _load_json(directory / "gate-master" / "assignments.json")
 
+    gate = _gate_row(tracker)
+    bindings_path = directory / "gate-master" / "report-bindings.json"
+    bindings = _load_json(bindings_path) if bindings_path.exists() else {}
+
     blockers = []
     for assignment in sorted(sealed["assignments"]):
-        report = directory / "gate-master" / "reports" / f"{assignment}.md"
-        if not report.exists():
+        binding = bindings.get(assignment)
+        if binding is None:
             blockers.append(f"{assignment} has not reported")
             continue
-        block = parse_master_report(report.read_text(encoding="utf-8"))
-        if (block["base"], block["head"]) != (sealed["base"], sealed["head"]):
-            blockers.append(f"{assignment} reviewed a different edge")
+        block = parse_master_report((directory / binding["path"]).read_text(encoding="utf-8"))
+        # Checked against the head it was WRITTEN against, never the current one.
+        # A sealed report keeps its own edge forever; the gate's head moves past
+        # it through fix rounds, and that is exactly how a stale report is
+        # recognised rather than quietly re-used.
+        if (block["base"], block["head"]) != (binding["base"], binding["head"]):
+            blockers.append(f"{assignment}'s sealed report no longer matches its binding")
+        elif binding["head"] != gate["head"]:
+            blockers.append(f"{assignment} has not re-reviewed the current edge")
 
     for row in open_findings(str(directory)):
         blockers.append(f"{row['id']} is open ({row['severity']})")
@@ -3069,16 +3245,16 @@ def evaluate_master_gate(run_dir: str) -> dict:
         blockers.append("no digest-bound master verification record")
     else:
         record = _load_json(verification)
-        if record.get("head") != sealed["head"] or record.get("outcome") != "PASS":
+        if record.get("head") != gate["head"] or record.get("outcome") != "PASS":
             blockers.append("master verification does not PASS at the reviewed head")
 
     if blockers:
         return {"accepted": False, "blockers": blockers}
 
     def mutate(updated):
-        gate = next(row for row in updated["gates"] if row["id"] == MASTER_GATE_ID)
+        gate = _gate_row(updated)
         gate["state"] = "accepted"
-        gate["reports"] = ",".join(f"gate-master/reports/{name}.md"
+        gate["reports"] = ",".join(bindings[name]["path"]
                                    for name in sorted(sealed["assignments"]))
         gate["verification"] = "gate-master/verification.json"
         eleven = _stage_row(updated, "11")
@@ -3108,7 +3284,389 @@ git commit -m "feat(pipeline-auto): derive master-gate acceptance from evidence 
 
 ---
 
-### Task 10: Final verification — the run-wide suite, and the two commands that must print nothing
+### Task 10: The master-gate fix loop, bounded at three rounds
+
+**Files:**
+- Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
+- Modify: `plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py`
+
+**Interfaces:**
+- Consumes: `MASTER_GATE_ID`, `_queue_escalation`, `open_findings`, `GateError`, P02's `parse_tracker`, `locked_tracker_update`, `append_row`, `_csv`
+- Produces: `MAX_GATE_FIX_ROUNDS`, `GATE_HALTS`, `gate_fix_rounds(run_dir) -> list[dict]`, `open_gate_fix_round(run_dir, *, fixer, findings) -> dict`, `record_gate_fix_round(run_dir, *, round_number, fixer, commits, verification, re_review, remaining) -> dict`
+
+**Why this task exists.** The master plan's cross-phase clarifications settle what this plan
+originally refused to invent: stage 11 **does** re-review after a fix round, bounded at the
+same cap of three that applies at task scope. The entailment is short — the inlined SDD
+protocol gives a final review that returns findings one fix subagent carrying the complete
+list, then re-runs the review on the updated package and finishes when a round returns zero;
+the recorded default extends zero-open-findings to the master gate; so a gate that could not
+re-review would be a gate that can never close after its first finding, which makes
+`SPEC-NOT-MET` unfixable by construction.
+
+**Named fault this task catches:** a fourth round. The cap is not advisory — a fourth round
+**halts to the escalation queue** and dispatches nobody, because a gate still blocked after
+three rounds has a problem no further round will solve, and looping produces commits,
+renamed findings and a claim of improvement rather than progress.
+
+**Second named fault, and the one a counter alone misses: oscillation.** A round that
+re-opens a finding an earlier round resolved halts immediately, with rounds still on the
+clock. A counter cannot see it: rounds 1, 2 and 3 can each "resolve" a finding and each
+re-break the one before it, staying inside the cap forever while converging on nothing. The
+same immediate halt covers a round that resolves **none** of its targeted findings — and
+neither halt consumes the remaining rounds, because the budget is not the thing that ran out.
+
+**Third named fault: the gate's head not advancing.** The inlined SDD protocol re-runs the
+final review on *the updated package*. A gate whose head stayed at the initial edge would
+re-review code that does not contain the fixes, so the same findings return every round and
+the three-round cap fires on **every** gate that ever produced a finding — a loop that
+cannot succeed rather than a conservative one. `record_gate_fix_round` therefore advances
+`gate.head` to the fix commit.
+
+**Fourth named fault, and its exact opposite: a sealed report rebound to the new head.** The
+gate advances; the evidence does not. Task 4 binds each report to the edge it was written
+against and Task 9 checks it there, so after a round the round-1 reports still validate
+against their own head **and** are correctly not treated as covering the round-2 edge. A
+test that only checks the head moved passes against an implementation that rebinds every
+report to it, silently claiming a reviewer saw code they never read — which is why the test
+below asserts both halves.
+
+**Scope note.** P06 owns the gate-scope loop end-to-end rather than calling P05's
+`open_fix_round`, which is shaped for a task scope and a per-task review row. The `## Fix
+Rounds` grammar is shared and P02 validates it for both.
+
+**One grammar consequence worth stating,** because it looks like a bug and is not: P02
+rejects a scope whose **last** round is `complete` with `Remaining` other than `none`. So a
+round closing with findings still open closes and opens its successor as `pending` in the
+**same** transition, and a **halted** round is left `re_reviewing` rather than `complete` —
+which is also what it truthfully is. A halted round therefore records no `Remaining`; the
+still-open findings are in `findings.md` and the block is the escalation row.
+
+**Why that is one transition and not two.** Closing the round and opening its successor in
+separate `locked_tracker_update` calls leaves the tracker *invalid* in between — last round
+`complete`, `Remaining` non-empty — so an interruption between the two writes strands the
+run in a state its own validator rejects, recoverable only by hand. This is precisely the
+class of bug the single-locked-transition discipline exists to prevent: a transition is the
+unit at which state is legal, and any change that needs two writes to stay legal is one
+write.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+class MasterGateFixRounds(unittest.TestCase):
+    def setUp(self):
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+        _root, self.run_dir = new_run(self.stack)
+        opened_gate(self.run_dir)
+        publish_report(self.run_dir, assignment="master-A", reviewer="reviewer-a")
+        publish_report(self.run_dir, assignment="master-B", reviewer="reviewer-b")
+        pass_master_verification(self.run_dir)
+
+    FIXES = ("7" * 40, "8" * 40, "9" * 40)
+
+    def cycle(self, number, targeted, remaining, fixer="fixer-9"):
+        opened = pas.open_gate_fix_round(str(self.run_dir), fixer=fixer,
+                                         findings=list(targeted))
+        if opened["halted"]:
+            return opened
+        return pas.record_gate_fix_round(
+            str(self.run_dir), round_number=opened["round"], fixer=fixer,
+            commits=self.FIXES[number - 1],
+            verification="scratch/gate-fix-tests.txt",
+            re_review="scratch/gate-re-review.md", remaining=list(remaining))
+
+    def bindings(self):
+        return json.loads((self.run_dir / "gate-master" / "report-bindings.json")
+                          .read_text(encoding="utf-8"))
+
+    def gate_head(self):
+        return next(row for row in tracker_of(self.run_dir)["gates"]
+                    if row["id"] == pas.MASTER_GATE_ID)["head"]
+
+    def re_review_at(self, head):
+        publish_report(self.run_dir, assignment="master-A", reviewer="reviewer-a", head=head)
+        publish_report(self.run_dir, assignment="master-B", reviewer="reviewer-b", head=head)
+        pass_master_verification(self.run_dir, head=head)
+
+    def queued(self):
+        return [row for row in tracker_of(self.run_dir)["escalations"]
+                if row["state"] == "queued"]
+
+    def test_a_round_returning_zero_closes_the_loop_and_lets_the_gate_accept(self):
+        pas.upsert_finding(str(self.run_dir), {"id": "F-101", "scope": "gate-master",
+                                               "severity": "Critical", "status": "open"})
+        self.cycle(1, ["F-101"], [])
+        pas.upsert_finding(str(self.run_dir), {"id": "F-101", "status": "resolved",
+                                               "disposition": "Fixed"})
+        self.assertEqual([row["state"] for row in pas.gate_fix_rounds(str(self.run_dir))],
+                         ["complete"])
+        self.re_review_at(self.FIXES[0])
+        self.assertTrue(pas.evaluate_master_gate(str(self.run_dir))["accepted"])
+
+    def test_the_gate_head_advances_to_the_fix_commit(self):
+        # Without this the re-review reads code that does not contain the fixes,
+        # the same findings return every round, and the three-round cap fires on
+        # every gate that ever produced a finding.
+        self.assertEqual(self.gate_head(), HEAD)
+        self.cycle(1, ["F-101"], [])
+        self.assertEqual(self.gate_head(), self.FIXES[0])
+
+    def test_a_sealed_report_keeps_its_own_head_and_does_not_cover_a_later_one(self):
+        # THE REBINDING SEED. A test that only checks the head moved passes
+        # against an implementation that rebinds every report to it, silently
+        # claiming a reviewer saw code they never read. Both halves are asserted.
+        self.assertEqual(self.bindings()["master-A"]["head"], HEAD)
+        pas.upsert_finding(str(self.run_dir), {"id": "F-101", "scope": "gate-master",
+                                               "severity": "Critical", "status": "open"})
+        self.cycle(1, ["F-101"], [])
+        pas.upsert_finding(str(self.run_dir), {"id": "F-101", "status": "resolved",
+                                               "disposition": "Fixed"})
+
+        self.assertEqual(self.gate_head(), self.FIXES[0])          # the gate advanced
+        binding = self.bindings()["master-A"]
+        self.assertEqual(binding["head"], HEAD)                    # the evidence did not
+        sealed = (self.run_dir / binding["path"]).read_text(encoding="utf-8")
+        self.assertEqual(pas.parse_master_report(sealed)["head"], HEAD)
+
+        pass_master_verification(self.run_dir, head=self.FIXES[0])
+        result = pas.evaluate_master_gate(str(self.run_dir))
+        self.assertFalse(result["accepted"])
+        self.assertIn("master-A has not re-reviewed the current edge", result["blockers"])
+        self.assertIn("master-B has not re-reviewed the current edge", result["blockers"])
+
+        self.re_review_at(self.FIXES[0])
+        self.assertTrue(pas.evaluate_master_gate(str(self.run_dir))["accepted"])
+        self.assertEqual(self.bindings()["master-A"]["head"], self.FIXES[0])
+        # the round-1 report is still on disk, still bound to its own edge
+        self.assertTrue((self.run_dir / binding["path"]).exists())
+
+    def test_three_rounds_are_allowed_and_the_fourth_halts(self):
+        # THE UNBOUNDED-LOOP SEED. A gate still blocked after three rounds has a
+        # problem no fourth round solves; commits and renamed findings are not
+        # progress.
+        self.cycle(1, ["F-101", "F-102", "F-103"], ["F-102", "F-103"])
+        self.cycle(2, ["F-102", "F-103"], ["F-103"])
+        self.cycle(3, ["F-103", "F-104"], ["F-104"])
+        self.assertEqual(len(pas.gate_fix_rounds(str(self.run_dir))), 4)
+        fourth = pas.open_gate_fix_round(str(self.run_dir), fixer="fixer-9",
+                                         findings=["F-104"])
+        self.assertTrue(fourth["halted"])
+        self.assertEqual(fourth["reason"], "round-cap")
+        self.assertFalse(fourth["dispatch"])
+        self.assertEqual(len(self.queued()), 1)
+
+    def test_a_halted_round_dispatches_no_reviewer_and_blocks_the_gate(self):
+        self.cycle(1, ["F-101", "F-102", "F-103"], ["F-102", "F-103"])
+        self.cycle(2, ["F-102", "F-103"], ["F-103"])
+        self.cycle(3, ["F-103", "F-104"], ["F-104"])
+        before = sorted(path.name for path in
+                        (self.run_dir / "gate-master" / "reports").iterdir())
+        pas.open_gate_fix_round(str(self.run_dir), fixer="fixer-9", findings=["F-104"])
+        after = sorted(path.name for path in
+                       (self.run_dir / "gate-master" / "reports").iterdir())
+        self.assertEqual(before, after)
+        pas.upsert_finding(str(self.run_dir), {"id": "F-104", "scope": "gate-master",
+                                               "severity": "Important", "status": "open"})
+        result = pas.evaluate_master_gate(str(self.run_dir))
+        self.assertFalse(result["accepted"])
+        self.assertTrue(any("escalation" in blocker for blocker in result["blockers"]))
+
+    def test_a_round_resolving_none_halts_immediately_with_rounds_to_spare(self):
+        halted = self.cycle(1, ["F-101", "F-102"], ["F-101", "F-102"])
+        self.assertTrue(halted["halted"])
+        self.assertEqual(halted["reason"], "no-progress")
+        self.assertEqual(len(self.queued()), 1)
+        self.assertEqual([row["state"] for row in pas.gate_fix_rounds(str(self.run_dir))],
+                         ["re_reviewing"])
+
+    def test_oscillation_halts_even_though_the_counter_has_room(self):
+        # THE OSCILLATION SEED. Rounds 1, 2 and 3 can each resolve a finding and
+        # each re-break the one before it, staying inside the cap forever while
+        # converging on nothing. A counter cannot see this; only the history can.
+        self.cycle(1, ["F-101", "F-102"], ["F-102"])          # F-101 resolved
+        reopened = pas.open_gate_fix_round(str(self.run_dir), fixer="fixer-9",
+                                           findings=["F-101", "F-102"])
+        self.assertTrue(reopened["halted"])
+        self.assertEqual(reopened["reason"], "oscillation")
+        self.assertFalse(reopened["dispatch"])
+        self.assertEqual(len(self.queued()), 1)
+        self.assertLess(len([row for row in pas.gate_fix_rounds(str(self.run_dir))
+                             if row["state"] == "complete"]), pas.MAX_GATE_FIX_ROUNDS)
+
+    def test_opening_twice_returns_the_active_round_rather_than_a_second_one(self):
+        first = pas.open_gate_fix_round(str(self.run_dir), fixer="fixer-9",
+                                        findings=["F-101"])
+        second = pas.open_gate_fix_round(str(self.run_dir), fixer="fixer-9",
+                                         findings=["F-101"])
+        self.assertEqual(first["round"], second["round"])
+        self.assertEqual(len(pas.gate_fix_rounds(str(self.run_dir))), 1)
+
+    def test_closing_an_unopened_round_is_an_error(self):
+        with self.assertRaises(pas.GateError):
+            pas.record_gate_fix_round(str(self.run_dir), round_number=1, fixer="fixer-9",
+                                      commits="6" * 40, verification="v.txt",
+                                      re_review="r.md", remaining=[])
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k MasterGateFixRounds`
+Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'open_gate_fix_round'`
+
+- [ ] **Step 3: Write the implementation**
+
+```python
+MAX_GATE_FIX_ROUNDS = 3
+GATE_HALTS = ("round-cap", "no-progress", "oscillation")
+
+
+def gate_fix_rounds(run_dir: str) -> list[dict]:
+    """`## Fix Rounds` rows scoped to the master gate, in round order."""
+    tracker = parse_tracker((Path(run_dir) / "progress.md").read_text(encoding="utf-8"))
+    return sorted((row for row in tracker["fix_rounds"] if row["scope"] == MASTER_GATE_ID),
+                  key=lambda row: int(row["round"]))
+
+
+def _remaining_of(row: dict) -> list[str]:
+    if row["remaining"] in ("-", "none"):
+        return []
+    return _csv(row["remaining"])
+
+
+def _resolved_so_far(rounds: list) -> set:
+    """Findings some completed round targeted and did not leave remaining."""
+    resolved = set()
+    for row in rounds:
+        if row["state"] != "complete":
+            continue
+        resolved |= set(_csv(row["findings"])) - set(_remaining_of(row))
+    return resolved
+
+
+def _halt(run_dir: str, reason: str, round_number) -> dict:
+    _queue_escalation(run_dir, blast="run", reason=f"master-gate-{reason}")
+    return {"round": round_number, "halted": True, "reason": reason, "dispatch": False}
+
+
+def open_gate_fix_round(run_dir: str, *, fixer: str, findings: list) -> dict:
+    """Start the next master-gate fix round, or halt.
+
+    One fixer per round carrying all findings. Two halts are decided here:
+    the cap, and oscillation — a round re-opening a finding an earlier round
+    resolved. Oscillation halts with rounds still on the clock, because the
+    budget is not the thing that ran out; three rounds that each resolve a
+    finding and re-break the previous one stay inside the cap forever while
+    converging on nothing, and a counter cannot see it.
+    """
+    directory = Path(run_dir)
+    rounds = gate_fix_rounds(str(directory))
+    active = [row for row in rounds if row["state"] in ("fixing", "re_reviewing")]
+    if active:
+        return {"round": int(active[0]["round"]), "halted": False,
+                "reason": "-", "dispatch": True}
+
+    reopened = _resolved_so_far(rounds) & set(findings)
+    if reopened:
+        return _halt(str(directory), "oscillation", None)
+    complete = [row for row in rounds if row["state"] == "complete"]
+    if len(complete) >= MAX_GATE_FIX_ROUNDS:
+        return _halt(str(directory), "round-cap", None)
+
+    number = len(complete) + 1
+
+    def mutate(tracker):
+        row = next((entry for entry in tracker["fix_rounds"]
+                    if entry["scope"] == MASTER_GATE_ID
+                    and entry["round"] == str(number)), None)
+        values = {"state": "fixing", "fixer": fixer, "findings": ",".join(findings),
+                  "commits": "-", "verification": "-", "re_review": "-", "remaining": "-"}
+        if row is not None:
+            row.update(values)
+            return tracker
+        return append_row(tracker, "fix_rounds",
+                          {"scope": MASTER_GATE_ID, "round": str(number), **values})
+
+    locked_tracker_update(str(directory), transition_id=f"gate-fix-open-{number}",
+                          mutate=mutate)
+    return {"round": number, "halted": False, "reason": "-", "dispatch": True}
+
+
+def record_gate_fix_round(run_dir: str, *, round_number: int, fixer: str, commits: str,
+                          verification: str, re_review: str, remaining: list) -> dict:
+    """Close one master-gate fix round and open its successor, or halt.
+
+    A round that resolved NONE of its targeted findings halts immediately and
+    leaves the remaining rounds unspent: commits, renamed findings, and a claimed
+    improvement are not progress, and spending two more rounds on them would
+    escalate the run for the wrong reason three rounds later.
+
+    A round closing with findings still open opens its successor in the SAME
+    transition, because P02 rejects a scope whose last round is `complete` with
+    a `Remaining` other than `none`; doing it in two writes would leave the
+    tracker invalid in between, strandable by any interruption. A halted round
+    stays `re_reviewing`, which is also what it truthfully is.
+
+    A completing round also advances `gate.head` to its fix commit, because the
+    re-review must read the updated package. Sealed reports are NOT moved with
+    it: each stays bound to the edge it was written against, and `evaluate_master_gate`
+    is what notices that a report bound to an older head no longer covers the gate.
+    """
+    directory = Path(run_dir)
+    rounds = gate_fix_rounds(str(directory))
+    row = next((entry for entry in rounds if entry["round"] == str(round_number)), None)
+    if row is None or row["state"] not in ("fixing", "re_reviewing"):
+        raise GateError(f"the master gate has no open fix round {round_number}")
+
+    targeted = _csv(row["findings"])
+    remaining = list(remaining)
+    stalled = bool(remaining) and set(remaining) == set(targeted)
+
+    def mutate(tracker):
+        entry = next(item for item in tracker["fix_rounds"]
+                     if item["scope"] == MASTER_GATE_ID
+                     and item["round"] == str(round_number))
+        entry.update({"fixer": fixer, "commits": commits, "verification": verification,
+                      "re_review": re_review})
+        if stalled:
+            entry["state"] = "re_reviewing"
+            entry["remaining"] = "-"
+            return tracker
+        entry["state"] = "complete"
+        entry["remaining"] = ",".join(remaining) if remaining else "none"
+        # The gate advances to the fix commit; the sealed reports do not move.
+        _gate_row(tracker)["head"] = commits
+        if remaining:
+            tracker = append_row(tracker, "fix_rounds", {
+                "scope": MASTER_GATE_ID, "round": str(round_number + 1),
+                "state": "pending", "fixer": "-", "findings": "-", "commits": "-",
+                "verification": "-", "re_review": "-", "remaining": "-"})
+        return tracker
+
+    locked_tracker_update(str(directory), transition_id=f"gate-fix-close-{round_number}",
+                          mutate=mutate)
+    if stalled:
+        return _halt(str(directory), "no-progress", round_number)
+    return {"round": round_number, "halted": False, "reason": "-",
+            "dispatch": bool(remaining), "remaining": remaining,
+            "next_round": round_number + 1 if remaining else None}
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v -k MasterGateFixRounds`
+Expected: PASS (9 tests)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git diff --name-only c8bddd610119f52b54bf077d284c7f5d8362ae77..HEAD -- plugins/superb/skills/pipeline/
+git add plugins/superb/skills/pipeline-auto/
+git commit -m "feat(pipeline-auto): bound the master-gate fix loop and halt on oscillation"
+```
+
+---
+
+### Task 11: Final verification — the run-wide suite, and the two commands that must print nothing
 
 **Files:**
 - Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
@@ -3322,7 +3880,7 @@ git commit -m "feat(pipeline-auto): verify the two silent commands on stdout, no
 
 ---
 
-### Task 11: The terminal report, leading with what the user never approved
+### Task 12: The terminal report, leading with what the user never approved
 
 **Files:**
 - Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
@@ -3541,12 +4099,36 @@ Two-reviewer gate with non-implementer enforcement: Tasks 2, 3, 4, 9. `DECISION-
 routing: Tasks 5 and 6, covering all eight rows of the spec's contradiction-routing table
 plus the Minor/quality reversal rule. Completeness freeze: Task 8. Phase-set immutability:
 Task 1, built first because Task 8's freeze is only real if Task 1's guard is. Final
-verification: Task 10. The spec's governing invariant 6 is Task 1; invariant 7 (no push,
-publish, PR or merge) is Task 10, where `git status --short` and the untouched-`pipeline/`
+verification: Task 11. The spec's governing invariant 6 is Task 1; invariant 7 (no push,
+publish, PR or merge) is Task 11, where `git status --short` and the untouched-`pipeline/`
 proof are checked on stdout rather than exit code — this phase adds no push path at all, so
 there is nothing else to gate. The spec's "Cascading on a low-confidence answer" — verbatim
 copy of the tainting decision into the reviewer's global-constraints block — is Task 3. The
-terminal-report requirement from invariant 5 is Task 11.
+terminal-report requirement from invariant 5 is Task 12.
+
+**Master-plan cross-phase clarifications.** All five bind this phase and all five are
+covered. The gate's head advances to each fix commit while sealed reports stay bound to the
+edge they were written against: Task 4 binds, Task 9 checks each report against its own
+binding and separately requires coverage of the current edge, Task 10 advances. Those are
+two checks on purpose — validating a report against the current head would reject a
+correctly sealed report after the first fix round, and accepting one bound to an older head
+would close the gate over code nobody reviewed. Stage-11 re-review bounded at three rounds is Task 10, with the fourth-round halt
+and the oscillation halt as separate named faults, because a counter alone cannot see
+oscillation. `repo_root` as a `## Run` field is in both fixtures and is read through P02's
+`repo_root(tracker)` in Task 11, never derived from run-directory depth. The raised bar
+being *applied* rather than recorded is Task 6's `RaisedBarIsApplied`, which drives P03's
+real adoption path and carries a control case — a test that inspected only the re-open
+record would pass against a complete no-op. The worker-result owner grammar
+`- **Owner:** <id>` is Task 2's `_OWNER_LINE`, and the independence check parses history
+rather than current owners so a released worker cannot review its own task.
+
+**On the two commands that must print nothing.** Both `git diff --name-only` and
+`git status --short` exit `0` while printing, so an exit-code assertion passes on a run that
+modified `plugins/superb/skills/pipeline/` — the one Global Constraint the whole rewrite
+exists to honour. `FINAL_SUITE_SILENT = (2, 3)` verifies them on stdout, and both tests name
+the reason in their own names:
+`test_a_modified_pipeline_skill_fails_even_though_git_exits_zero` and
+`test_a_dirty_working_tree_fails_even_though_git_exits_zero`.
 
 **Placeholder scan.** No TBDs, no "add error handling", no "similar to Task N". Every Step 1
 carries the actual test code and every Step 3 the actual implementation. The four fixtures
@@ -3574,6 +4156,31 @@ failed in every test for the wrong reason, and `test_a_frozen_run_with_no_sealed
 would have passed accidentally. `new_run` now seals a frozen fixture and that one test
 unlinks the file explicitly.
 
+**Fifth gap found and closed.** The gate fix loop's first draft never advanced
+`gate.head`, so every re-review would have read code without the fixes in it, the same
+findings would have returned each round, and the three-round cap would have fired on every
+gate that ever produced a finding. `record_gate_fix_round` now advances the head, and the
+opposite error — rebinding sealed reports to the new head — is blocked by per-report
+bindings whose test asserts both halves, because a test that only checks the head moved
+passes against an implementation that rebinds everything.
+
+**Fourth gap found and closed.** The gate fix loop's first draft closed a round with
+findings still open and opened its successor in two transitions. P02 rejects a scope whose
+last round is `complete` with a `Remaining` other than `none`, so the tracker was invalid
+between the two writes — an interruption there strands the run in a state its own validator
+rejects. That is the class of bug the single-locked-transition discipline exists to prevent:
+a transition is the unit at which state is legal, so any change needing two writes to stay
+legal is one write. Closing and opening now happen in one transition, and a halted round
+stays `re_reviewing`, which is also what it truthfully is.
+
+**A test pattern worth copying.** `RaisedBarIsApplied`'s third case asserts that the same
+`code-evidenced` answer **does** adopt on a question that was never re-opened. Without it the
+first two cases pass against a run that escalates everything, and the raised bar would still
+be a no-op. The general form: a test that only proves the strict path rejects has not proven
+the lenient path accepts, and a one-sided assertion is satisfied by a stuck implementation.
+The same shape is why Task 10's rebinding test asserts that the gate accepts once both
+reviewers re-report at the new head, not merely that the stale reports blocked.
+
 **Third gap found and closed.** `evaluate_master_gate` originally treated a moved phase set
 as a blocker. That is wrong: a blocker is something a fix round can clear, and a phase set
 that no longer matches its seal is evidence the run's history is not what it claims. It
@@ -3588,15 +4195,17 @@ None of the following is settled by `2026-09-14-pipeline-auto-design.md` or
 in this repository, and safe to overrule), **open** (no basis to derive; a decision is
 needed), or **blocking** (a task here cannot be completed until someone rules).
 
-1. **`repo_root` as a `## Run` field.** *Blocking for P02, not for P06's code.* The master
-   plan's current revision adds `repo_root(tracker) -> str`, "recorded at init; NEVER derived
-   from run_dir depth", and adds `repo_root` to `initialize_run`'s signature — but P02's
-   phase plan on disk predates that change and its `_RUN_KEYS` has no such key. This plan's
-   two tracker fixtures carry `| repo_root | . |` immediately after `target_branch`, which
-   is a guess at placement. P02 must add the field; if it records the project root somewhere
-   other than `## Run`, the two fixtures lose that line and nothing else changes, because
-   `final_suite_commands` takes the root as a parameter and only `record_final_verification`
-   calls `repo_root(tracker)`.
+**Four items in the first draft of this list are now settled by the master plan's
+`## Cross-phase clarifications` section and are recorded below as resolved rather than
+deleted, so a reader can see what was asked and what was answered.**
+
+1. **`repo_root` as a `## Run` field.** **RESOLVED — binding.** The master plan now states
+   that `repo_root` is a `## Run` field carried in P02's `_RUN_KEYS`, recorded by
+   `initialize_run` and read by `effective_rung` for citation resolution. Deriving it from
+   run-directory depth is the defect that would silently demote every grounded answer below
+   the floor while appearing to work. Both fixtures here carry `| repo_root | . |`
+   immediately after `target_branch`; only the placement within the key order remains P02's
+   to fix, and nothing in this phase depends on it.
 
 2. **Column placement of `Decisions` in `## Tasks`, and the fourteen `## Task Review`
    columns.** *Open.* The coordinator supplied both column sets but not `Decisions`'
@@ -3629,11 +4238,15 @@ needed), or **blocking** (a task here cannot be completed until someone rules).
    check, where "the adoption floor rises one rung". If a different magnitude is intended,
    it is a one-line change in `raised_floor`.
 
-7. **Where the re-open's raised floor is enforced.** *Open.* P06 writes
-   `quorum/<qid>/reopen.json` carrying `raised_floor`; P03's `finalize_quorum` and
-   `current_floor` are the code that would have to honour it, and P03's plan on disk does not
-   mention re-opens at all. Someone must confirm that P03 reads `reopen.json`, or the raised
-   bar is recorded and never applied.
+7. **Where the re-open's raised floor is enforced.** **RESOLVED — binding, and P03 owes
+   code.** The master plan now states that a re-opened question's adoption requires the
+   winning cluster's rung to be **strictly higher than the rung originally adopted**, not
+   merely above the floor, and that P03 owns the path. P06 writes
+   `quorum/<qid>/reopen.json`; Task 6's `RaisedBarIsApplied` asserts the adoption path
+   consumes it, with a control case so the assertion cannot be satisfied by a run that
+   simply escalates everything. **P03's plan on disk still does not mention re-opens**, so
+   that test will fail until P03 implements the consumption — which is the correct failure,
+   not a reason to weaken the test.
 
 8. **The adjudicator's identity and model.** *Open.* The spec requires "one adjudicator —
    most capable model, read-only" for a fixer dispute and an "unbiased reconciliation" for a
@@ -3647,22 +4260,42 @@ needed), or **blocking** (a task here cannot be completed until someone rules).
    list[dict]` without fixing the keys. If they differ, the rejected-contradictions section
    of the terminal report needs the real key names.
 
-10. **Worker-result owner grammar.** *Derived* from P03's decision-record field style;
-    `owner_history` scans `<run_dir>/results/**/*.md` for a `- **Owner:** <id>` line. P04
-    owns `templates/worker-result.md` and `publish_worker_result`, and neither document fixes
-    the field spelling. If P04 emits a different one, that regex is the single line to change
-    — but until it is confirmed, **the independence check's coverage of released workers
-    depends on a grammar this plan assumed.**
+10. **Worker-result owner grammar.** **RESOLVED — binding.** The master plan now pins the
+    worker-result template's owner grammar as `- **Owner:** <id>`, owned by P04, and states
+    that independence is checked against every owner appearing in any task's history —
+    including released and superseded attempts — rather than against current owners. That is
+    exactly what `owner_history`'s `_OWNER_LINE` scan of `<run_dir>/results/**/*.md` does,
+    and Task 2's released-worker test is the assertion.
 
 11. **Escalation blast radius for a halted challenge.** *Derived.* `_queue_escalation` uses
     `blast="run"` because the spec makes the freeze on raising run-wide and because a
     challenge to a recorded decision is not scoped to one phase. Neither document enumerates
     the legal blast values; P02 validates only that it is a token.
 
-12. **Whether stage 11 may re-open after a fix round.** *Open.* The v2 review reference
-    allows `gate.head` to advance through reviewed remediation edges, and this phase's
-    `open_master_gate` is inert once the gate leaves `pending`. A `SPEC-NOT-MET` finding that
-    is fixed therefore needs a re-review path that this plan does not build, because neither
-    document says whether `pipeline-auto`'s master gate keeps v2's bounded remediation loop
-    or replaces it with the per-task fix loop at gate scope. **This is the largest open item
-    in the phase** and it should be ruled on before P07 writes the stage-11 prose.
+12. **Whether stage 11 may re-open after a fix round.** **RESOLVED — entailed, and now
+    built as Task 10.** The master plan's clarification derives it rather than decreeing it:
+    the inlined SDD protocol re-runs the final review on the updated package and finishes
+    when a round returns zero, and the recorded default extends zero-open-findings to the
+    master gate — so a gate that could not re-review could never close after its first
+    finding, which makes `SPEC-NOT-MET` unfixable by construction. The bound is the same cap
+    of three that applies at task scope; a fourth round halts to the escalation queue, and a
+    round resolving none of its targets, or one whose fixes oscillate, halts immediately
+    without spending the remainder. Task 10 builds it with both halts as separate named
+    faults.
+
+13. **Whether a master-gate re-review advances `gate.head`.** **RESOLVED — entailed, and
+    now built.** The master plan rules that it does, and the reasoning is short: the inlined
+    SDD protocol re-runs the final review on the *updated package*, so a gate whose head
+    stayed at the initial edge would re-review code without the fixes, the same findings
+    would return every round, and Task 10's cap would fire on every gate that ever produced
+    a finding — a loop that cannot succeed rather than a conservative one. Two heads are in
+    play and the distinction is the point: `record_gate_fix_round` advances `gate.head` to
+    the fix commit, while each report stays bound to the edge it was written against, since
+    the digest binding is what makes it evidence. Task 4 binds, Task 9 checks each report
+    against its own binding and separately requires coverage of the current edge, Task 10
+    advances and asserts both halves.
+
+**Nothing in this list now blocks P07.** Items 1, 7, 10, 12 and 13 are settled by the master
+plan's `## Cross-phase clarifications`; item 7 additionally owes code in P03, and Task 6's
+`RaisedBarIsApplied` will fail until it lands, which is the correct failure. The remaining
+items are naming and placement details that change one line each.

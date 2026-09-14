@@ -122,6 +122,11 @@ quorum becoming a chat channel:
    knowledge only the user has (budget, deadline, who the users are, what the
    product is *for*).
 3. It carries an **axis**: a stage-03 question id, or the literal `new`.
+   It also carries a **blast radius** from the closed vocabulary
+   `task | phase | run | contract` — `contract` meaning it changes a public
+   interface or the spec. The vocabulary is closed because adoption checks it
+   against the irreversible-axis list; an unenumerated value would pass that
+   check by not matching anything, which fails open.
 4. It passes the options test from `plugins/superb/agents/architecture-discovery.md:54-69`
    — blank the title, keep the options, and a reader can still tell what is being
    decided.
@@ -136,9 +141,9 @@ means halt: three brains cannot conjure an API key.
 identity every time anything else was decided, and the run would re-litigate
 itself. It is recorded separately as `context_digest` for audit.
 
-### Confidence by grounding tier
+### Confidence by grounding rung
 
-**A brain never types a number.** It selects a grounding tier; the controller
+**A brain never types a number.** It selects a grounding rung; the controller
 derives the value and verifies the citation.
 
 | Rung | Value | Must cite | Adoptable |
@@ -181,15 +186,26 @@ Three further demotions to `engineering-judgement` (0.55):
 - **No second-best.** Every response must name a rejected alternative with a real
   reason. An empty alternatives list is rejected outright, re-dispatched once,
   and a second empty counts as a non-response.
-- **Second-best in the same tier as the top answer.** A brain that cannot
+- **Second-best on the same rung as the top answer.** A brain that cannot
   separate its own top two must not drive an adoption.
 - **Empty falsifier.** `what_would_change_my_mind` empty means the answer was not
   examined.
 
 **Run-level inflation check:** after five or more adopted events, if the mean
-effective value exceeds 0.90, the adoption floor rises one tier for the rest of
-the run and the adjustment is recorded. Individual confidence claims are often
-unfalsifiable; the distribution is not.
+effective value exceeds 0.90, the adoption floor rises one rung for the rest of
+the run. Individual confidence claims are often unfalsifiable; the distribution
+is not.
+
+**How that is stored, because the obvious way is forbidden.** The rung values and
+the base floor are schema constants and must never appear in `## Run` — a
+controller that can write its own floor can lower it. So `## Run` carries
+`floor_adjustment`, a non-negative integer count of rungs, default `0`, and the
+effective floor is the base floor raised by that many rungs. The adjustment is
+**monotonically non-decreasing**; a tracker write that lowers it is
+schema-invalid, exactly as a downward review-intensity transition is. This keeps
+the constants frozen while leaving the adjustment auditable, and it means the
+floor actually applied by a past run is reconstructible from its tracker without
+the run having been able to choose it.
 
 ### Independence
 
@@ -222,7 +238,7 @@ The payload **must not** contain:
 
 - any other brain's answer, or the fact that the others exist beyond "you are one
   of several"; a brain that knows it is competing on argmax has a dominant
-  strategy of claiming a high tier;
+  strategy of claiming a high rung;
 - the controller's own leaning or hypothesis;
 - **the adoption floor** — the numbers in this document must not appear in a
   brain's payload; a brain that knows the bar clears the bar;
@@ -248,7 +264,7 @@ things is a malformed question, not a split: escalate as
 `question-not-decidable`. The controller never synthesises a fourth answer — that
 would be an unreviewed decision with no confidence attached.
 
-A group's tier is its **maximum** member tier, not the mean. Averaging lets one
+A cluster's rung is its **maximum** member rung, not the mean. Averaging lets one
 weak agreer drag down a well-grounded answer and lets two weak agreers
 manufacture a majority.
 
@@ -290,11 +306,22 @@ it. Where the three-way split genuinely signals underdetermination — three
 answers resting on evidence of equal quality — rung strictness already escalates.
 Two overlapping rules are worse than one correct one.
 
-Tie-breaks in order: higher rung wins; then the answer whose consequence set is a
-strict subset of the other's — *between two answers the run cannot separate, take
-the one that forecloses less*; then escalate. Never coin-flip, never take the
-first response, never take the longest answer, and never dispatch a fourth brain:
-that is a retry-until-you-like-it loop wearing a quorum's clothes.
+**There is only one tie-break, and it is escalation.** Higher rung already
+decides every adoptable case, and equal rungs never adopt — so a second-level
+tie-break among equal-rung clusters would have no case left to fire on. An
+earlier draft added "prefer the answer whose consequence set is a strict subset"
+as a tie-break; under rung strictness that rule is unreachable, and an
+unreachable rule in a skill is worse than none, because a maintainer will
+eventually make it reachable to "fix" it.
+
+The subset heuristic survives only as **escalation-report ordering**: when a
+question escalates, the candidate foreclosing least is presented first, because
+*between answers the run could not separate, the one that forecloses less is the
+cheaper thing for a human to approve*. That is presentation, not adoption.
+
+Never coin-flip, never take the first response, never take the longest answer,
+and never dispatch a fourth brain: that is a retry-until-you-like-it loop wearing
+a quorum's clothes.
 
 ### Drift budget
 
@@ -405,7 +432,7 @@ ask four and halt on the rest. Independent work continues while the queue fills.
   re-opened; it is flagged to stage 11 as `stale-context`. Re-deciding on resume
   is precisely the silent-divergence failure.
 - **Never re-run a quorum to check.** A second run with different brains produces
-  a different answer roughly as often as the tier gap is narrow, and the
+  a different answer roughly as often as the rung gap is narrow, and the
   controller has no principled way to prefer either.
 
 ## Review-intensity dial
@@ -444,7 +471,7 @@ downward and never by quorum:
 | (a) | any task produced a CONFIRMED or unrefuted PLAUSIBLE adversarial finding |
 | (b) | the phase suite has failed twice or more |
 | (c) | a stage-10 root cause traced into a file inside this phase's write scopes |
-| (d) | a quorum adopted a decision scoped to this phase below 0.80 |
+| (d) | a quorum adopted a decision in this phase at `code-evidenced` rather than `specified` |
 | (e) | cumulative changed source lines in the phase exceed 300 |
 
 A ratchet does not retroactively review complete tasks. It gates every remaining
@@ -548,13 +575,13 @@ property, and the mechanism looks strongest exactly when it is most dangerous.
   anything writing outside the repository.
 - **Anchoring.** Every response must cite at least one stage-03 decision or spec
   line in `consistent_with`. An answer citing only repository code is capped at
-  `general-practice` and therefore auto-escalates. Every adopted answer traces to
+  `convention-cited` and therefore auto-escalates. Every adopted answer traces to
   something the user actually said.
 - **Negative space.** `forecloses` is required, and the union of the three lists
   is checked against the irreversible-axis list before adoption. Asking what an
   answer *destroys* surfaces risk that asking what it *achieves* never does.
 
-**Confidence inflation.** Covered by the tier table, citation verification, the
+**Confidence inflation.** Covered by the rung table, citation verification, the
 second-best and falsifier caps, the run-level distribution check, and the floor's
 absence from the payload. Additionally: the controller must **never** ask a brain
 to reconsider its confidence. That is a pressure signal; it moves the number
@@ -638,7 +665,8 @@ and `Ratchet`.
 provenance stays legible even if a field is lost. The file is **append-only**;
 the only legal in-place mutation is `Adopted → Superseded`.
 
-Decision actions narrow to `task.resume | quorum.adopt | none`. The
+Decision actions narrow to
+`task.resume | quorum.adopt | quorum.extend-budget | none`. The
 generic-approval rejection carries over unchanged: a quorum answer of "proceed"
 is as empty as a human's.
 
@@ -656,7 +684,7 @@ first, not last.
 | --- | --- | --- |
 | P01 | Pressure baselines (RED) — agents failing with no skill present, rationalisations recorded verbatim, real-agent evidence labelled separately from simulation | HIGH |
 | P02 | Schema and helper core — parse/render round-trip, semantic validation, foreign-schema stop, locking, atomic replace, three failure outcomes | HIGH |
-| P03 | Quorum record and decisions contract — qid derivation, three-phase record, replay idempotency, tier recomputation, contradiction detection, depth, budget | HIGH |
+| P03 | Quorum record and decisions contract — qid derivation, three-phase record, replay idempotency, rung recomputation, contradiction detection, depth, budget | HIGH |
 | P04 | Task lifecycle carry-over — reserve/start/resume, typed scopes, result identity, baseline range proof, integration ancestry, reconciliation | HIGH |
 | P05 | Dial and per-task gate bookkeeping — adversarial trigger evaluation, fix-round cap, the one-way ratchet, provisional propagation | HIGH |
 | P06 | Stage 11/12 gate — two reviewers with non-implementer enforcement, `DECISION-CHALLENGE` routing, completeness freeze, phase-set immutability | HIGH |
@@ -682,7 +710,7 @@ named fault: renaming a reference without updating the routing table produces a
 dead route at runtime, silently, mid-run.
 
 The *quality* of a quorum answer is not testable in process. The design can test
-that a quorum ran, that tiers were recomputed, that contradictions were rejected,
+that a quorum ran, that rungs were recomputed, that contradictions were rejected,
 that replay is idempotent, and that the audit record is complete. It cannot test
 that three brains gave a good answer. The only instruments are the pressure
 scenarios and the stage-11 review of adopted decisions.
@@ -726,9 +754,11 @@ reversible before implementation begins.
 
 ## Unknowns, flagged rather than hidden
 
-The adoption floor and the tier values are uncalibrated. They must be **persisted
-per run** so a later session knows what bar was applied, and they must never
-appear in a brain's payload. Log every event's tier, spread, and outcome, and
+The rung values are frozen schema constants rather than run configuration, so a
+controller cannot lower its own bar — but the *calibration* behind them is still
+uncalibrated. The floor actually applied must be **persisted per run** so a later
+session knows what bar governed, and neither floor nor values may ever appear in
+a brain's payload. Log every event's rung, runner-up rung, and outcome, and
 revisit after three real runs.
 
 The drift budget of three per phase and ten per run is likewise a first estimate.

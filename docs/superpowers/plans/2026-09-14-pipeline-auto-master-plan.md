@@ -6,7 +6,7 @@
 
 **Architecture:** A controller skill (`SKILL.md` + five references) over a single Python state module that owns all durable transitions. The state module is a markdown-tracker parser/renderer with strict semantic validation, an OS-level lock, atomic replacement, and immutable artifact publication. Review discipline is the subagent-driven-development protocol, inlined rather than invoked, with intensity set per phase by a one-way ratchet dial. Every decision the run makes without the user is recorded with its grounding tier and surfaced in the terminal report.
 
-**Tech Stack:** Python 3 standard library only (no third-party dependencies — matches `pipeline/scripts/pipeline_state.py`). `pytest` for tests. Markdown for all durable state. POSIX file locking with a documented fallback.
+**Tech Stack:** Python 3 standard library only, tests included. **`pytest` is NOT installed on this machine and must not be used** — tests are `unittest.TestCase` and run under `python3 -m unittest discover`, which also keeps them runnable under pytest if it ever appears. Markdown for all durable state. POSIX file locking with a documented fallback.
 
 **Spec:** `docs/superpowers/specs/2026-09-14-pipeline-auto-design.md`
 
@@ -66,7 +66,7 @@ Each phase gets its own detailed plan at `docs/superpowers/plans/pipeline-auto/p
 | Phase | Depends on | Review class | Deliverable |
 | --- | --- | --- | --- |
 | P01 pressure-baselines | — | `required` | RED transcripts of agents failing each scenario with no skill present |
-| P02 schema-core | — | `required` | `pipeline_auto_state.py`: parse, render, validate, lock, atomic replace, initialize |
+| P02 schema-core | — | `required` | `pipeline_auto_state.py`: parse, render, validate, lock, atomic replace, initialize, filesystem classification. `## Tasks` carries a `Phase` column — the per-phase drift budget and the ratchet are otherwise underivable |
 | P03 quorum-contract | P02 | `required` | Quorum record, qid derivation, tier recomputation, contradiction detection, budget, depth |
 | P04 task-lifecycle | P02 | `required` | Reserve/start/resume, typed scopes, result identity, range proof, ancestry, reconciliation |
 | P05 dial-and-gate | P03, P04 | `required` | `## Task Review`, `## Fix Rounds`, adversarial trigger, one-way ratchet, provisional propagation |
@@ -88,11 +88,13 @@ Phase-plan workers consume these verbatim. A worker needing something not listed
 ### P01 produces — consumed by P08
 
 - `tests/pressure/stimuli/S01..S08.md` — committed, **facts only**. A stimulus states the situation and never states the correct behaviour, or the baseline measures the skill instead of the agent.
-- `tests/pressure/oracles.md` — **uncommitted, controller-only**. Per scenario: the correct behaviour, the fail predicate, the rationalization watchlist, and a `GREEN predicate:` line. P08 asserts against this line verbatim. Committing it would leak the answers into any agent that reads the repo.
+- `tests/pressure/oracles.md` — **uncommitted while P01 measures, committed by P01's last task**. Per scenario: the correct behaviour, the fail predicate, the rationalization watchlist, and a `GREEN predicate:` line. P08 asserts against this line verbatim. See the ordering note below.
 - `tests/pressure/records/<class>/` — evidence records, where `<class>` is `actual-agent` or `simulated`. A committed validator rejects any record whose internal class label disagrees with its directory.
 - `tests/pressure/RED-baseline.md` — the one committed curated record: two tables, one row per scenario, carrying the verbatim rationalization and the fail-predicate outcome.
 
-Raw transcripts live in the run directory's ignored `scratch/`; only the curated record and the stimuli are committed. P08 therefore depends on `RED-baseline.md`, not on the transcripts, and survives running in a different workspace.
+Raw transcripts live in `tests/pressure/records/`, ignored in place by a self-ignoring `.gitignore`. Only the stimuli, the validator and `RED-baseline.md` are committed during P01. P08 depends on `RED-baseline.md`, not on the transcripts, so it survives a different workspace.
+
+**`oracles.md` is uncommitted during P01 and committed by P01's final task, after every RED record is captured and validated.** The ordering is the whole point and must be stated in the plan: the oracle has to be secret while the RED baseline is measured, because an unaided agent that can read the answers is measuring the repository rather than itself. After P01 closes, secrecy is no longer purchasable at any price — P07 writes the correct behaviour into `SKILL.md`, which is the same information. Withholding the oracle past that point buys nothing and costs P08 its GREEN predicates, so P01 commits it on the way out.
 
 ### P02 produces — consumed by P03, P04, P05, P06, P09
 
@@ -111,10 +113,19 @@ def parse_tracker(text: str) -> dict: ...
 def render_tracker(tracker: dict) -> str: ...
 def validate_run(run_dir: str) -> dict: ...
 def initialize_run(run_dir: str, *, run_id: str, base_commit: str,
-                   target_branch: str, worker_limit: int) -> dict: ...
+                   target_branch: str, worker_limit: int, repo_root: str) -> dict: ...
 def locked_tracker_update(run_dir: str, *, transition_id: str, mutate) -> dict: ...
-def publish_immutable(path: str, content: str) -> str: ...
+def publish_immutable(path: str, content: str) -> str: ...   # returns the sha256 hex digest, not the path
 def derive_next_action(tracker: dict) -> str: ...
+
+# Section column grammar — P02 OWNS ALL OF IT, including sections whose rows
+# later phases write. A phase that writes rows it does not own still needs the
+# grammar validated in one place, or `## Quorum` drifts from its validator.
+SECTIONS: dict[str, tuple[str, ...]]   # section name -> ordered column tuple
+def section_columns(name: str) -> tuple[str, ...]: ...
+def append_row(tracker: dict, section: str, row: dict) -> dict: ...
+def repo_root(tracker: dict) -> str: ...   # recorded at init; NEVER derived from run_dir depth
+def classify_filesystem(path: str) -> str: ...  # unclassified => read-only stop BEFORE the run starts
 ```
 
 `locked_tracker_update` contract: validate, acquire exclusive lock, re-read, revalidate, apply `mutate`, render, **reparse the render**, write to a temp file in the run directory, fsync, atomic replace, fsync the directory. A replayed `transition_id` returns current state without mutating. A post-replace sync failure raises `UpdateOutcomeUncertain`, never `TrackerWriteError`.
@@ -133,10 +144,10 @@ MAX_EXTENSIONS = 2
 def derive_qid(question: str, axis: str) -> str: ...      # sha256(normalize(q) + "\x00" + axis)[:12]
 def effective_rung(response: dict, repo_root: str) -> str: ...  # resolve citation, then demote
 def cluster_rung(cluster: list) -> str: ...               # MAX member rung, never mean
-def build_payload(qid: str, brain_index: int) -> dict: ...  # identical question, per-brain reading assignment
 def project_decisions(decisions: dict) -> str: ...        # question + answer + provenance ONLY; no values
 def open_quorum(run_dir: str, *, question_record: str) -> dict: ...
 def record_brain_response(run_dir: str, *, qid: str, owner: str, payload: dict) -> str: ...
+def build_payload(qid: str, brain_index: int, *, run_dir: str) -> dict: ...
 def finalize_quorum(run_dir: str, *, qid: str) -> dict: ...  # adopted | escalated | rejected-*
 def check_contradiction(decisions: dict, candidate: dict) -> str | None: ...
 def decision_depth(decisions: dict, consistent_with: list) -> int: ...
@@ -149,6 +160,7 @@ def reserve_task(run_dir: str, *, task_id: str, owner: str, attempt: int) -> dic
 def resume_task(run_dir: str, *, task_id: str, prior_attempt: int,
                 new_owner: str, new_attempt: int, decision_ref: str) -> dict: ...
 def scopes_overlap(a: str, b: str) -> bool: ...   # file:/tree: with ancestor rules
+def parse_plan_metadata(path: str) -> dict: ...   # strict comment grammar, pinned key order; raises PlanMetadataError
 def publish_worker_result(run_dir: str, *, result: dict) -> str: ...
 def import_worker_result(run_dir: str, *, result_path: str) -> dict: ...
 def verify_source_range(repo: str, *, baseline: str, head: str, scopes: list) -> dict: ...
@@ -181,7 +193,7 @@ A structure validator, `tests/test_skill_structure.py`, asserting: frontmatter p
 Each phase's plan names its exact ordered command tuple. The run-wide suite, executed at the master gate and at final verification, is:
 
 ```bash
-python3 -m pytest plugins/superb/skills/pipeline-auto/tests/ -v
+python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -t . -v
 python3 plugins/superb/skills/pipeline-auto/examples/controller_walkthrough.py
 git -C . diff --name-only c8bddd610119f52b54bf077d284c7f5d8362ae77..HEAD -- plugins/superb/skills/pipeline/
 git status --short

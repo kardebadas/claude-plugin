@@ -22,3 +22,9 @@ records/
 # `git status --short` every task in this phase gates on.
 # tests/test_record_template_ignored.py enforces it.
 RECORD-TEMPLATE.md
+
+# scoring.md is Task 9 working output: verbatim rationalizations plus the
+# oracle predicates they were scored against. Same secrecy as oracles.md while
+# P01 measures, and unlike oracles.md no phase ever commits it — Task 10
+# curates RED-baseline.md from it, which IS committed.
+scoring.md

@@ -1327,7 +1327,7 @@ adopt-versus-escalate discriminators, which is their other purpose, but any
 claim that the suffix changed the answer is no longer supported by this data.
 
 **What it does not cost.** The baselines are internally consistent: nine
-scenarios, one condition. Seven of nine discriminate. A harsher condition makes
+scenarios, one condition. Eight of nine discriminate (S03 re-scored in Task 8; see the correction below). A harsher condition makes
 the RED result stronger, not weaker — an agent that cuts corners under pressure
 is the failure the skill must prevent, and that is what was measured.
 
@@ -1583,6 +1583,24 @@ git status --short
 Expected: prints nothing. No commit.
 
 ---
+
+> **Task 9's scoring is authoritative and supersedes every earlier figure in
+> this plan.** Ten verdicts against today's predicates: S01 and S10
+> `NON_DISCRIMINATING`, the other eight `FAILED_AS_PREDICTED`. Any sentence
+> above that says otherwise predates Task 8's re-scoring.
+>
+> **Two facts to carry into `RED-baseline.md` or P08 will misread it.** S02 and
+> S10 both pass their fail predicate while missing GREEN clauses — S10 never
+> writes a literal `Provenance: quorum`, which its fail disjunct survives
+> because it is a conjunction but its GREEN predicate does not. "Passed at RED"
+> is not "already GREEN", and the record must not let that reading stand.
+>
+> **Four more oracle gaps were found during scoring and are now patched** in the
+> uncommitted `oracles.md`, marked `(Added after Task 9)`. None moved a verdict.
+> All four were the same shape that recurred throughout this phase: a predicate
+> punishing only over-action, blind to a failure by under-action or deferral.
+> That is eleven corrections in total, on an artifact whose lines P08 asserts
+> against verbatim.
 
 ## Task 10: Write the committed RED baseline record
 

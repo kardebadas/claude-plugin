@@ -3700,3 +3700,481 @@ def effective_rung(response: dict, repo_root: str) -> str:
     if _demotion_reason(response) is not None:
         return _not_above(declared, DEMOTION_RUNG)
     return declared
+
+
+# --- the decisions contract: what this run has already settled ------------
+#
+# ``decisions.md`` is the run's audit trail. It is append-only, it is the only
+# evidence that anything was DECIDED rather than assumed, and the two things
+# this section does to it are read it strictly and project it narrowly.
+#
+# STRICTLY, because two adopted decisions contradicting each other on one axis
+# is a read-only stop of the same severity as a foreign schema. A trail holding
+# both answers has already failed: every later reader -- the contradiction
+# check, the depth walk, the terminal report -- picks one of the two by
+# accident of iteration order, and whichever it picks is defensible, so nothing
+# downstream can notice. The file is not repaired and no answer is preferred;
+# the run stops and a human is told which two records disagree.
+#
+# NARROWLY, because ``decisions-effective.md`` is the only decision material a
+# brain ever sees, and what it omits is as load-bearing as what it carries. See
+# ``project_decisions``.
+
+#: The two provenances, and the whole of them. ``Provenance`` is recorded even
+#: though the id already implies it, because a provenance read only by a
+#: validator has informed nobody -- it has to be visible in the record, in the
+#: tracker index and in the terminal report.
+_PROVENANCES = frozenset({"human", "quorum"})
+
+#: The five decision actions, and nothing else is honoured. ``dispatch``'s
+#: extension is here beside ``quorum``'s because TWO BUDGETS MEAN TWO
+#: AUTHORITIES: the drift budget caps decision authority and the dispatch
+#: budget caps run cost, and one action shared between them would let a grant
+#: against either refill the other. A set of four that dropped
+#: ``dispatch.extend-budget`` would make the one action that unblocks a
+#: hard-ceilinged run unwritable -- the record the human signed would parse as
+#: an unknown action, which is a read-only stop, which is a run that cannot be
+#: restarted by the very grant that exists to restart it.
+_DECISION_ACTIONS = frozenset({
+    "task.resume", "quorum.adopt", "quorum.extend-budget",
+    "dispatch.extend-budget", "none",
+})
+
+#: Both grants, named once. They are the two actions whose ANSWER carries a
+#: ceiling, which is why ``project_decisions`` withholds them from brains.
+_EXTENSION_ACTIONS = frozenset({"quorum.extend-budget", "dispatch.extend-budget"})
+
+#: A generic approval is not an answer to an unresolved choice, and this holds
+#: for a quorum answer of "proceed" exactly as it holds for a human's. The
+#: empty string is a member so that a present-but-blank ``Answer`` is caught by
+#: the same rule rather than by the absence of one.
+_GENERIC_ANSWERS = frozenset({
+    "", "approved", "yes", "no", "continue", "proceed", "go", "ok", "okay",
+    "agreed", "sounds good", "lgtm", "sure", "do it", "pending user response",
+})
+
+#: The exact placeholder an UNANSWERED question is recorded with. The template
+#: requires the question be written down now rather than later -- a question
+#: recorded only once it has an answer is a question the run can silently drop
+#: -- so ``Open`` is a status this parser must accept, and the placeholder is
+#: the one string that may stand where an answer will go.
+_PENDING_ANSWER = "pending user response"
+
+#: ``Open`` is neither adopted nor superseded: it binds nothing, contradicts
+#: nothing, and is never projected. Ordered canonical spellings; the lookup
+#: below folds case so that ``ADOPTED`` and ``adopted`` are the same status and
+#: ``Adopted!`` is not a status at all.
+_DECISION_STATUSES = ("Adopted", "Superseded", "Open")
+_STATUS_SPELLINGS = MappingProxyType(
+    {status.casefold(): status for status in _DECISION_STATUSES})
+#: The same three as a SET, for the one membership test whose value does not
+#: come from this parser. ``_member`` over a frozenset is the pinnable
+#: spelling: a bare ``in`` against it raises ``TypeError`` on an unhashable
+#: value, which is outside ``TrackerError``, so reverting the call site fails
+#: the suite instead of passing quietly the way a tuple would.
+_DECISION_STATUS_NAMES = frozenset(_DECISION_STATUSES)
+
+#: Every record must carry all seven. ``depth`` is required rather than
+#: defaulted, and that is the whole of why it is in this tuple: a missing
+#: ``Depth`` read as 0 would let a quorum answer claim it stands exactly where
+#: a human's does, which is the one distance the depth cap exists to measure.
+_REQUIRED_DECISION_FIELDS = ("question", "axis", "answer", "provenance",
+                             "decision_action", "depth", "status")
+
+#: The template writes ``Action``; the P03 contract writes ``Decision action``.
+#: They are one field, so they are normalised to one key here rather than read
+#: as two -- two keys would let a record spell one of them, satisfy neither
+#: validator, and record an action nothing honours.
+_DECISION_FIELD_ALIASES = MappingProxyType({"action": "decision_action"})
+
+#: The three fields a brain is shown, and the whole of them. A whitelist rather
+#: than a blacklist because ``decisions.md`` is hand-editable: a new field
+#: added to a record by a human, a later phase, or a template revision must
+#: reach no brain until somebody decides it may, and a blacklist grants the
+#: opposite default.
+_PROJECTED_FIELDS = ("question", "answer", "provenance")
+
+
+def _id_provenance(did: str) -> str | None:
+    """Which namespace a decision id is in -- ``human``, ``quorum`` or neither.
+
+    Grammar, not prefix. ``H-01x`` starts with ``H-`` and is not a human
+    decision id: ``_validate_tasks`` refuses it in a task's ``Decisions`` cell,
+    so a record headed with it is a decision no task in the run can ever cite.
+    Checking the prefix alone would accept it here and lose it there, which is
+    the shape where an audit trail and the tracker disagree about what exists.
+    """
+    if _HUMAN_DECISION.fullmatch(did):
+        return "human"
+    if _QUORUM_DECISION.fullmatch(did):
+        return "quorum"
+    return None
+
+
+def _decision_field(line: str) -> tuple[str, str] | None:
+    """One ``- **Field:** value`` or ``- Field: value`` line, or ``None``.
+
+    BOTH SPELLINGS, because both are already in the repository: the shipped
+    ``templates/decisions.md`` writes the plain form and this phase's record
+    grammar writes the emphasised one. A parser that took only one of them
+    would read a file copied from the shipped template as a file with no
+    fields at all -- so every record would be missing every required field,
+    and an ordinary run would be a read-only stop on its first decision.
+
+    Stated without ``re``: the module's import allowlist is a capability
+    boundary, and a field line is ``-``, a label, a colon and the rest. The
+    label may not contain an asterisk or a colon, which is what stops a prose
+    bullet inside a record from being read as a field.
+    """
+    if not line.startswith("- "):
+        return None
+    body = line[2:].strip()
+    if body.startswith("**"):
+        label, closer, value = body[2:].partition(":**")
+    else:
+        label, closer, value = body.partition(":")
+    if not closer:
+        return None
+    label = label.strip()
+    if not label or "*" in label or ":" in label:
+        return None
+    return _field(label), value.strip()
+
+
+def _decision_sections(text: str) -> list[tuple[str, dict]]:
+    """Every ``## <heading>`` section of ``decisions.md``, with its fields.
+
+    Sections, not decisions: a real ``decisions.md`` opens with prose and an
+    ``## Axis Index`` table before the first record, and a reader that treated
+    every heading as a decision would report the axis index as a decision
+    missing every field it needs. Which sections are decisions is settled by
+    the caller, by id -- and a section that is not one but carries decision
+    FIELDS is refused there rather than skipped, so a record whose heading was
+    mistyped cannot vanish out of the audit trail silently.
+
+    Duplicate headings raise. A dict keyed by id would let the second ``##
+    H-001`` overwrite the first, which is an append-only file losing a decision
+    through the parser rather than through an edit.
+    """
+    if not isinstance(text, str):
+        raise TrackerValidationError(
+            f"decisions.md is {type(text).__name__}, not str: the audit trail "
+            "is read as text and is never coerced into one")
+    sections: list[tuple[str, dict]] = []
+    seen: set[str] = set()
+    fields: dict | None = None
+    for line in text.splitlines():
+        if line.startswith("## "):
+            heading = line[3:].split("—")[0].strip()
+            if heading in seen:
+                raise TrackerValidationError(
+                    f"decisions.md holds two ## {heading} sections; the file is "
+                    "append-only and a repeated heading loses whichever record "
+                    "is read second")
+            seen.add(heading)
+            fields = {}
+            sections.append((heading, fields))
+            continue
+        if fields is None:
+            continue
+        parsed = _decision_field(line)
+        if parsed is None:
+            continue
+        key, value = parsed
+        if key in _DECISION_FIELD_ALIASES:
+            key = _DECISION_FIELD_ALIASES[key]
+        if key in fields:
+            raise TrackerValidationError(
+                f"section {sections[-1][0]!r} states {key!r} twice; one of the "
+                "two is the value every later reader will use and nothing says "
+                "which")
+        fields[key] = value
+    return sections
+
+
+def _consequence_map(raw: str, did: str) -> dict:
+    """``kind:subject=value`` entries, as a mapping contradiction can compare.
+
+    Every part is required and the kind is checked against the enum. A
+    free-text consequence is the fail-open shape ``_BLAST_RADII`` is closed
+    against: it matches no other record's consequences, so two adopted
+    decisions that genuinely conflict are compared on an empty intersection and
+    pass. A consequence is an assertion that would be verifiably TRUE of the
+    repository if the answer were adopted -- never a rationale -- and the enum
+    is what holds it to that.
+    """
+    mapping = {}
+    for entry in (part.strip() for part in raw.split(",") if part.strip()):
+        head, assigned, value = entry.partition("=")
+        kind, marked, subject = head.partition(":")
+        kind, subject, value = kind.strip(), subject.strip(), value.strip()
+        if not assigned or not marked or not subject or not value:
+            raise TrackerValidationError(
+                f"{did}: consequence {entry!r} is not kind:subject=value; a "
+                "consequence with no subject or no value asserts nothing about "
+                "the repository and can contradict nothing")
+        if not _member(kind, _CONSEQUENCE_KINDS):
+            raise TrackerValidationError(
+                f"{did}: consequence kind {kind!r} is not one of "
+                f"{sorted(_CONSEQUENCE_KINDS)}; an unrecognised kind matches no "
+                "other record, so the contradiction check passes by failing to "
+                "understand either side")
+        if (kind, subject) in mapping:
+            raise TrackerValidationError(
+                f"{did}: consequence {kind}:{subject} is asserted twice; a "
+                "record that contradicts itself is an audit trail holding both "
+                "answers in one decision")
+        mapping[(kind, subject)] = value
+    return mapping
+
+
+def parse_decisions(text: str) -> dict:
+    """Parse ``decisions.md`` into records plus a validated axis index.
+
+    Returns ``{"decisions": {D-ID: record}, "axis_index": {axis: [D-ID, ...]}}``.
+
+    PROVENANCE IS REQUIRED AND MUST AGREE WITH THE ID PREFIX, so provenance
+    survives even if the field is lost. The prefix is the entire difference
+    between a decision a machine made and one the user made, and it is what
+    contradiction routing reads to tell them apart: a finding tracing to a
+    human decision halts to the escalation queue, while one tracing to a quorum
+    decision re-opens that qid at a raised bar. Two records that disagree with
+    their own ids would route by whichever of the two a given reader consulted.
+
+    TWO ADOPTED DECISIONS CONTRADICTING EACH OTHER ON ONE AXIS IS A READ-ONLY
+    STOP of the same severity as a foreign schema. The file IS the audit trail,
+    and a trail holding both answers has already failed -- every later reader
+    picks one by accident of iteration order and every pick is defensible, so
+    nothing downstream can detect it. Nothing is repaired and neither answer is
+    preferred.
+
+    Nothing outside ``TrackerError`` leaves here. A malformed decisions.md is
+    input, not a bug: an ``int('two')`` or a ``KeyError`` escaping this function
+    would kill the run through a handler no controller has written, instead of
+    stopping it read-only with the record named.
+    """
+    decisions: dict = {}
+    axis_index: dict = {}
+    for did, fields in _decision_sections(text):
+        provenance_by_id = _id_provenance(did)
+        if provenance_by_id is None:
+            #: Not a decision section. ``## Axis Index`` is one, and so is any
+            #: prose heading a writer adds. It is skipped only if it carries no
+            #: decision field: a section that states a Question and an Answer
+            #: under a mistyped id IS a decision, and skipping it would drop a
+            #: record out of an append-only file without a word.
+            stated = sorted(set(fields) & set(_REQUIRED_DECISION_FIELDS))
+            if stated:
+                raise TrackerValidationError(
+                    f"section {did!r} states decision fields {stated} but is "
+                    "not a decision id (H-<n> or Q-<qid>); a record no task can "
+                    "cite is a decision the run cannot act on")
+            continue
+        missing = [name for name in _REQUIRED_DECISION_FIELDS
+                   if not fields.get(name, "").strip()]
+        if missing:
+            raise TrackerValidationError(
+                f"{did}: decision record is missing {missing}; every one of "
+                "them is read by something that routes on it")
+        provenance = fields["provenance"].strip().casefold()
+        if not _member(provenance, _PROVENANCES):
+            raise TrackerValidationError(
+                f"{did}: Provenance must be human or quorum, not "
+                f"{fields['provenance']!r}")
+        if provenance != provenance_by_id:
+            raise TrackerValidationError(
+                f"{did}: id prefix says {provenance_by_id} and Provenance says "
+                f"{provenance}; provenance is recorded twice so that it survives "
+                "one of the two being lost, not so that a record can claim both")
+        action = fields["decision_action"].strip()
+        if not _member(action, _DECISION_ACTIONS):
+            raise TrackerValidationError(
+                f"{did}: unknown decision action {action!r}; the actions are "
+                f"{sorted(_DECISION_ACTIONS)} and an unrecognised one is an "
+                "authority no validator in this run will ever honour")
+        if _member(action, _EXTENSION_ACTIONS) and provenance != "human":
+            raise TrackerValidationError(
+                f"{did}: {action} requires Provenance: human; a budget a quorum "
+                "can extend is not a budget")
+        status_raw = fields["status"].strip()
+        if not _member(status_raw.casefold(), _STATUS_SPELLINGS):
+            raise TrackerValidationError(
+                f"{did}: Status must be one of {list(_DECISION_STATUSES)}, not "
+                f"{status_raw!r}")
+        status = _STATUS_SPELLINGS[status_raw.casefold()]
+        answer = fields["answer"].strip()
+        answer_key = answer.split("—")[0].strip()
+        if status == "Open":
+            #: An unanswered question is recorded NOW. The placeholder is the
+            #: only string that may stand where an answer will go, and the
+            #: action must be ``none``: an Open record granting an authority
+            #: would be a grant nobody made.
+            if answer.casefold() != _PENDING_ANSWER:
+                raise TrackerValidationError(
+                    f"{did}: an Open decision's Answer is exactly "
+                    f"{_PENDING_ANSWER!r}, not {answer!r}; an Open record with "
+                    "an answer in it is an answer nothing has adopted")
+            if action != "none":
+                raise TrackerValidationError(
+                    f"{did}: an Open decision's action is 'none', not {action!r}")
+        else:
+            for candidate in (answer, answer_key):
+                if candidate.rstrip(".").casefold() in _GENERIC_ANSWERS:
+                    raise TrackerValidationError(
+                        f"{did}: {candidate!r} is a generic approval, not an "
+                        "answer to an unresolved choice; this holds for a quorum "
+                        "answer of 'proceed' exactly as it holds for a human's")
+        axis = fields["axis"].strip()
+        if not _TOKEN.fullmatch(axis):
+            raise TrackerValidationError(
+                f"{did}: Axis {axis!r} is not a legal axis token; the axis is "
+                "the key the contradiction check groups by, and one that cannot "
+                "be written into the tracker's own cell groups with nothing")
+        if axis == _RESERVED_AXIS:
+            #: ``new`` is the RESERVED LITERAL for a question that has not been
+            #: tagged to a stable axis yet. Two unrelated decisions both
+            #: recorded against it would be compared as though they answered one
+            #: question, and the run would stop on a contradiction that does not
+            #: exist. Whoever writes the record assigns the stable axis; the
+            #: placeholder never reaches the audit trail.
+            raise TrackerValidationError(
+                f"{did}: Axis {_RESERVED_AXIS!r} is the reserved literal for an "
+                "untagged question, not an axis; a decision recorded against it "
+                "shares one axis bucket with every other untagged decision")
+        depth_raw = fields["depth"].strip()
+        if not _is_count(depth_raw):
+            raise TrackerValidationError(
+                f"{did}: Depth {depth_raw!r} is not a non-negative integer; "
+                "isdigit alone is true of '٣', which int() reads back as 3 "
+                "and no downstream reader can match")
+        depth = int(depth_raw)
+        if provenance == "human" and depth != 0:
+            raise TrackerValidationError(
+                f"{did}: a human decision is depth 0, not {depth}; depth counts "
+                "inference from the last thing a human actually said, and a "
+                "human saying it is that thing")
+        record = dict(fields)
+        record.update({
+            "id": did,
+            "axis": axis,
+            "provenance": provenance,
+            "action": action,
+            "decision_action": action,
+            "answer": answer,
+            "answer_key": answer_key,
+            "status": status,
+            "depth": depth,
+            "question": fields["question"].strip(),
+            "consequences": _consequence_map(fields.get("consequences", ""), did),
+            "consistent_with": [entry.strip() for entry
+                                in fields.get("consistent_with", "").split(",")
+                                if entry.strip()],
+        })
+        decisions[did] = record
+        axis_index.setdefault(axis, []).append(did)
+
+    for axis, ids in sorted(axis_index.items()):
+        adopted = [decisions[did] for did in ids
+                   if decisions[did]["status"] == "Adopted"]
+        for index, left in enumerate(adopted):
+            for right in adopted[index + 1:]:
+                clash = _contradiction(left, right)
+                if clash is not None:
+                    raise TrackerValidationError(
+                        f"axis {axis} holds two adopted contradicting answers, "
+                        f"{left['id']} and {right['id']} ({clash}); this run is "
+                        "a read-only stop -- the audit trail holds both answers "
+                        "and no reader can tell which one the run is bound by")
+    return {"decisions": decisions, "axis_index": axis_index}
+
+
+def _contradiction(left: dict, right: dict) -> str | None:
+    """How two adopted records on one axis disagree, or ``None``.
+
+    The reason rather than a boolean, because the stop has to name what
+    disagreed: "these two contradict" sends a human to read both records and
+    guess, and the guess is between an answer key and a consequence.
+
+    Two answers on one axis are the same answer only if they name the same key
+    AND assert nothing incompatible. When in doubt they are DIFFERENT answers,
+    which pushes toward the stop, which is the safe direction.
+    """
+    if left["answer_key"] != right["answer_key"]:
+        return (f"answer keys {left['answer_key']!r} and "
+                f"{right['answer_key']!r} differ")
+    shared = set(left["consequences"]) & set(right["consequences"])
+    for key in sorted(shared):
+        if left["consequences"][key] != right["consequences"][key]:
+            kind, subject = key
+            return (f"{kind}:{subject} is asserted "
+                    f"{left['consequences'][key]!r} and "
+                    f"{right['consequences'][key]!r}")
+    return None
+
+
+def project_decisions(decisions: dict) -> str:
+    """Render ``decisions-effective.md``: the only decision material a brain sees.
+
+    QUESTION, ANSWER AND PROVENANCE. No value, no rung name, no rejected
+    alternatives, no consequences, no depth, no scope.
+
+    * Adopted answers must be INCLUDED, or brains re-litigate settled ground
+      and manufacture the very drift the quorum exists to bound.
+    * Values must be EXCLUDED: a brain reading "adopted at 0.85" treats the
+      decision as soft and reverses it, where a brain reading it as simply a
+      decision treats it as binding. The rung NAME goes with the value, because
+      a name whose ladder the brain also knows is the value.
+    * Provenance must be INCLUDED so a brain can recognise a human decision and
+      refuse to contradict it.
+
+    Superseded and Open records are not projected: the first is no longer in
+    effect and the second has no answer to be in effect. Budget extensions are
+    not projected either -- their answer carries a ceiling, and a ceiling is a
+    number in a brain's payload.
+
+    The three fields are whitelisted rather than the others blacklisted.
+    ``decisions.md`` is hand-editable and grows fields; a blacklist ships every
+    new one to a brain until somebody remembers to add it.
+    """
+    if not isinstance(decisions, dict) or not isinstance(
+            decisions.get("decisions"), dict):
+        raise TrackerValidationError(
+            "project_decisions takes the whole parse_decisions result, not the "
+            "records alone: it is handed what a brain will read, and a shape "
+            "it cannot read would project an empty file that looks like a run "
+            "with no decisions in it")
+    lines = ["<!-- pipeline-auto-decisions-effective/v1 -->", "",
+             "# Decisions in effect", "",
+             "Read-only and generated. Do not cite a value; there is none here.",
+             ""]
+    for did in sorted(decisions["decisions"]):
+        record = decisions["decisions"][did]
+        if not isinstance(record, dict):
+            raise TrackerValidationError(
+                f"{did}: a decision record is {type(record).__name__}, not an "
+                "object")
+        if not _member(record.get("status"), _DECISION_STATUS_NAMES):
+            raise TrackerValidationError(
+                f"{did}: status {record.get('status')!r} is not one of "
+                f"{list(_DECISION_STATUSES)}; a record whose status cannot be "
+                "read is a record that cannot be shown to be in effect")
+        if not _member(record.get("action"), _DECISION_ACTIONS):
+            raise TrackerValidationError(
+                f"{did}: action {record.get('action')!r} is not a decision "
+                "action; the extension actions are withheld from brains by "
+                "name, and an unreadable action is withheld from nothing")
+        if record["status"] != "Adopted":
+            continue
+        if _member(record["action"], _EXTENSION_ACTIONS):
+            continue
+        missing = [name for name in _PROJECTED_FIELDS if not _text(record.get(name))]
+        if missing:
+            raise TrackerValidationError(
+                f"{did}: cannot be projected without {missing}; a decision shown "
+                "to a brain without its question is an answer to nothing")
+        lines.append(f"## {did}")
+        lines.append("")
+        lines.extend(f"- **{name.capitalize()}:** {record[name].strip()}"
+                     for name in _PROJECTED_FIELDS)
+        lines.append("")
+    return "\n".join(lines) + "\n"

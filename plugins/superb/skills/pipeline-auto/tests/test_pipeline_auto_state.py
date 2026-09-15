@@ -7987,5 +7987,747 @@ class FilesystemStopBeforeTheRunStartsTests(unittest.TestCase):
         self.assertEqual(seen, [run_dir])
 
 
+# --- the decisions contract ------------------------------------------------
+
+#: One human decision, in the EMPHASISED field spelling this phase's record
+#: grammar states. Every case below is this fixture with exactly one thing
+#: changed, through ``swap``, so no case can be built on a pattern the fixture
+#: no longer contains.
+DECISION_HUMAN = """<!-- pipeline-auto-decisions/v1 -->
+
+## H-001 — Session storage
+
+- **Question:** Which storage engine backs the session table?
+- **Axis:** storage-engine
+- **Answer:** postgres — Use the existing PostgreSQL instance.
+- **Decision action:** none
+- **Provenance:** human
+- **Depth:** 0
+- **Consequences:** file-exists:db/session.sql=present
+- **Scope:** T04
+- **Status:** Adopted
+"""
+
+#: The SAME record in the plain spelling `templates/decisions.md` ships, which
+#: also renames `Decision action` to `Action`. Derived from the emphasised
+#: fixture rather than typed out, so the two cannot drift into being different
+#: records and the equality assertion below stay true for the wrong reason.
+DECISION_HUMAN_PLAIN = DECISION_HUMAN.replace("**", "").replace(
+    "Decision action:", "Action:")
+
+#: A second, quorum-provenance record on the SAME axis, agreeing with the first
+#: in both its answer key and its consequences. This is the positive control
+#: the contradiction stop needs: an implementation that refused every second
+#: record on an axis would pass every rejection case below and stop every real
+#: run on its first quorum adoption.
+DECISION_QUORUM = """
+## Q-abc123def456 — Session storage, confirmed by quorum
+
+- **Question:** Which storage engine backs the session table?
+- **Axis:** storage-engine
+- **Answer:** postgres — Use the existing PostgreSQL instance.
+- **Decision action:** quorum.adopt
+- **Provenance:** quorum
+- **Depth:** 1
+- **Consequences:** file-exists:db/session.sql=present
+- **Scope:** T04
+- **Status:** Adopted
+"""
+
+#: The axis index a real `decisions.md` opens with, copied in shape from the
+#: shipped template. It is a `##` heading that is not a decision, which is the
+#: thing a reader treating every heading as a record gets wrong.
+AXIS_INDEX = """
+## Axis Index
+
+| Axis | Decision | Provenance | Status |
+| --- | --- | --- | --- |
+| storage-engine | H-001 | human | Adopted |
+"""
+
+#: Values a field is varied with when the claim is TOTALITY. Both halves of the
+#: standing rule are here: wrong-typed scalars a markdown cell can actually
+#: carry (`0.85`, `True`, `٣`), the absence sentinel, the field separator the
+#: record grammar uses, and the shapes that would derail a parser written with
+#: `split` or `int` and no guard.
+HOSTILE_DECISION_VALUES = (
+    "", "   ", "-", "0.85", "True", "٣", "²", "1.0", "-1", "none", "null",
+    "a: b", "**", "|", "\x00", "—", "— —", "a, b", "[1]", "{}", "x" * 300,
+    "file-exists", "file-exists:", ":=", "H-001", "Adopted", "storage engine",
+)
+
+
+def findings_template() -> str:
+    return (TEMPLATES / "findings.md").read_text(encoding="utf-8")
+
+
+def decision_field_lines(text: str) -> list[str]:
+    """Every line of ``text`` the module itself reads as a field.
+
+    Enumerated through ``pas._decision_field`` rather than by eye, so a case
+    list claiming to cover "every field" is derived from the parser's own call
+    tree and cannot fall behind a field the fixture gains.
+    """
+    return [line for line in text.splitlines()
+            if pas._decision_field(line) is not None]
+
+
+class DecisionContractCase(unittest.TestCase):
+    """Shared assertions for the two halves of the decisions contract."""
+
+    def refused(self, text: str, *, because: str = ""):
+        """``parse_decisions`` stops read-only, naming what it refused."""
+        with self.assertRaises(pas.TrackerValidationError) as raised:
+            pas.parse_decisions(text)
+        if because:
+            self.assertIn(because.casefold(), str(raised.exception).casefold())
+        return raised.exception
+
+    def only_a_tracker_error(self, text: str):
+        """Either a usable parse, or a stop inside this module's family.
+
+        ``TypeError``, ``ValueError``, ``KeyError``, ``AttributeError`` and
+        ``IndexError`` from a malformed audit trail are defects, not acceptable
+        behaviour: each is outside ``TrackerError``, so it escapes every
+        ``except TrackerError`` a controller has written and kills the run on a
+        typo in a file a human is invited to edit.
+        """
+        try:
+            parsed = pas.parse_decisions(text)
+        except pas.TrackerError:
+            return None
+        except Exception as escaped:          # noqa: BLE001 - that is the claim
+            raise AssertionError(
+                f"{type(escaped).__name__}({escaped}) escaped parse_decisions; "
+                "nothing outside TrackerError may leave this module") from escaped
+        self.assertIsInstance(parsed, dict)
+        try:
+            pas.project_decisions(parsed)
+        except pas.TrackerError:
+            return parsed
+        except Exception as escaped:          # noqa: BLE001
+            raise AssertionError(
+                f"{type(escaped).__name__}({escaped}) escaped project_decisions "
+                "on a record parse_decisions had accepted") from escaped
+        return parsed
+
+
+class ParseDecisionsTests(DecisionContractCase):
+    """``decisions.md`` is the run's audit trail, read strictly.
+
+    Two adopted decisions contradicting each other on one axis is a read-only
+    stop of the same severity as a foreign schema: every later reader — the
+    contradiction check, the depth walk, the terminal report — would pick one
+    of the two by accident of iteration order, and every pick is defensible, so
+    nothing downstream could detect it.
+
+    The rejection cases are each paired with a case that must still be
+    ACCEPTED. A parser that refused everything would satisfy every stop in this
+    class and stop every real run on its first decision.
+    """
+
+    def test_parses_records_and_builds_the_axis_index(self):
+        parsed = pas.parse_decisions(DECISION_HUMAN)
+        self.assertEqual(parsed["decisions"]["H-001"]["provenance"], "human")
+        self.assertEqual(parsed["decisions"]["H-001"]["answer_key"], "postgres")
+        self.assertEqual(parsed["decisions"]["H-001"]["depth"], 0)
+        self.assertEqual(parsed["decisions"]["H-001"]["status"], "Adopted")
+        self.assertEqual(parsed["decisions"]["H-001"]["action"], "none")
+        self.assertEqual(
+            parsed["decisions"]["H-001"]["consequences"],
+            {("file-exists", "db/session.sql"): "present"})
+        self.assertEqual(parsed["axis_index"]["storage-engine"], ["H-001"])
+
+    def test_the_plain_spelling_the_shipped_template_teaches_parses_identically(self):
+        """The template in this repository writes ``- Provenance: human`` and
+        ``- Action:``; this phase's record grammar writes ``- **Provenance:**``
+        and ``- **Decision action:**``. Both are already committed, so a parser
+        that took only one of them would read a file copied from the shipped
+        template as a file with no fields at all — every record missing every
+        required field, and an ordinary run a read-only stop on its first
+        decision.
+
+        The fixture property is asserted here rather than assumed: if the
+        template stopped using the plain spelling this test would be comparing
+        two copies of the same grammar and would pass while proving nothing.
+        """
+        template = decisions_template()
+        self.assertIn("- Provenance: human", template)
+        self.assertIn("- Action: ", template)
+        self.assertNotIn("- **Provenance:**", template)
+        self.assertIn("- Provenance: human", DECISION_HUMAN_PLAIN)
+        self.assertIn("- Action: none", DECISION_HUMAN_PLAIN)
+        self.assertEqual(pas.parse_decisions(DECISION_HUMAN_PLAIN),
+                         pas.parse_decisions(DECISION_HUMAN))
+
+    def test_missing_provenance_is_invalid(self):
+        self.refused(swap("- **Provenance:** human\n", "", DECISION_HUMAN),
+                     because="provenance")
+
+    def test_provenance_must_agree_with_the_id_prefix(self):
+        """Provenance is recorded twice — in the id and in the field — so that
+        it survives one of the two being lost, not so that a record can claim
+        both. Routing reads the prefix: a finding tracing to a human decision
+        halts to the escalation queue, one tracing to a quorum decision re-opens
+        that qid.
+        """
+        self.refused(swap("Provenance:** human", "Provenance:** quorum",
+                          DECISION_HUMAN), because="prefix")
+        self.refused(swap("## H-001 —", "## Q-abc123def456 —", DECISION_HUMAN),
+                     because="prefix")
+
+    def test_both_namespaces_are_accepted_with_their_own_provenance(self):
+        parsed = pas.parse_decisions(DECISION_HUMAN + DECISION_QUORUM)
+        self.assertEqual(parsed["decisions"]["Q-abc123def456"]["provenance"],
+                         "quorum")
+        self.assertEqual(parsed["axis_index"]["storage-engine"],
+                         ["H-001", "Q-abc123def456"])
+
+    def test_a_heading_outside_both_namespaces_is_refused_not_skipped(self):
+        """A record whose id is mistyped must not vanish. ``H-01x`` starts with
+        ``H-`` and is not a decision id — ``_validate_tasks`` refuses it in a
+        task's ``Decisions`` cell — so a parser matching on the prefix alone
+        would accept a decision no task in the run can ever cite, and one that
+        silently skipped unknown headings would drop a record out of an
+        append-only file without a word.
+        """
+        for heading in ("## H-01x — Session storage", "## h-001 — Session storage",
+                        "## Q-ABC123DEF456 — Session storage",
+                        "## Q-abc123 — Session storage", "## Session storage",
+                        "## "):
+            with self.subTest(heading=heading):
+                self.refused(swap("## H-001 — Session storage", heading,
+                                  DECISION_HUMAN), because="decision id")
+
+    def test_the_axis_index_a_real_file_opens_with_is_not_read_as_a_decision(self):
+        """A real ``decisions.md`` opens with prose and an ``## Axis Index``
+        table. A reader treating every heading as a record reports the axis
+        index as a decision missing every field, which stops a healthy run.
+        """
+        self.assertIn("## Axis Index", decisions_template())
+        parsed = pas.parse_decisions(AXIS_INDEX + DECISION_HUMAN)
+        self.assertEqual(list(parsed["decisions"]), ["H-001"])
+
+    def test_two_adopted_contradicting_answers_on_one_axis_are_a_read_only_stop(self):
+        clash = DECISION_HUMAN + swap(
+            "Answer:** postgres — Use the existing PostgreSQL instance.",
+            "Answer:** sqlite — Ship a single-file database.", DECISION_QUORUM)
+        message = str(self.refused(clash, because="read-only stop"))
+        self.assertIn("H-001", message)
+        self.assertIn("Q-abc123def456", message)
+
+    def test_two_adopted_records_that_agree_on_one_axis_are_accepted(self):
+        """The positive control. An implementation that refused every second
+        adopted record on an axis passes the stop above and stops a real run
+        the moment a quorum confirms a human decision.
+        """
+        parsed = pas.parse_decisions(DECISION_HUMAN + DECISION_QUORUM)
+        self.assertEqual(len(parsed["decisions"]), 2)
+
+    def test_consequences_that_contradict_stop_the_run_even_when_the_key_agrees(self):
+        """Where the question supplied no named options, two answers are the
+        same answer only if their consequences are mutually non-contradictory.
+        Comparing answer keys alone passes a pair that names one thing and
+        asserts opposite facts about the repository.
+        """
+        clash = DECISION_HUMAN + swap("file-exists:db/session.sql=present",
+                                      "file-exists:db/session.sql=absent",
+                                      DECISION_QUORUM)
+        self.assertIn("db/session.sql", str(self.refused(clash)))
+
+    def test_a_superseded_record_cannot_contradict_an_adopted_one(self):
+        """The one legal in-place mutation is ``Adopted -> Superseded``, and the
+        superseded record keeps its row. A stop that counted it would make that
+        mutation unusable: every replacement decision would clash with the
+        record it replaced, so the file could never record a change of mind.
+        """
+        retired = swap("- **Status:** Adopted", "- **Status:** Superseded",
+                       swap("postgres — Use the existing PostgreSQL instance.",
+                            "sqlite — Ship a single-file database.", DECISION_HUMAN))
+        parsed = pas.parse_decisions(retired + DECISION_QUORUM)
+        self.assertEqual(parsed["decisions"]["H-001"]["status"], "Superseded")
+        self.assertEqual(parsed["decisions"]["Q-abc123def456"]["status"], "Adopted")
+
+    def test_a_generic_approval_is_not_an_answer(self):
+        """A generic approval is as empty from a quorum as from a human. The
+        accepted case is stated beside them: a rule matching every answer would
+        satisfy this list and refuse every real decision.
+        """
+        for empty in ("approved", "proceed", "continue", "yes", "ok", "Approved.",
+                      "LGTM", "sounds good", "pending user response"):
+            with self.subTest(answer=empty):
+                self.refused(
+                    swap("postgres — Use the existing PostgreSQL instance.",
+                         empty, DECISION_HUMAN), because="generic approval")
+        self.assertEqual(
+            pas.parse_decisions(DECISION_HUMAN)["decisions"]["H-001"]["answer_key"],
+            "postgres")
+
+    def test_a_generic_answer_key_is_refused_however_much_prose_follows_it(self):
+        """``answer_key`` is what clustering and contradiction compare. An
+        answer of ``yes — because we already run it`` reads as reasoned and
+        keys on ``yes``, which agrees with every other ``yes`` in the run.
+        """
+        self.refused(swap("postgres — Use the existing PostgreSQL instance.",
+                          "yes — because we already run it", DECISION_HUMAN),
+                     because="generic approval")
+
+    def test_every_action_the_schema_honours_is_accepted_and_no_other(self):
+        """The closed vocabulary, in BOTH directions and against the template.
+
+        ``dispatch.extend-budget`` is in the set because two budgets mean two
+        authorities: the drift budget caps decision authority and the dispatch
+        budget caps run cost. Dropping it would make the one record that
+        unblocks a hard-ceilinged run unparseable — the grant the human signed
+        would read as an unknown action, which is a read-only stop, which is a
+        run that cannot be restarted by the very grant that exists to restart
+        it.
+        """
+        template = decisions_template()
+        for action in sorted(pas._DECISION_ACTIONS):
+            with self.subTest(action=action):
+                self.assertIn(action, template)
+                text = swap("Decision action:** none", f"Decision action:** {action}",
+                            DECISION_HUMAN)
+                parsed = pas.parse_decisions(text)
+                self.assertEqual(parsed["decisions"]["H-001"]["action"], action)
+        for foreign in ("remediation.start-round", "review.resolve-question",
+                        "filesystem.authorize", "adopt", "", "None"):
+            with self.subTest(foreign=foreign):
+                self.refused(swap("Decision action:** none",
+                                  f"Decision action:** {foreign}", DECISION_HUMAN),
+                             because="decision")
+
+    def test_a_budget_extension_is_never_grantable_by_quorum(self):
+        for action in sorted(pas._EXTENSION_ACTIONS):
+            with self.subTest(action=action):
+                granted = swap("Decision action:** quorum.adopt",
+                               f"Decision action:** {action}",
+                               DECISION_HUMAN + DECISION_QUORUM)
+                self.assertIn("Provenance: human", str(self.refused(granted)))
+                #: The same action on the human record is accepted, so the rule
+                #: is about provenance and not about the action's name.
+                human = swap("Decision action:** none", f"Decision action:** {action}",
+                             DECISION_HUMAN)
+                self.assertEqual(
+                    pas.parse_decisions(human)["decisions"]["H-001"]["action"],
+                    action)
+
+    def test_status_must_be_one_the_schema_spells(self):
+        for status in ("Adopted", "adopted", "SUPERSEDED", "Open", "open"):
+            with self.subTest(status=status):
+                text = swap("Status:** Adopted", f"Status:** {status}", DECISION_HUMAN)
+                if status.casefold() == "open":
+                    text = swap("postgres — Use the existing PostgreSQL instance.",
+                                "pending user response", text)
+                self.assertEqual(
+                    pas.parse_decisions(text)["decisions"]["H-001"]["status"],
+                    status.capitalize())
+        for status in ("Closed", "Adopted!", "Accepted", "Rejected", "-", "Draft"):
+            with self.subTest(status=status):
+                self.refused(swap("Status:** Adopted", f"Status:** {status}",
+                                  DECISION_HUMAN), because="Status")
+
+    def test_an_unanswered_question_is_recorded_now_and_binds_nothing(self):
+        """The shipped template requires the question be written down BEFORE it
+        has an answer — a question recorded only once answered is a question the
+        run can silently drop. So ``Open`` is a status this parser must accept,
+        and it must bind nothing: two Open records on one axis are two questions
+        pending, not two answers in conflict.
+        """
+        self.assertIn("pending user response", decisions_template())
+        pending = swap("postgres — Use the existing PostgreSQL instance.",
+                       "pending user response",
+                       swap("Status:** Adopted", "Status:** Open", DECISION_HUMAN))
+        second = swap("## H-001 —", "## H-002 —", pending)
+        second = swap("Which storage engine backs the session table?",
+                      "Which cache backs the session table?", second)
+        parsed = pas.parse_decisions(pending + second)
+        self.assertEqual(parsed["decisions"]["H-001"]["status"], "Open")
+        self.assertEqual(sorted(parsed["decisions"]), ["H-001", "H-002"])
+
+    def test_an_open_record_may_carry_neither_an_answer_nor_an_authority(self):
+        opened = swap("Status:** Adopted", "Status:** Open", DECISION_HUMAN)
+        self.refused(opened, because="pending user response")
+        answered = swap("postgres — Use the existing PostgreSQL instance.",
+                        "pending user response", opened)
+        self.refused(swap("Decision action:** none",
+                          "Decision action:** task.resume", answered),
+                     because="'none'")
+
+    def test_depth_is_an_ascii_integer_and_a_bad_one_is_never_a_valueerror(self):
+        """``int('two')`` raises ``ValueError``, outside this module's family.
+        ``isdigit`` alone is true of ``'٣'``, which ``int`` reads back as 3 —
+        a depth no downstream reader can match, arriving through a check that
+        looked like one.
+        """
+        for depth in ("two", "-1", "0.5", "٣", "²", "+1", " ", "-", "1 2"):
+            with self.subTest(depth=depth):
+                self.refused(swap("Depth:** 0", f"Depth:** {depth}",
+                                  DECISION_HUMAN), because="Depth")
+        self.assertEqual(
+            pas.parse_decisions(swap("Depth:** 0", "Depth:** 2",
+                                     swap("Provenance:** human", "Provenance:** quorum",
+                                          swap("## H-001 —", "## Q-abc123def456 —",
+                                               DECISION_HUMAN))),
+            )["decisions"]["Q-abc123def456"]["depth"], 2)
+
+    def test_a_human_decision_is_depth_zero(self):
+        self.refused(swap("Depth:** 0", "Depth:** 1", DECISION_HUMAN),
+                     because="depth 0")
+
+    def test_a_missing_depth_is_not_read_as_zero(self):
+        """Carried from Task 2: treating an absent anchor as depth 0 by accident
+        would let a machine claim its answer stands exactly where a human's
+        does, which is the one distance the depth cap exists to measure.
+        """
+        self.refused(swap("- **Depth:** 0\n", "", DECISION_HUMAN),
+                     because="depth")
+
+    def test_a_repeated_heading_is_refused_rather_than_overwritten(self):
+        """A dict keyed by id lets the second ``## H-001`` overwrite the first:
+        an append-only file losing a decision through the parser.
+        """
+        self.refused(DECISION_HUMAN + DECISION_HUMAN.split("\n\n", 1)[1],
+                     because="two ## H-001")
+
+    def test_a_field_stated_twice_is_refused_in_either_spelling(self):
+        """Including the two spellings of one field. ``Action`` and ``Decision
+        action`` are one field, so a record stating both states one field twice
+        and nothing says which value every later reader will use.
+        """
+        self.refused(swap("- **Depth:** 0\n", "- **Depth:** 0\n- **Depth:** 1\n",
+                          DECISION_HUMAN), because="twice")
+        self.refused(swap("- **Decision action:** none\n",
+                          "- **Decision action:** none\n- **Action:** quorum.adopt\n",
+                          DECISION_HUMAN), because="twice")
+
+    def test_a_consequence_that_asserts_nothing_about_the_repository(self):
+        """A free-text consequence is the fail-open shape ``_BLAST_RADII`` is
+        closed against: it matches no other record's consequences, so two
+        adopted decisions that genuinely conflict are compared on an empty
+        intersection and pass.
+        """
+        for broken in ("we should use postgres", "file-exists:db/session.sql",
+                       "file-exists=present", ":db/session.sql=present",
+                       "file-exists:=present", "file-exists:db/session.sql=",
+                       "made-up:db/session.sql=present",
+                       "file-exists:db/session.sql=present, "
+                       "file-exists:db/session.sql=absent"):
+            with self.subTest(consequences=broken):
+                self.refused(swap("file-exists:db/session.sql=present", broken,
+                                  DECISION_HUMAN), because="consequence")
+        for good in ("file-exists:db/session.sql=present",
+                     "signature:db.session.open=(url: str) -> Session",
+                     "command-passes:pytest tests=true",
+                     "config-value:app.storage=postgres",
+                     "file-exists:db/a.sql=present, config-value:app.db=postgres"):
+            with self.subTest(consequences=good):
+                parsed = pas.parse_decisions(
+                    swap("file-exists:db/session.sql=present", good, DECISION_HUMAN))
+                self.assertTrue(parsed["decisions"]["H-001"]["consequences"])
+
+    def test_the_reserved_axis_literal_is_not_an_axis(self):
+        """``new`` is the reserved literal for a question not yet tagged to a
+        stable axis. Two unrelated decisions recorded against it share one
+        bucket, and the run stops on a contradiction that does not exist.
+        """
+        self.refused(swap("Axis:** storage-engine", f"Axis:** {pas._RESERVED_AXIS}",
+                          DECISION_HUMAN), because="reserved literal")
+
+    def test_an_axis_that_is_no_legal_token_is_refused(self):
+        for axis in ("storage engine", "", "-", "!engine", "engine|two", "*"):
+            with self.subTest(axis=axis):
+                self.refused(swap("Axis:** storage-engine", f"Axis:** {axis}",
+                                  DECISION_HUMAN), because="axis")
+
+    def test_the_audit_trail_is_read_as_text_and_never_coerced(self):
+        for value in (None, 12, b"## H-001\n", ["## H-001"], {"text": "x"},
+                      Path("decisions.md")):
+            with self.subTest(text=value):
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_decisions(value)
+
+    def test_no_value_of_any_field_lets_anything_but_a_trackererror_escape(self):
+        """Totality, over the fields the PARSER itself finds in the fixture.
+
+        The case list is derived from ``pas._decision_field`` rather than from
+        what the author remembers the grammar containing, so a field the record
+        gains is varied automatically. Each field is varied with wrong-typed
+        scalars a markdown cell can carry, the absence sentinel, the record
+        grammar's own separators, and deletion.
+        """
+        lines = decision_field_lines(DECISION_HUMAN)
+        stated = {pas._decision_field(line)[0] for line in lines}
+        self.assertEqual(set(pas._REQUIRED_DECISION_FIELDS) - stated, set(),
+                         "the fixture no longer states every required field, so "
+                         "this case list no longer covers them")
+        for line in lines:
+            head = line.split(":**")[0] + ":**"
+            for value in HOSTILE_DECISION_VALUES:
+                with self.subTest(line=line, value=value):
+                    self.only_a_tracker_error(
+                        swap(line, f"{head} {value}", DECISION_HUMAN))
+            with self.subTest(line=line, value="<deleted>"):
+                self.only_a_tracker_error(swap(line + "\n", "", DECISION_HUMAN))
+
+    def test_no_heading_shape_lets_anything_but_a_trackererror_escape(self):
+        for heading in ("## ", "## —", "##  — ", "## H-001", "## H-001 — — —",
+                        "## Q-abc123def456", "## Axis Index", "## |", "## \x00",
+                        "## " + "x" * 300, "##H-001", "### H-001 — t"):
+            with self.subTest(heading=heading):
+                self.only_a_tracker_error(
+                    swap("## H-001 — Session storage", heading, DECISION_HUMAN))
+
+
+class ProjectDecisionsTests(DecisionContractCase):
+    """``decisions-effective.md`` — the only decision material a brain sees.
+
+    What it omits is as load-bearing as what it carries. Adopted answers must be
+    included or brains re-litigate settled ground and manufacture the very drift
+    the quorum exists to bound. Values must be excluded: a brain reading
+    "adopted at 0.85" treats the decision as soft and reverses it, where a brain
+    reading it as simply a decision treats it as binding. Provenance must be
+    included so a brain can recognise a human decision and refuse to contradict
+    it.
+    """
+
+    def projected(self, text: str) -> str:
+        return pas.project_decisions(pas.parse_decisions(text))
+
+    def test_the_projection_carries_question_answer_and_provenance_only(self):
+        source = swap("- **Status:** Adopted",
+                      "- **Grounding rung:** specified\n"
+                      "- **Runner-up rung:** convention-cited\n"
+                      "- **Rejected alternatives:** sqlite — no concurrent writers\n"
+                      "- **Context digest:** " + "a" * 64 + "\n"
+                      "- **Status:** Adopted", DECISION_HUMAN)
+        projection = self.projected(source)
+        self.assertIn("Which storage engine backs the session table?", projection)
+        self.assertIn("postgres", projection)
+        self.assertIn("human", projection)
+        for leak in ("0.95", "0.85", "0.70", "0.55", "0.30", "specified",
+                     "Rejected alternatives", "sqlite", "Grounding rung",
+                     "Runner-up", "convention-cited", "Context digest",
+                     "a" * 64, "T04", "file-exists", "Depth", "Scope"):
+            with self.subTest(leak=leak):
+                self.assertNotIn(leak, projection)
+
+    def test_no_rung_name_and_no_rung_value_reaches_a_brain(self):
+        """Derived from the ladder rather than typed out. A brain that knows the
+        bar clears the bar, and a rung name whose ladder the brain also knows is
+        the value with one lookup in front of it.
+        """
+        source = swap("- **Status:** Adopted",
+                      "- **Grounding rung:** code-evidenced\n- **Status:** Adopted",
+                      DECISION_HUMAN)
+        projection = self.projected(source)
+        for name, value in pas.RUNGS.items():
+            with self.subTest(rung=name):
+                self.assertNotIn(name, projection)
+                self.assertNotIn(str(value), projection)
+
+    def test_every_field_outside_the_whitelist_stays_out(self):
+        """Totality, by construction: a sentinel is written into one extra field
+        at a time and the projection must not contain it. A blacklist passes the
+        named cases above and ships the next field somebody adds.
+        """
+        for field in ("Sources", "Supersedes", "Forecloses", "Consistent with",
+                      "Authorized through", "Granted against", "Runner-up rung",
+                      "Grounding rung", "Context digest", "Rung", "Notes"):
+            with self.subTest(field=field):
+                sentinel = "zzsentinelzz"
+                source = swap("- **Status:** Adopted",
+                              f"- **{field}:** {sentinel}\n- **Status:** Adopted",
+                              DECISION_HUMAN)
+                self.assertNotIn(sentinel, self.projected(source))
+
+    def test_superseded_decisions_are_not_projected(self):
+        self.assertNotIn("postgres", self.projected(
+            swap("- **Status:** Adopted", "- **Status:** Superseded",
+                 DECISION_HUMAN)))
+
+    def test_open_decisions_are_not_projected(self):
+        opened = swap("postgres — Use the existing PostgreSQL instance.",
+                      "pending user response",
+                      swap("Status:** Adopted", "Status:** Open", DECISION_HUMAN))
+        projection = self.projected(opened)
+        self.assertNotIn("pending user response", projection)
+        self.assertNotIn("H-001", projection)
+
+    def test_an_adopted_decision_is_projected(self):
+        """The positive control for the three exclusions above. A projection
+        that emitted nothing at all would satisfy every one of them, and brains
+        would re-litigate every decision the run has made.
+        """
+        projection = self.projected(DECISION_HUMAN)
+        self.assertIn("## H-001", projection)
+        self.assertIn("- **Question:** Which storage engine backs the session "
+                      "table?", projection)
+        self.assertIn("- **Answer:** postgres — Use the existing PostgreSQL "
+                      "instance.", projection)
+        self.assertIn("- **Provenance:** human", projection)
+
+    def test_a_budget_extension_is_not_projected(self):
+        """Its answer carries a ceiling, and a ceiling is a number in a brain's
+        payload. Both grants, because two budgets mean two authorities.
+        """
+        for action in sorted(pas._EXTENSION_ACTIONS):
+            with self.subTest(action=action):
+                granted = swap("Decision action:** none",
+                               f"Decision action:** {action}", DECISION_HUMAN)
+                granted = swap("- **Status:** Adopted",
+                               "- **Authorized through:** 14 adoptions\n"
+                               "- **Status:** Adopted", granted)
+                projection = self.projected(granted)
+                self.assertNotIn("14 adoptions", projection)
+                self.assertNotIn("postgres", projection)
+
+    def test_the_projection_is_ordered_and_deterministic(self):
+        both = pas.parse_decisions(DECISION_HUMAN + DECISION_QUORUM)
+        projection = pas.project_decisions(both)
+        self.assertEqual(projection, pas.project_decisions(both))
+        self.assertLess(projection.index("## H-001"),
+                        projection.index("## Q-abc123def456"))
+
+    def test_a_record_with_no_question_is_refused_rather_than_a_keyerror(self):
+        """``record['question']`` on a record that never stated one raises
+        ``KeyError`` — outside ``TrackerError``, on the one path whose output a
+        brain reads.
+        """
+        parsed = pas.parse_decisions(DECISION_HUMAN)
+        for field in ("question", "answer", "provenance"):
+            for value in (None, "", "   ", 12, ["x"], {"a": 1}):
+                with self.subTest(field=field, value=value):
+                    record = dict(parsed["decisions"]["H-001"])
+                    record[field] = value
+                    with self.assertRaises(pas.TrackerValidationError):
+                        pas.project_decisions({"decisions": {"H-001": record}})
+            with self.subTest(field=field, value="<absent>"):
+                record = dict(parsed["decisions"]["H-001"])
+                del record[field]
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.project_decisions({"decisions": {"H-001": record}})
+
+    def test_an_unhashable_status_or_action_is_a_stop_and_never_a_typeerror(self):
+        """Standing rule: never test membership of a supplied value with a bare
+        ``in`` against a set. ``["Adopted"] in frozenset(...)`` raises
+        ``TypeError`` — outside ``TrackerError``, so it escapes every handler a
+        controller has written. Reverting either call site to a bare ``in``
+        fails this test.
+        """
+        parsed = pas.parse_decisions(DECISION_HUMAN)
+        for field in ("status", "action"):
+            for value in (["Adopted"], {"a": 1}, {"Adopted"}, None, 3, 0.85):
+                with self.subTest(field=field, value=value):
+                    record = dict(parsed["decisions"]["H-001"])
+                    record[field] = value
+                    with self.assertRaises(pas.TrackerValidationError):
+                        pas.project_decisions({"decisions": {"H-001": record}})
+
+    def test_a_shape_the_projection_cannot_read_is_a_stop_not_an_empty_file(self):
+        """An empty projection is indistinguishable from a run that has decided
+        nothing, and a brain handed one re-litigates everything.
+        """
+        for shape in (None, [], "decisions", {}, {"decisions": []},
+                      {"decisions": "H-001"}, {"axis_index": {}},
+                      {"decisions": {"H-001": "adopted"}},
+                      {"decisions": {"H-001": None}}):
+            with self.subTest(shape=shape):
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.project_decisions(shape)
+
+    def test_the_projection_declares_itself_generated_and_read_only(self):
+        projection = self.projected(DECISION_HUMAN)
+        self.assertTrue(projection.startswith(
+            "<!-- pipeline-auto-decisions-effective/v1 -->"))
+        self.assertIn("Read-only", projection)
+        self.assertTrue(projection.endswith("\n"))
+
+
+class FindingsLedgerTemplateTests(unittest.TestCase):
+    """``templates/findings.md`` — where a fixer's dispute is adjudicated.
+
+    The ledger is P03's because the adjudication lands there and never in
+    ``decisions.md``: an adjudication is a factual question about a finding, not
+    a requirement decision, and filing it as a decision would let a dispute
+    about whether code is broken masquerade as a statement about what the user
+    wants.
+    """
+
+    def test_the_ledger_carries_an_adjudication_column(self):
+        header = findings_template().splitlines()
+        self.assertEqual(header[0], "<!-- pipeline-auto-findings/v1 -->")
+        self.assertIn("Adjudication", header[1])
+        self.assertIn("Severity", header[1])
+
+    def test_its_columns_are_named_and_its_rows_match_them(self):
+        """A template one column short of its own header teaches every writer to
+        file a row the ledger cannot hold — the defect this build has already
+        paid for three times.
+        """
+        lines = [line for line in findings_template().splitlines()
+                 if line.startswith("|")]
+        header = [cell.strip() for cell in lines[0].strip("|").split("|")]
+        self.assertEqual(header, ["ID", "Scope", "Severity", "Status",
+                                  "Disposition", "Evidence", "Adjudication",
+                                  "Fix Round", "Re-review"])
+        self.assertGreater(len(lines), 2, "the template shows no example row")
+        for line in lines[1:]:
+            with self.subTest(row=line):
+                self.assertEqual(len(line.strip("|").split("|")), len(header))
+
+    def test_it_names_the_module_severities_and_no_foreign_one(self):
+        """Through ``pas._SEVERITIES``, the module's own enum, not by eye. A
+        template teaching ``major`` teaches every reviewer to file a severity
+        ``_validate_task_review`` refuses, and the run finds out at its first
+        review row.
+        """
+        text = findings_template()
+        for severity in pas._SEVERITIES:
+            with self.subTest(severity=severity):
+                self.assertIn(severity, text)
+        for foreign in ("major", "blocker", "trivial", "nit", "wontfix",
+                        "deferred"):
+            with self.subTest(foreign=foreign):
+                self.assertNotIn(foreign, text)
+
+    def test_it_states_the_zero_open_findings_bar(self):
+        text = findings_template()
+        self.assertIn("ZERO OPEN FINDINGS AT EVERY SEVERITY", text)
+
+    def test_it_routes_a_dispute_to_one_adjudicator_and_never_to_a_quorum(self):
+        """"Can line 41 be null" is a FACT, settled by reading code or running
+        an experiment, not by a confidence-weighted vote. Routing facts to the
+        quorum is the mechanism by which a quorum degrades into a
+        general-purpose "ask three models when unsure" reflex.
+        """
+        text = findings_template()
+        self.assertIn("ONE adjudicator settles it, not three", text)
+        for verdict in ("confirmed", "refuted", "plausible"):
+            with self.subTest(verdict=verdict):
+                self.assertIn(verdict, text)
+        self.assertIn("only then does it become a quorum", text)
+
+    def test_it_states_that_a_bare_disagreement_is_inadmissible(self):
+        text = findings_template()
+        self.assertIn("file:line", text)
+        self.assertIn("bare disagreement is inadmissible", text)
+        self.assertIn("the finding STANDS", text)
+
+    def test_it_states_that_an_adjudication_never_enters_the_decisions_file(self):
+        self.assertIn("AN ADJUDICATION NEVER ENTERS `decisions.md`",
+                      findings_template())
+
+    def test_it_never_spells_a_rung_value_or_the_adoption_floor(self):
+        """The same rule the decisions template is held to: the numbers are
+        schema constants the controller owns, and a copy in a file a hand can
+        edit is a second source of truth for the adoption bar.
+        """
+        text = findings_template()
+        for value in pas.RUNGS.values():
+            with self.subTest(value=value):
+                self.assertNotIn(str(value), text)
+
 if __name__ == "__main__":
     unittest.main()

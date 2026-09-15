@@ -9003,6 +9003,44 @@ class ParseDecisionsTests(DecisionContractCase):
         self.assertEqual(parsed["decisions"]["H-003"]["status"], "Adopted")
         self.assertEqual(parsed["decisions"]["H-003"]["supersedes"], "H-002")
 
+    def test_a_cycle_is_still_found_after_a_valid_chain_has_been_walked(self):
+        """The walk remembers which records are already PROVEN to reach a live
+        decision, so each is walked once instead of the whole downstream chain
+        being re-walked from every retired record — cubic on input with no cycle
+        in it, and ``decisions.md`` only grows.
+
+        What that memory can get wrong is marking a record as terminating before
+        its walk proved that it does, which would let a cycle sorted AFTER a
+        valid succession be skipped entirely. So the file below holds both: a
+        three-generation chain that terminates, and a two-cycle whose ids sort
+        after it. The cycle must still be named.
+        """
+        def retired(did, axis, supersedes=None):
+            line = ("- **Status:** Superseded" if supersedes is None
+                    else f"- **Supersedes:** {supersedes}\n"
+                          "- **Status:** Superseded")
+            return (DECISION_HUMAN
+                    .replace("<!-- pipeline-auto-decisions/v1 -->\n", "")
+                    .replace("## H-001", f"## {did}")
+                    .replace("- **Axis:** storage-engine", f"- **Axis:** {axis}")
+                    .replace("- **Status:** Adopted", line))
+
+        live = (DECISION_HUMAN
+                .replace("<!-- pipeline-auto-decisions/v1 -->\n", "")
+                .replace("## H-001", "## H-003")
+                .replace("- **Axis:** storage-engine", "- **Axis:** queue-broker")
+                .replace("- **Status:** Adopted",
+                         "- **Supersedes:** H-002\n- **Status:** Adopted"))
+        text = ("<!-- pipeline-auto-decisions/v1 -->\n"
+                + retired("H-001", "storage-engine")
+                + retired("H-002", "cache-layer", "H-001")
+                + live
+                + retired("H-004", "retry-policy", "H-005")
+                + retired("H-005", "log-sink", "H-004"))
+        message = str(self.refused(text, because="Supersedes cycle"))
+        self.assertIn("H-004", message)
+        self.assertIn("H-005", message)
+
     def test_a_record_quoting_the_ladder_is_refused_when_it_is_written(self):
         """The content screen runs HERE and not only in the projection.
 
@@ -9156,16 +9194,25 @@ class ProjectDecisionsTests(DecisionContractCase):
             with self.subTest(leak=leak):
                 self.assertNotIn(leak, projection)
 
-    def test_no_rung_name_and_no_rung_value_reaches_a_brain(self):
+    def test_every_rung_value_and_every_compound_rung_name_is_refused(self):
         """Derived from the ladder rather than typed out, and planted in the two
         fields that are actually PROJECTED.
+
+        The name is the claim, and it is deliberately not "no rung name reaches
+        a brain": ``specified`` and ``speculation`` do, by the narrowing
+        ``_RUNG_NAME_STRINGS`` argues and the test below pins. What this covers
+        is every rung VALUE and every COMPOUND rung name — the set the screen
+        actually undertakes to catch, derived from the module so it cannot fall
+        behind the ladder.
 
         The previous version planted the rung in ``Grounding rung`` — a field
         the whitelist already withholds — so it proved the whitelist and said
         nothing about ``question`` and ``answer``, which a human or a brain
         writes as free text and which the projection carries verbatim.
         ``Answer: postgres — adopted at 0.85, code-evidenced, runner-up
-        speculation`` leaks all three through a field the whitelist approved.
+        speculation`` carries a value and a compound name through a field the
+        whitelist approved, and is refused twice over; strike those two and the
+        surviving ``runner-up speculation`` projects.
 
         A STOP rather than a strip: a decision record whose prose quotes the
         ladder is a record that should never have been written, and silently
@@ -9173,11 +9220,15 @@ class ProjectDecisionsTests(DecisionContractCase):
         what the brain read disagreeing about what was decided.
         """
         for field, original in PLANTED_IN.items():
-            #: EVERY rung value, in both spellings, because ``str(0.70)`` is
-            #: ``'0.7'`` and a screen built on ``str`` alone accepts ``adopted
-            #: at 0.70`` — the leak written the way the ladder writes it.
+            #: EVERY rung value, in four spellings of the same number, because
+            #: ``str(0.70)`` is ``'0.7'`` and a screen built on ``str`` alone
+            #: accepts ``adopted at 0.70`` — the leak written the way the ladder
+            #: writes it — while one built on ``str`` and ``f"{v:.2f}"`` accepts
+            #: ``adopted at 0.850``, the same hole one digit further out.
             leaks = [str(value) for value in pas.RUNGS.values()]
             leaks += [f"{value:.2f}" for value in pas.RUNGS.values()]
+            leaks += [f"{value:.3f}" for value in pas.RUNGS.values()]
+            leaks += [str(value).lstrip("0") for value in pas.RUNGS.values()]
             #: And every rung name the screen still looks for. Derived from the
             #: module's own tuple, so a ladder that gains a compound name gains
             #: a case here on the same day.
@@ -9243,6 +9294,242 @@ class ProjectDecisionsTests(DecisionContractCase):
                     self.refused(swap(original,
                                       f"{original} ({pas.RUNGS[name]})",
                                       DECISION_HUMAN))
+
+    def test_a_rung_value_is_screened_in_every_spelling_of_the_same_number(self):
+        """The screen matches a NUMBER, not a list of spellings.
+
+        A list of spellings is always one digit behind whoever writes the
+        record: the first version held ``str(value)`` and accepted ``adopted at
+        0.70``; the second added ``f"{value:.2f}"`` and accepted ``adopted at
+        0.850``. Trailing zeros are unbounded and a bare leading ``.`` is a
+        third form, so the spellings are DERIVED here — zero to five trailing
+        zeros, with and without the leading zero — and the screen has to parse
+        rather than enumerate to pass.
+        """
+        for name, value in pas.RUNGS.items():
+            for places in range(1, 6):
+                for spelling in (f"{value:.{places}f}",
+                                 f"{value:.{places}f}".lstrip("0")):
+                    if spelling.rstrip("0").rstrip(".") not in ("", "."):
+                        #: Only spellings that still denote the value; a
+                        #: one-place rendering of 0.85 is 0.8 and is a
+                        #: different number.
+                        if float(spelling) != value:
+                            continue
+                    with self.subTest(rung=name, spelling=spelling):
+                        self.assertEqual(pas._rung_leak(f"adopted at {spelling}"),
+                                         spelling)
+        #: And through the parser, in the fields that are projected.
+        for field, original in PLANTED_IN.items():
+            for spelling in ("0.850", "0.8500", "0.85000", ".85", ".70",
+                             "0.950", "0.300", ".55"):
+                with self.subTest(field=field, spelling=spelling):
+                    self.refused(swap(original, f"{original} adopted at {spelling}",
+                                      DECISION_HUMAN),
+                                 because=field.capitalize())
+
+    def test_a_decimal_a_separator_split_is_not_a_rung(self):
+        """The narrowing that the trailing-zero fix could have taken away.
+
+        Parsing every digit run rather than searching for a spelling makes
+        ``$1,000.85`` two runs, and the second of them — ``000.85`` — parses to
+        exactly 0.85. A grouped number is the one place a legitimate digit run
+        starts with redundant zeros, so a leading zero the integer part does not
+        need means the run is a FRAGMENT and not the rung.
+        """
+        for prose in ("the vendor quote is $1,000.85 a month",
+                      "a budget of 1,000.70 units", "000.85", "0000.30"):
+            with self.subTest(prose=prose):
+                self.assertIsNone(pas._rung_leak(prose))
+        #: The paired stop, so this pins the narrowing and not the absence of a
+        #: screen: the same number written the way a rung is written.
+        self.assertEqual(pas._rung_leak("adopted at 0.85"), "0.85")
+
+    def test_a_percentage_and_an_exponent_are_deliberately_not_screened(self):
+        """Stated as a DECISION, so a later reader finds an argument rather than
+        an omission and a gap it might close by accident.
+
+        ``85%`` is not 0.85, and the five rungs times a hundred are 95, 85, 70,
+        55 and 30 — bare integers ordinary decision prose is full of. Screening
+        them would stop "a 30 second timeout" and "a 70 GB index" to catch a
+        spelling this module never writes. Scientific notation is out for the
+        mirror reason: nothing writes a rung as ``8.5e-1``, and admitting
+        exponents admits every ``1e-3`` in a config discussion.
+
+        The percentage being out is also the workaround the unit collision below
+        depends on, so it is load-bearing and not merely tolerated.
+        """
+        for prose in ("a 85% cache hit rate", "95% availability", "a 30 second "
+                      "timeout", "a 70 GB index", "55 open connections",
+                      "8.5e-1", "adopted at 8.5e-1", "7e-1", "3.0e-1"):
+            with self.subTest(prose=prose):
+                self.assertIsNone(pas._rung_leak(prose))
+        for field, original in PLANTED_IN.items():
+            for prose in ("we target an 85% hit rate", "a 30 second timeout"):
+                with self.subTest(field=field, prose=prose):
+                    parsed = pas.parse_decisions(
+                        swap(original, prose, DECISION_HUMAN))
+                    self.assertEqual(parsed["decisions"]["H-001"][field], prose)
+
+    def test_a_trailing_dot_is_punctuation_and_an_interior_one_is_not(self):
+        """The one asymmetry in the decimal rule, and the clause that carries it.
+
+        ``adopted at 0.85.`` ends a sentence and is exactly the leak, so the
+        trailing ``.`` is stripped before the run is parsed. ``0.85.1`` and
+        ``v1.0.85`` continue a version string and are not, so the strip is
+        TRAILING ONLY and the surviving two-dot run reads as no number at all.
+        Both halves, because a rule that dropped the strip would let the
+        sentence-ending leak through and a rule that stripped dots anywhere
+        would stop every version string in the repository.
+        """
+        for leak, token in (("adopted at 0.85.", "0.85"),
+                            ("adopted at 0.85..", "0.85"),
+                            ("adopted at 0.70.", "0.70"),
+                            ("adopted at .85.", ".85"),
+                            ("it was adopted at 0.85. Then we moved on", "0.85")):
+            with self.subTest(leak=leak):
+                self.assertEqual(pas._rung_leak(leak), token)
+        for prose in ("pinned at v1.0.85", "pinned at v1.0.85.",
+                      "bumped 0.85.1 to 0.85.2", "^0.30.0", "the 0.70.3 release",
+                      "0.85.1"):
+            with self.subTest(prose=prose):
+                self.assertIsNone(pas._rung_leak(prose))
+        for field, original in PLANTED_IN.items():
+            with self.subTest(field=field):
+                self.refused(swap(original, f"{original} adopted at 0.85.",
+                                  DECISION_HUMAN),
+                             because=field.capitalize())
+                parsed = pas.parse_decisions(
+                    swap(original, "pinned to v0.85.1 of the driver",
+                         DECISION_HUMAN))
+                self.assertEqual(parsed["decisions"]["H-001"][field],
+                                 "pinned to v0.85.1 of the driver")
+
+    def test_a_decimal_that_is_a_unit_and_not_a_rung_is_refused_too(self):
+        """The cost of the value screen, pinned so it is DISCLOSED rather than
+        discovered by whoever first tries to record a hit-rate axis.
+
+        The screen cannot tell a rung from a unit — nothing in the text
+        distinguishes 0.85-the-hit-rate from 0.85-the-rung — so an innocent
+        decimal that happens to equal a rung value is stopped. This is believed
+        irreducible: guessing from the surrounding words would make the screen a
+        heuristic exactly where it is relied on to be total.
+
+        What makes it liveable is that the stop SAYS SO and names the way out,
+        which is what this asserts: rescale the number, or use the percentage
+        spelling, which is deliberately not screened.
+        """
+        for prose in ("the price is $0.30 per request",
+                      "timeout of 0.7 seconds",
+                      "a 0.55 ratio of reads to writes",
+                      "the hit rate is 0.85 of requests"):
+            with self.subTest(prose=prose):
+                self.assertIsNotNone(pas._rung_leak(prose))
+        #: The stop a writer meets has to carry the disclosure and the remedy,
+        #: or the collision is a mystery at the one moment it can be worked
+        #: around for free.
+        message = str(self.refused(
+            swap(PLANTED_IN["answer"], "redis — the hit rate is 0.85 of requests",
+                 DECISION_HUMAN)))
+        for hint in ("unit", "0.7 seconds", "700ms", "85%"):
+            with self.subTest(hint=hint):
+                self.assertIn(hint, message.casefold())
+        #: And the workarounds the message names actually work.
+        for reworded in ("redis — a 85% hit rate", "redis — 700ms of timeout",
+                         "redis — 30 cents per request"):
+            with self.subTest(reworded=reworded):
+                parsed = pas.parse_decisions(
+                    swap(PLANTED_IN["answer"], reworded, DECISION_HUMAN))
+                self.assertEqual(parsed["decisions"]["H-001"]["answer"], reworded)
+
+    def test_provenance_is_screened_before_the_presence_check_that_would_hide_it(self):
+        """WHERE the enum screen sits, asserted as behaviour and not as source
+        order.
+
+        ``_text`` below it refuses every non-string, so an enum screen placed
+        AFTER it is handed nothing but strings — and ``_member``'s whole reason
+        for existing, that ``["human"] in frozenset(...)`` raises ``TypeError``
+        outside ``TrackerError``, becomes unobservable. Moved down, a bare ``in``
+        written here passes the suite, and the record is refused for the wrong
+        reason: "cannot be projected without ['provenance']", a MISSING-field
+        message for a field that is present and holds a list.
+
+        So this pins the message rather than the position: the screen must have
+        SEEN the unhashable value and named it as an enum violation. Move the
+        block below ``_text`` and this fails; leave it and replace ``_member``
+        with ``in`` and this fails too.
+        """
+        parsed = pas.parse_decisions(DECISION_HUMAN)
+        for value in (["human"], {"human"}, {"a": 1}, ("human",), 0.85, 12,
+                      None, True, b"human"):
+            with self.subTest(provenance=value):
+                record = dict(parsed["decisions"]["H-001"])
+                record["provenance"] = value
+                with self.assertRaises(pas.TrackerValidationError) as raised:
+                    pas.project_decisions({"decisions": {"H-001": record}})
+                message = str(raised.exception)
+                self.assertIn(f"provenance {value!r} is not one of", message)
+                self.assertNotIn("cannot be projected without", message)
+
+    def test_the_projection_contract_discloses_what_the_screen_does_not_catch(self):
+        """``project_decisions``' docstring IS the contract, and a reader trusts
+        the entry point over a module-level comment two thousand lines away.
+
+        Three times in this task a docstring here has claimed more than its code
+        — most recently "no rung name ... and that claim holds for all three
+        fields", written by the same commit that stopped screening ``specified``
+        and ``speculation``. So the claim is no longer prose alone: the two
+        names the screen gives up are DERIVED from the module and have to appear
+        in the contract that a reader trusts, and so do the three it catches. A
+        ladder that gains a single-word name gains a disclosure obligation on
+        the same day, and an edit that tidies the give-up back out of the
+        headline fails here.
+        """
+        doc = pas.project_decisions.__doc__
+
+        def bullet(marker):
+            """The one bullet, and not the rest of the docstring around it.
+
+            Presence anywhere is not the check this needs: ``specified``
+            already appears in the docstring inside "use the schema specified in
+            the RFC", so a contract that had dropped the disclosure entirely
+            would still contain the word. The claim has to be in the bullet that
+            makes it.
+            """
+            self.assertIn(marker, doc,
+                          f"the entry-point contract no longer states {marker!r}; "
+                          "the split between what the content screen catches and "
+                          "what it gives up IS the contract")
+            start = doc.index(marker)
+            rest = doc[start + len(marker):]
+            ends = [end for end in (rest.find("\n    * "), rest.find("\n\n"))
+                    if end != -1]
+            return marker + (rest if not ends else rest[:min(ends)])
+
+        unscreened = sorted(set(pas.RUNGS) - set(pas._RUNG_NAME_STRINGS))
+        self.assertEqual(unscreened, ["specified", "speculation"])
+        caught = bullet("* CAUGHT:")
+        given_up = bullet("* NOT CAUGHT")
+        for name in pas._RUNG_NAME_STRINGS:
+            with self.subTest(screened=name):
+                self.assertIn(name, caught,
+                              "a rung name the screen catches is not listed as "
+                              "caught")
+                self.assertNotIn(name, given_up)
+        for name in unscreened:
+            with self.subTest(unscreened=name):
+                self.assertIn(name, given_up,
+                              "a rung name the screen lets through is not "
+                              "disclosed by the contract a reader trusts")
+                self.assertNotIn(name, caught)
+        #: The exact shape of the three recurrences: a sentence that sweeps the
+        #: give-up back under a claim about "all three fields".
+        self.assertNotIn("holds for all three fields", doc)
+        #: And ``_rung_leak`` states the same pair, because the two documents
+        #: disagreeing is the defect itself.
+        for name in unscreened:
+            with self.subTest(unscreened=name, doc="_rung_leak"):
+                self.assertIn(name, pas._rung_leak.__doc__)
 
     def test_the_projection_screens_its_content_again_on_what_it_is_handed(self):
         """The backstop half. ``parse_decisions`` refuses a leaking record at

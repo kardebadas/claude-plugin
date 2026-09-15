@@ -3910,15 +3910,31 @@ _SCREENED_FIELDS = ("question", "answer")
 #: speculation`` is carried by ``answer``, which is projected, so every value
 #: the whitelist withholds arrives anyway inside a field it cannot inspect.
 #:
-#: Every rung VALUE, in BOTH spellings a writer reaches for: ``str`` gives the
-#: shortest one (``0.7``) and the two-decimal form is how the ladder itself is
-#: written down (``0.70``). Both, because the screen requires a match to be a
-#: WHOLE number and ``0.7`` inside ``0.70`` is not one -- screening only
-#: ``str(value)`` would accept ``adopted at 0.70``, which is the leak spelled
-#: the way the ladder spells it.
-_RUNG_VALUE_STRINGS = tuple(sorted(
-    {str(value) for value in RUNGS.values()}
-    | {f"{value:.2f}" for value in RUNGS.values()}))
+#: Every rung VALUE as a NUMBER, because the leak is a number and a list of
+#: spellings only ever catches the spellings somebody thought of. ``0.85``,
+#: ``0.850``, ``0.8500``, ``0.85000`` and ``.85`` are one value written five
+#: ways; the screen that enumerated ``str(value)`` and ``f"{value:.2f}"``
+#: caught two of them and let ``adopted at 0.850`` through -- the same hole the
+#: two-decimal fix closed, one digit further out, which is what an enumeration
+#: of spellings is always one digit away from. ``_rung_leak`` finds each
+#: decimal in the prose and PARSES it instead, so any spelling that denotes a
+#: rung value is that rung value and the set below never has to grow.
+#:
+#: TWO SPELLINGS ARE DELIBERATELY OUT, decided here rather than silently
+#: omitted:
+#:
+#: * ``85%``. A percentage is not the number -- 85 is not 0.85 -- and the five
+#:   rungs times a hundred are 95, 85, 70, 55 and 30: bare integers that
+#:   ordinary decision prose is full of ("30 seconds", "a 70 GB index", "55
+#:   open connections"). Screening them would stop real records by the dozen to
+#:   catch a spelling nothing in this module ever writes, in a file whose only
+#:   prescribed remedy is to reword a sentence.
+#: * ``8.5e-1``. Nothing here writes a rung in scientific notation, a brain
+#:   reading it does not read the ladder, and admitting exponents admits every
+#:   ``1e-3`` in a config discussion to the same parse. The cost of missing it
+#:   is a leak nobody writes; the cost of catching it is stops on prose people
+#:   do write.
+_RUNG_VALUE_NUMBERS = frozenset(RUNGS.values())
 
 #: The rung NAMES the content screen looks for, and deliberately NOT all five.
 #: A rung name that is an ordinary English word -- ``specified``,
@@ -3951,24 +3967,90 @@ def _wordish(char: str) -> bool:
     return char.isalnum() or char == "_"
 
 
+def _decimal_leak(lowered: str) -> str | None:
+    """The first decimal in ``lowered`` that DENOTES a rung value, as written.
+
+    A NUMBER IS PARSED, NOT A SPELLING MATCHED, which is the whole of why this
+    is a scan and not a ``find``. Every decimal in the prose is taken whole and
+    handed to ``float``, so ``0.85``, ``0.850``, ``0.8500``, ``0.85000`` and
+    ``.85`` are one leak and the screen cannot be one trailing zero behind the
+    writer.
+
+    A DECIMAL IS A MAXIMAL RUN of digits and dots, and taking the run whole is
+    what keeps the fragments out without a boundary rule: ``$10.85 per million
+    tokens`` yields ``10.85`` and ``a p99 of 10.3 seconds`` yields ``10.3``,
+    numbers that are not rungs, where a substring search found ``0.85`` and
+    ``0.3`` inside them.
+
+    THREE RUNS ARE PASSED OVER, each because it is not a single decimal:
+
+    * One ``float`` cannot read. ``1.0.85`` and ``0.30.0`` are version strings
+      and ``..`` is punctuation; a run with two dots in it denotes no number.
+    * One whose integer part carries a leading zero it does not need --
+      ``000.85``, the tail of ``$1,000.85`` after the comma ends the run. A
+      grouped number is the one place a digit run legitimately starts with
+      redundant zeros, and the rung is never written that way.
+    * A trailing ``.``, which is stripped first because it is punctuation:
+      ``adopted at 0.85.`` ends a sentence and is exactly the leak. It is only
+      punctuation at the END of the run -- ``0.85.1`` keeps both dots, reads as
+      no number, and passes. That asymmetry is the one judgement call in here
+      and it is deliberate.
+    """
+    index = 0
+    length = len(lowered)
+    while index < length:
+        if not (lowered[index].isdigit() or lowered[index] == "."):
+            index += 1
+            continue
+        start = index
+        while index < length and (lowered[index].isdigit()
+                                  or lowered[index] == "."):
+            index += 1
+        token = lowered[start:index].rstrip(".")
+        whole = token.split(".", 1)[0]
+        if whole.startswith("0") and whole != "0":
+            continue
+        try:
+            number = float(token)
+        except ValueError:
+            continue
+        if number in _RUNG_VALUE_NUMBERS:
+            return token
+    return None
+
+
 def _rung_leak(value: str) -> str | None:
     """The first rung VALUE or compound rung NAME quoted inside ``value``.
 
     EXACTLY WHAT IS SCREENED, and exactly what is not:
 
-    * Every rung value, in both the ``0.7`` and ``0.70`` spellings, matched as a
-      WHOLE number. ``adopted at 0.85``, ``(0.85)``, ``rung=0.85`` and ``adopted
-      at 0.85.`` all hit. ``$10.85 per million tokens`` and ``a p99 of 10.3
-      seconds`` do not: a neighbouring digit -- or a ``.`` that a digit follows
-      -- means the match is a fragment of some other decimal and not the rung. A
-      plain substring test called all of those a leak, and ``str(0.70)`` being
-      ``'0.7'`` made every decimal containing ``.7`` one.
+    * Every rung value, in ANY spelling that denotes the number: ``0.85``,
+      ``0.850``, ``0.8500`` and ``.85`` are one leak, because the decimal is
+      parsed rather than matched against a list of spellings. ``adopted at
+      0.85``, ``(0.85)``, ``rung=0.85`` and ``adopted at 0.85.`` all hit.
+      ``$10.85 per million tokens``, ``a p99 of 10.3 seconds``, ``v1.0.85`` and
+      ``^0.30.0`` do not. See ``_decimal_leak`` for how a decimal is bounded,
+      and ``_RUNG_VALUE_NUMBERS`` for why ``85%`` and ``8.5e-1`` are out.
     * Every HYPHENATED rung name, as a whole word: ``code-evidenced``,
       ``convention-cited``, ``engineering-judgement``.
 
     NOT SCREENED: ``specified`` and ``speculation``, the two rung names that are
     also ordinary English words. See ``_RUNG_NAME_STRINGS`` for why, and for
     what that costs.
+
+    WHAT IT COSTS ON THE OTHER SIDE, stated here because a writer meets it as a
+    stop and nowhere else tells them why: the screen cannot tell a rung from a
+    UNIT. A decimal that happens to equal a rung value is refused however
+    innocent it is -- ``timeout of 0.7 seconds``, ``the price is $0.30 per
+    request``, ``a 0.55 ratio of reads to writes``, ``the hit rate is 0.85 of
+    requests`` -- so an axis like "what cache hit rate do we target?" cannot be
+    recorded in those words. This is believed irreducible: nothing in the text
+    distinguishes 0.85-the-hit-rate from 0.85-the-rung, and guessing from the
+    surrounding words would make the screen a heuristic exactly where it is
+    relied on to be total. THE REMEDY IS TO REWORD OR RESCALE: ``700ms``, ``30
+    cents per request``, ``11 reads per 20 writes``, ``a hit rate of 85%`` --
+    the percentage spelling is deliberately not screened, so it is always
+    available.
 
     A trailing ``.`` is punctuation unless a digit follows it, which is the one
     asymmetry here and is deliberate: ``adopted at 0.85.`` ends a sentence and is
@@ -3982,16 +4064,9 @@ def _rung_leak(value: str) -> str | None:
     untrusted and is the last thing standing between a record and a brain.
     """
     lowered = value.casefold()
-    for token in _RUNG_VALUE_STRINGS:
-        start = lowered.find(token)
-        while start != -1:
-            end = start + len(token)
-            before = lowered[start - 1:start]
-            after = lowered[end:end + 1]
-            if not (before.isdigit() or before == "." or after.isdigit()
-                    or (after == "." and lowered[end + 1:end + 2].isdigit())):
-                return token
-            start = lowered.find(token, start + 1)
+    leaked = _decimal_leak(lowered)
+    if leaked is not None:
+        return leaked
     for token in _RUNG_NAME_STRINGS:
         start = lowered.find(token)
         while start != -1:
@@ -4345,7 +4420,11 @@ def parse_decisions(text: str) -> dict:
                     "or a rung value; a brain reading 'adopted at 0.85' treats "
                     "the decision as soft and reverses it, so the ladder never "
                     "enters the audit trail -- reword the sentence now, while "
-                    "the record is still being written")
+                    "the record is still being written. The screen cannot tell "
+                    "a rung from a UNIT, so an innocent decimal that equals one "
+                    "-- 'timeout of 0.7 seconds', 'the hit rate is 0.85 of "
+                    "requests' -- is refused too; rescale it ('700ms', 'a hit "
+                    "rate of 85%') or say it in words")
         record = dict(fields)
         record.update({
             "id": did,
@@ -4457,13 +4536,26 @@ def parse_decisions(text: str) -> dict:
     #: rule above exists to keep answerable, so a cycle defeats it while passing
     #: every syntactic check it states. Walked from each retired record rather
     #: than asserted structurally, because the message has to name the loop.
+    #:
+    #: LINEAR, and that is not a micro-optimisation. ``decisions.md`` is
+    #: append-only and only grows, and the walk this replaced re-walked the
+    #: whole downstream chain from every retired record with ``in`` over a LIST:
+    #: cubic on a perfectly legal succession, 12s at 2000 records against 0.03s
+    #: here, on input with no cycle in it at all. ``terminates`` remembers every
+    #: record already PROVEN to reach a live decision, so each is walked once;
+    #: ``in_chain`` is the same membership test as ``chain`` and is a set. A
+    #: record only enters ``terminates`` after its walk completed without
+    #: raising, so no member of a cycle can ever be in it, and reaching one is
+    #: proof this chain terminates too.
+    terminates: set = set()
     for did in sorted(decisions):
-        if decisions[did]["status"] != "Superseded":
+        if decisions[did]["status"] != "Superseded" or did in terminates:
             continue
         chain = [did]
+        in_chain = {did}
         successor = claimed[did]
         while decisions[successor]["status"] == "Superseded":
-            if successor in chain:
+            if successor in in_chain:
                 raise TrackerValidationError(
                     f"{chain} form a Supersedes cycle; every record in it is "
                     "Superseded and each is replaced by another record in the "
@@ -4471,8 +4563,12 @@ def parse_decisions(text: str) -> dict:
                     "decision and no reader can say what replaced any of them "
                     "-- which is the one question a reader of a retired record "
                     "has")
+            if successor in terminates:
+                break
             chain.append(successor)
+            in_chain.add(successor)
             successor = claimed[successor]
+        terminates |= in_chain
 
     #: Anchors resolve, or the grounding they claim is unverifiable. A
     #: ``Consistent with`` naming a record this file does not hold is the
@@ -4520,14 +4616,45 @@ def _contradiction(left: dict, right: dict) -> str | None:
 def project_decisions(decisions: dict) -> str:
     """Render ``decisions-effective.md``: the only decision material a brain sees.
 
-    QUESTION, ANSWER AND PROVENANCE. No value, no rung name, no rejected
-    alternatives, no consequences, no depth, no scope -- and that claim holds
-    for all three fields, not two of them. ``question`` and ``answer`` are free
-    text and are screened as CONTENT; ``provenance`` is an ENUM and is screened
-    by membership against ``_PROVENANCES``, which is strictly narrower than any
-    content rule and is what an enum field should get. LEFT UNSCREENED it would
-    project ``human -- adopted at 0.85, code-evidenced`` verbatim into the one
-    file a brain reads, through the one projected field the screen missed.
+    QUESTION, ANSWER AND PROVENANCE, and no fourth field: no rejected
+    alternatives, no consequences, no depth, no scope, and no ``Grounding
+    rung`` or ``Runner-up rung``. That is the FIELD whitelist and it is exact.
+
+    WHAT THE FIELD WHITELIST DOES NOT BUY is a claim about the text inside the
+    three fields it admits, and the two are stated apart here because
+    collapsing them is how this docstring has over-claimed three times running.
+    A ladder quoted inside ``question`` or ``answer`` arrives through a field
+    the whitelist has already approved, so those two get a CONTENT screen on
+    top -- and that screen is narrower than the whitelist, deliberately, in a
+    way a reader of this contract has to be told rather than left to find:
+
+    * CAUGHT: every rung VALUE in any spelling that denotes the number
+      (``0.85``, ``0.850``, ``.85``), and the three HYPHENATED rung names
+      ``code-evidenced``, ``convention-cited`` and ``engineering-judgement``.
+    * NOT CAUGHT, and never will be: ``specified`` and ``speculation``, the two
+      rung names that are also ordinary English words. ``Answer: postgres --
+      adopted on speculation, runner-up sqlite`` projects VERBATIM. No rule can
+      refuse those two words and still admit "use the schema specified in the
+      RFC" and "redis -- avoids speculation about disk contention", which are
+      real answers in a file whose only prescribed remedy is to reword a
+      sentence. ``_RUNG_NAME_STRINGS`` derives the screen on the hyphen for
+      that reason and ``_rung_leak`` repeats the cost; it is repeated a third
+      time HERE because this is the entry point, and the entry point is the
+      contract a reader trusts.
+    * ALSO NOT CAUGHT, by the same argument one level down: a rung value
+      written ``85%`` or ``8.5e-1``. See ``_RUNG_VALUE_NUMBERS``.
+
+    Read the bullets as the whole of the content claim. "No rung name reaches a
+    brain" is not true, has never been true since the hyphen narrowing, and any
+    future sentence in this docstring that says it is has to be measured
+    against them.
+
+    ``provenance`` is the third projected field and the only one that is an
+    ENUM, so it is screened by membership against ``_PROVENANCES`` instead --
+    strictly narrower than any content rule, and what an enum field should get.
+    LEFT UNSCREENED it would project ``human -- adopted at 0.85,
+    code-evidenced`` verbatim into the one file a brain reads, through the one
+    projected field the screen missed.
 
     * Adopted answers must be INCLUDED, or brains re-litigate settled ground
       and manufacture the very drift the quorum exists to bound.
@@ -4547,16 +4674,15 @@ def project_decisions(decisions: dict) -> str:
     ``decisions.md`` is hand-editable and grows fields; a blacklist ships every
     new one to a brain until somebody remembers to add it.
 
-    THE WHITELIST IS A FIELD SCREEN AND IS NOT THE WHOLE CLAIM. Two of the three
-    projected fields are free text a human or a brain wrote, so a rung name or a
-    rung value quoted INSIDE one of them reaches a brain through a field the
-    whitelist has already approved -- ``Answer: postgres -- adopted at 0.85,
-    code-evidenced, runner-up speculation`` leaks all three. ``question`` and
-    ``answer`` are therefore screened for rung names and rung values as CONTENT,
-    and a hit is a STOP rather than a strip: a decision record whose prose quotes
-    the ladder is a record that should never have been written, and silently
-    editing the audit trail on its way to a brain would leave the file and what
-    the brain read disagreeing about what was decided.
+    A CONTENT HIT IS A STOP AND NEVER A STRIP. ``Answer: postgres -- adopted at
+    0.85, code-evidenced, runner-up speculation`` is refused twice over, by the
+    value and by the compound name -- not edited down to ``postgres``. A
+    decision record whose prose quotes the ladder is a record that should never
+    have been written, and silently editing the audit trail on its way to a
+    brain would leave the file and what the brain read disagreeing about what
+    was decided. (The same sentence also shows the give-up: strike ``0.85`` and
+    ``code-evidenced`` from it and the surviving ``runner-up speculation``
+    projects.)
 
     Record KEYS are screened too, before anything is sorted. A key that is not a
     decision id is projected as ``## 1`` or ``## ('a',)`` -- a heading no

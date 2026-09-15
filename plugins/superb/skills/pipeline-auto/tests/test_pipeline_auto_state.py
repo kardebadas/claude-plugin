@@ -11,6 +11,8 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -3116,6 +3118,17 @@ HOLDER_PID_FILE = "holder.pid"
 #: unbounded wait is the deadlock this constant exists to refuse.
 HOLDER_WAIT_SECONDS = 30.0
 
+#: The timeout the waiter in the inode-swap case gives itself. Long enough that
+#: it is still spinning in the retry loop while the swap happens, and short
+#: enough that it gives up on its own if the swap never comes — so no join in
+#: that case can outlast it.
+SWAP_WAITER_SECONDS = 5.0
+
+#: How long that case polls for the waiter to reach the retry loop, in seconds
+#: per pass. Short, because the barrier it polls for is an effect the waiter
+#: produces before its first attempt, not a guess about scheduling.
+SWAP_POLL_SECONDS = 0.005
+
 
 def hold_lock(run_dir: str, ready, release) -> None:
     """Take the run lock in a SEPARATE process and hold it until told to stop.
@@ -3338,6 +3351,97 @@ class LockTests(unittest.TestCase):
             pass
         self.assertEqual(lock_path.stat().st_ino, inode)
 
+    def test_a_lock_held_on_a_replaced_inode_is_refused_not_reported_as_held(self):
+        """The post-acquire ``(st_dev, st_ino)`` identity check, falsified.
+
+        The case above pins that THIS module never unlinks the lock file. That
+        is not the same guarantee: ``os.open`` and the lock call are two
+        syscalls, and anything else on the machine — a stray ``rm``, a cleanup
+        script, an older build that did unlink on release — can replace the
+        inode at that path in between. The descriptor then holds a perfectly
+        real lock on an inode nobody will ever contend for again, while the
+        next caller opens the NEW inode, finds it free, and wins. Two holders,
+        one path, both certain. Reporting success there is worse than failing:
+        the lock is the only thing standing between two controllers and an
+        interleaved read-modify-write of ``progress.md``.
+
+        The window is reached through the module's own API, not by patching:
+
+        1. This interpreter takes the lock directly, on the original inode,
+           using the primitive the module itself selects.
+        2. A waiter thread calls ``_exclusive_lock`` on the same directory. It
+           opens that same original inode — the path still points at it — and
+           then spins in the retry loop.
+        3. The barrier is an effect only the waiter produces: ``_exclusive_lock``
+           writes its one byte before its first attempt, and this case watches
+           the size through the HOLDER's descriptor, so observing 1 proves the
+           waiter opened the inode this case is about to unlink rather than a
+           later one. Without that, a slow waiter would open the replacement,
+           acquire it cleanly, and the case would prove nothing while passing.
+        4. The lock file is unlinked and recreated, and only then is the
+           original lock released. The waiter's next attempt therefore succeeds
+           — on an inode that is no longer the lock file.
+
+        A thread rather than a process because the waiter's exception is the
+        evidence, and because ``flock`` binds to the open file description: a
+        second ``os.open`` in this interpreter contends exactly as another
+        process would. The waiter is a daemon, bounds its own wait, and its
+        body only sets a flag, so nothing here can outlive the case.
+        """
+        run_dir = make_run(self)
+        lock_path = run_dir / pas.LOCK_FILENAME
+        acquire, release, _ = pas.select_lock_impl(pas.fcntl, pas.msvcrt)
+        holder = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        state = {"locked": False, "open": True}
+
+        def let_go() -> None:
+            """Release and close once, whether the case reached that point."""
+            if state["locked"]:
+                release(holder)
+                state["locked"] = False
+            if state["open"]:
+                os.close(holder)
+                state["open"] = False
+
+        self.addCleanup(let_go)
+        self.assertTrue(acquire(holder), "the fresh lock file was already held")
+        state["locked"] = True
+        outcome: dict[str, object] = {}
+
+        def wait_for_the_lock() -> None:
+            try:
+                with pas._exclusive_lock(run_dir, timeout_s=SWAP_WAITER_SECONDS):
+                    outcome["entered"] = True
+            except BaseException as exc:  # reported to the case, not swallowed
+                outcome["error"] = exc
+
+        waiter = threading.Thread(target=wait_for_the_lock, daemon=True)
+        waiter.start()
+        self.addCleanup(waiter.join, HOLDER_WAIT_SECONDS)
+        deadline = time.monotonic() + HOLDER_WAIT_SECONDS
+        while time.monotonic() < deadline and os.fstat(holder).st_size == 0:
+            time.sleep(SWAP_POLL_SECONDS)
+        self.assertEqual(
+            os.fstat(holder).st_size, 1,
+            "the waiter never opened the original lock inode, so replacing it "
+            "below would not be the race this case is about")
+        original = os.fstat(holder).st_ino
+        os.unlink(lock_path)
+        os.close(os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600))
+        self.assertNotEqual(lock_path.stat().st_ino, original,
+                            "the replacement reused the original inode")
+        let_go()
+        waiter.join(HOLDER_WAIT_SECONDS)
+        self.assertFalse(waiter.is_alive(),
+                         "the waiter never finished; the lock may still be held")
+        self.assertNotIn(
+            "entered", outcome,
+            "the caller was told it holds the run lock while its lock is on an "
+            "inode that is no longer the lock file, so a second controller can "
+            "take the real one and both will write")
+        self.assertIsInstance(outcome.get("error"), pas.LockUnavailableError)
+        self.assertIn(str(lock_path), str(outcome["error"]))
+
     def test_no_os_lock_primitive_is_an_explicit_failure_not_a_silent_no_lock(self):
         """Falling back to "no lock" would turn every concurrency guarantee in
         this module into a comment, and the failure would only ever surface as
@@ -3406,10 +3510,31 @@ class LockTests(unittest.TestCase):
 
     def test_a_zero_timeout_still_gets_one_honest_attempt(self):
         """``timeout_s=0`` means "do not wait", not "do not try". A caller that
-        polls with zero would otherwise never acquire an uncontended lock."""
+        polls with zero would otherwise never acquire an uncontended lock.
+
+        Reaching the body is not enough to show an attempt was made, and that
+        gap is exactly how this case used to pass while proving nothing: change
+        the retry loop to ``while time.monotonic() < deadline`` and a zero
+        timeout skips the loop ENTIRELY — no acquire is ever issued, ``acquired``
+        stays false, and the caller is handed a body it runs holding no lock at
+        all. The free lock below makes that indistinguishable from success. So
+        the attempt itself is counted, on the recording stand-in for the
+        primitive: exactly one acquire before the body, and the matching
+        release after it.
+        """
         run_dir = make_run(self)
         with pas._exclusive_lock(run_dir, timeout_s=0.0):
             pass
+        fake = FakeFlock()
+        self.addCleanup(setattr, pas, "fcntl", pas.fcntl)
+        pas.fcntl = fake
+        attempt = [fake.LOCK_EX | fake.LOCK_NB]
+        with pas._exclusive_lock(run_dir, timeout_s=0.0):
+            self.assertEqual(
+                fake.operations, attempt,
+                "the body runs on a zero timeout without a single acquire "
+                "having been issued: the attempt was skipped, not made")
+        self.assertEqual(fake.operations, attempt + [fake.LOCK_UN])
 
 
 class SuiteIsWhollyCollectedTests(unittest.TestCase):

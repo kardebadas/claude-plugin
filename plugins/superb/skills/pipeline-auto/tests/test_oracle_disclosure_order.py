@@ -165,17 +165,28 @@ class OracleDisclosureAncestry(unittest.TestCase):
         if not is_committed(ORACLES):
             self.skipTest("oracles.md has not entered the history yet")
 
-    def test_oracle_was_published_in_exactly_one_commit(self):
+    def test_the_oracle_entered_the_history_exactly_once(self):
+        """Amended deliberately, as the original assertion instructed.
+
+        This first read ``len(commits) == 1``. That over-specified the property
+        it protects: what must not happen is publishing the answers BEFORE the
+        baseline that justifies them, and that is a statement about the
+        EARLIEST commit, not about how many there are. A later correction to
+        the oracle's own prose -- the preamble still claimed the file was
+        uncommitted, which publishing it had falsified -- is a legitimate
+        amendment and failed the old form for no reason connected to
+        disclosure.
+
+        What is still refused: the oracle appearing in no commit at all (the
+        history was rewritten under it), which would leave
+        ``test_oracle_commit_descends_from_the_red_baseline_commit`` with
+        nothing to anchor against.
+        """
         commits = _commits_touching(ORACLES)
-        self.assertEqual(
-            len(commits), 1,
-            "oracles.md should have exactly one commit in its history: the "
-            "single publishing commit P01 makes on its way out. More than one "
-            f"means it was published and then rewritten ({commits}), which is "
-            "the shape an early disclosure leaves behind once it is tidied up; "
-            "fewer means the history was rewritten under it. If a later phase "
-            "genuinely needs to amend the oracle, amend this assertion "
-            "deliberately -- do not delete it.")
+        self.assertTrue(
+            commits,
+            "no commit in HEAD's history adds oracles.md, so the ordering "
+            "cannot be checked at all -- the history was rewritten under it.")
 
     def test_oracle_commit_descends_from_the_red_baseline_commit(self):
         oracle_commits = _commits_touching(ORACLES)

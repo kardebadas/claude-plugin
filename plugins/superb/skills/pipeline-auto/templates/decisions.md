@@ -119,7 +119,9 @@ the fields are the same and the two grants never substitute for each other.
 - Axis: the stable axis id this escalation was tagged to
 - Provenance: human
 - Action: quorum.extend-budget
-- Scope: the run this grant applies to
+- Scope: the **phase** whose ceiling this grant raises (`P04`), not the run —
+  `Authorized run` already names the run, and a grant that names no phase of
+  this run raises no ceiling while still spending one of the two extensions
 - Rung: -
 - Depth: 0
 - Authorized run: the exact run id

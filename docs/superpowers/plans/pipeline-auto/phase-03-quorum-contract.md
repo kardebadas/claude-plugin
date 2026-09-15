@@ -1777,6 +1777,56 @@ git commit -m "feat(pipeline-auto): manufacture brain independence with per-sour
 
 ### Task 7: Drift budget, events, and the human budget extension
 
+> **QUORUM DECISION — a budget grant is PHASE-SCOPED.** Three brains, unanimous;
+> cluster rung `specified` (0.95), no runner-up. `Scope` on a
+> `quorum.extend-budget` / `dispatch.extend-budget` record names **the phase
+> whose ceiling the grant raises**, and `Authorized through` is that phase's new
+> ceiling. The run ceiling rises by the headroom conferred.
+>
+> **The spec is silent, and that was the most useful finding.** Its required-field
+> list for `quorum.extend-budget` (spec:438-441) is five fields — `Authorized
+> run`, `Source revision`, `Authorized through`, `Granted against`,
+> `Provenance: human` — and **`Scope` is not among them**. "A finite new ceiling"
+> never says which ceiling. So neither reading had spec backing and the question
+> had to be settled on the rest of the record.
+>
+> **What settled it.** The only worked grant record in any plan reads
+> `- **Answer:** extend — three further adoptions in P04.` with `- **Scope:** P04`
+> *and* `- **Authorized run:**` present as separate fields, and its own test
+> asserts `phase_ceiling == 6`. The committed validator compares `Authorized
+> through` against `BUDGET_PER_PHASE` (3), not `BUDGET_PER_RUN` (10) — a field
+> meant as a new run ceiling would be checked against the run ceiling. Eight
+> committed passing tests assert a phase ceiling rising. The pin stores `Scope`
+> under the key `phase`.
+>
+> **`Scope` is polymorphic by `Action`**, which is what made this look like a
+> contradiction: a task id on `task.resume`, the blocked-task list on an
+> adoption, a phase id on a grant. The template says exactly that in its generic
+> definition ("the run, phase, gate, task, finding or artifact this binds"); its
+> budget-extension gloss said "the run", which appears in **no** plan and was
+> written before the budget semantics existed. **That gloss was the drift and is
+> now corrected**, not the code's intent.
+>
+> **Two code defects follow, and neither is the design.**
+> 1. `Scope` is validated with `_TOKEN`, so `T04` and `p04` pass as "phase
+>    tokens", raise no ceiling, and still burn one of the two extensions. The
+>    validation this needs **already exists twice in the module** — a quorum row's
+>    phase is checked against `tracker["phases"]`, and a fix round's scope against
+>    the run's tasks, phases and gates. Reuse it.
+> 2. Run headroom is currently fungible: a grant scoped `P04` lets an *ungranted*
+>    phase spend it. Bind the headroom to the phase that was granted.
+>
+> **Correction to the review that raised this:** test 12086 does **not** assert
+> the defect. It pins the summing rule — two grants of three confer six, never a
+> maximum — and says nothing about `phase_ceiling` for the ungranted phase. The
+> looseness is unpinned, so it can be tightened without editing that test.
+>
+> **Why not run-only:** a phase that exhausts its three would be permanently
+> stuck, which is the failure the spec names in so many words — "permanent
+> exhaustion is also wrong: it lets one unlucky early question kill a healthy
+> run, which teaches the controller to avoid raising questions at all."
+
+
 > **QUORUM DECISION — `json` is admitted to `ALLOWED_IMPORTS`, making it twelve.**
 > Three brains, 2-1 on the count but decided on rung rather than headcount:
 > `admit-json` at `specified`, `markdown-everywhere` demoted to

@@ -7132,3 +7132,469 @@ def open_quorum(run_dir: str, *, question_record: str,
     qid = derive_qid(record["question"], record["axis"])
     with _exclusive_lock(run_dir, timeout_s=timeout_s):
         return _open_under_lock(run_dir, qid, record, text)
+
+
+# --- phase 2 of the record: the responses ----------------------------------
+#
+# A BRAIN'S ANSWER IS A SINGLE-ASSIGNMENT CELL. It is written once, under its
+# own name, and never edited: a byte-identical redelivery is inert and a
+# differing one is refused. That is the whole of what makes a response
+# auditable -- the thing the controller graded is the thing the brain said --
+# and it is why each answer is its own file rather than a list inside one. A
+# crash between two responses loses nothing, a duplicate delivery costs
+# nothing, and no write ever has to read what another brain said first.
+#
+# A SCHEMA-INVALID RESPONSE IS RECORDED, NOT DISCARDED AND NOT REPAIRED.
+# Discarding it hides the malformation from the audit trail, so the quorum
+# reads as two brains that answered rather than three that were asked;
+# repairing it invents a vote. It is recorded with the violations that made it
+# invalid, and it buys its owner exactly ONE re-dispatch.
+#
+# EXACTLY ONE, AND ONLY FOR AN INVALID ANSWER. Re-dispatching a brain whose
+# answer was well-formed but unwelcome is the run collecting answers until it
+# likes one, which is the failure this entire phase exists to prevent, so a
+# second answer from a brain that already answered LEGALLY is refused rather
+# than recorded. A second INVALID answer is a non-response: the quorum is
+# incomplete and escalates. A brain can therefore force a human look and can
+# never force an adoption.
+
+#: The attempts one owner may ever occupy, and the whole of them. Attempt 1 is
+#: the dispatch every owner gets; attempt 2 is the single re-dispatch a
+#: schema-invalid answer buys. There is no attempt 3, and the bound is a
+#: constant rather than a comparison written at each site because it is the
+#: drift rule itself: a controller that could raise it would be a controller
+#: that can re-ask until it likes the answer.
+_MAX_ATTEMPTS = 2
+
+#: What separates an owner from its attempt number in a response filename.
+#:
+#: TWO UNDERSCORES, AND THE PAIR IS NOT DECORATION. ``_OWNER`` admits ``_``, so
+#: an owner may legally be called ``brain__1`` and the naive reading is that
+#: ``brain__1__1.json`` is ambiguous. It is not, and the argument is worth
+#: stating because the check it replaces would be worse than the hole: the
+#: attempt suffix is drawn from ``{1, 2}``, so the only other reading of that
+#: name would need an owner ``brain`` and an attempt ``1__1``, which this
+#: module never writes and ``_owner_attempts`` never looks for. The map from
+#: ``(owner, attempt)`` to a filename is therefore injective over exactly the
+#: pairs that exist, and ``check_admissible`` already requires the three owners
+#: distinct. Refusing an owner containing the separator would instead refuse an
+#: id ``open_quorum`` had already accepted, leaving a quorum that opened and
+#: can never be answered.
+_ATTEMPT_SEPARATOR = "__"
+
+#: The violation a response earns by answering under ANOTHER question's
+#: identity. It is appended to ``validate_brain_response``'s list rather than
+#: found inside it, because it is not a fact about the response: the schema
+#: requires ``qid`` to be a non-empty string and nothing more, and WHICH string
+#: is right is a fact about the quorum the response is being filed into.
+#:
+#: RECORDED INVALID RATHER THAN REFUSED, which is the opposite of how
+#: ``_final_event`` and ``_opened_record`` treat the same disagreement, and the
+#: difference is the remedy. A record filed under the wrong qid is corruption a
+#: human repairs; a RESPONSE naming the wrong qid is a brain that answered the
+#: wrong question, and the designed recovery for that is exactly the one
+#: re-dispatch this file grants -- then an escalation. Refusing it outright
+#: leaves the controller holding an answer it may neither record nor retry.
+_QID_MISMATCH = "qid-mismatch"
+
+
+def _quorum_directory(run_dir: Path, qid: str) -> Path:
+    """The directory one question's whole record lives in."""
+    return run_dir / _QUORUM_DIRNAME / qid
+
+
+def _quorum_qid(qid) -> str:
+    """One qid, held to the grammar ``derive_qid`` produces and nothing wider.
+
+    ``qid`` NAMES A DIRECTORY THIS MODULE OPENS, and it is the argument a
+    controller carries across a compaction and reassembles from a tracker cell.
+    ``Path(...) / None`` raises ``TypeError``, outside ``TrackerError``;
+    ``Path(...) / "../../.."`` names a directory outside the quorum tree, whose
+    ``open.json`` would be read as this question's; and ``"a\\x00b"`` is the
+    string ``Path`` accepts and every later read refuses with ``ValueError``,
+    which is outside the family too and outside the ``(OSError, UnicodeError)``
+    a read is usually written for.
+
+    ``_QID`` is exactly what ``derive_qid`` emits -- twelve lowercase hex --
+    so nothing a real run produces is refused and every one of those is.
+    """
+    if not _text(qid) or not _QID.fullmatch(qid.strip()):
+        raise QuorumSchemaInvalid(
+            f"qid {qid!r} is not a question id; a response filed under a name "
+            "no derivation produces belongs to a question nobody asked, and "
+            "the name is a directory this module opens")
+    return qid.strip()
+
+
+def _open_record(run_dir: Path, qid: str) -> dict:
+    """``open.json``, or a stop that says nothing was ever dispatched.
+
+    ABSENCE AND UNREADABILITY ARE TWO STATES, and the split is the one
+    ``_decisions_text`` makes for ``decisions.md``. A name that is not there is
+    a quorum that was never opened -- which is also the exact shape a BUDGET
+    TRIP leaves behind, ``final.json`` written and nothing else -- and no
+    response can belong to it, because no brain was dispatched to produce one.
+    A name that IS there and cannot be read is corruption, and folding the two
+    together would answer a half-written record with "raise the question
+    again", which re-dispatches three brains at a question already in flight.
+
+    ``lexists`` rather than ``exists`` for ``_decisions_text``'s reason: a
+    dangling symlink and a symlink loop are names that exist and cannot be
+    read, and reporting them as "never opened" is the fail-open direction.
+    """
+    path = _quorum_directory(run_dir, qid) / _OPEN_FILE
+    if not os.path.lexists(path):
+        raise QuorumError(
+            f"quorum {qid} was never opened; a response has nothing to be "
+            "recorded against, because nothing was dispatched to produce it")
+    return _opened_record(path, qid)
+
+
+def _record_owners(opened: dict, qid: str) -> list[str]:
+    """The owner ids from ``open.json``, HELD TO ``_OWNER`` ON THE WAY BACK IN.
+
+    ``open_quorum`` checks this grammar before it writes the file and checking
+    it again here is not belt-and-braces, because the two calls guard different
+    writes. There an owner became ``payload-<owner>.json``; here it becomes
+    ``<owner>__<attempt>.json``, and a record naming ``../../../evil`` files a
+    brain's answer outside the quorum tree and reads one back from outside it.
+    ``open.json`` is a file in a directory a human may have edited or restored
+    from a backup, and ``_opened_record`` validates the two fields an open
+    record is CLASSIFIED by -- its status and its qid. Which strings may become
+    filenames is a different question and it is asked here.
+
+    THE COUNT IS CHECKED TOO. Exactly three brains per quorum, and a count is
+    never reduced to fit capacity: a record naming two owners would let a
+    two-brain quorum finalise, and one naming four would let a fourth brain's
+    answer into the grouping.
+    """
+    owners = opened.get("owners")
+    if not isinstance(owners, list) or len(owners) != _BRAINS:
+        raise QuorumSchemaInvalid(
+            f"the open record for {qid} names {owners!r}, not {_BRAINS} owners; "
+            "a count is never reduced to fit capacity, so a record naming any "
+            "other number describes a quorum this module never dispatched")
+    for owner in owners:
+        if not _text(owner) or not _OWNER.fullmatch(owner):
+            raise QuorumSchemaInvalid(
+                f"the open record for {qid} names owner {owner!r}, which is not "
+                f"an owner id; each answer is published as <owner>"
+                f"{_ATTEMPT_SEPARATOR}<attempt>.json inside the question's own "
+                "directory, so an owner carrying a separator writes a brain's "
+                "answer where no audit trail will look for it")
+    if len(set(owners)) != len(owners):
+        raise QuorumSchemaInvalid(
+            f"the open record for {qid} names {owners!r}, in which two owners "
+            "are one id; two brains sharing one response file is either a "
+            "refused second write or one brain answering out of the other's "
+            "bytes, and the quorum cannot say which brain said what")
+    return list(owners)
+
+
+def _dispatched_digest(opened: dict, qid: str) -> str:
+    """The payload digest ``open.json`` bound AT DISPATCH, never a fresh one.
+
+    READ RATHER THAN RECOMPUTED, and that is the whole reason this helper
+    exists instead of a second call to ``payload_digest``.
+    ``decisions-effective.md`` is ONE run-global mutable file that every
+    ``open_quorum`` rewrites, so a digest computed now stops matching this
+    quorum's as soon as any OTHER question is raised -- which is the ordinary
+    state of a run with more than one question in it, not a rare one. A
+    response record citing the fresh digest would attest that the brain
+    answered a context the brain never saw, and nothing downstream could tell:
+    the record would look perfectly well-formed and the drift the digest exists
+    to expose would have been written out of the evidence.
+
+    So a response is bound to the bytes its own dispatch was bound to. Whether
+    those bytes still describe the run is a separate question with a separate
+    answer -- ``classify_quorum``'s ``stale-context`` -- and it is answered by
+    comparing these two digests, which is only possible while this one is the
+    recorded one.
+    """
+    digest = opened.get("payload_digest")
+    if not _text(digest) or not _SHA256.fullmatch(digest.strip()):
+        raise QuorumSchemaInvalid(
+            f"the open record for {qid} binds payload_digest {digest!r}, which "
+            "is not a digest; a response recorded against it would cite a "
+            "dispatch nothing can be checked against")
+    return digest.strip()
+
+
+def _response_name(owner: str, attempt: int) -> str:
+    """One response's filename, spelled in exactly one place."""
+    return f"{owner}{_ATTEMPT_SEPARATOR}{attempt}.json"
+
+
+def _response_record(path: Path, qid: str, owner: str,
+                     attempt: int) -> tuple[str, dict]:
+    """One recorded response, with the digest of the bytes it was published as.
+
+    THE DIGEST IS TAKEN OVER THE FILE'S OWN TEXT, not recomputed from the
+    parse, so it is the value ``publish_immutable`` returned when it wrote the
+    file. A redelivery that this function has just proved inert is answered
+    with that value, and a caller comparing what it got the first time with
+    what it got the second is comparing two statements about the same bytes.
+
+    EVERY FIELD THE RECORD IS READ FOR IS VALIDATED, for ``_final_event``'s
+    reason: the file is inside the run directory and a human may have edited
+    it. The qid and the owner are re-derived from where the file SITS and
+    compared, because a response directory can be copied or half-restored and a
+    file filed under another brain's name is one brain's answer counted as
+    another's. ``valid`` is required to AGREE with ``problems``: they are two
+    spellings of one verdict, and a record claiming to be valid while listing
+    violations is a malformed answer that would be clustered and adopted.
+    """
+    what = f"{owner}'s attempt {attempt} for {qid}"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise QuorumError(f"unreadable {what} at {str(path)!r}: {exc}") from exc
+    record = _loads(text, what)
+    if not isinstance(record, dict):
+        raise QuorumSchemaInvalid(
+            f"{what} is a {type(record).__name__}, not an object; a recorded "
+            "response is a verdict with an answer inside it, and a bare value "
+            "is neither")
+    stated = record.get("qid")
+    if not _text(stated) or stated.strip() != qid:
+        raise QuorumSchemaInvalid(
+            f"{what} states qid {stated!r}; an answer filed under another "
+            "question's identity is grouped, clustered and adopted for a "
+            "question nobody asked it")
+    named = record.get("owner")
+    if not _text(named) or named != owner:
+        raise QuorumSchemaInvalid(
+            f"{what} states owner {named!r}; one brain's answer read back as "
+            "another's is a quorum reporting agreement between a brain and "
+            "itself")
+    numbered = record.get("attempt")
+    if isinstance(numbered, bool) or not isinstance(numbered, int) or numbered != attempt:
+        raise QuorumSchemaInvalid(
+            f"{what} states attempt {numbered!r}; the attempt is what says "
+            "whether the single permitted re-dispatch has been spent, and a "
+            "record disagreeing with its own filename spends it twice or never")
+    if "response" not in record:
+        raise QuorumSchemaInvalid(
+            f"{what} holds no response; a verdict with nothing under it records "
+            "that a brain was graded and not what it said")
+    problems = record.get("problems")
+    if not isinstance(problems, list) or not all(_text(item) for item in problems):
+        raise QuorumSchemaInvalid(
+            f"{what} states problems {problems!r}, which is not a list of "
+            "violations; the violations are what a re-dispatch is owed for")
+    valid = record.get("valid")
+    if not isinstance(valid, bool) or valid != (not problems):
+        raise QuorumSchemaInvalid(
+            f"{what} states valid {valid!r} beside {len(problems)} violations; "
+            "the two are one verdict spelled twice, and a record that calls "
+            "itself valid while listing violations is a malformed answer "
+            "clustered as a vote")
+    return _digest(text), record
+
+
+def _owner_attempts(run_dir: Path, qid: str, owner: str) -> list[tuple[str, dict]]:
+    """Every attempt one owner has on record, in attempt order.
+
+    ENUMERATED, NEVER GLOBBED, and the two readings of the directory differ in
+    a way that matters. ``directory.glob(owner + "__*.json")`` numbers attempts
+    by SORT POSITION, so a directory holding only ``brain-a__2.json`` -- an
+    interrupted restore, a partially copied backup -- reports one attempt and
+    calls it the first; the next answer is then published as attempt 2 over a
+    file that is already attempt 2, and the single re-dispatch is either spent
+    on a brain nothing shows was ever wrong or refused as conflicting evidence.
+    A glob also interprets its own argument: ``*``, ``?`` and ``[`` are pattern
+    syntax, and although ``_OWNER`` admits none of them today that is a
+    property of a grammar one screen away rather than of this read.
+
+    A GAP IS CORRUPTION AND IS A STOP. Attempts are numbered from one without
+    holes, so anything else is a record whose first answer is missing, and
+    pricing the second as the first is the same spend-it-twice fault.
+    """
+    directory = _quorum_directory(run_dir, qid) / _RESPONSES_DIRNAME
+    present = [attempt for attempt in range(1, _MAX_ATTEMPTS + 1)
+               if os.path.lexists(directory / _response_name(owner, attempt))]
+    if present != list(range(1, len(present) + 1)):
+        raise QuorumSchemaInvalid(
+            f"{owner} has attempts {present} on record for {qid}; attempts are "
+            "numbered from one without gaps, and a record missing its first "
+            "answer prices the second as the first -- the one re-dispatch spent "
+            "on a brain nothing shows was ever wrong")
+    return [_response_record(directory / _response_name(owner, attempt),
+                             qid, owner, attempt) for attempt in present]
+
+
+def record_brain_response(run_dir: str, *, qid: str, owner: str,
+                          payload) -> str:
+    """Phase 2: one immutable file per response, valid or not.
+
+    Returns the SHA256 OF THE PUBLISHED BYTES -- ``publish_immutable``'s return
+    value, for ``publish_immutable``'s reason. The response file's path stays
+    true when its contents change, and the contents changing is the one thing
+    this record exists to prevent, so the identity handed back is the bytes. A
+    redelivery this call proves inert is answered with the digest of the bytes
+    already on disk, so two calls that stored one answer return one value.
+
+    THE THREE THINGS THIS FUNCTION REFUSES, and why each is not the others:
+
+    * A response from a brain this quorum never dispatched. Grouping counts
+      answers, and a fourth answer is a fourth brain.
+    * A second answer from a brain whose first was LEGAL. That is the run
+      collecting answers until it likes one, and it is refused rather than
+      recorded because recording it would put two votes from one brain in front
+      of the grouping and leave it to choose.
+    * A third answer, or a second from a brain that has already used its
+      re-dispatch. A second invalid answer is a non-response: the quorum is
+      incomplete and escalates, and the escalation is the remedy.
+
+    A BYTE-IDENTICAL REDELIVERY IS INERT WHICHEVER ATTEMPT IT REPEATS, and the
+    comparison is over THE BYTES THIS MODULE WRITES rather than over Python
+    equality of the two values. ``_dumps`` is the only spelling this module
+    stores JSON in, so comparing serializations answers exactly the question
+    ``publish_immutable`` would answer a moment later. ``==`` answers a
+    different one and gets it wrong in both directions: a payload holding
+    ``NaN`` never equals its own round trip, so every redelivery of it would
+    burn an attempt and then be refused, and a mapping keyed by ``1`` is stored
+    and read back keyed by ``"1"``, so the re-delivery of a response already on
+    disk would be published a second time under a fresh attempt number.
+
+    NO RUN LOCK IS TAKEN, deliberately. Each response is a single-assignment
+    cell and ``os.link`` is the atomic arbiter of it, so two writers racing one
+    filename produce one winner and one refusal with no window in which either
+    sees a partial file -- which is the property a lock would be bought for.
+    Taking one here would also make this uncallable from ``open_quorum``'s
+    critical section and from ``locked_tracker_update``'s ``mutate``: the run
+    lock is POSIX ``flock``, which belongs to the open file description rather
+    than the process, so a nested acquire does not recurse, it blocks against
+    itself until the timeout.
+    """
+    run_dir = _run_path(run_dir)
+    #: VALIDATED BEFORE ANYTHING IS WRITTEN, for ``open_quorum``'s reason: a
+    #: foreign, missing or malformed run is a read-only stop, and this call
+    #: publishes a file into the directory it is handed.
+    validate_run(run_dir)
+    qid = _quorum_qid(qid)
+    directory = _quorum_directory(run_dir, qid)
+    opened = _open_record(run_dir, qid)
+    owners = _record_owners(opened, qid)
+    #: ``_member`` rather than a bare ``in``, and what it buys HERE is the
+    #: string check rather than the hash safety: ``owners`` is a list, so
+    #: ``owner in owners`` compares by equality and raises on nothing. The
+    #: string check is the load-bearing half -- ``owner`` becomes a path
+    #: component two lines down, and a list that happened to contain a list
+    #: would otherwise name a file by its repr.
+    if not _member(owner, owners):
+        raise QuorumError(
+            f"{owner!r} is not one of the {_BRAINS} owners of {qid} ({owners}); "
+            "a quorum is three brains and an answer from a fourth is a fourth "
+            "vote in a count that admits three")
+    dispatched = _dispatched_digest(opened, qid)
+    #: Serialized ONCE, ahead of every comparison and of the write, so a value
+    #: this module cannot store stops here rather than after an attempt has
+    #: been counted against the owner.
+    serialized = _dumps(payload)
+    attempts = _owner_attempts(run_dir, qid, owner)
+    for digest, previous in attempts:
+        if _dumps(previous["response"]) == serialized:
+            return digest
+    if os.path.lexists(directory / _FINAL_FILE):
+        #: AFTER the redelivery check and not before it. A duplicate delivery
+        #: of something already recorded changes nothing and must stay inert
+        #: however late it arrives; growing the record the outcome was computed
+        #: from is a different act, and it is refused.
+        raise QuorumError(
+            f"quorum {qid} is already finalised; an answer added after the "
+            "outcome was computed is an answer the outcome was not computed "
+            "from, and the record would no longer show what was graded")
+    attempt = len(attempts) + 1
+    if attempt > _MAX_ATTEMPTS:
+        raise QuorumError(
+            f"{owner} has already used its one re-dispatch for {qid}; a second "
+            "invalid answer is a non-response, so the quorum is incomplete and "
+            "escalates -- a brain may force a human look and never an adoption")
+    if attempts and attempts[-1][1]["valid"]:
+        raise QuorumError(
+            f"{owner} has already answered {qid} and its answer was legal; the "
+            "one re-dispatch is bought by a SCHEMA-INVALID response and by "
+            "nothing else, because re-asking a brain whose answer was merely "
+            "unwelcome is the run collecting answers until it likes one")
+    problems = validate_brain_response(payload)
+    stated = payload.get("qid") if isinstance(payload, dict) else None
+    if not (_text(stated) and stated.strip() == qid):
+        problems = problems + [_QID_MISMATCH]
+    record = {
+        "qid": qid,
+        "owner": owner,
+        "attempt": attempt,
+        "valid": not problems,
+        "problems": problems,
+        #: The digest the DISPATCH bound, copied out of ``open.json``. See
+        #: ``_dispatched_digest``: recomputing it here would record the context
+        #: as it is now against an answer given to the context as it was.
+        "payload_digest": dispatched,
+        #: VERBATIM, never repaired and never normalised. The malformation is
+        #: the evidence.
+        "response": payload,
+    }
+    return publish_immutable(
+        directory / _RESPONSES_DIRNAME / _response_name(owner, attempt),
+        _dumps(record))
+
+
+def quorum_needs_redispatch(run_dir: str, *, qid: str) -> list[str]:
+    """The owners owed the single permitted re-dispatch, in dispatch order.
+
+    Owed by exactly one thing: a first answer that was SCHEMA-INVALID. Not a
+    late answer, not a weak one, not one the controller dislikes -- those are
+    an incomplete quorum and a low rung respectively, and both have their own
+    remedy. An owner that has already spent its re-dispatch is owed nothing
+    more, whatever came back: a second invalid answer is a non-response, the
+    quorum is incomplete, and it escalates.
+
+    THE ORDER IS ``open.json``'s OWNER ORDER, which is the brain-index order
+    ``build_payload`` was called in, so a caller re-dispatching owner ``n``
+    reads the index it needs out of the position it found the name in.
+
+    WHAT A RE-DISPATCH SENDS IS ALREADY ON DISK and is not rebuilt here. Each
+    brain's bytes were published once as ``payload-<owner>.json`` and are
+    immutable, so a re-dispatch re-sends that file; ``build_payload`` is pure
+    with respect to the index and one ``payload_digest`` binds all three, which
+    is what makes those bytes reproducible from ``(payload_digest, n)`` -- but
+    only while nothing about the assignment is read from run state. Rebuilding
+    the payload from the run AS IT IS NOW would hand the brain a different
+    question from the one the digest attests to, and the answer would come back
+    looking like an answer to the first.
+
+    THE PROJECTION WILL USUALLY HAVE MOVED BY THEN, and this function does not
+    hide that and does not act on it. ``decisions-effective.md`` is one
+    run-global mutable file that every ``open_quorum`` rewrites, so an
+    in-flight quorum's recorded ``payload_digest`` stops matching what a fresh
+    computation produces as soon as another question is raised. That drift
+    neither creates nor cancels a re-dispatch debt -- a malformed answer is
+    malformed whatever the run has decided since -- so it is not consulted
+    here. Naming it is ``classify_quorum``'s ``stale-context``, computed by
+    comparing the recorded digest with a fresh one, and it stays computable
+    precisely because this function reads neither.
+
+    A FINALISED QUORUM OWES NOTHING, including one whose outcome is the
+    terminal record a BUDGET TRIP wrote -- which has a ``final.json`` and no
+    ``open.json`` at all, because nothing was ever dispatched. Reading the open
+    record first would report that shape as a stop rather than as a question
+    that was never asked.
+    """
+    run_dir = _run_path(run_dir)
+    qid = _quorum_qid(qid)
+    final_path = _quorum_directory(run_dir, qid) / _FINAL_FILE
+    if os.path.lexists(final_path):
+        #: Validated rather than merely counted, for the reason
+        #: ``_open_under_lock`` validates it: a record restored under the wrong
+        #: qid would answer for a question nobody asked, and here it would
+        #: answer "nothing is owed" -- a quorum that never gets its brains back
+        #: and never escalates either.
+        _final_event(final_path, qid)
+        return []
+    owed = []
+    for owner in _record_owners(_open_record(run_dir, qid), qid):
+        attempts = _owner_attempts(run_dir, qid, owner)
+        if len(attempts) == 1 and not attempts[0][1]["valid"]:
+            owed.append(owner)
+    return owed

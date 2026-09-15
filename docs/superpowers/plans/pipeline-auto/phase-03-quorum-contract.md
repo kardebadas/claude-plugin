@@ -105,6 +105,13 @@ is what `derive_qid` hashes before writing it. If the qid should hash something
 narrower, say so rather than hashing a column whose meaning depends on which
 validator is reading it.
 
+**A `## Questions` id may itself be the literal `new`.** `_validate_questions`
+checks uniqueness only, so a question named `new` is indistinguishable from the
+reserved axis literal at `pipeline_auto_state.py:786`. Found in Task 5's review
+and left to this phase deliberately. Either reserve `new` as an illegal question
+id, or make the axis check distinguish "the literal" from "a question that
+happens to be called that" — but do not leave both readings live.
+
 **`new` is a by-construction hole in the contradiction check**, and the schema
 cannot close it. A free-token axis clears the check by being unrecognisable — the
 same fail-open shape `_BLAST_RADII` is closed against. P02 set the fixture's

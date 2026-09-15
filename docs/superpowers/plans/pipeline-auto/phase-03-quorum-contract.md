@@ -3470,6 +3470,25 @@ git commit -m "feat(pipeline-auto): reject quorum answers that overrule a human,
 
 ### Task 13: Consuming a re-open's raised bar
 
+> **From the Task 6 review (F1) — `challenge` is the field you fill, and it
+> reaches all three brains as free text.** `_shared_payload` emits `challenge`
+> verbatim to every brain. Until the Task 6 fix round, nothing screened it, and
+> a challenge reading "the earlier answer was only convention-cited at 0.70
+> grounding" put the adoption floor and a rung name into every payload — a
+> breach of standing rule 5 through a whitelisted field, which is exactly the
+> shape the question/axis screen was added for.
+>
+> The screen now covers it. **What binds this task is what you put in there.**
+> The challenging evidence must carry the *evidence*, never the earlier answer's
+> rung, its value, its owner, or how close it came to the floor. A brain that
+> learns the previous attempt scored 0.70 is a brain told what to beat, and the
+> re-open stops being an independent measurement.
+>
+> Note also that `challenge` had exactly one occurrence in the whole test suite
+> (`"challenge": []`) when this was found. Your tests are the first that will
+> exercise it with content.
+
+
 **Files:**
 - Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
 - Test: `plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py`

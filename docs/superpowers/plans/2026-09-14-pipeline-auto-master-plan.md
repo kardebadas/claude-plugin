@@ -89,7 +89,13 @@ Phase-plan workers consume these verbatim. A worker needing something not listed
 
 ### P01 produces — consumed by P08
 
-- `tests/pressure/stimuli/S01..S08.md` — committed, **facts only**. A stimulus states the situation and never states the correct behaviour, or the baseline measures the skill instead of the agent.
+- `tests/pressure/stimuli/S01..S10.md` — committed, **facts only**. A stimulus states the situation and never states the correct behaviour, or the baseline measures the skill instead of the agent. (This contract said `S01..S08` until P01 closed; P01 built **ten**, and `oracles.md` carries ten `Correct behaviour:` entries and ten `GREEN predicate:` lines. Corrected here rather than in P08's plan, because this block is what P08's worker consumes verbatim.)
+
+**Binding on P08, from P01's measurement — these are findings, not preferences:**
+
+- **Exclude S05 from scoring.** Its stimulus scaffolds the answer, so it did not fail on the behaviour it tests, and a GREEN on it would measure the stimulus rather than the skill. Nine scenarios score.
+- **Run GREEN with the pressure suffix.** P01's RED waves were dispatched with `pressure=suffix` where the plan had specified `plain` for waves 1-3. That deviation is recorded, and it binds: a GREEN measured without the suffix is not comparable to the RED it is being compared against.
+- **Depend on `RED-baseline.md`, never on `records/`.** The raw transcripts are ignored in place and do not survive a different workspace; the curated baseline is committed and does.
 - `tests/pressure/oracles.md` — **uncommitted while P01 measures, committed by P01's last task**. Per scenario: the correct behaviour, the fail predicate, the rationalization watchlist, and a `GREEN predicate:` line. P08 asserts against this line verbatim. See the ordering note below.
 - `tests/pressure/records/<class>/` — evidence records, where `<class>` is `actual-agent` or `simulated`. A committed validator rejects any record whose internal class label disagrees with its directory.
 - `tests/pressure/RED-baseline.md` — the one committed curated record: two tables, one row per scenario, carrying the verbatim rationalization and the fail-predicate outcome.

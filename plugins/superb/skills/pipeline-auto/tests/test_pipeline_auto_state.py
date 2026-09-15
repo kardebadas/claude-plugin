@@ -16,6 +16,7 @@ import time
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 FIXTURES = SKILL_DIR / "tests" / "fixtures"
@@ -92,9 +93,19 @@ WIDE_GAP = "| 12 | pending | - |\n\n\n## Intent\n"
 #: carried by ``write_capable_calls`` below, scoped to ``validate_run``, and
 #: widening this allowlist to ``os`` does not touch it: ``validate_run``'s own
 #: subtree is still checked call by call.
+#: ``tempfile`` was added for the atomic replace, and for that alone. The temp
+#: file MUST be created inside the run directory — a name anywhere else makes
+#: ``os.replace`` a cross-device rename, which raises instead of swapping — and
+#: it must be created without a window in which a second writer can guess or
+#: pre-create the name. ``tempfile.mkstemp(dir=...)`` is the standard library's
+#: one answer to both; hand-rolling it out of ``os.open(..., O_CREAT | O_EXCL)``
+#: plus a name generator would be strictly more code for strictly less
+#: guarantee. The phase plan's Tech Stack names it. This is a widening argued
+#: for, not one taken incidentally to make a failing test pass: nothing else in
+#: this module may use it, and ``re`` is still absent and stays absent.
 ALLOWED_IMPORTS = frozenset({
     "__future__", "contextlib", "errno", "fcntl", "hashlib", "msvcrt", "os",
-    "pathlib", "time",
+    "pathlib", "tempfile", "time",
 })
 
 #: Builtins that open a file or run generated code. Called anywhere in the
@@ -3535,6 +3546,262 @@ class LockTests(unittest.TestCase):
                 "the body runs on a zero timeout without a single acquire "
                 "having been issued: the attempt was skipped, not made")
         self.assertEqual(fake.operations, attempt + [fake.LOCK_UN])
+
+
+class ReplaceTrackerTests(unittest.TestCase):
+    """``_replace_tracker`` and the THREE outcomes a write can have.
+
+    A write either did not happen, definitely happened, or **may** have
+    happened. The third is not a hedge: between ``os.replace`` returning and
+    the directory fsync completing there is a real interval in which a crash
+    leaves a state the caller cannot tell from either neighbour. Reporting it
+    as failure makes an autonomous retry apply the same transition twice;
+    reporting it as success loses a write that never became durable. So the
+    module raises ``TrackerWriteError`` for the first and
+    ``UpdateOutcomeUncertain`` for the third, and they are siblings rather
+    than parent and child so that a caller's ``except TrackerWriteError``
+    cannot quietly absorb the one it must not retry.
+    """
+
+    def test_the_file_being_renamed_lives_in_the_run_directory(self):
+        """A temp file in the system temp directory makes ``os.replace`` a
+        cross-device rename: it raises instead of swapping, and the atomicity
+        this whole function exists for is gone. Both the location and the
+        device are asserted, because this suite's run directories are
+        THEMSELVES under the system temp directory — so on this machine the two
+        share a device and only the location check can fail, while on a machine
+        where the repository and /tmp are separate filesystems the device check
+        is the one that catches it first.
+        """
+        run_dir = make_run(self)
+        seen = {}
+        real_replace = os.replace
+
+        def spy(source, destination):
+            seen["source"] = Path(source)
+            seen["device"] = os.stat(source).st_dev
+            return real_replace(source, destination)
+
+        with mock.patch.object(pas.os, "replace", side_effect=spy):
+            pas._replace_tracker(run_dir, valid_text(), "transition-1")
+        self.assertEqual(
+            seen["source"].parent.resolve(), run_dir.resolve(),
+            "the renamed file is not in the run directory; os.replace is a "
+            "cross-device rename and no longer atomic")
+        self.assertEqual(
+            seen["device"], os.stat(run_dir / "progress.md").st_dev,
+            "the temp file is on a different filesystem from progress.md")
+        self.assertEqual((run_dir / "progress.md").read_text(encoding="utf-8"),
+                         valid_text())
+
+    def test_a_pre_replace_failure_leaves_the_old_tracker_intact(self):
+        """Everything up to and including ``os.replace`` is 'nothing has
+        happened yet'. The file fsync is inside that region, so its failure
+        must leave progress.md byte-identical and must not strand the temp
+        file: this run directory is listed by later phases, and a half-written
+        ``.progress.*.tmp`` nothing ever removes is indistinguishable from one
+        a live writer is using.
+        """
+        run_dir = make_run(self)
+        before = (run_dir / "progress.md").read_bytes()
+        replacement = swap("| revision | 12 |", "| revision | 99 |")
+        with mock.patch.object(
+                pas, "_sync_file",
+                side_effect=OSError(errno.EIO, "simulated fsync failure")):
+            with self.assertRaises(pas.TrackerWriteError) as caught:
+                pas._replace_tracker(run_dir, replacement, "transition-2")
+        self.assertNotIsInstance(caught.exception, pas.UpdateOutcomeUncertain)
+        self.assertEqual(
+            (run_dir / "progress.md").read_bytes(), before,
+            "the tracker changed on a failure reported as 'nothing happened'")
+        #: No lock file is expected: ``_replace_tracker`` takes no lock — its
+        #: caller does — and ``make_run`` creates none. A later task that routes
+        #: this through ``_exclusive_lock`` adds ``.pipeline-auto.lock`` here.
+        self.assertEqual(
+            sorted(p.name for p in run_dir.iterdir()), ["progress.md"],
+            "a temp file survived the failure and nothing will clean it up")
+
+    def test_a_post_replace_failure_raises_update_outcome_uncertain(self):
+        """The replacement already landed; only its durability is in doubt.
+        Reporting ``TrackerWriteError`` here tells an autonomous retry that
+        nothing happened, and it re-applies a transition that did apply.
+        """
+        run_dir = make_run(self)
+        replacement = swap("| revision | 12 |", "| revision | 13 |")
+        with mock.patch.object(
+                pas, "_sync_directory",
+                side_effect=OSError(errno.EIO, "simulated dirsync failure")):
+            with self.assertRaises(pas.UpdateOutcomeUncertain):
+                pas._replace_tracker(run_dir, replacement, "transition-3")
+        self.assertEqual(
+            (run_dir / "progress.md").read_text(encoding="utf-8"), replacement,
+            "the replacement is not on disk, so the directory sync ran before "
+            "os.replace and the outcome was never uncertain to begin with")
+
+    def test_update_outcome_uncertain_is_not_a_kind_of_tracker_write_error(self):
+        """The static half of the distinction. ``TrackerWriteError`` promises
+        nothing changed; ``UpdateOutcomeUncertain`` promises the opposite is
+        possible. Making the second a subclass of the first would be a one-word
+        edit that silently re-classifies every uncertain outcome as a safe
+        retry, and both would still be raised from the right places.
+        """
+        self.assertFalse(issubclass(pas.UpdateOutcomeUncertain,
+                                    pas.TrackerWriteError))
+        self.assertFalse(issubclass(pas.TrackerWriteError,
+                                    pas.UpdateOutcomeUncertain))
+        self.assertTrue(issubclass(pas.UpdateOutcomeUncertain, pas.TrackerError))
+
+    def bump_revision(self, run_dir) -> str:
+        """The current tracker with ``revision`` incremented by one."""
+        text = (run_dir / "progress.md").read_text(encoding="utf-8")
+        revision = pas.parse_tracker(text)["run"]["revision"]
+        return swap(f"| revision | {revision} |",
+                    f"| revision | {int(revision) + 1} |", text)
+
+    def apply_with_one_retry(self, run_dir, transition_id: str) -> str:
+        """A retry loop in the shape a controller actually writes one.
+
+        ``TrackerWriteError`` promises nothing changed, so retrying is safe and
+        the loop retries. Every other ``TrackerError`` — ``UpdateOutcomeUncertain``
+        above all — is left to propagate, because retrying it blindly is the
+        double-apply this whole distinction exists to prevent.
+        """
+        for _ in range(2):
+            try:
+                pas._replace_tracker(run_dir, self.bump_revision(run_dir),
+                                     transition_id)
+            except pas.TrackerWriteError:
+                continue
+            return "applied"
+        return "gave-up"
+
+    def revision_of(self, run_dir) -> str:
+        return pas.parse_tracker(
+            (run_dir / "progress.md").read_text(encoding="utf-8"))["run"]["revision"]
+
+    def test_a_retrying_caller_retries_a_write_that_did_not_happen(self):
+        """The 'nothing happened' half, proven through a caller rather than
+        through an isinstance check: the transition is applied exactly once
+        across a failed attempt and its retry, so revision moves 12 -> 13, not
+        12 -> 14 and not 12 -> 12.
+        """
+        run_dir = make_run(self)
+        real_sync_file = pas._sync_file
+        faults = [OSError(errno.EIO, "simulated fsync failure"), None]
+
+        def flaky(handle):
+            problem = faults.pop(0) if faults else None
+            if problem is not None:
+                raise problem
+            return real_sync_file(handle)
+
+        with mock.patch.object(pas, "_sync_file", side_effect=flaky):
+            self.assertEqual(self.apply_with_one_retry(run_dir, "transition-5"),
+                             "applied")
+        self.assertEqual(self.revision_of(run_dir), "13")
+
+    def test_a_retrying_caller_does_not_retry_a_write_that_may_have_applied(self):
+        """The 'may have applied' half, through the SAME caller. This is the
+        assertion the class-hierarchy check cannot make: make
+        ``UpdateOutcomeUncertain`` a subclass of ``TrackerWriteError`` and the
+        loop above swallows it, retries a transition that already landed, and
+        revision reaches 14 for one logical transition. Here the exception must
+        reach the caller and the tracker must show exactly one application.
+        """
+        run_dir = make_run(self)
+        with mock.patch.object(
+                pas, "_sync_directory",
+                side_effect=OSError(errno.EIO, "simulated dirsync failure")):
+            with self.assertRaises(pas.UpdateOutcomeUncertain):
+                self.apply_with_one_retry(run_dir, "transition-6")
+        self.assertEqual(
+            self.revision_of(run_dir), "13",
+            "the transition was applied more than once: the retry loop treated "
+            "'it may have applied' as 'nothing happened'")
+
+    def test_a_successful_replace_leaves_no_temp_file_behind(self):
+        run_dir = make_run(self)
+        pas._replace_tracker(run_dir, valid_text(), "transition-4")
+        self.assertEqual(
+            sorted(p.name for p in run_dir.iterdir()), ["progress.md"],
+            "the temp file is still there: it was copied over progress.md "
+            "rather than renamed onto it, so the write was never atomic")
+
+    def test_sync_file_pushes_the_buffered_write_out_to_the_operating_system(self):
+        """The only case that runs the real ``_sync_file``: the two fault cases
+        above replace it, so a body reduced to ``pass`` keeps them both green.
+        Flush is asserted by reading the path while the handle is still open —
+        under a missing flush the file is empty — and the fsync is asserted by
+        the descriptor it is handed.
+        """
+        run_dir = empty_run(self)
+        target = run_dir / "buffered.txt"
+        synced = []
+        real_fsync = os.fsync
+
+        def spy(descriptor):
+            synced.append(descriptor)
+            return real_fsync(descriptor)
+
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write("x" * 8)
+            self.assertEqual(
+                target.read_text(encoding="utf-8"), "",
+                "the write reached the file on its own; this case cannot tell "
+                "a flush from no flush")
+            with mock.patch.object(pas.os, "fsync", side_effect=spy):
+                pas._sync_file(handle)
+            self.assertEqual(target.read_text(encoding="utf-8"), "x" * 8)
+            self.assertEqual(synced, [handle.fileno()])
+
+    @unittest.skipIf(os.name == "nt", "the nt branch returns without syncing")
+    def test_sync_directory_fsyncs_the_directory_itself(self):
+        """A rename is not durable until the DIRECTORY entry is synced, and
+        syncing only the file is the classic version of this bug. The early
+        return belongs to ``os.name == "nt"`` alone: made unconditional it
+        would drop durability here too, and every other case in this class
+        would stay green because none of them survives a power cut.
+        """
+        run_dir = empty_run(self)
+        synced = []
+        real_fsync = os.fsync
+
+        def spy(descriptor):
+            synced.append(os.fstat(descriptor))
+            return real_fsync(descriptor)
+
+        with mock.patch.object(pas.os, "fsync", side_effect=spy):
+            pas._sync_directory(run_dir)
+        expected = os.stat(run_dir)
+        self.assertEqual(
+            [(status.st_dev, status.st_ino) for status in synced],
+            [(expected.st_dev, expected.st_ino)],
+            "_sync_directory did not fsync the run directory itself")
+
+    @unittest.skipIf(os.name == "nt", "the nt branch opens no descriptor")
+    def test_sync_directory_closes_the_descriptor_it_opened(self):
+        """Every durable write in this run calls this function. A descriptor
+        left open on each one exhausts the process's file-descriptor limit part
+        way through a long run, and the failure surfaces somewhere else
+        entirely as ``EMFILE``.
+        """
+        run_dir = empty_run(self)
+        opened = []
+        real_fsync = os.fsync
+
+        def spy(descriptor):
+            opened.append(descriptor)
+            return real_fsync(descriptor)
+
+        with mock.patch.object(pas.os, "fsync", side_effect=spy):
+            pas._sync_directory(run_dir)
+        self.assertEqual(len(opened), 1)
+        with self.assertRaises(OSError) as leaked:
+            os.fstat(opened[0])
+        self.assertEqual(
+            leaked.exception.errno, errno.EBADF,
+            "the directory descriptor is still open after _sync_directory "
+            "returned; this leaks one descriptor per tracker write")
 
 
 class SuiteIsWhollyCollectedTests(unittest.TestCase):

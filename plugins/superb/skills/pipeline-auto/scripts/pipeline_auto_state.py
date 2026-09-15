@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import errno
 import os
+import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -1950,3 +1951,103 @@ def _exclusive_lock(run_dir, *, timeout_s: float = DEFAULT_LOCK_TIMEOUT_S):
             except OSError:
                 pass
         os.close(descriptor)
+
+
+def _sync_file(handle) -> None:
+    """Push one file's buffered bytes past Python and past the OS cache.
+
+    ``flush`` alone moves the bytes from Python's buffer into the kernel's,
+    where a crash still loses them; ``fsync`` alone would sync a descriptor
+    whose buffer has not been handed over yet. Both, in this order.
+    """
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
+def _sync_directory(directory: Path) -> None:
+    """Make a rename in ``directory`` durable, not merely visible.
+
+    ``os.replace`` publishes the new name immediately, but the directory ENTRY
+    is itself buffered: without this the swap can be lost by a crash that the
+    file's own fsync did nothing to protect against. The ``nt`` early return is
+    narrow on purpose — Windows has no directory descriptor to sync and its
+    native semantics here remain unverified, so that platform is skipped rather
+    than guessed at.
+    """
+    if os.name == "nt":  # native directory-sync semantics remain unverified
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _replace_tracker(run_dir, text: str, transition_id: str) -> None:
+    """Replace ``progress.md`` atomically, and be exact about which of the
+    three outcomes occurred.
+
+    A write either did not happen, definitely happened, or MAY have happened.
+    The third outcome is real rather than a hedge: after ``os.replace`` returns
+    and before the directory fsync completes there is an interval in which a
+    crash leaves a state no caller can tell from either neighbour. So there are
+    two ``try`` blocks, not one.
+
+    Everything up to and including ``os.replace`` is "nothing has happened
+    yet" and fails as ``TrackerWriteError``: the old tracker is byte-intact and
+    a retry is safe. The directory fsync afterwards is "it already happened,
+    durably or not" and fails as ``UpdateOutcomeUncertain``: the caller must
+    reconcile ``revision`` and ``last_transition`` before retrying.
+
+    Collapsing the two into one ``except`` — even with a ``replaced`` flag
+    deciding which exception to raise — is the edit that makes an autonomous
+    retry double-apply, because every OSError raised after the replacement then
+    has to be re-derived from a flag instead of from the block it came out of.
+    Separating them structurally is what makes the claim checkable.
+
+    The temp file is created with ``dir=run_dir`` so that it shares a
+    filesystem with ``progress.md``. A temp file anywhere else makes
+    ``os.replace`` a cross-device rename, which raises instead of swapping, and
+    the atomicity this function exists for is gone.
+    """
+    run_dir = Path(run_dir)
+    progress = run_dir / "progress.md"
+    descriptor = -1
+    temporary: str | None = None
+    try:
+        descriptor, temporary = tempfile.mkstemp(
+            dir=str(run_dir), prefix=".progress.", suffix=".tmp"
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            #: The handle owns the descriptor from here, so the cleanup path
+            #: below must not close it a second time.
+            descriptor = -1
+            handle.write(text)
+            _sync_file(handle)
+        os.replace(temporary, progress)
+    except OSError as exc:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary is not None:
+            #: Nothing else ever removes this file. A stranded
+            #: ``.progress.*.tmp`` in a run directory is indistinguishable from
+            #: one a live writer is holding.
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+        raise TrackerWriteError(
+            f"tracker update {transition_id} failed before replacement; "
+            f"the old tracker is intact and nothing changed: {exc}"
+        ) from exc
+
+    try:
+        _sync_directory(run_dir)
+    except OSError as exc:
+        raise UpdateOutcomeUncertain(
+            f"tracker update {transition_id} replaced progress.md, then the "
+            "directory sync failed; the update may or may not survive a crash. "
+            "Reconcile revision and last_transition before retrying — a blind "
+            f"retry can double-apply: {exc}"
+        ) from exc

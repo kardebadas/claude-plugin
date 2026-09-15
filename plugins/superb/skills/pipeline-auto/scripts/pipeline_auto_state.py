@@ -3838,36 +3838,111 @@ _DECISION_FIELD_ALIASES = MappingProxyType({"action": "decision_action"})
 #: opposite default.
 _PROJECTED_FIELDS = ("question", "answer", "provenance")
 
-#: Every rung NAME and every rung VALUE, as the strings the projection screens
-#: its two free-text fields against. Derived from ``RUNGS`` rather than typed
-#: out, so a ladder that gains a rung gains the screen for it on the same day.
+#: The two free-text fields the CONTENT screen below is run over, named once so
+#: that ``parse_decisions`` and ``project_decisions`` cannot come to screen
+#: different sets. They are the two members of ``_PROJECTED_FIELDS`` a human or
+#: a brain writes as prose; ``provenance`` is the third and is an ENUM, so it is
+#: screened by membership against ``_PROVENANCES`` instead -- strictly narrower
+#: than any content rule, and the reason it is absent from this tuple rather
+#: than forgotten from it.
+_SCREENED_FIELDS = ("question", "answer")
+
+#: The whitelist above is a FIELD screen and what follows is a CONTENT screen,
+#: and the field screen alone is not the guarantee the docstring claims:
+#: ``Answer: postgres -- adopted at 0.85, code-evidenced, runner-up
+#: speculation`` is carried by ``answer``, which is projected, so every value
+#: the whitelist withholds arrives anyway inside a field it cannot inspect.
 #:
-#: The whitelist above is a FIELD screen and this is a CONTENT screen, and the
-#: field screen alone is not the guarantee the docstring claims: ``Answer:
-#: postgres -- adopted at 0.85, code-evidenced, runner-up speculation`` is
-#: carried by ``answer``, which is projected, so every value the whitelist
-#: withholds arrives anyway inside a field it cannot inspect.
-_RUNG_STRINGS = tuple(sorted(
-    set(RUNGS) | {str(value) for value in RUNGS.values()}))
+#: Every rung VALUE, in BOTH spellings a writer reaches for: ``str`` gives the
+#: shortest one (``0.7``) and the two-decimal form is how the ladder itself is
+#: written down (``0.70``). Both, because the screen requires a match to be a
+#: WHOLE number and ``0.7`` inside ``0.70`` is not one -- screening only
+#: ``str(value)`` would accept ``adopted at 0.70``, which is the leak spelled
+#: the way the ladder spells it.
+_RUNG_VALUE_STRINGS = tuple(sorted(
+    {str(value) for value in RUNGS.values()}
+    | {f"{value:.2f}" for value in RUNGS.values()}))
+
+#: The rung NAMES the content screen looks for, and deliberately NOT all five.
+#: A rung name that is an ordinary English word -- ``specified``,
+#: ``speculation`` -- is a word a decision record legitimately uses: "use the
+#: schema specified in the RFC" and "redis -- avoids speculation about disk
+#: contention" are real answers, and a screen that stops them stops real records
+#: for saying ordinary things, in a file whose prescribed remedy is to reword a
+#: sentence. A HYPHENATED rung name is coined by this ladder and appears in
+#: prose only when the ladder is being quoted, so the hyphen is the property
+#: this derives on: a ladder that gains a compound name gains the screen for it
+#: on the same day, and one that gains a bare English word does not.
+#:
+#: WHAT THIS GIVES UP, stated here rather than left to be discovered: a bare
+#: ``speculation`` or ``specified`` standing alone in an Answer now reaches a
+#: brain. What it does not give up is the leak the screen exists for --
+#: ``Answer: postgres -- adopted at 0.85, code-evidenced, runner-up
+#: speculation`` is still refused twice over, by the value ``0.85`` and by the
+#: compound ``code-evidenced``.
+_RUNG_NAME_STRINGS = tuple(sorted(name for name in RUNGS if "-" in name))
+
+
+def _wordish(char: str) -> bool:
+    """Whether ``char`` continues a word, so a match beside it is not one.
+
+    The empty string is not: it is what the slice either end of the string
+    yields, and a rung name at the very start or end of a field is quoted as
+    much as one in the middle. ``-`` is not either, which is what lets
+    ``code-evidenced`` be found at all.
+    """
+    return char.isalnum() or char == "_"
 
 
 def _rung_leak(value: str) -> str | None:
-    """The first rung name or rung value quoted inside ``value``, or ``None``.
+    """The first rung VALUE or compound rung NAME quoted inside ``value``.
 
-    Substring rather than token, and deliberately so: the leak this screens for
-    is a brain reading a number, and ``(0.85)``, ``at 0.85,`` and ``rung=0.85``
-    all deliver it. A token split would pass every one of them.
+    EXACTLY WHAT IS SCREENED, and exactly what is not:
 
-    The cost is a false positive on prose that happens to contain a rung word --
-    "the behaviour specified in the RFC" is the realistic one. That is the
-    direction to fail in: the stop is loud, it names the record and the word, and
-    the fix is to reword one sentence of an audit-trail entry. The other
-    direction ships a number into a payload and is silent forever.
+    * Every rung value, in both the ``0.7`` and ``0.70`` spellings, matched as a
+      WHOLE number. ``adopted at 0.85``, ``(0.85)``, ``rung=0.85`` and ``adopted
+      at 0.85.`` all hit. ``$10.85 per million tokens`` and ``a p99 of 10.3
+      seconds`` do not: a neighbouring digit -- or a ``.`` that a digit follows
+      -- means the match is a fragment of some other decimal and not the rung. A
+      plain substring test called all of those a leak, and ``str(0.70)`` being
+      ``'0.7'`` made every decimal containing ``.7`` one.
+    * Every HYPHENATED rung name, as a whole word: ``code-evidenced``,
+      ``convention-cited``, ``engineering-judgement``.
+
+    NOT SCREENED: ``specified`` and ``speculation``, the two rung names that are
+    also ordinary English words. See ``_RUNG_NAME_STRINGS`` for why, and for
+    what that costs.
+
+    A trailing ``.`` is punctuation unless a digit follows it, which is the one
+    asymmetry here and is deliberate: ``adopted at 0.85.`` ends a sentence and is
+    exactly the leak, while ``1.0.85`` continues a version string and is not.
+
+    RUN AT BOTH ENDS. ``parse_decisions`` runs it as the record is written,
+    which is the only moment the prescribed remedy -- reword one sentence -- is
+    available: by projection time the record is already in an append-only file
+    that ``_decision_sections`` refuses to let lose a record. ``project_decisions``
+    runs it again on whatever it is handed, because it declares its input
+    untrusted and is the last thing standing between a record and a brain.
     """
     lowered = value.casefold()
-    for token in _RUNG_STRINGS:
-        if token in lowered:
-            return token
+    for token in _RUNG_VALUE_STRINGS:
+        start = lowered.find(token)
+        while start != -1:
+            end = start + len(token)
+            before = lowered[start - 1:start]
+            after = lowered[end:end + 1]
+            if not (before.isdigit() or before == "." or after.isdigit()
+                    or (after == "." and lowered[end + 1:end + 2].isdigit())):
+                return token
+            start = lowered.find(token, start + 1)
+    for token in _RUNG_NAME_STRINGS:
+        start = lowered.find(token)
+        while start != -1:
+            end = start + len(token)
+            if not (_wordish(lowered[start - 1:start])
+                    or _wordish(lowered[end:end + 1])):
+                return token
+            start = lowered.find(token, start + 1)
     return None
 
 
@@ -4049,6 +4124,18 @@ def parse_decisions(text: str) -> dict:
     decision re-opens that qid at a raised bar. Two records that disagree with
     their own ids would route by whichever of the two a given reader consulted.
 
+    THE LADDER NEVER ENTERS THE AUDIT TRAIL, and that is refused HERE rather
+    than only at the projection. ``project_decisions`` keeps the same content
+    screen as a backstop, but it runs on a record that is already written, and
+    the remedy the stop prescribes -- reword one sentence -- would then mean
+    editing a file ``_decision_sections`` refuses to let lose a record. Refused
+    as the record is parsed, nothing has been appended and rewording is free.
+
+    A ``Supersedes`` CHAIN MUST TERMINATE IN A LIVE RECORD. Two records that
+    supersede each other satisfy every other retirement rule -- each target
+    exists, each is Superseded, each is claimed once, none is orphaned -- and
+    answer nothing about what replaced either.
+
     TWO ADOPTED DECISIONS CONTRADICTING EACH OTHER ON ONE AXIS IS A READ-ONLY
     STOP of the same severity as a foreign schema. The file IS the audit trail,
     and a trail holding both answers has already failed -- every later reader
@@ -4187,6 +4274,21 @@ def parse_decisions(text: str) -> dict:
                 f"{did}: a human decision is depth 0, not {depth}; depth counts "
                 "inference from the last thing a human actually said, and a "
                 "human saying it is that thing")
+        #: THE CONTENT SCREEN, AT WRITE TIME. ``project_decisions`` runs the
+        #: same screen over the same two fields as a backstop, but it runs it on
+        #: a record that is already sitting in the audit trail -- and the remedy
+        #: this stop prescribes is to reword one sentence, which by then means
+        #: editing a file ``_decision_sections`` refuses to let lose a record.
+        #: Refused here, nothing has been written yet and rewording is free.
+        for name in _SCREENED_FIELDS:
+            leaked = _rung_leak(fields[name].strip())
+            if leaked is not None:
+                raise TrackerValidationError(
+                    f"{did}: {name.capitalize()} quotes {leaked!r}, a rung name "
+                    "or a rung value; a brain reading 'adopted at 0.85' treats "
+                    "the decision as soft and reverses it, so the ladder never "
+                    "enters the audit trail -- reword the sentence now, while "
+                    "the record is still being written")
         record = dict(fields)
         record.update({
             "id": did,
@@ -4290,6 +4392,31 @@ def parse_decisions(text: str) -> dict:
             "Supersedes line, and a retirement with no successor is a decision "
             "withdrawn without recording what took its place")
 
+    #: AND THE CHAIN MUST TERMINATE. Every check above is satisfied by two
+    #: records that supersede each other: each target exists, each is
+    #: ``Superseded``, each is claimed exactly once, none is orphaned -- and the
+    #: successor chain is a closed loop that never reaches a live decision, so
+    #: "what took its place" has no answer. That is the very question the orphan
+    #: rule above exists to keep answerable, so a cycle defeats it while passing
+    #: every syntactic check it states. Walked from each retired record rather
+    #: than asserted structurally, because the message has to name the loop.
+    for did in sorted(decisions):
+        if decisions[did]["status"] != "Superseded":
+            continue
+        chain = [did]
+        successor = claimed[did]
+        while decisions[successor]["status"] == "Superseded":
+            if successor in chain:
+                raise TrackerValidationError(
+                    f"{chain} form a Supersedes cycle; every record in it is "
+                    "Superseded and each is replaced by another record in the "
+                    "same loop, so the chain never terminates in a live "
+                    "decision and no reader can say what replaced any of them "
+                    "-- which is the one question a reader of a retired record "
+                    "has")
+            chain.append(successor)
+            successor = claimed[successor]
+
     #: Anchors resolve, or the grounding they claim is unverifiable. A
     #: ``Consistent with`` naming a record this file does not hold is the
     #: carried-forward Task-2 hazard in its markdown spelling: a brain claims
@@ -4337,7 +4464,13 @@ def project_decisions(decisions: dict) -> str:
     """Render ``decisions-effective.md``: the only decision material a brain sees.
 
     QUESTION, ANSWER AND PROVENANCE. No value, no rung name, no rejected
-    alternatives, no consequences, no depth, no scope.
+    alternatives, no consequences, no depth, no scope -- and that claim holds
+    for all three fields, not two of them. ``question`` and ``answer`` are free
+    text and are screened as CONTENT; ``provenance`` is an ENUM and is screened
+    by membership against ``_PROVENANCES``, which is strictly narrower than any
+    content rule and is what an enum field should get. LEFT UNSCREENED it would
+    project ``human -- adopted at 0.85, code-evidenced`` verbatim into the one
+    file a brain reads, through the one projected field the screen missed.
 
     * Adopted answers must be INCLUDED, or brains re-litigate settled ground
       and manufacture the very drift the quorum exists to bound.
@@ -4419,12 +4552,30 @@ def project_decisions(decisions: dict) -> str:
             continue
         if _member(record["action"], _EXTENSION_ACTIONS):
             continue
+        #: ``provenance`` is the third projected field and the only one of the
+        #: three that is an enum. Membership, not a content screen: this
+        #: function declares its input untrusted -- it already re-checks
+        #: ``status`` and ``action`` against their enums for exactly that reason
+        #: -- and a record handed here directly can carry anything in it.
+        #:
+        #: FIRST, and that ordering is load-bearing. ``_text`` below already
+        #: refuses every non-string, so an enum screen placed after it would
+        #: never be handed one, and ``_member``'s whole reason for existing --
+        #: that ``["human"] in frozenset(...)`` raises ``TypeError``, outside
+        #: ``TrackerError`` -- would be unobservable: a bare ``in`` written here
+        #: would pass the suite.
+        if not _member(record.get("provenance"), _PROVENANCES):
+            raise TrackerValidationError(
+                f"{did}: provenance {record.get('provenance')!r} is not one of "
+                f"{sorted(_PROVENANCES)}; provenance is projected verbatim, so "
+                "anything but the enum is arbitrary text written into the one "
+                "file a brain reads")
         missing = [name for name in _PROJECTED_FIELDS if not _text(record.get(name))]
         if missing:
             raise TrackerValidationError(
                 f"{did}: cannot be projected without {missing}; a decision shown "
                 "to a brain without its question is an answer to nothing")
-        for name in ("question", "answer"):
+        for name in _SCREENED_FIELDS:
             leaked = _rung_leak(record[name])
             if leaked is not None:
                 raise TrackerValidationError(

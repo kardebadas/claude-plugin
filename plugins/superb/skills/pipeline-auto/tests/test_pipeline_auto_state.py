@@ -8139,6 +8139,38 @@ DECISION_QUORUM_SECOND_AXIS = (
              "file-exists:cache/redis.conf=present"))
 
 
+#: The two PROJECTED free-text fields, and the exact strings they carry in the
+#: fixture, so a content-screen case plants into the thing the projection
+#: actually reads rather than into a field the whitelist already withholds.
+#: Keyed by the record key the stop message capitalises.
+PLANTED_IN = {
+    "answer": "postgres — Use the existing PostgreSQL instance.",
+    "question": "Which storage engine backs the session table?",
+}
+
+#: A three-generation succession: ``H-001`` retired by ``H-002``, itself retired
+#: by the live ``H-003``. The positive control the cycle rule needs — a rule
+#: that refused every chain longer than one step would satisfy both cycle cases
+#: below and forbid the second time a run ever changes its mind. Each record is
+#: on its own axis so the one-Adopted-per-axis rule is not what is under test.
+def succession_chain() -> str:
+    first = DECISION_HUMAN.replace("- **Status:** Adopted",
+                                   "- **Status:** Superseded")
+    second = (DECISION_HUMAN
+              .replace("## H-001", "## H-002")
+              .replace("<!-- pipeline-auto-decisions/v1 -->\n", "")
+              .replace("- **Axis:** storage-engine", "- **Axis:** cache-layer")
+              .replace("- **Status:** Adopted",
+                       "- **Supersedes:** H-001\n- **Status:** Superseded"))
+    third = (DECISION_HUMAN
+             .replace("## H-001", "## H-003")
+             .replace("<!-- pipeline-auto-decisions/v1 -->\n", "")
+             .replace("- **Axis:** storage-engine", "- **Axis:** queue-broker")
+             .replace("- **Status:** Adopted",
+                      "- **Supersedes:** H-002\n- **Status:** Adopted"))
+    return first + second + third
+
+
 def retired_and_replaced() -> str:
     """``H-001`` retired, beside the record that retires it.
 
@@ -8204,24 +8236,37 @@ def decision_fields_the_parser_reads() -> set[str]:
     anything noticing. A field the parser gains and the fixture omits must widen
     this list by itself, or the totality claim is a claim about a fixture.
 
-    Both spellings the parser uses are collected -- ``fields["x"]`` and
-    ``fields.get("x", ...)`` -- plus ``_REQUIRED_DECISION_FIELDS``, which is
-    iterated through a loop variable no literal scan can see.
+    BOTH RECEIVERS, and that is the second half of the same lesson. The parser
+    reads a field through the raw ``fields`` mapping while the record is being
+    built -- ``fields["x"]``, ``fields.get("x", ...)`` -- and through the
+    already-built record afterwards, ``decisions[did].get("supersedes", "")``.
+    The first version of this walk matched only the ``fields`` receiver, so the
+    ``Supersedes`` validator's field was invisible to it and ``supersedes``
+    dropped out of a set whose docstring claimed to be the call tree's: the
+    MINOR-4 defect, reintroduced by the change that closed MINOR 4.
+    ``_REQUIRED_DECISION_FIELDS`` is unioned in on top, because the parser
+    iterates it through a loop variable no literal scan can see.
     """
+    def reads_a_record(node) -> bool:
+        """The two receivers a decision field is read through."""
+        if isinstance(node, ast.Name) and node.id == "fields":
+            return True
+        return (isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "decisions")
+
     node = function_node(module_source(), "parse_decisions")
     names = set(pas._REQUIRED_DECISION_FIELDS)
     for child in ast.walk(node):
         if (isinstance(child, ast.Subscript)
-                and isinstance(child.value, ast.Name)
-                and child.value.id == "fields"
+                and reads_a_record(child.value)
                 and isinstance(child.slice, ast.Constant)
                 and isinstance(child.slice.value, str)):
             names.add(child.slice.value)
         if (isinstance(child, ast.Call)
                 and isinstance(child.func, ast.Attribute)
                 and child.func.attr == "get"
-                and isinstance(child.func.value, ast.Name)
-                and child.func.value.id == "fields"
+                and reads_a_record(child.func.value)
                 and child.args
                 and isinstance(child.args[0], ast.Constant)
                 and isinstance(child.args[0].value, str)):
@@ -8874,6 +8919,93 @@ class ParseDecisionsTests(DecisionContractCase):
                 + DECISION_SUPERSEDING + second)
         self.refused(text, because="both supersede")
 
+    def test_a_supersedes_cycle_is_refused(self):
+        """Every syntactic check the retirement rules state passes on a cycle:
+        each target exists, each is ``Superseded``, each is claimed exactly
+        once, none is orphaned. And the successor chain never reaches a live
+        record, so "what took its place" — the one question a reader of a
+        retired record has, and the stated purpose of the orphan rule — has no
+        answer. A cycle defeats that rule while satisfying every check it makes.
+        """
+        def retired(did, axis, supersedes):
+            return (DECISION_HUMAN
+                    .replace("<!-- pipeline-auto-decisions/v1 -->\n", "")
+                    .replace("## H-001", f"## {did}")
+                    .replace("- **Axis:** storage-engine", f"- **Axis:** {axis}")
+                    .replace("- **Status:** Adopted",
+                             f"- **Supersedes:** {supersedes}\n"
+                             "- **Status:** Superseded"))
+
+        two = (retired("H-001", "storage-engine", "H-002")
+               + retired("H-002", "cache-layer", "H-001"))
+        three = (retired("H-001", "storage-engine", "H-002")
+                 + retired("H-002", "cache-layer", "H-003")
+                 + retired("H-003", "queue-broker", "H-001"))
+        for length, text in (("2-cycle", two), ("3-cycle", three)):
+            with self.subTest(cycle=length):
+                self.refused(text, because="Supersedes cycle")
+        #: The positive control. A rule that simply forbade a chain longer than
+        #: one step would refuse both cases above and forbid the second time a
+        #: run ever changes its mind about the same thing.
+        parsed = pas.parse_decisions(succession_chain())
+        self.assertEqual(parsed["decisions"]["H-001"]["status"], "Superseded")
+        self.assertEqual(parsed["decisions"]["H-002"]["status"], "Superseded")
+        self.assertEqual(parsed["decisions"]["H-003"]["status"], "Adopted")
+        self.assertEqual(parsed["decisions"]["H-003"]["supersedes"], "H-002")
+
+    def test_a_record_quoting_the_ladder_is_refused_when_it_is_written(self):
+        """The content screen runs HERE and not only in the projection.
+
+        Run only in ``project_decisions``, it fires on a record that is already
+        in the audit trail — and the remedy it prescribes is to reword a
+        sentence, which by then means editing a file ``_decision_sections``
+        refuses to let lose a record. Refused at write time, nothing has been
+        written and rewording is free. The projection keeps the same screen as a
+        backstop, pinned separately over records handed to it directly.
+        """
+        for field, original in PLANTED_IN.items():
+            for leak in ("postgres — adopted at 0.85, code-evidenced, "
+                         "runner-up speculation",
+                         "adopted at 0.85.", "adopted at 0.70",
+                         "adopted at 0.30", "rung=0.85", "(0.55)",
+                         "code-evidenced", "convention-cited",
+                         "engineering-judgement"):
+                with self.subTest(field=field, leak=leak):
+                    self.refused(swap(original, f"{original} {leak}",
+                                      DECISION_HUMAN),
+                                 because=field.capitalize())
+
+    def test_the_content_screen_reads_a_rung_value_as_a_value_and_not_a_substring(self):
+        """``str(0.70)`` is ``'0.7'`` and ``str(0.30)`` is ``'0.3'``, and a
+        substring test matched them inside ANY decimal: a vendor quote of
+        ``$10.85``, a p99 of ``10.3 seconds``. The four records below are
+        realistic decision prose and every one of them was stopped.
+
+        Each is paired with the stop it must not have taken away — the same
+        number written as a rung still stops — so this pins the narrowing and
+        not merely the absence of a screen.
+        """
+        accepted = {
+            "answer": ("batch — the vendor quote is $10.85 per million tokens",
+                       "redis — avoids speculation about disk contention",
+                       "use the schema specified in the RFC"),
+            "question": ("Do we cap the p99 at 10.3 seconds or 20.7 seconds?",
+                         "Which schema is specified in the RFC?",
+                         "Is 20.95 seconds an acceptable p99?"),
+        }
+        for field, original in PLANTED_IN.items():
+            for prose in accepted[field]:
+                with self.subTest(field=field, prose=prose):
+                    parsed = pas.parse_decisions(
+                        swap(original, prose, DECISION_HUMAN))
+                    self.assertEqual(parsed["decisions"]["H-001"][field], prose)
+            #: The paired stop: the same decimals, written as the rung.
+            for leak in ("0.85", "0.3", "0.30", "0.7", "0.70", "0.95"):
+                with self.subTest(field=field, leak=leak):
+                    self.refused(swap(original, f"adopted at {leak} — x",
+                                      DECISION_HUMAN),
+                                 because=field.capitalize())
+
     def test_the_audit_trail_is_read_as_text_and_never_coerced(self):
         for value in (None, 12, b"## H-001\n", ["## H-001"], {"text": "x"},
                       Path("decisions.md")):
@@ -8902,6 +9034,15 @@ class ParseDecisionsTests(DecisionContractCase):
         self.assertIn("consistent_with", read,
                       "the parser stopped reading consistent_with; this test's "
                       "own cautionary case is gone and the claim is weaker")
+        #: The second field the derivation had lost, and it was lost the same
+        #: way: ``supersedes`` is read as ``decisions[did].get(...)`` rather than
+        #: off ``fields``, and a walk that matched only the ``fields`` receiver
+        #: could not see it. Neither field is in ``_REQUIRED_DECISION_FIELDS``,
+        #: so neither has any other way into this list.
+        self.assertIn("supersedes", read,
+                      "the parser stopped reading supersedes, or this walk "
+                      "stopped seeing a field read off a record rather than "
+                      "off fields — the defect this widening closed")
         for key in sorted(read):
             label = decision_field_label(key)
             probe = pas._decision_field(f"- **{label}:** x")
@@ -8981,21 +9122,25 @@ class ProjectDecisionsTests(DecisionContractCase):
         editing the audit trail on its way to a brain would leave the file and
         what the brain read disagreeing about what was decided.
         """
-        planted = {
-            "answer": "postgres — Use the existing PostgreSQL instance.",
-            "question": "Which storage engine backs the session table?",
-        }
-        for field, original in planted.items():
-            for name, value in pas.RUNGS.items():
-                for leak in (name, str(value)):
-                    with self.subTest(field=field, leak=leak):
-                        source = swap(original, f"{original} ({leak})",
-                                      DECISION_HUMAN)
-                        with self.assertRaises(pas.TrackerValidationError) as raised:
-                            self.projected(source)
-                        message = str(raised.exception)
-                        self.assertIn(leak, message)
-                        self.assertIn(field.capitalize(), message)
+        for field, original in PLANTED_IN.items():
+            #: EVERY rung value, in both spellings, because ``str(0.70)`` is
+            #: ``'0.7'`` and a screen built on ``str`` alone accepts ``adopted
+            #: at 0.70`` — the leak written the way the ladder writes it.
+            leaks = [str(value) for value in pas.RUNGS.values()]
+            leaks += [f"{value:.2f}" for value in pas.RUNGS.values()]
+            #: And every rung name the screen still looks for. Derived from the
+            #: module's own tuple, so a ladder that gains a compound name gains
+            #: a case here on the same day.
+            leaks += list(pas._RUNG_NAME_STRINGS)
+            for leak in leaks:
+                with self.subTest(field=field, leak=leak):
+                    source = swap(original, f"{original} ({leak})",
+                                  DECISION_HUMAN)
+                    with self.assertRaises(pas.TrackerValidationError) as raised:
+                        self.projected(source)
+                    message = str(raised.exception)
+                    self.assertIn(leak, message)
+                    self.assertIn(field.capitalize(), message)
         #: The positive control: prose that quotes no rung projects unchanged,
         #: so this is a screen and not a refusal of every free-text field.
         projection = self.projected(DECISION_HUMAN)
@@ -9003,6 +9148,98 @@ class ProjectDecisionsTests(DecisionContractCase):
             with self.subTest(rung=name):
                 self.assertNotIn(name, projection)
                 self.assertNotIn(str(value), projection)
+
+    def test_a_compound_rung_name_is_matched_as_a_word_and_not_a_substring(self):
+        """The name half of the screen is a TOKEN rule, stated rather than
+        assumed. No compound rung name is a substring of an English word today,
+        so this is defensive for the ladder as it stands — and the set is
+        DERIVED (``name for name in RUNGS if "-" in name``), so the day it gains
+        a name that is, the screen is already right instead of already wrong.
+        That is the exact shape of the defect this round was filed for.
+        """
+        for token in pas._RUNG_NAME_STRINGS:
+            with self.subTest(token=token):
+                self.assertEqual(pas._rung_leak(f"adopted {token}, then"), token)
+                self.assertEqual(pas._rung_leak(f"{token}-first"), token)
+                self.assertEqual(pas._rung_leak(token), token)
+                self.assertIsNone(pas._rung_leak(f"{token}ness of the claim"))
+                self.assertIsNone(pas._rung_leak(f"pre{token}"))
+
+    def test_the_two_rung_names_that_are_english_words_are_not_screened(self):
+        """The narrowing, pinned as a DELIBERATE give-up rather than left to be
+        rediscovered as a regression.
+
+        ``specified`` and ``speculation`` are ordinary English words before they
+        are rungs, and the screen that caught them caught "use the schema
+        specified in the RFC" and "redis — avoids speculation about disk
+        contention" — real answers, stopped for saying ordinary things, in a
+        file whose prescribed remedy is to reword a sentence. They are no longer
+        screened, so a bare one of them now reaches a brain; the compound names
+        and every rung VALUE still do not, which is what keeps the leak this
+        screen exists for refused.
+        """
+        unscreened = sorted(set(pas.RUNGS) - set(pas._RUNG_NAME_STRINGS))
+        self.assertEqual(unscreened, ["specified", "speculation"],
+                         "the ladder's single-word names changed; the screen's "
+                         "documented give-up has to change with them")
+        for field, original in PLANTED_IN.items():
+            for name in unscreened:
+                with self.subTest(field=field, name=name):
+                    projection = self.projected(
+                        swap(original, f"{original} ({name})", DECISION_HUMAN))
+                    self.assertIn(f"({name})", projection)
+                    #: And its VALUE is still screened, so no rung loses its
+                    #: number to this narrowing.
+                    self.refused(swap(original,
+                                      f"{original} ({pas.RUNGS[name]})",
+                                      DECISION_HUMAN))
+
+    def test_the_projection_screens_its_content_again_on_what_it_is_handed(self):
+        """The backstop half. ``parse_decisions`` refuses a leaking record at
+        write time, so every file-level case above now stops there — and a
+        projection that had dropped its own screen would pass all of them.
+        ``project_decisions`` declares its input untrusted and is handed records
+        directly, so it screens what it is given.
+        """
+        parsed = pas.parse_decisions(DECISION_HUMAN)
+        for field in ("question", "answer"):
+            for leak in ("adopted at 0.85", "code-evidenced"):
+                with self.subTest(field=field, leak=leak):
+                    record = dict(parsed["decisions"]["H-001"])
+                    record[field] = f"{record[field]} — {leak}"
+                    with self.assertRaises(pas.TrackerValidationError) as raised:
+                        pas.project_decisions({"decisions": {"H-001": record}})
+                    self.assertIn(field.capitalize(), str(raised.exception))
+
+    def test_provenance_is_screened_against_its_enum_before_it_is_projected(self):
+        """The third projected field, and the one the key screen's own argument
+        had not reached.
+
+        ``status`` and ``action`` are re-checked against their enums here
+        because this function declares its input untrusted; ``question`` and
+        ``answer`` are screened as content for the same reason. ``provenance``
+        was screened by neither, so ``human — adopted at 0.85, code-evidenced``
+        projected a rung value AND a rung name verbatim into the one file a
+        brain reads. Membership rather than a content screen, because
+        provenance is an enum and an enum check is strictly narrower.
+        """
+        parsed = pas.parse_decisions(DECISION_HUMAN)
+        for value in ("human — adopted at 0.85, code-evidenced",
+                      "human, code-evidenced", "Human", "HUMAN", "human ",
+                      "humanquorum", "", "   ", "machine", None, 12, 0.85,
+                      ["human"], {"human"}, {"a": 1}):
+            with self.subTest(provenance=value):
+                record = dict(parsed["decisions"]["H-001"])
+                record["provenance"] = value
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.project_decisions({"decisions": {"H-001": record}})
+        #: Both members project, or the screen is a refusal of every record.
+        for value in sorted(pas._PROVENANCES):
+            with self.subTest(provenance=value):
+                record = dict(parsed["decisions"]["H-001"])
+                record["provenance"] = value
+                self.assertIn(f"- **Provenance:** {value}",
+                              pas.project_decisions({"decisions": {"H-001": record}}))
 
     def test_every_field_outside_the_whitelist_stays_out(self):
         """Totality, by construction: a sentinel is written into one extra field

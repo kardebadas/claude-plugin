@@ -6360,6 +6360,40 @@ class ValidateBrainResponseTests(unittest.TestCase):
                 self.assertIn("consistent-with-item-malformed",
                               pas.validate_brain_response(response(consistent_with=[item])))
 
+    def test_an_anchor_must_name_the_thing_it_stands_on(self):
+        """An anchor declares grounding; without an id it names nothing.
+
+        `decision_depth` resolves anchors BY ID, so `{"kind": "decision"}`
+        alone is a schema-valid claim of grounding that resolves to no record —
+        and an anchor that resolves to nothing contributes nothing to the
+        depth walk, so the answer with the least grounding in the run comes
+        back at the shallowest depth there is. That is the Task-2 hazard in its
+        JSON spelling; `_decision_anchors` closed the markdown one.
+
+        A `decision` id is held to the id GRAMMAR because it is the kind whose
+        id is looked up. `spec` and `repo` ids are free text — a spec line, a
+        `path:line` — and are held only to being text, which is the pair that
+        stops this from being a rule that refuses every anchor.
+        """
+        for item in ({"kind": "decision"}, {"kind": "decision", "id": ""},
+                     {"kind": "decision", "id": "   "},
+                     {"kind": "decision", "id": None},
+                     {"kind": "decision", "id": ["H-001"]},
+                     {"kind": "decision", "id": "H-01x"},
+                     {"kind": "decision", "id": "storage-engine"},
+                     {"kind": "spec"}, {"kind": "repo", "id": 12}):
+            with self.subTest(anchor=item):
+                self.assertIn(
+                    "consistent-with-item-malformed",
+                    pas.validate_brain_response(response(consistent_with=[item])))
+        for item in ({"kind": "decision", "id": "H-001"},
+                     {"kind": "decision", "id": "Q-abc123def456"},
+                     {"kind": "spec", "id": "docs/design.md:112"},
+                     {"kind": "repo", "id": "db/engine.py:1"}):
+            with self.subTest(accepted=item):
+                self.assertEqual(
+                    pas.validate_brain_response(response(consistent_with=[item])), [])
+
     def test_an_evidence_item_is_checked_against_its_own_kind(self):
         """A ``repo`` citation carries a line number and a ``decision`` citation
         carries the decision it cites. ``line`` is an int and NOT a bool, for
@@ -9506,6 +9540,733 @@ class FindingsLedgerTemplateTests(unittest.TestCase):
         for value in pas.RUNGS.values():
             with self.subTest(value=value):
                 self.assertNotIn(str(value), text)
+
+# --- contradiction and depth ----------------------------------------------
+
+#: A human budget grant. `dispatch.extend-budget` specifically, and not the
+#: quorum one: an implementation that excluded extensions by writing
+#: `action == "quorum.extend-budget"` — which is what the brief for this task
+#: proposed — passes every case built on the quorum spelling and fails this one.
+#: Its `Answer` carries a CEILING, which is what makes it not an option on an
+#: axis and not grounding for anything.
+DECISION_BUDGET_GRANT = """
+## H-009 — More quorum adoptions in this phase
+
+- **Question:** May the run adopt beyond its per-phase drift budget?
+- **Axis:** drift-budget
+- **Answer:** 3 more adoptions in P04 — the remaining tasks all turn on one unanswered choice.
+- **Decision action:** dispatch.extend-budget
+- **Provenance:** human
+- **Depth:** 0
+- **Consequences:** file-exists:quorum/extensions.json=present
+- **Scope:** P04
+- **Status:** Adopted
+"""
+
+#: An OPEN record: the question written down before it has an answer, which
+#: `templates/decisions.md` requires so a question cannot be silently dropped.
+#: It binds nothing and can be anchored to nothing.
+DECISION_OPEN = """
+## H-020 — Queue broker
+
+- **Question:** Which broker carries the work queue?
+- **Axis:** queue-broker
+- **Answer:** pending user response
+- **Decision action:** none
+- **Provenance:** human
+- **Depth:** 0
+- **Scope:** T07
+- **Status:** Open
+"""
+
+
+def derived_decision(did: str, depth: int, *, axis: str | None = None,
+                     anchors: str = "") -> str:
+    """One quorum record on its own axis, at a stated depth.
+
+    Each on its own axis so that the one-Adopted-per-axis rule is never what a
+    depth case is testing, and every field is spelled the way the record
+    grammar states it so the fixture is parsed rather than assumed.
+    """
+    anchor_line = f"- **Consistent with:** {anchors}\n" if anchors else ""
+    return (f"\n## {did} — derived at depth {depth}\n\n"
+            f"- **Question:** What follows from the decision above?\n"
+            f"- **Axis:** {axis or ('axis-' + did)}\n"
+            f"- **Answer:** option-{did} — the answer derived at that distance.\n"
+            f"- **Decision action:** quorum.adopt\n"
+            f"- **Provenance:** quorum\n"
+            f"- **Depth:** {depth}\n"
+            f"{anchor_line}"
+            f"- **Consequences:** file-exists:build/{did}.txt=present\n"
+            f"- **Scope:** T05\n- **Status:** Adopted\n")
+
+
+def a_ladder_of_depths() -> str:
+    """`H-001` at depth 0, then quorum records at depth 1 and depth 2.
+
+    The depth-2 record anchors to the depth-1 record and that one to `H-001`,
+    so the chain the fixture states is the chain `decision_depth` walks — a
+    fixture whose depths were free-standing numbers would let the walk agree
+    with it for the wrong reason.
+    """
+    return (DECISION_HUMAN
+            + derived_decision("Q-aaaaaaaaaaaa", 1, anchors="H-001")
+            + derived_decision("Q-bbbbbbbbbbbb", 2, anchors="Q-aaaaaaaaaaaa"))
+
+
+def candidate(**overrides):
+    """A well-formed candidate answer on the decided axis; override one field.
+
+    It AGREES with `H-001` as it stands — same option, same consequence — so
+    every rejection case below is this candidate with exactly one thing changed
+    and cannot pass because the base was already a contradiction.
+    """
+    base = {
+        "axis": "storage-engine",
+        "answer_key": "postgres",
+        "consequences": [{"kind": "file-exists", "subject": "db/session.sql",
+                          "value": "present"}],
+    }
+    base.update(overrides)
+    return base
+
+
+def keys_read_from(source: str, function: str, receiver: str) -> set[str]:
+    """Every string key ``function`` reads off ``receiver``, from its own AST.
+
+    Derived from the call tree and not from a fixture, which is the standing
+    rule a totality claim in this suite is held to. A field the function starts
+    reading widens the case list by itself; a field it stops reading drops out,
+    and the test that uses this asserts the set it got so that a rename cannot
+    empty it silently.
+    """
+    node = function_node(source, function)
+    names = set()
+    for child in ast.walk(node):
+        if (isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Attribute)
+                and child.func.attr in ("get", "pop")
+                and isinstance(child.func.value, ast.Name)
+                and child.func.value.id == receiver
+                and child.args
+                and isinstance(child.args[0], ast.Constant)
+                and isinstance(child.args[0].value, str)):
+            names.add(child.args[0].value)
+        if (isinstance(child, ast.Subscript)
+                and isinstance(child.value, ast.Name)
+                and child.value.id == receiver
+                and isinstance(child.slice, ast.Constant)
+                and isinstance(child.slice.value, str)):
+            names.add(child.slice.value)
+    return names
+
+
+#: Hostile JSON values, for the claim that a malformed candidate or a malformed
+#: anchor never escapes the exception family. Both halves of the standing rule
+#: are here for every field it is applied to: UNHASHABLE values (`[]`, `{}`,
+#: and the populated forms of each), which a bare `in` against a frozenset
+#: raises `TypeError` on, and WRONG-TYPED SCALARS (`None`, `True`, `0`, `0.85`)
+#: which hash fine and then break whatever reads them as text.
+HOSTILE_JSON_VALUES = (
+    None, True, False, 0, 1, -1, 0.85, "", "   ", "postgres", "new", "H-001",
+    "storage-engine", "\x00", "a b", "x" * 300, [], ["postgres"],
+    [{"kind": "file-exists"}], {}, {"kind": "file-exists"}, ("postgres",),
+)
+
+
+def parsed_records(text: str) -> dict:
+    """`{D-ID: record}` for one decisions file, as mutable copies.
+
+    Copies, so a case that moves a record onto another axis cannot leak that
+    change into the next case through a shared parse.
+    """
+    parsed = pas.parse_decisions(text)
+    return {did: dict(record) for did, record in parsed["decisions"].items()}
+
+
+def index_over(records: dict, order: list) -> dict:
+    """A `parse_decisions`-shaped result whose axis index states `order`.
+
+    Assembled rather than parsed on purpose, and only where the file grammar
+    cannot state the shape under test. Every record in it is genuine parser
+    output; the only thing built by hand is the index.
+    """
+    index: dict = {}
+    for did in order:
+        index.setdefault(records[did]["axis"], []).append(did)
+    return {"decisions": records, "axis_index": index}
+
+
+class CheckContradictionTests(DecisionContractCase):
+    """Does this candidate disagree with something the run is already bound by.
+
+    Structural and never semantic: same axis, then a different option or a
+    different value asserted for the same subject. Nothing here reads an
+    answer for meaning.
+
+    THE FAILURE THIS CLASS IS SHAPED AROUND is `None` arriving because the
+    check could not work the answer out. `None` is the clear verdict — it says
+    the candidate was compared and is compatible — so every case that cannot be
+    compared is asserted to STOP rather than to come back clear. Each rejection
+    is paired with a case that must still be ACCEPTED: an implementation that
+    refused every candidate would satisfy every stop below and adopt nothing
+    for the rest of the run.
+    """
+
+    def setUp(self):
+        self.decisions = pas.parse_decisions(DECISION_HUMAN)
+        self.record = self.decisions["decisions"]["H-001"]
+        #: The fixture properties every case below depends on, asserted here so
+        #: the fixture cannot quietly stop satisfying them.
+        self.assertEqual(self.record["status"], "Adopted")
+        self.assertEqual(self.record["provenance"], "human")
+        self.assertEqual(self.record["answer_key"], "postgres")
+        self.assertEqual(self.record["consequences"],
+                         {("file-exists", "db/session.sql"): "present"})
+
+    def test_an_agreeing_candidate_is_not_a_contradiction(self):
+        """The positive control the whole class rests on. Same option, same
+        assertion about the repository: nothing disagrees, and the answer is
+        the clear one rather than the absence of a verdict."""
+        self.assertIsNone(pas.check_contradiction(self.decisions, candidate()))
+
+    def test_a_different_option_on_a_decided_axis_names_the_decision(self):
+        """The D-ID and not a boolean: the rejection status and the terminal
+        report both key off WHICH decision was contradicted."""
+        self.assertEqual(
+            pas.check_contradiction(self.decisions, candidate(
+                answer_key="sqlite",
+                consequences=[{"kind": "file-exists",
+                               "subject": "db/session.sql", "value": "absent"}])),
+            "H-001")
+
+    def test_the_same_option_asserting_an_opposite_consequence_is_caught(self):
+        """The consequence branch, reached on its own.
+
+        The brief's version of this case gave the candidate a BLANK answer key
+        and claimed the consequence was what caught it. It was not: a blank key
+        differs from `postgres`, so the answer-key branch returned first and the
+        case passed without the consequence comparison ever running. Here the
+        two keys are asserted EQUAL, so the only thing left to disagree is the
+        consequence.
+        """
+        probe = candidate(consequences=[{"kind": "file-exists",
+                                         "subject": "db/session.sql",
+                                         "value": "absent"}])
+        self.assertEqual(probe["answer_key"], self.record["answer_key"],
+                         "this case is about the consequence branch; equal "
+                         "answer keys are what make it reachable")
+        self.assertEqual(pas.check_contradiction(self.decisions, probe), "H-001")
+
+    def test_a_consequence_about_something_else_is_not_a_contradiction(self):
+        """The pair for the case above. Consequences are compared on the
+        subjects both sides assert, so an assertion the record never made is
+        new information and not a disagreement — and an implementation that
+        called every differing consequence a clash would fail here."""
+        probe = candidate(consequences=[{"kind": "file-exists",
+                                         "subject": "db/pool.sql",
+                                         "value": "absent"}])
+        self.assertNotIn(("file-exists", "db/pool.sql"),
+                         self.record["consequences"])
+        self.assertIsNone(pas.check_contradiction(self.decisions, probe))
+
+    def test_an_axis_nothing_has_decided_is_not_a_contradiction(self):
+        """A candidate on an axis the run has never decided contradicts
+        nothing. This is the one legitimate `None`-with-no-comparison, and it
+        is legitimate because there is nothing on the axis to compare to."""
+        probe = candidate(axis="log-format", answer_key="sqlite")
+        self.assertNotIn("log-format", self.decisions["axis_index"])
+        self.assertIsNone(pas.check_contradiction(self.decisions, probe))
+
+    def test_a_blank_answer_key_stops_rather_than_returning_a_verdict(self):
+        """A candidate that names no option cannot be compared as one.
+
+        Under the brief's implementation this returned `H-001` — the blank key
+        differs from `postgres` — so a candidate whose consequences AGREE with
+        the record in every particular was reported as contradicting a human
+        decision and routed to `rejected-contradicts-human`. The agreeing form
+        is the case below: it is a stop, and it is emphatically not a verdict.
+        """
+        for value in ("", "   ", None):
+            with self.subTest(answer_key=value):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.check_contradiction(self.decisions,
+                                            candidate(answer_key=value))
+
+    def test_a_generic_approval_is_not_an_option_on_an_axis(self):
+        """`yes` names nothing, so it differs from every real answer key and
+        would be reported as contradicting whatever the axis had decided. The
+        rule does not vary by provenance, which is what `parse_decisions` says
+        about the same string in a record."""
+        for value in ("yes", "proceed", "LGTM", "ok."):
+            with self.subTest(answer_key=value):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.check_contradiction(self.decisions,
+                                            candidate(answer_key=value))
+        #: The pair. `go` is a language and `no` is a refusal, and both are
+        #: real answers a candidate may name.
+        for value in ("go", "no"):
+            with self.subTest(accepted=value):
+                self.assertEqual(
+                    pas.check_contradiction(self.decisions,
+                                            candidate(answer_key=value)),
+                    "H-001")
+
+    def test_a_candidate_with_no_consequences_cannot_be_compared(self):
+        """The fail-open this section exists to close.
+
+        With no consequences the intersection with every record is empty, so
+        the comparison collapses to the answer key alone and two genuinely
+        incompatible answers that happen to name the same option pass. The
+        response schema requires consequences for that reason; accepting a
+        candidate without them here would reopen the hole one layer down.
+        """
+        for value in ([], None, "file-exists:db/session.sql=present",
+                      [{"kind": "file-exists", "subject": "db/session.sql"}],
+                      [{"kind": "invented", "subject": "x", "value": "y"}]):
+            with self.subTest(consequences=value):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.check_contradiction(self.decisions,
+                                            candidate(consequences=value))
+        self.assertIsNone(pas.check_contradiction(self.decisions, candidate()))
+
+    def test_a_candidate_that_asserts_one_subject_twice_is_a_stop(self):
+        """A candidate holding both values for one subject agrees with an
+        adopted record through whichever of the two survives into the map."""
+        with self.assertRaises(pas.QuorumSchemaInvalid):
+            pas.check_contradiction(self.decisions, candidate(consequences=[
+                {"kind": "file-exists", "subject": "db/session.sql",
+                 "value": "present"},
+                {"kind": "file-exists", "subject": "db/session.sql",
+                 "value": "absent"}]))
+
+    def test_the_reserved_axis_literal_is_refused_rather_than_passed(self):
+        """`new` clears the check by being unrecognisable, which is exactly the
+        fail-open shape the master plan carries forward.
+
+        The second assertion is why it has to be refused HERE: a decision
+        record may not carry `new` as its axis, so the index can never hold it
+        and a candidate arriving on it would find no records, be compared with
+        nothing, and come back clear.
+        """
+        with self.assertRaises(pas.QuorumSchemaInvalid):
+            pas.check_contradiction(self.decisions,
+                                    candidate(axis=pas._RESERVED_AXIS))
+        self.refused(
+            DECISION_HUMAN.replace("- **Axis:** storage-engine",
+                                   f"- **Axis:** {pas._RESERVED_AXIS}"),
+            because="reserved literal")
+
+    def test_the_axis_is_screened_before_it_is_used_as_a_lookup_key(self):
+        """An unhashable axis raises `TypeError` inside `dict.get` and a
+        non-string one raises it inside the token grammar, which indexes its
+        argument. Both are outside `TrackerError`, and both arrive before
+        anything has established what the axis is."""
+        for value in (["storage-engine"], {"axis": "storage-engine"}, 12, None,
+                      True, "", "storage engine", "-leading-hyphen"):
+            with self.subTest(axis=value):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.check_contradiction(self.decisions,
+                                            candidate(axis=value))
+
+    def test_a_superseded_decision_binds_nothing_and_the_live_one_does(self):
+        """Both halves, because only the pair distinguishes "retired records
+        are skipped" from "the first record on the axis is used".
+
+        `H-001` is retired holding `sqlite`; the record that replaced it holds
+        `postgres`. A candidate naming `postgres` agrees with what binds and
+        must come back clear even though it contradicts the retired answer, and
+        a candidate naming `sqlite` must be rejected against the SUCCESSOR and
+        never against the record that was withdrawn.
+        """
+        decisions = pas.parse_decisions(retired_and_replaced())
+        self.assertEqual(decisions["decisions"]["H-001"]["status"], "Superseded")
+        self.assertEqual(decisions["decisions"]["H-001"]["answer_key"], "sqlite")
+        live = decisions["decisions"]["Q-abc123def456"]
+        self.assertEqual((live["status"], live["answer_key"]),
+                         ("Adopted", "postgres"))
+        self.assertIsNone(pas.check_contradiction(decisions, candidate()))
+        self.assertEqual(
+            pas.check_contradiction(decisions, candidate(
+                answer_key="sqlite",
+                consequences=[{"kind": "file-exists",
+                               "subject": "db/session.sql", "value": "absent"}])),
+            "Q-abc123def456")
+
+    def test_an_open_decision_binds_nothing(self):
+        """An `Open` record is the question written down before it has an
+        answer. Its placeholder differs from every real answer key, so counting
+        it would reject every candidate on the axis it is holding open."""
+        decisions = pas.parse_decisions(DECISION_HUMAN + DECISION_OPEN)
+        self.assertEqual(decisions["decisions"]["H-020"]["status"], "Open")
+        self.assertEqual(decisions["decisions"]["H-020"]["axis"], "queue-broker")
+        self.assertIsNone(pas.check_contradiction(
+            decisions, candidate(axis="queue-broker", answer_key="redis")))
+
+    def test_a_budget_grant_is_not_an_answer_on_an_axis(self):
+        """BOTH extension actions, which is what the brief's `action ==
+        "quorum.extend-budget"` missed.
+
+        A grant's answer is a ceiling rather than an option, so compared as an
+        answer key it disagrees with every real answer and would reject the
+        first candidate ever raised on the axis it was recorded against.
+        """
+        decisions = pas.parse_decisions(DECISION_HUMAN + DECISION_BUDGET_GRANT)
+        grant = decisions["decisions"]["H-009"]
+        self.assertEqual((grant["status"], grant["action"]),
+                         ("Adopted", "dispatch.extend-budget"))
+        self.assertIn(grant["action"], pas._EXTENSION_ACTIONS)
+        self.assertNotEqual(grant["action"], "quorum.extend-budget",
+                            "this case exists to catch an exclusion written "
+                            "against the quorum spelling alone")
+        self.assertIsNone(pas.check_contradiction(
+            decisions, candidate(axis="drift-budget", answer_key="no more")))
+
+    def test_human_decisions_are_reported_ahead_of_quorum_ones(self):
+        """Which D-ID comes back decides the rejection status.
+
+        ASSEMBLED RATHER THAN PARSED, and the second assertion says why: an
+        axis holds at most one Adopted decision, so no legal `decisions.md` can
+        state a human and a quorum decision both binding on one axis — a later
+        adoption supersedes the record standing there. The ordering is
+        therefore a backstop for a caller that assembles a mapping, and every
+        record in this one is still genuine parser output.
+
+        Both index orders are asserted. One alone would pass on a function that
+        simply returned the first id it was handed.
+        """
+        self.refused(DECISION_HUMAN + DECISION_QUORUM,
+                     because="Adopted decisions")
+        records = parsed_records(DECISION_HUMAN + DECISION_QUORUM_SECOND_AXIS)
+        for record in records.values():
+            record["axis"] = "storage-engine"
+        clash = candidate(answer_key="sqlite",
+                          consequences=[{"kind": "file-exists",
+                                         "subject": "db/session.sql",
+                                         "value": "absent"}])
+        #: Each record contradicts the candidate ON ITS OWN, so the case is
+        #: about which id is REPORTED and not about which one disagrees.
+        for did in ("H-001", "Q-abc123def456"):
+            with self.subTest(alone=did):
+                self.assertEqual(
+                    pas.check_contradiction(
+                        index_over({did: records[did]}, [did]), clash), did)
+        for order in (["H-001", "Q-abc123def456"], ["Q-abc123def456", "H-001"]):
+            with self.subTest(order=order):
+                self.assertEqual(
+                    pas.check_contradiction(index_over(records, order), clash),
+                    "H-001")
+
+    def test_a_record_enum_is_screened_by_membership_and_not_by_a_bare_in(self):
+        """`["Adopted"] in frozenset(...)` raises `TypeError`, which is outside
+        this module's family and escapes every handler a controller has
+        written. The three enum fields are read before anything has established
+        a type, so this is where an unhashable value actually arrives."""
+        for field in ("status", "action", "provenance"):
+            for value in (["Adopted"], {"status": "Adopted"}, 12, None):
+                with self.subTest(field=field, value=value):
+                    records = parsed_records(DECISION_HUMAN)
+                    records["H-001"][field] = value
+                    with self.assertRaises(pas.TrackerValidationError):
+                        pas.check_contradiction(
+                            index_over(records, ["H-001"]), candidate())
+
+    def test_a_record_the_comparison_cannot_read_stops_rather_than_deciding(self):
+        """A record whose answer key or consequence map is not the shape
+        `parse_decisions` builds would report a difference that is a fact about
+        the record rather than about the answer — under the candidate's name."""
+        for field, value in (("answer_key", None), ("answer_key", 12),
+                             ("answer_key", ["postgres"]), ("answer_key", ""),
+                             ("consequences", None), ("consequences", 12),
+                             ("consequences", "file-exists:x=present"),
+                             ("consequences", [("file-exists", "x")]),
+                             ("consequences", {"file-exists": "present"}),
+                             ("consequences", {("file-exists", 1): "present"}),
+                             ("consequences", {("file-exists", "x"): 1})):
+            with self.subTest(field=field, value=value):
+                records = parsed_records(DECISION_HUMAN)
+                records["H-001"][field] = value
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.check_contradiction(
+                        index_over(records, ["H-001"]), candidate())
+
+    def test_an_index_and_the_records_that_disagree_are_a_stop(self):
+        """An index naming a record the run does not hold would compare the
+        candidate against whichever records survived the disagreement."""
+        records = parsed_records(DECISION_HUMAN)
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.check_contradiction(
+                {"decisions": records,
+                 "axis_index": {"storage-engine": ["H-001", "H-777"]}},
+                candidate())
+        for value in ("H-001", 12, None, {"H-001": 1}):
+            with self.subTest(ids=value):
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.check_contradiction(
+                        {"decisions": records,
+                         "axis_index": {"storage-engine": value}}, candidate())
+
+    def test_the_whole_parse_result_is_required_and_not_the_records_alone(self):
+        """A shape this cannot read reports every candidate as contradicting
+        nothing, which is indistinguishable from a run that has decided
+        nothing and is the most permissive answer available."""
+        for value in (parsed_records(DECISION_HUMAN), None, [], "decisions",
+                      {"decisions": None}, {"decisions": {}}):
+            with self.subTest(decisions=value):
+                with self.assertRaises(pas.TrackerError):
+                    pas.check_contradiction(value, candidate())
+        #: `{"decisions": {}}` is readable and simply holds nothing; it fails
+        #: above only for its missing index, so the pair is asserted here.
+        self.assertIsNone(pas.check_contradiction(
+            {"decisions": {}, "axis_index": {}}, candidate()))
+
+    def test_no_candidate_shape_escapes_the_tracker_error_family(self):
+        """TOTALITY, over the fields this function actually reads.
+
+        The case list is derived from `check_contradiction`'s own AST and from
+        the consequence screen it delegates to, not from the fixture and not
+        from memory — a field either function starts reading widens it by
+        itself. Every field is varied with an unhashable value and with a
+        wrong-typed scalar, and the whole candidate is varied too.
+        """
+        source = module_source()
+        fields = keys_read_from(source, "check_contradiction", "candidate")
+        self.assertEqual(fields, {"axis", "answer_key", "consequences"},
+                         "the fields check_contradiction reads have changed; "
+                         "this claim is about the call tree, so widen the case "
+                         "list rather than this assertion")
+        item_fields = (keys_read_from(source, "_candidate_consequences", "item")
+                       | keys_read_from(source, "_consequence_problems", "item"))
+        self.assertTrue(item_fields, "the consequence screen reads no field; "
+                                     "this totality claim has gone hollow")
+        probes = [value for value in HOSTILE_JSON_VALUES]
+        for field in sorted(fields):
+            for value in HOSTILE_JSON_VALUES:
+                probes.append(candidate(**{field: value}))
+        for field in sorted(item_fields):
+            for value in HOSTILE_JSON_VALUES:
+                item = {"kind": "file-exists", "subject": "db/session.sql",
+                        "value": "present"}
+                item[field] = value
+                probes.append(candidate(consequences=[item]))
+        for probe in probes:
+            with self.subTest(candidate=repr(probe)[:70]):
+                try:
+                    result = pas.check_contradiction(self.decisions, probe)
+                except pas.TrackerError:
+                    continue
+                except Exception as escaped:    # noqa: BLE001 - that is the claim
+                    raise AssertionError(
+                        f"{type(escaped).__name__}({escaped}) escaped "
+                        "check_contradiction; nothing outside TrackerError may "
+                        "leave this module") from escaped
+                self.assertTrue(result is None or isinstance(result, str))
+
+
+class DecisionDepthTests(DecisionContractCase):
+    """How far from the last thing a human actually said this answer stands.
+
+    Human is 0, an answer citing only depth-0 material is 1, and `DEPTH_CAP` is
+    2 — depth 3 is where a run stops building the user's product and starts
+    building its own.
+
+    EVERY ANCHOR EITHER COUNTS OR STOPS. An anchor that is skipped contributes
+    0, and an answer whose anchors are all skipped comes back at depth 1: the
+    shallowest and most adoptable depth there is, handed to the response with
+    the least grounding behind it. Every case below that asserts a stop is
+    asserting that the alternative was that number.
+    """
+
+    def setUp(self):
+        self.decisions = pas.parse_decisions(DECISION_HUMAN)
+        self.assertEqual(self.decisions["decisions"]["H-001"]["depth"], 0,
+                         "a human decision is depth 0; every count below is "
+                         "measured from it")
+
+    def test_an_answer_citing_only_a_human_decision_is_depth_one(self):
+        self.assertEqual(
+            pas.decision_depth(self.decisions,
+                               [{"kind": "decision", "id": "H-001"}]), 1)
+
+    def test_an_answer_citing_only_the_spec_is_depth_one(self):
+        """The specification and the repository are facts rather than
+        inferences: they are where the run started, not somewhere it reasoned
+        its way to, so they contribute 0."""
+        for anchor in ({"kind": "spec", "id": "spec.md:12"},
+                       {"kind": "repo", "id": "db/engine.py:1"}):
+            with self.subTest(anchor=anchor):
+                self.assertEqual(pas.decision_depth(self.decisions, [anchor]), 1)
+
+    def test_depth_accumulates_and_three_exceeds_the_cap(self):
+        decisions = pas.parse_decisions(a_ladder_of_depths())
+        self.assertEqual(decisions["decisions"]["Q-aaaaaaaaaaaa"]["depth"], 1)
+        self.assertEqual(decisions["decisions"]["Q-bbbbbbbbbbbb"]["depth"], 2)
+        self.assertEqual(
+            pas.decision_depth(decisions,
+                               [{"kind": "decision", "id": "Q-aaaaaaaaaaaa"}]), 2)
+        self.assertEqual(
+            pas.decision_depth(decisions,
+                               [{"kind": "decision", "id": "Q-bbbbbbbbbbbb"}]), 3)
+        self.assertGreater(3, pas.DEPTH_CAP)
+
+    def test_the_deepest_anchor_sets_the_depth(self):
+        """The MAXIMUM and never a mean, a sum or a count. Asserted in both
+        orders so a walk that simply kept the last one it saw fails."""
+        decisions = pas.parse_decisions(a_ladder_of_depths())
+        deep = {"kind": "decision", "id": "Q-bbbbbbbbbbbb"}
+        shallow = {"kind": "decision", "id": "H-001"}
+        spec = {"kind": "spec", "id": "spec.md:12"}
+        for anchors in ([deep, shallow, spec], [spec, shallow, deep]):
+            with self.subTest(anchors=[a["id"] for a in anchors]):
+                self.assertEqual(pas.decision_depth(decisions, anchors), 3)
+
+    def test_an_anchor_that_names_no_decision_is_a_stop(self):
+        """THE CARRIED-FORWARD QUESTION, ruled here.
+
+        Task 4 closed the markdown half — `Consistent with` in `decisions.md`
+        is ids only, each resolving to a record the file holds. The JSON half
+        reached this function still open: an anchor is what a brain SENDS, and
+        the response schema checked its `kind` and nothing else, so
+        `{"kind": "decision"}` was a schema-valid claim of grounding that names
+        no decision. Resolved to nothing and skipped it contributes 0, and the
+        answer with the least grounding in the run comes back at depth 1.
+
+        Both layers are now closed and both are asserted here, because this
+        function is also called with mappings that never went through the
+        response validator.
+        """
+        for anchor in ({"kind": "decision"},
+                       {"kind": "decision", "id": ""},
+                       {"kind": "decision", "id": "   "},
+                       {"kind": "decision", "id": None},
+                       {"kind": "decision", "id": ["H-001"]},
+                       {"kind": "decision", "id": "H-01x"},
+                       {"kind": "decision", "id": "db/engine.py:1"},
+                       {"kind": "decision", "id": "storage-engine"}):
+            with self.subTest(anchor=anchor):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.decision_depth(self.decisions, [anchor])
+                self.assertIn(
+                    "consistent-with-item-malformed",
+                    pas.validate_brain_response(response(consistent_with=[anchor])),
+                    "the response schema lets this anchor through; the stop "
+                    "above is then the only thing between it and a depth of 1")
+        #: The pair. A decision anchor that DOES name a live record resolves,
+        #: and the response carrying it is schema-valid.
+        live = {"kind": "decision", "id": "H-001"}
+        self.assertEqual(pas.decision_depth(self.decisions, [live]), 1)
+        self.assertEqual(pas.validate_brain_response(response(consistent_with=[live])), [])
+
+    def test_an_anchor_naming_a_decision_the_run_does_not_hold_is_a_stop(self):
+        """Grounding the audit trail cannot produce is grounding nothing can
+        check. Counting it as absent counts it as costless."""
+        with self.assertRaises(pas.QuorumSchemaInvalid):
+            pas.decision_depth(self.decisions,
+                               [{"kind": "decision", "id": "H-777"}])
+
+    def test_an_unknown_anchor_kind_is_a_stop_and_the_kind_is_screened(self):
+        """An unrecognised kind contributes 0, so an answer anchored entirely
+        to kinds nobody defined comes back at depth 1. The unhashable cases are
+        the membership pin: `["decision"] in frozenset(...)` raises
+        `TypeError`, outside this module's family, and `kind` is the first
+        field read off an anchor so it is where such a value arrives."""
+        for value in ("hunch", "", None, 12, True, ["decision"],
+                      {"kind": "decision"}, "Decision"):
+            with self.subTest(kind=value):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.decision_depth(self.decisions,
+                                       [{"kind": value, "id": "H-001"}])
+        for value in sorted(pas._ANCHOR_KINDS):
+            with self.subTest(accepted=value):
+                self.assertEqual(
+                    pas.decision_depth(self.decisions,
+                                       [{"kind": value, "id": "H-001"}]), 1)
+
+    def test_an_answer_anchored_to_nothing_is_a_stop(self):
+        """Depth measures distance from something a human said. With no anchor
+        there is nothing to measure from, so the distance is unbounded by
+        construction — and the permissive reading of unbounded is 1."""
+        for value in ([], None, "H-001", 12, {}, ({"kind": "spec", "id": "s"},)):
+            with self.subTest(consistent_with=value):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.decision_depth(self.decisions, value)
+
+    def test_a_retired_or_unanswered_anchor_is_a_stop(self):
+        """A `Superseded` record was retired, an `Open` one has no answer, and
+        a budget grant's answer is a ceiling. None of the three is ever
+        projected to a brain, so an answer standing on one is standing on
+        something it could not have read: counted it prices that claim at the
+        retired record's depth, skipped it prices it at zero.
+        """
+        decisions = pas.parse_decisions(
+            retired_and_replaced() + DECISION_OPEN + DECISION_BUDGET_GRANT)
+        for did, why in (("H-001", "Superseded"), ("H-020", "Open"),
+                         ("H-009", "a budget grant")):
+            with self.subTest(anchor=did, why=why):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.decision_depth(
+                        decisions, [{"kind": "decision", "id": did}])
+        #: The pair: the record that REPLACED the retired one is anchorable.
+        self.assertEqual(
+            decisions["decisions"]["Q-abc123def456"]["status"], "Adopted")
+        self.assertEqual(
+            pas.decision_depth(
+                decisions, [{"kind": "decision", "id": "Q-abc123def456"}]), 2)
+
+    def test_a_depth_that_is_not_a_count_is_a_stop(self):
+        """`True` is not a depth of 1 and `"1"` cannot be added to. A depth
+        that cannot be read would otherwise be compared against `DEPTH_CAP`
+        by whatever `max` made of it."""
+        for value in (True, "1", 1.0, None, -1, ["1"], {}):
+            with self.subTest(depth=value):
+                records = parsed_records(DECISION_HUMAN)
+                records["H-001"]["depth"] = value
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.decision_depth(index_over(records, ["H-001"]),
+                                       [{"kind": "decision", "id": "H-001"}])
+
+    def test_the_whole_parse_result_is_required_and_not_the_records_alone(self):
+        for value in (parsed_records(DECISION_HUMAN), None, [], "decisions",
+                      {"decisions": None}):
+            with self.subTest(decisions=value):
+                with self.assertRaises(pas.TrackerError):
+                    pas.decision_depth(value,
+                                       [{"kind": "decision", "id": "H-001"}])
+
+    def test_no_anchor_shape_escapes_the_tracker_error_family(self):
+        """TOTALITY, over the fields this function actually reads.
+
+        Derived from `decision_depth`'s own AST rather than from memory, with
+        every field varied by an unhashable value and by a wrong-typed scalar,
+        and with the container itself varied too.
+        """
+        fields = keys_read_from(module_source(), "decision_depth", "entry")
+        self.assertEqual(fields, {"kind", "id"},
+                         "the fields decision_depth reads off an anchor have "
+                         "changed; this claim is about the call tree, so widen "
+                         "the case list rather than this assertion")
+        probes = [value for value in HOSTILE_JSON_VALUES]
+        probes.extend([value] for value in HOSTILE_JSON_VALUES)
+        for field in sorted(fields):
+            for value in HOSTILE_JSON_VALUES:
+                anchor = {"kind": "decision", "id": "H-001"}
+                anchor[field] = value
+                probes.append([anchor])
+                probes.append([{"kind": "spec", "id": "spec.md:1"}, anchor])
+        for probe in probes:
+            with self.subTest(consistent_with=repr(probe)[:70]):
+                try:
+                    depth = pas.decision_depth(self.decisions, probe)
+                except pas.TrackerError:
+                    continue
+                except Exception as escaped:    # noqa: BLE001 - that is the claim
+                    raise AssertionError(
+                        f"{type(escaped).__name__}({escaped}) escaped "
+                        "decision_depth; nothing outside TrackerError may "
+                        "leave this module") from escaped
+                self.assertIsInstance(depth, int)
+                self.assertGreaterEqual(depth, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

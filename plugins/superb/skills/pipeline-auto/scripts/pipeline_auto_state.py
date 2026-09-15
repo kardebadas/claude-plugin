@@ -3311,12 +3311,35 @@ def _consequence_problems(consequences) -> list[str]:
 
 
 def _anchor_problems(anchors) -> list[str]:
+    """What an answer says it stands on, checked as an anchor and not a shape.
+
+    THE ID IS REQUIRED, and for a ``decision`` it must BE a decision id. An
+    anchor of ``{"kind": "decision"}`` alone was schema-valid until this line
+    existed: it declares grounding, names nothing, and reaches ``decision_depth``
+    -- which resolves anchors BY ID -- as an anchor that resolves to no record.
+    Skipped there it contributes 0 and the answer comes back at depth 1, the
+    shallowest and most adoptable depth there is, awarded to the response with
+    the least grounding behind it. That is the Task-2 hazard in its JSON
+    spelling; Task 4 closed the markdown one in ``_decision_anchors``, which
+    this mirrors field for field.
+
+    ``spec`` and ``repo`` ids are free text -- a spec line, a ``path:line`` --
+    so they are held only to being text. A ``decision`` id is held to the
+    grammar, because that is the kind whose id is looked UP.
+    """
     if not isinstance(anchors, list) or not anchors:
         return ["empty-consistent-with"]
     problems = []
     for item in anchors:
         if (not isinstance(item, dict)
                 or not _member(item.get("kind"), _ANCHOR_KINDS)):
+            problems.append("consistent-with-item-malformed")
+            continue
+        anchor = item.get("id")
+        if not _text(anchor):
+            problems.append("consistent-with-item-malformed")
+            continue
+        if item["kind"] == "decision" and _id_provenance(anchor.strip()) is None:
             problems.append("consistent-with-item-malformed")
     return problems
 
@@ -4624,3 +4647,396 @@ def project_decisions(decisions: dict) -> str:
                      for name in _PROJECTED_FIELDS)
         lines.append("")
     return "\n".join(lines) + "\n"
+
+
+# --- contradiction and depth ----------------------------------------------
+#
+# The two questions asked of a candidate answer before a quorum may adopt it:
+# does it disagree with something already decided, and how far from the last
+# thing a human said does it stand.
+#
+# BOTH ARE EXPOSED TO THE SAME FAILURE, and it is the failure this section is
+# shaped around: "I could not work it out" coming back as "no". A contradiction
+# check that cannot compare two answers and returns ``None`` reports the
+# candidate as compatible with a decision it was never measured against; a
+# depth walk that cannot resolve an anchor and skips it reports the candidate
+# at the shallowest -- most adoptable -- depth there is. Neither raises,
+# neither logs, and both look exactly like the healthy answer. So every input
+# either decides or STOPS, and nothing in here treats undetermined as clear.
+#
+# The stop class is ``QuorumSchemaInvalid`` wherever the unusable thing is the
+# CANDIDATE, because that is the one the controller already knows how to
+# recover from: re-dispatch that brain once, then escalate. It is
+# ``TrackerValidationError`` wherever the unusable thing is the DECISIONS
+# STRUCTURE, because a malformed audit trail is a read-only stop and no
+# re-dispatch repairs it.
+
+
+def _decision_records(decisions) -> dict:
+    """The record mapping out of a ``parse_decisions`` result, or a stop.
+
+    Handed the whole result rather than the records alone, for the reason
+    ``project_decisions`` states: the shape it cannot read would come back as
+    "this run has decided nothing", which is indistinguishable from a run that
+    genuinely has and is the most permissive answer either function can give.
+    """
+    if not isinstance(decisions, dict) or not isinstance(
+            decisions.get("decisions"), dict):
+        raise TrackerValidationError(
+            "check_contradiction and decision_depth take the whole "
+            "parse_decisions result, not the records alone; a shape neither "
+            "can read would report every candidate as contradicting nothing "
+            "and standing one step from a human, which is the answer that "
+            "adopts")
+    return decisions["decisions"]
+
+
+def _decision_binds(record, did: str) -> bool:
+    """Whether one record is a decision this run is bound by RIGHT NOW.
+
+    One predicate for both callers, because they ask the same question for the
+    same reason. ``check_contradiction`` compares a candidate only against
+    decisions in effect -- a Superseded record was retired and an Open one has
+    no answer -- and ``decision_depth`` measures distance only from decisions
+    in effect, because an answer anchored to a retired record is grounded in
+    something the run has already stopped believing.
+
+    BOTH EXTENSION ACTIONS ARE EXCLUDED, not just the quorum one. A budget
+    grant's answer is a CEILING, not an option on an axis: compared as an
+    answer key it disagrees with every real answer, and anchored to as
+    grounding it prices a ceiling as a decision. ``project_decisions`` already
+    withholds both from brains for the same reason, and one of the two being
+    named here and not the other would make the pair disagree about what a
+    decision is.
+
+    The three enum fields are screened by ``_member`` and screened FIRST, ahead
+    of every text read below them. That ordering is the whole of why the screen
+    is observable: this function is handed records a caller may have built, and
+    ``["Adopted"] in frozenset(...)`` raises ``TypeError`` -- outside
+    ``TrackerError``, so it escapes every ``except TrackerError`` a controller
+    has written. Placed after a ``_text`` check no unhashable value could ever
+    reach it, and a bare ``in`` written here would pass the suite.
+    """
+    if not isinstance(record, dict):
+        raise TrackerValidationError(
+            f"{did}: a decision record is {type(record).__name__}, not an "
+            "object; a record that cannot be read cannot be shown not to bind")
+    if not _member(record.get("status"), _DECISION_STATUS_NAMES):
+        raise TrackerValidationError(
+            f"{did}: status {record.get('status')!r} is not one of "
+            f"{list(_DECISION_STATUSES)}; a record whose status cannot be read "
+            "is a record that cannot be shown to be out of effect, and the "
+            "permissive reading of that is the one that adopts")
+    if not _member(record.get("action"), _DECISION_ACTIONS):
+        raise TrackerValidationError(
+            f"{did}: action {record.get('action')!r} is not a decision action; "
+            "the extension actions are excluded by name, and an unreadable "
+            "action is excluded from nothing")
+    if not _member(record.get("provenance"), _PROVENANCES):
+        raise TrackerValidationError(
+            f"{did}: provenance {record.get('provenance')!r} is not one of "
+            f"{sorted(_PROVENANCES)}; provenance is what routes a rejection to "
+            "the escalation queue rather than back to a re-opened qid, and an "
+            "unreadable one routes by accident")
+    if record["status"] != "Adopted":
+        return False
+    return not _member(record["action"], _EXTENSION_ACTIONS)
+
+
+def _comparable_record(record: dict, did: str) -> dict:
+    """The two fields ``_contradiction`` compares, screened before it reads them.
+
+    ``_contradiction`` is written against ``parse_decisions`` output and is
+    total over it. It is NOT total over an arbitrary mapping, and each half of
+    this screen closes one way for an unreadable record to come back as a
+    VERDICT instead of as a stop:
+
+    * a non-string ``answer_key`` compares unequal to every candidate key, so a
+      malformed record is reported as a contradiction the candidate never had
+      -- and ``.strip()`` on it raises ``AttributeError``, outside
+      ``TrackerError``.
+    * ``consequences`` that are not a mapping raise ``TypeError`` out of
+      ``set(...)`` on an ``int``, and walk one character at a time on a ``str``
+      -- which shares no key with any candidate, so every clash is compared on
+      an empty intersection and passes.
+    * a key or value inside it that is not the ``(kind, subject) -> value``
+      shape ``_consequence_map`` builds is compared as something it is not: the
+      difference that comes back is a fact about the record rather than about
+      the answer, reported under the answer's name.
+    """
+    if not _text(record.get("answer_key")):
+        raise TrackerValidationError(
+            f"{did}: answer_key {record.get('answer_key')!r} is not an answer; "
+            "an unreadable key differs from every candidate key, so the record "
+            "would contradict everything and name itself as the reason")
+    consequences = record.get("consequences")
+    if not isinstance(consequences, dict):
+        raise TrackerValidationError(
+            f"{did}: consequences are {type(consequences).__name__}, not the "
+            "kind:subject -> value mapping parse_decisions builds; a shape the "
+            "comparison cannot read shares no key with any candidate, so every "
+            "clash is compared on an empty intersection and passes")
+    for key, value in consequences.items():
+        if (not isinstance(key, tuple) or len(key) != 2
+                or not all(isinstance(part, str) for part in key)
+                or not isinstance(value, str)):
+            raise TrackerValidationError(
+                f"{did}: consequence key {key!r} is not a (kind, subject) pair "
+                "of strings; keys of mixed type raise out of the sort that "
+                "orders the shared ones, which is an exception outside this "
+                "module's family thrown by the check that stops the run")
+    return {"answer_key": record["answer_key"].strip(),
+            "consequences": consequences}
+
+
+def _candidate_consequences(consequences) -> dict:
+    """A candidate's consequence list as the mapping ``_contradiction`` compares.
+
+    Screened through ``_consequence_problems`` -- the same gate
+    ``validate_brain_response`` puts a real response through -- rather than
+    read defensively item by item, so a consequence legal in a response and
+    illegal here cannot exist.
+
+    THE EMPTY LIST IS A STOP, and that is the fail-open this whole section is
+    built around. A candidate with no consequences shares no key with any
+    record, so every comparison falls back to the answer key alone: two
+    genuinely incompatible answers that happen to name the same option are
+    compared on an empty intersection and pass. The response schema requires
+    consequences for exactly this reason, and accepting a candidate without
+    them here would reopen the hole one layer down.
+    """
+    problems = sorted(set(_consequence_problems(consequences)))
+    if problems:
+        raise QuorumSchemaInvalid(
+            f"candidate consequences are unusable {problems}; a consequence is "
+            "an assertion that would be verifiably true of the repository if "
+            "the answer were adopted, and one that is not matches no record, "
+            "so the clash it should have caught is compared on an empty "
+            "intersection and passes")
+    mapping: dict = {}
+    for item in consequences:
+        key = (item["kind"], item["subject"].strip())
+        if key in mapping:
+            raise QuorumSchemaInvalid(
+                f"candidate asserts {key[0]}:{key[1]} twice; a candidate that "
+                "contradicts itself agrees with whichever adopted record is "
+                "compared against whichever of its two values is kept")
+        mapping[key] = item["value"].strip()
+    return mapping
+
+
+def check_contradiction(decisions: dict, candidate: dict) -> str | None:
+    """The D-ID this candidate contradicts on its axis, or ``None``.
+
+    STRUCTURAL, NEVER SEMANTIC. Every stage-03 question has a stable axis id
+    and every later question is tagged to one, so the whole of the check is:
+    on this axis, does the candidate name a different option, or assert a
+    different value for something an adopted decision already asserted. No
+    text is compared for meaning and no answer is interpreted.
+
+    ``None`` MEANS COMPARED AND COMPATIBLE. It never means "could not
+    compare": every input that cannot be measured against the axis is a stop,
+    because a check that returns its clear answer when it has no answer is a
+    check whose failures all fall the way that adopts. So the candidate must
+    carry a legal axis, an answer key that is an answer, and at least one
+    well-formed consequence, and every record on the axis must be readable.
+
+    THE RESERVED AXIS IS REFUSED OUTRIGHT. ``new`` is the placeholder for a
+    question that was never tagged, and ``parse_decisions`` refuses it as a
+    record's axis, so the index can never hold it: a candidate arriving on
+    ``new`` would find no records, clear the check by being unrecognisable, and
+    be adopted against an axis nobody had ever looked at. That is the same
+    fail-open shape ``_BLAST_RADII`` is closed against, and the caller's fix is
+    to mint the question's own qid as the axis -- which is what the adoption
+    path does -- not to let the placeholder through.
+
+    A GENERIC APPROVAL IS REFUSED for the same reason ``parse_decisions``
+    refuses one, and the rule does not vary by provenance: ``yes`` is not an
+    option on an axis, so comparing it as one reports a contradiction with
+    every record that ever named a real option -- routing a candidate that said
+    nothing to ``rejected-contradicts-human``.
+
+    HUMAN-PROVENANCE DECISIONS ARE SCANNED FIRST so that the D-ID that comes
+    back names the human decision whenever one is contradicted; the rejection
+    status (``rejected-contradicts-human`` against
+    ``rejected-contradicts-quorum``) and the terminal report both key off which
+    one it is.
+
+    That ordering is now a BACKSTOP rather than a live discriminator, and
+    saying so is the point: ``parse_decisions`` enforces at most one Adopted
+    decision per axis, so a file cannot present a human and a quorum decision
+    both binding on one axis -- a later adoption supersedes the record standing
+    there. The ordering is kept because this function does not take a file, it
+    takes a mapping, and a caller that assembles one (a projection, a merge of
+    two runs, a test) can hand it the pair the file grammar refuses. Deleted,
+    the D-ID would then come back by dict iteration order and the rejection
+    status would be right by luck.
+    """
+    records = _decision_records(decisions)
+    index = decisions.get("axis_index")
+    if not isinstance(index, dict):
+        raise TrackerValidationError(
+            f"axis_index is {type(index).__name__}, not the axis -> [D-ID] "
+            "mapping parse_decisions builds; an index that cannot be read "
+            "produces no records on any axis, so every candidate contradicts "
+            "nothing")
+    if not isinstance(candidate, dict):
+        raise QuorumSchemaInvalid(
+            f"candidate is {type(candidate).__name__}, not an object; there is "
+            "no axis to check it on and no answer to check")
+    axis = candidate.get("axis")
+    #: ``isinstance`` BEFORE the grammar, and before the lookup. ``_TOKEN``
+    #: indexes its argument, so an ``int`` axis raises ``TypeError`` inside the
+    #: grammar; an unhashable one raises it inside ``index.get``. Both are
+    #: outside ``TrackerError``.
+    if not isinstance(axis, str) or not _TOKEN.fullmatch(axis):
+        raise QuorumSchemaInvalid(
+            f"candidate axis {axis!r} is not a legal axis token; the axis is "
+            "the key this check groups by, and one that cannot be a key groups "
+            "with nothing and contradicts nothing")
+    if axis == _RESERVED_AXIS:
+        raise QuorumSchemaInvalid(
+            f"candidate axis is the reserved literal {_RESERVED_AXIS!r}, which "
+            "no decision record may carry, so it indexes nothing and every "
+            "candidate on it passes by being unrecognisable; the adoption path "
+            "mints the question's own qid as the axis")
+    answer_key = candidate.get("answer_key")
+    if not _text(answer_key):
+        raise QuorumSchemaInvalid(
+            f"candidate answer_key {answer_key!r} is not an answer; a blank key "
+            "names no option, so it differs from every adopted key and would be "
+            "reported as contradicting a decision it never disagreed with")
+    if answer_key.strip().rstrip(".").casefold() in _GENERIC_ANSWERS:
+        raise QuorumSchemaInvalid(
+            f"candidate answer_key {answer_key!r} is a generic approval, not an "
+            "answer to an unresolved choice; it names no option on this axis, "
+            "so comparing it as one reports a contradiction with whatever was "
+            "decided rather than with anything this candidate actually said")
+    probe = {"answer_key": answer_key.strip(),
+             "consequences": _candidate_consequences(
+                 candidate.get("consequences"))}
+    ids = index.get(axis, ())
+    if isinstance(ids, str) or not isinstance(ids, (list, tuple)):
+        raise TrackerValidationError(
+            f"axis {axis} indexes {type(ids).__name__}, not a list of D-IDs; a "
+            "string walks one character at a time and anything else walks not "
+            "at all, and a walk over nothing contradicts nothing")
+    #: Human first, then the file's own order within each group. ``enumerate``
+    #: is in the key so the sort is stable on a mapping whose iteration order
+    #: is not the file's.
+    ranked = []
+    for position, did in enumerate(ids):
+        if not _member(did, records):
+            raise TrackerValidationError(
+                f"axis {axis} indexes {did!r}, which the decision records do "
+                "not hold; the index and the records disagree about what was "
+                "decided, and the candidate would be compared against the "
+                "records that happen to survive the disagreement")
+        record = records[did]
+        if not _decision_binds(record, did):
+            continue
+        ranked.append((0 if record["provenance"] == "human" else 1,
+                       position, did))
+    for _rank, _position, did in sorted(ranked):
+        if _contradiction(_comparable_record(records[did], did), probe) is not None:
+            return did
+    return None
+
+
+def decision_depth(decisions: dict, consistent_with: list) -> int:
+    """Layers of inference away from the last thing a human actually said.
+
+    A human decision is depth 0, so an answer citing only depth-0 material is
+    depth 1. ``spec`` and ``repo`` anchors are FACTS rather than inferences and
+    contribute 0: the specification and the repository are not something the
+    run reasoned its way to. Depth 3 is past ``DEPTH_CAP`` and is not
+    quorum-eligible -- three layers out is where a run stops building the
+    user's product and starts building its own.
+
+    EVERY ANCHOR EITHER COUNTS OR STOPS. Nothing is skipped, and that is the
+    ruling this function owes.
+
+    THE ID-LESS ANCHOR, decided here. Task 4 validated ``Consistent with`` in
+    ``decisions.md`` -- ids only, no repeat, no self-reference, every anchor
+    resolving to a record the file holds -- and that closed the MARKDOWN half
+    of the hazard only. The JSON half was still open when this was written:
+    ``_anchor_problems`` checked a brain response's ``consistent_with`` items
+    for ``kind`` and for nothing else, so ``[{"kind": "decision"}]`` was a
+    SCHEMA-VALID response carrying an anchor that names no decision -- and it
+    is a response, not a file, that this function walks. Skipping it would
+    resolve to no record, contribute 0, and return 1: the shallowest and most
+    adoptable depth there is, handed to the answer with the least grounding.
+    So an anchor of kind ``decision`` that does not name a record in effect is
+    a stop, ``_anchor_problems`` now requires the id as well, and the two
+    layers are deliberately redundant -- this function is called with mappings
+    that never went through that validator.
+
+    An anchor NAMING A RECORD THAT DOES NOT BIND is a stop too. A Superseded
+    decision was retired and an Open one has no answer, and neither is ever
+    projected to a brain, so an answer claiming to stand on one is claiming to
+    stand on something it could not have read. Counted, it would price that
+    claim at the retired record's depth; skipped, at zero.
+
+    An unknown anchor KIND is a stop for the same reason: contributing 0 makes
+    an answer anchored entirely to kinds nobody defined come back at depth 1.
+    """
+    records = _decision_records(decisions)
+    if not isinstance(consistent_with, list) or not consistent_with:
+        raise QuorumSchemaInvalid(
+            f"consistent_with is {consistent_with!r}; an answer anchored to "
+            "nothing has no measurable distance from anything a human said, so "
+            "its depth is unbounded by construction -- this is a stop and never "
+            "a depth of 1")
+    deepest = 0
+    for entry in consistent_with:
+        if not isinstance(entry, dict):
+            raise QuorumSchemaInvalid(
+                f"anchor {entry!r} is {type(entry).__name__}, not an object; an "
+                "anchor with no readable kind contributes nothing to the walk, "
+                "and a walk that contributes nothing returns the shallowest "
+                "depth there is")
+        #: FIRST, and by ``_member``. An anchor's ``kind`` is the one field
+        #: read before anything has established a type, so this is where an
+        #: unhashable value actually arrives: ``["decision"] in frozenset(...)``
+        #: raises ``TypeError``, outside ``TrackerError``. A bare ``in`` here
+        #: fails the suite; placed below a ``_text`` guard it could not.
+        kind = entry.get("kind")
+        if not _member(kind, _ANCHOR_KINDS):
+            raise QuorumSchemaInvalid(
+                f"anchor kind {kind!r} is not one of {sorted(_ANCHOR_KINDS)}; an "
+                "unrecognised kind contributes 0 to the walk, so an answer "
+                "anchored entirely to kinds nobody defined would come back at "
+                "the shallowest depth there is")
+        if kind != "decision":
+            #: A fact, not an inference. The specification and the repository
+            #: are where the run started, not somewhere it reasoned to.
+            continue
+        anchor = entry.get("id")
+        if not _text(anchor) or _id_provenance(anchor.strip()) is None:
+            raise QuorumSchemaInvalid(
+                f"anchor {anchor!r} is not a decision id (H-<n> or Q-<qid>); an "
+                "anchor without an id lets an answer claim grounding in a "
+                "decision it never names, and resolving it to nothing prices "
+                "that claim at the shallowest depth there is")
+        anchor = anchor.strip()
+        if not _member(anchor, records):
+            raise QuorumSchemaInvalid(
+                f"anchor {anchor} names a decision this run does not hold; "
+                "grounding nothing can produce is grounding nothing can check, "
+                "and counting it as absent counts it as costless")
+        if not _decision_binds(records[anchor], anchor):
+            raise QuorumSchemaInvalid(
+                f"anchor {anchor} is not a decision in effect; a Superseded "
+                "record was retired, an Open one has no answer, and a budget "
+                "grant's answer is a ceiling -- none of the three is ever shown "
+                "to a brain, so an answer standing on one is standing on "
+                "something it could not have read")
+        depth = records[anchor].get("depth")
+        if not isinstance(depth, int) or isinstance(depth, bool) or depth < 0:
+            raise QuorumSchemaInvalid(
+                f"{anchor}: depth {depth!r} is not a non-negative integer; "
+                "``True`` is not a depth of 1 and a depth that cannot be read "
+                "cannot be added to")
+        if depth > deepest:
+            deepest = depth
+    return deepest + 1

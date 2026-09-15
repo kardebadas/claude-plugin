@@ -5538,10 +5538,19 @@ class SddWorkspaceTests(unittest.TestCase):
         self.assertNotIn("/Users/", text)
 
 
-#: The five rung names as they must appear in a rung-defaulting mistake. Used by
+#: The rung-enum names as they must appear in a rung-defaulting mistake. Used by
 #: the AST detector below and by the test OF that detector, so the detector is
 #: never proven against a pattern only it and nothing else uses.
-_RUNG_WORDS = ("RUNGS", "RUNG_ORDER", "RUNG_NAMES", "_RUNG_VALUES", "ADOPTABLE")
+#:
+#: ``_RUNG_EVIDENCE`` is in the list because the evidence table is the SECOND
+#: place a rung can acquire a fallback: ``_RUNG_EVIDENCE.get(declared,
+#: (frozenset(), 0))`` gives an unlisted rung no evidence requirement at all,
+#: which is the same fail-open door one table along. The table is total and
+#: pinned by ``test_every_rung_states_its_own_evidence_requirement``, so the
+#: fallback would be harmless TODAY — and would stop being harmless the moment
+#: a sixth rung was added. The shape is refused as well as the data.
+_RUNG_WORDS = ("RUNGS", "RUNG_ORDER", "RUNG_NAMES", "_RUNG_VALUES", "ADOPTABLE",
+               "_RUNG_EVIDENCE")
 
 
 def rung_defaulting_nodes(source: str) -> list[str]:
@@ -6981,6 +6990,29 @@ class EffectiveRungTests(unittest.TestCase):
                      "quote": "PostgresEngine"}])
                 self.assertEqual(self.rung(payload), "engineering-judgement")
 
+    def test_a_sibling_whose_name_extends_the_roots_name_demotes(self):
+        """Containment is a PARENT relation and never a string prefix.
+
+        ``<root>-evil`` starts with ``<root>``, so
+        ``str(target).startswith(str(root))`` — the obvious simplification of
+        the containment test — calls this citation contained and prices it at
+        the top rung. The case above cannot see that: an absolute path and a
+        climb into an unrelated directory are both rejected by a prefix check
+        too. A brain naming ``../<root>-evil/engine.py`` would be graded
+        against a tree this run does not contain.
+        """
+        evil = Path(str(self.root) + "-evil")
+        self.addCleanup(shutil.rmtree, evil, ignore_errors=True)
+        write_repo(evil, "engine.py", ENGINE_TEXT)
+        self.assertTrue(
+            str(evil.resolve()).startswith(str(self.root.resolve())),
+            "the sibling no longer extends the root's name, so a prefix check "
+            "would reject this citation for the wrong reason")
+        climbing = os.path.relpath(evil / "engine.py", self.root)
+        payload = response(evidence=[{"kind": "repo", "path": climbing,
+                                      "line": 1, "quote": "PostgresEngine"}])
+        self.assertEqual(self.rung(payload), "engineering-judgement")
+
     def test_a_line_number_past_the_end_of_the_file_demotes(self):
         payload = response(evidence=[{"kind": "repo", "path": CITED_PATH,
                                       "line": 900, "quote": "PostgresEngine"}])
@@ -7007,6 +7039,65 @@ class EffectiveRungTests(unittest.TestCase):
         payload = response(evidence=[{"kind": "repo", "path": CITED_PATH,
                                       "line": True, "quote": "PostgresEngine"}])
         self.assertEqual(self.rung(payload), "engineering-judgement")
+
+    def test_a_non_string_quote_demotes_because_of_its_TYPE(self):
+        """``_squash(str(quote))`` is exactly the coercion already refused for
+        ``what_would_change_my_mind``, and it is refused here for the same
+        reason: ``"quote": true`` squashes to ``"true"`` and grounds against
+        any line that happens to contain the word.
+
+        The cited line is written to contain BOTH ``True`` and ``12``, so each
+        case demotes because the type was rejected and NOT because the text
+        failed to match — which is all that a quote of ``12`` against
+        ``class PostgresEngine:`` would be measuring.
+        """
+        line = "retries = 12 if True else 0"
+        write_repo(self.root, "db/flags.py", line + "\n")
+        for quote in (True, 12):
+            with self.subTest(quote=quote):
+                self.assertIn(str(quote), line,
+                              "the fixture line no longer contains the coerced "
+                              "quote, so this case would demote for want of a "
+                              "match rather than for the type")
+                payload = response(evidence=[
+                    {"kind": "repo", "path": "db/flags.py", "line": 1,
+                     "quote": quote}])
+                self.assertEqual(self.rung(payload), "engineering-judgement")
+
+    def test_a_non_string_decision_id_demotes_because_of_its_TYPE(self):
+        """The same shape one field along. A record headed ``## 12 — ...`` is a
+        legal decision file, so ``_decision_section(text, str(decision))``
+        would find it for a citation whose ``decision`` arrived as the integer
+        ``12`` and attribute that record's words to a brain that never named
+        it. The second half proves the record is reachable at all, so the first
+        half cannot be passing for want of a section.
+        """
+        write_repo(self.root, "numbered.md",
+                   "## 12 — Retention window\n"
+                   "\n"
+                   "- **Answer:** ninety days of session rows.\n")
+
+        def cite(decision):
+            return response(rung="specified", evidence=[
+                {"kind": "decision", "path": "numbered.md",
+                 "decision": decision, "quote": "ninety days"}])
+
+        self.assertEqual(self.rung(cite(12)), "engineering-judgement")
+        self.assertEqual(self.rung(cite("12")), "specified")
+
+    def test_a_non_string_path_demotes_because_of_its_TYPE(self):
+        """And one field further along. ``(root / str(path)).resolve()`` would
+        read a file really named ``12`` for a citation whose ``path`` arrived as
+        the integer, which is a citation to a place the brain never named.
+        """
+        write_repo(self.root, "12", ENGINE_TEXT)
+
+        def cite(path):
+            return response(evidence=[{"kind": "repo", "path": path, "line": 1,
+                                       "quote": "PostgresEngine"}])
+
+        self.assertEqual(self.rung(cite(12)), "engineering-judgement")
+        self.assertEqual(self.rung(cite("12")), "code-evidenced")
 
     def test_a_dangling_citation_alongside_a_resolving_one_demotes(self):
         """EVERY citation is resolved, not merely enough of them.
@@ -7118,8 +7209,19 @@ class EffectiveRungTests(unittest.TestCase):
     def test_a_separable_second_best_keeps_the_rung(self):
         """Stated so the case above is about the alternative's RUNG and not
         about having alternatives at all.
+
+        The alternatives are spelled out here rather than taken from the
+        default response, so this case is not a byte-identical restatement of
+        ``test_a_resolving_quoted_citation_keeps_the_declared_rung`` under a
+        second name: two second-bests, neither of them at the declared rung,
+        one of them adjacent to it on the ladder.
         """
-        self.assertEqual(self.rung(response()), "code-evidenced")
+        payload = response(alternatives=[
+            {"answer_key": "sqlite", "rung": "speculation",
+             "reason": "no concurrent writers"},
+            {"answer_key": "mysql", "rung": "convention-cited",
+             "reason": "the sibling service uses it"}])
+        self.assertEqual(self.rung(payload), "code-evidenced")
 
     def test_an_empty_falsifier_demotes(self):
         """An answer nothing could change is not grounded; it is held."""
@@ -7201,6 +7303,32 @@ class EffectiveRungTests(unittest.TestCase):
                     "can no longer tell a recorded root from a derived one")
         self.assertNotEqual(Path(recorded).resolve(), run_dir.resolve())
 
+    def test_a_repo_root_reached_through_a_symlink_still_resolves_citations(self):
+        """THIS PHASE'S NAMED INVISIBLE FAILURE, on any checkout whose path has
+        a symlinked component.
+
+        ``_resolution_root`` canonicalises the recorded root, and the citation
+        is canonicalised on the way in. Drop either ``.resolve()`` and the two
+        are compared in different namespaces: the symlinked root is never a
+        parent of the real target, so EVERY citation fails containment, every
+        grounded answer lands at 0.55, every cluster falls below the floor, and
+        the run escalates every question while looking like a correctly
+        cautious quorum. Nothing raises, and no other case in this file can see
+        it — every other root here comes from ``tempfile.mkdtemp`` and is
+        already canonical.
+        """
+        elsewhere = Path(tempfile.mkdtemp(prefix="pipeline-auto-linked-"))
+        self.addCleanup(shutil.rmtree, elsewhere, ignore_errors=True)
+        link = elsewhere / "checkout"
+        try:
+            link.symlink_to(self.root, target_is_directory=True)
+        except (OSError, NotImplementedError, AttributeError) as error:
+            self.skipTest(f"symlinks are not available here: {error}")
+        self.assertNotEqual(str(link), str(self.root.resolve()),
+                            "the link and its target are spelled the same, so "
+                            "this case would pass without canonicalisation")
+        self.assertEqual(self.rung(response(), root=link), "code-evidenced")
+
     def test_a_root_that_is_not_a_directory_is_a_stop_and_not_a_demotion(self):
         """The one wrong root this function CAN detect, made loud.
 
@@ -7213,8 +7341,17 @@ class EffectiveRungTests(unittest.TestCase):
         for bad in (str(self.root / "missing"), str(self.root / "spec.md"),
                     "", None, 12):
             with self.subTest(root=bad):
-                with self.assertRaises(pas.QuorumError):
+                with self.assertRaises(pas.QuorumError) as caught:
                     pas.effective_rung(response(), bad)
+                #: The EXACT class. ``QuorumSchemaInvalid`` is a SUBCLASS of
+                #: ``QuorumError``, so the assertion above passes against
+                #: either one — and the two carry different recoveries. A
+                #: ``QuorumSchemaInvalid`` says "re-dispatch that brain once",
+                #: which would re-run the whole quorum against the same broken
+                #: root. No brain did anything wrong here; the recorded root
+                #: did.
+                self.assertNotIsInstance(caught.exception,
+                                         pas.QuorumSchemaInvalid)
 
     # --- no value arrives through an illegal door -------------------------
 
@@ -7233,30 +7370,75 @@ class EffectiveRungTests(unittest.TestCase):
 
         ``alt.get(...)`` on a string raises ``AttributeError``; ``list(12)``
         and ``for item in 12`` raise ``TypeError``; indexing an empty list
-        raises ``IndexError``. None of the three is a ``TrackerError``, so each
-        escapes every ``except TrackerError`` a controller has written and
-        kills the run on a brain's typo instead of demoting it.
+        raises ``IndexError``; and ``["repo"] in frozenset(...)`` raises
+        ``TypeError``: unhashable — a JSON array or object is a perfectly legal
+        thing for a brain to put in a string field, and every membership test in
+        this function hashes what it is given. None of those is a
+        ``TrackerError``, so each escapes every ``except TrackerError`` a
+        controller has written and kills the run on a brain's typo instead of
+        demoting it.
+
+        The list below is enumerated from the function's READS and not from the
+        author's imagination — every ``.get`` in ``effective_rung``,
+        ``_demotion_reason``, ``_evidence_resolves`` and ``_cited_file``, each
+        given an unhashable value as well as a wrong-scalar one. An earlier
+        version of this case listed fourteen payloads and never varied ``kind``,
+        which is the one field that reaches a ``frozenset``; it passed while the
+        unhashable ``kind`` crashed the run.
         """
+        unhashable = (["repo"], {"kind": "repo"})
         malformed = [
             response(evidence="db/engine.py"),
             response(evidence=12),
+            response(evidence={"kind": "repo"}),
             response(evidence=["db/engine.py"]),
             response(evidence=[None]),
             response(evidence=[{"kind": "repo", "path": 12, "line": 1,
                                 "quote": "PostgresEngine"}]),
+            response(evidence=[{"kind": "repo", "path": ["db/engine.py"],
+                                "line": 1, "quote": "PostgresEngine"}]),
             response(evidence=[{"kind": "repo", "path": CITED_PATH, "line": 1,
                                 "quote": 12}]),
+            response(evidence=[{"kind": "repo", "path": CITED_PATH, "line": 1,
+                                "quote": ["PostgresEngine"]}]),
             response(evidence=[{"kind": "repo", "path": CITED_PATH,
                                 "line": "1", "quote": "PostgresEngine"}]),
+            response(evidence=[{"kind": "repo", "path": CITED_PATH,
+                                "line": [1], "quote": "PostgresEngine"}]),
             response(evidence=[{"kind": "decision", "path": "decisions.md",
                                 "decision": 12, "quote": "postgres"}]),
+            response(evidence=[{"kind": "decision", "path": "decisions.md",
+                                "decision": ["H-001"], "quote": "postgres"}]),
             response(alternatives="sqlite"),
             response(alternatives=12),
             response(alternatives=["sqlite"]),
+            response(alternatives=[None]),
+            response(alternatives=[{"answer_key": "sqlite",
+                                    "rung": ["code-evidenced"]}]),
             response(consistent_with="H-001"),
             response(consistent_with=12),
             response(consistent_with=["H-001"]),
+            response(consistent_with=[None]),
+            response(what_would_change_my_mind=None),
+            response(what_would_change_my_mind=["a decision"]),
+            response(what_would_change_my_mind={"if": "a decision"}),
         ]
+        #: ``kind`` in BOTH places it is tested for membership, as an array and
+        #: as an object. The evidence item RESOLVES — ``_evidence_resolves``
+        #: compares ``kind`` with ``==``, which is safe for any type — so the
+        #: unhashable value really does reach the ``frozenset``.
+        for value in unhashable:
+            malformed.append(response(evidence=[
+                {"kind": value, "path": CITED_PATH, "line": 1,
+                 "quote": "PostgresEngine"}]))
+            #: ``speculation`` needs no evidence at all, so its qualifying
+            #: count is compared against zero — and the membership test is
+            #: still evaluated on the way there.
+            malformed.append(response(rung="speculation", evidence=[
+                {"kind": value, "path": CITED_PATH, "line": 1,
+                 "quote": "PostgresEngine"}]))
+            malformed.append(response(
+                consistent_with=[{"kind": value, "id": "H-001"}]))
         for payload in malformed:
             with self.subTest(payload=payload):
                 try:

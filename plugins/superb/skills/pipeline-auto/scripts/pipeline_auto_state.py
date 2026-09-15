@@ -3637,8 +3637,12 @@ def _demotion_reason(response: dict) -> str | None:
     anchors = response.get("consistent_with")
     if not isinstance(anchors, list):
         anchors = []
+    #: ``_member``, never ``in`` directly: ``kind`` is brain-supplied JSON and
+    #: ``["decision"] in _INTENT_ANCHORS`` raises ``TypeError``: unhashable.
+    #: That is outside ``TrackerError``, so it escapes every handler a
+    #: controller has written and kills the run on a brain's typo.
     if not any(isinstance(anchor, dict)
-               and anchor.get("kind") in _INTENT_ANCHORS
+               and _member(anchor.get("kind"), _INTENT_ANCHORS)
                for anchor in anchors):
         return "anchored-only-in-repository-code"
     return None
@@ -3684,7 +3688,13 @@ def effective_rung(response: dict, repo_root: str) -> str:
     #: and deliberately reads no file -- so counting is what meets it here.
     #: Indexing the list instead would raise ``IndexError``, outside
     #: ``TrackerError``, on the one path that exists to price a weak answer.
-    qualifying = sum(1 for item in resolved if item.get("kind") in kinds)
+    #: ``_member`` for the reason ``_demotion_reason`` uses it: a ``kind`` that
+    #: arrived as a list or an object is unhashable, and a bare ``in`` against
+    #: the frozenset would raise outside ``TrackerError``. A citation may resolve
+    #: with such a ``kind`` -- ``_evidence_resolves`` compares it with ``==`` --
+    #: so this membership test really is reached.
+    qualifying = sum(1 for item in resolved
+                     if _member(item.get("kind"), kinds))
     if qualifying < minimum:
         return _not_above(declared, DEMOTION_RUNG)
     if _demotion_reason(response) is not None:

@@ -1310,6 +1310,35 @@ Expected: prints nothing. No commit.
 
 ---
 
+## Deviation: every baseline was captured under the pressure suffix
+
+**This plan specifies `pressure=plain` for waves 1-3 and `pressure=suffix` only
+for wave 4.** The controller's dispatch instructions applied the suffix to every
+wave. All nine baselines S01-S09 were therefore captured under more pressure
+than designed. The error is the controller's, not the dispatching agents' —
+they followed the instruction they were given, and wave 3 reported the
+discrepancy rather than absorbing it.
+
+**What this costs, precisely.** S02 and S10 were designed as one test in two
+halves, isolating the pressure variable: the same rung-gap decision put to an
+agent with and without the deadline framing. With S02 already captured under the
+suffix, **the pair no longer isolates pressure.** Both halves remain valid as
+adopt-versus-escalate discriminators, which is their other purpose, but any
+claim that the suffix changed the answer is no longer supported by this data.
+
+**What it does not cost.** The baselines are internally consistent: nine
+scenarios, one condition. Seven of nine discriminate. A harsher condition makes
+the RED result stronger, not weaker — an agent that cuts corners under pressure
+is the failure the skill must prevent, and that is what was measured.
+
+**Binding on P08:** RED was captured with the suffix, so **GREEN must be too.**
+Comparing a suffixed RED against a plain GREEN would attribute to the skill an
+improvement that came from removing pressure. If P08 runs plain, it must re-run
+RED plain as well, and say which condition each number came from.
+
+**Wave 4 (S10) runs with the suffix as this plan specifies** — that part was
+always correct, and it is now the condition every other scenario shares.
+
 ## Task 7: Dispatch wave 4 — S10, the control
 
 S10 gets its own wave and its own task because it is not scored the way the

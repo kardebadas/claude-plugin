@@ -692,7 +692,12 @@ _QID = _Hex(12)
 #: ``Q-<qid>`` is a quorum's decision id and ``H-<n>`` is a human's. The prefix
 #: is the entire difference between a decision a machine made and one the user
 #: made, and it is what the contradiction check reads to tell them apart.
-_QUORUM_DECISION = _Hex(12, "Q-")
+#: Spelled ONCE, because the drift budget rebuilds a quorum's own decision id
+#: from its qid to check that an adopted record claims no other decision, and a
+#: second spelling of the prefix is a second answer to "which id is this
+#: quorum's own".
+_QUORUM_PREFIX = "Q-"
+_QUORUM_DECISION = _Hex(12, _QUORUM_PREFIX)
 
 #: A Git object name: forty lowercase hex characters. Task commits, a task's
 #: integration commit and both ends of a gate edge are spelled this way and
@@ -5984,11 +5989,14 @@ def _final_event(path: Path, qid: str) -> dict:
     in front of it would make the membership test unreachable for exactly the
     values that need it, and the pin below would pass against a bare ``in``.
 
-    An ``adopted`` event MUST name its decision record. The alternative -- drop
-    an adoption with no id out of the adopted list while still charging it to
-    the budget -- puts an adoption in the count that is missing from the list a
-    human is shown and signs against, which is the anti-reflex mechanism
-    reporting a set the run does not actually hold.
+    An ``adopted`` event MUST name its decision record, AND MUST NAME ITS OWN.
+    Dropping an adoption with no id out of the adopted list while still charging
+    it to the budget puts an adoption in the count that is missing from the list
+    a human is shown and signs against -- the anti-reflex mechanism reporting a
+    set the run does not hold. Letting it name SOME OTHER record is the same
+    fault from the other side: ``H-900`` in an adopted record's ``decision_id``
+    puts the human's own grant into the set their ``Granted against`` is checked
+    against, so the grant is required to have been signed against itself.
     """
     record = _read_json(path, f"the final record for {qid}")
     if not isinstance(record, dict):
@@ -6023,6 +6031,22 @@ def _final_event(path: Path, qid: str) -> dict:
             "which is not a decision id; the adopted list a human is shown "
             "before granting an extension is built from these, so an adoption "
             "missing from it is one they were never shown")
+    if status == _CHARGED_STATUS and decision_id.strip() != _QUORUM_PREFIX + qid:
+        #: RE-DERIVED FROM THE DIRECTORY AND COMPARED, exactly as the qid above
+        #: is, and for a sharper reason. ``_id_provenance`` is satisfied by any
+        #: well-formed id, so without this an adoption may name ANOTHER
+        #: quorum's decision -- or a HUMAN's. The adopted list is what a budget
+        #: grant's ``Granted against`` is checked against, so an adoption
+        #: claiming ``H-900`` puts the grant's own id into the set the human
+        #: must be on record as having been shown: they are required to have
+        #: signed against their own grant, which no honest record can satisfy,
+        #: and the run stops with an extension it can never spend.
+        raise QuorumSchemaInvalid(
+            f"{qid}: an adopted quorum states decision_id {decision_id!r} and "
+            f"an adoption writes {_QUORUM_PREFIX + qid}; a record naming "
+            "another decision puts that decision into the adopted set a human "
+            "is shown, and signs them against something this quorum never "
+            "decided")
     if decision_id is not None and not named:
         raise QuorumSchemaInvalid(
             f"{qid}: decision_id {decision_id!r} is neither null nor a decision "
@@ -6037,7 +6061,30 @@ def _final_event(path: Path, qid: str) -> dict:
 
 
 def quorum_events(run_dir: str) -> list[dict]:
-    """Every FINALISED quorum in this run, ordered by qid.
+    """Every FINALISED quorum in this run, ordered by qid, AS THE BUDGET SEES IT.
+
+    A BUDGET PROJECTION AND NOT THE RECORD. Four keys come back -- ``qid``,
+    ``status``, ``phase``, ``decision_id`` -- and they are exactly the cells the
+    two ceilings are computed from: what charges, which phase it charges, and
+    which decision record the human is shown before they are asked to raise the
+    ceiling. Every one of them is validated here, which is the same statement:
+    this function screens everything it projects, and a field it returned
+    unscreened would be a field the totality sweep over its reads does not
+    cover.
+
+    WHOEVER WRITES THE ``## Quorum`` ROW READS THE REST, and that is not this
+    function widened. ``section_columns("quorum")`` is twelve cells and eight of
+    them -- ``axis``, ``state``, ``owners``, ``payload_digest``,
+    ``context_digest``, ``responses``, ``depth``, and the row's own state
+    machine -- are not in ``final.json`` at all: they belong to the question
+    record and to the dispatch that carried it. So ``quorum_tracker_rows``, the
+    row writer P03 still owes, needs a second source whatever this returns, and
+    widening this reader would buy it four cells it already has while making the
+    budget's screening claim cover fields the budget has no stake in. What that
+    writer must NOT do is open the file itself: ``_read_json`` and ``_loads``
+    are the one door, and the suite asserts ``_loads`` is the module's only
+    caller of ``json``, so a second reader that grew its own ``json.loads``
+    would be a second way out of this module's exception family.
 
     Derived from the ``final.json`` files rather than from a separate log, so
     there is one place a record can exist and no way for a counter to disagree
@@ -6071,11 +6118,19 @@ def quorum_events(run_dir: str) -> list[dict]:
         did = event["decision_id"]
         if did is not None:
             if did in seen:
+                #: STILL REACHABLE, and by a narrower route than it once was.
+                #: ``_final_event`` now makes an adopted record name its OWN
+                #: ``Q-<qid>``, and a qid is the directory name, so two
+                #: ADOPTIONS can no longer collide here. What still can is a
+                #: record that adopted nothing citing a decision some other
+                #: quorum wrote -- an escalation or a rejection pointing at an
+                #: adoption's record, which would charge one decision to the
+                #: budget and then cite it again from a quorum that bought no
+                #: authority at all.
                 raise QuorumSchemaInvalid(
                     f"{event['qid']} and {seen[did]} both record decision "
-                    f"{did}; one adoption writes one decision record, and two "
-                    "quorums claiming it charge the budget twice for one grant "
-                    "of authority")
+                    f"{did}; one decision record belongs to one quorum, and two "
+                    "quorums claiming it report one grant of authority twice")
             seen[did] = event["qid"]
         events.append(event)
     return events
@@ -6117,6 +6172,15 @@ def _pinned_grant(entry, where: str) -> dict:
             f"{where}: phase {phase!r} is not one token; a grant scoped to "
             "nothing raises no phase ceiling and is authority spent on nothing")
     through = entry["authorized_through"]
+    #: THE ``bool`` CONJUNCT CANNOT BE PINNED BY A TEST, and saying so is
+    #: cheaper than the next reader re-deriving it. ``True`` and ``False`` ARE
+    #: ``int``s -- 1 and 0 -- so with this conjunct removed both fall through to
+    #: the ceiling comparison below and are refused there anyway, and no input
+    #: distinguishes the two spellings by VERDICT. What it changes is the
+    #: diagnostic (a ``bool`` is not a ceiling stated badly, it is not a ceiling)
+    #: and what it guards is the constant: were ``BUDGET_PER_PHASE`` ever 0,
+    #: ``True`` would be 1, would exceed it, and a pin carrying ``true`` would
+    #: become a ceiling of one. Belt and braces, deliberately, and kept.
     if isinstance(through, bool) or not isinstance(through, int):
         raise QuorumSchemaInvalid(
             f"{where}: authorized_through {through!r} is not a whole number; a "
@@ -6219,11 +6283,45 @@ def _live_grant(did: str, record: dict, *, run_id: str, revision: int,
 
 
 def _pin_extensions(path: Path, grants: list) -> None:
-    """Write the pins, and only when they would change.
+    """Write the pins ATOMICALLY, and only when they would change.
 
     ``quorum_budget`` is checked before every dispatch, so an unconditional
     write would rewrite this file on every question the run ever raises. The
     content is canonically ordered, so "would change" is a byte comparison.
+
+    WRITTEN THROUGH A TEMP SIBLING AND ``os.replace``, for the reason
+    ``_replace_tracker`` is, and the reason is sharper here than durability.
+    ``Path.write_text`` opens with ``O_TRUNC``, so a process killed between the
+    truncate and the write leaves a ZERO-BYTE pin -- and a zero-byte pin is not
+    a lost ceiling that the next check re-derives. It parses as nothing, so
+    every later budget check stops; and DELETING it does not recover the run,
+    because once one further adoption has landed the grant behind it no longer
+    names the adopted set it was signed against, and ``_live_grant`` can never
+    re-derive it. One interrupt in that window strands the run with a human
+    grant on record that can never be honoured, and state that cannot be
+    classified from disk alone is the one thing the interruption model refuses.
+    ``os.replace`` has no such window: the pin on disk is either the whole of
+    the old content or the whole of the new.
+
+    THE FILE IS SYNCED AND THE DIRECTORY IS NOT, which is deliberate and is not
+    the tracker's rule. Syncing the bytes before the rename is what stops the
+    crash from publishing a name that points at nothing -- the failure above,
+    rebuilt out of a buffer. Syncing the directory would add the tracker's
+    third outcome, "the write MAY have happened", and there is nothing here for
+    that outcome to mean: a rename lost by a crash leaves the PREVIOUS pin, or
+    no pin, and both are states this reader already handles by re-deriving.
+
+    CORRECTING A GRANT COSTS BOTH EXTENSIONS, and that follows from the pin
+    rather than from a bug. An axis holds at most one Adopted decision, so the
+    only way to restate a grant -- a mistyped ``Authorized through``, a
+    ``Scope`` naming the wrong phase -- is to supersede it; and a pinned grant
+    counts even after the record behind it is superseded, deliberately, so that
+    a later adoption cannot retire a ceiling the run has already spent against.
+    The two together mean a human who corrects one typo has spent both of the
+    run's two extensions and the budget is then terminal. That is the safe
+    direction for the rule to fail in, and it is a trap for whoever signs the
+    grant, so it is not a defect to be fixed here but guidance P07 owes its
+    template: ``Authorized through`` and ``Scope`` get one draft each.
     """
     if not grants:
         return
@@ -6236,14 +6334,50 @@ def _pin_extensions(path: Path, grants: list) -> None:
             #: Unreadable is not equal. The write below replaces it and
             #: surfaces the real failure if the directory itself is the problem.
             pass
+    descriptor = -1
+    temporary: str | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        #: ``O_EXCL``: the open either creates this name or fails, so no file
+        #: belonging to another writer is ever opened, truncated or unlinked.
+        candidate = path.parent / f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+        descriptor = os.open(
+            candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, TRACKER_MODE)
+        #: Assigned only AFTER the open succeeds, so the cleanup below never
+        #: removes a file this call did not create.
+        temporary = str(candidate)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            #: The handle owns the descriptor from here.
+            descriptor = -1
+            handle.write(content)
+            _sync_file(handle)
+        os.replace(temporary, path)
+        #: The name IS the pin now, so this call no longer owns anything to
+        #: clean up.
+        temporary = None
     except (OSError, UnicodeError) as exc:
         raise TrackerWriteError(
             f"cannot pin budget extensions to {str(path)!r}: {exc}; an unpinned "
             "grant is re-checked against a moving adopted set and stops the run "
             "the first time it moves") from exc
+    finally:
+        #: In ``finally`` rather than in the ``except`` for ``_replace_tracker``'s
+        #: reason: what ESCAPES is a write outcome only for the two families
+        #: named above, but what gets CLEANED UP is every one of them, because
+        #: nothing else ever removes this file and a stranded temp beside the
+        #: pin is indistinguishable from one a live writer is holding.
+        if descriptor >= 0:
+            #: Only reachable when ``os.fdopen`` itself failed; past that the
+            #: handle owns the descriptor and has closed it.
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
 
 
 def _budget_extensions(run_dir: Path, adopted_ids: list, run_id: str,
@@ -6336,10 +6470,26 @@ def quorum_budget(run_dir: str, *, phase: str) -> dict:
     ceiling that rose by three would leave the second grant half unusable while
     reporting that it had been honoured.
     """
-    if not _text(phase):
+    if not _text(phase) or not _TOKEN.fullmatch(phase.strip()):
+        #: HELD TO THE SAME GRAMMAR ``_final_event`` HOLDS A RECORD'S PHASE TO,
+        #: and that is the whole argument for the check. The per-phase count is
+        #: an equality against this string, so a phase spelled in a way no
+        #: ``final.json`` could ever carry matches nothing, reports zero
+        #: adoptions and hands the caller a fresh three-adoption budget --
+        #: fail-open by unrecognisable token, on the axis where failing open
+        #: means the run keeps deciding past the ceiling a human set.
+        #:
+        #: What this CANNOT catch is a typo that is itself a legal phase token:
+        #: ``p04`` for ``P04`` still reports zero adoptions, because there is no
+        #: registry of the run's phases to check against -- ``## Phases`` is
+        #: empty for the whole of the run in which questions are raised, so
+        #: checking it would refuse every budget check instead of the wrong
+        #: ones. The residual belongs to the caller: the phase passed here is
+        #: the phase written into the ``final.json`` the adoption files.
         raise QuorumError(
-            f"phase {phase!r} is not a phase; a budget with no phase to charge "
-            "against is a ceiling nothing is measured on")
+            f"phase {phase!r} is not a phase token; a budget charged against a "
+            "phase no record can name is measured on nothing, and it reports a "
+            "full budget for every question the run raises")
     phase = phase.strip()
     path = _run_path(run_dir)
     #: THE RUN ID IS READ FROM THE TRACKER, which is the one place it is

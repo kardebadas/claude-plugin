@@ -204,6 +204,32 @@ def module_source() -> str:
     return Path(pas.__file__).read_text(encoding="utf-8")
 
 
+def read_fields(name: str) -> set:
+    """Every literal key the function `name` reads, taken from the CALL TREE.
+
+    Derived rather than remembered, because a totality claim built on this is
+    about what the function reads and a list typed by hand is about what
+    somebody remembered it read. Both `record.get("x")` and `entry["x"]` count.
+
+    Module-level rather than a method on one case class: three sweeps need it —
+    `_final_event`, `_pinned_grant` and `_live_grant`'s required-field list —
+    and a helper reachable from only one of them is how the third one came to
+    be a tuple somebody typed.
+    """
+    found = set()
+    for node in ast.walk(function_node(module_source(), name)):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get" and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)):
+            found.add(node.args[0].value)
+        elif (isinstance(node, ast.Subscript)
+              and isinstance(node.slice, ast.Constant)
+              and isinstance(node.slice.value, str)):
+            found.add(node.slice.value)
+    return found
+
+
 def function_node(source: str, name: str) -> ast.FunctionDef:
     """The single ``def name`` node in ``source``, as an AST subtree."""
     found = [node for node in ast.walk(ast.parse(source))
@@ -11755,13 +11781,60 @@ class QuorumEventsTests(unittest.TestCase):
         self.assertIn("decision_id", str(raised.exception))
 
     def test_two_quorums_may_not_claim_one_decision_record(self):
+        """The duplicate stop, on the route still open to it. Two ADOPTIONS can
+        no longer reach it — each must name its own `Q-<qid>` and a qid is the
+        directory name — so what is left is a quorum that bought no authority
+        citing a record some other quorum wrote: one decision charged to the
+        budget once and reported as two."""
         seed_final(self.run_dir, budget_qid("a", 0), status="adopted", phase="P04",
                    decision_id="Q-" + budget_qid("a", 0))
-        seed_final(self.run_dir, budget_qid("a", 1), status="adopted", phase="P04",
+        seed_final(self.run_dir, budget_qid("e", 0), status="escalated", phase="P04",
                    decision_id="Q-" + budget_qid("a", 0))
         with self.assertRaises(pas.TrackerError) as raised:
             pas.quorum_events(str(self.run_dir))
-        self.assertIn("charge the budget twice", str(raised.exception))
+        self.assertIn("both record decision", str(raised.exception))
+
+    def test_an_adopted_quorum_may_not_claim_another_quorums_decision(self):
+        """An adoption writes ONE record and it is its own. `_id_provenance` is
+        satisfied by any well-formed id, so without the comparison an adoption
+        may name another quorum's decision — and the adopted set is derived from
+        these, so the run reports having decided something this quorum never
+        did. Paired with the id an adoption may legitimately name."""
+        seed_final(self.run_dir, budget_qid("a", 0), status="adopted", phase="P04",
+                   decision_id="Q-" + budget_qid("a", 1))
+        with self.assertRaises(pas.TrackerError) as raised:
+            pas.quorum_events(str(self.run_dir))
+        self.assertIn("an adoption writes", str(raised.exception))
+        seed_final(self.run_dir, budget_qid("a", 0), status="adopted", phase="P04",
+                   decision_id="Q-" + budget_qid("a", 0))
+        self.assertEqual([event["decision_id"]
+                          for event in pas.quorum_events(str(self.run_dir))],
+                         ["Q-" + budget_qid("a", 0)])
+
+    def test_an_adopted_quorum_may_not_claim_a_human_decision(self):
+        """THE ONE THAT BITES, and it bites the anti-reflex mechanism itself. A
+        grant's `Granted against` is checked against the adopted set, so an
+        adoption claiming `H-900` puts the human's OWN grant into the set they
+        must be on record as having been shown before signing it. No honest
+        record satisfies that, and the run then stops holding an extension it
+        can never spend."""
+        seed_final(self.run_dir, budget_qid("a", 0), status="adopted", phase="P04",
+                   decision_id="H-900")
+        with self.assertRaises(pas.TrackerError) as raised:
+            pas.quorum_events(str(self.run_dir))
+        self.assertIn("H-900", str(raised.exception))
+        self.assertIn("an adoption writes", str(raised.exception))
+
+    def test_a_quorum_that_adopted_nothing_may_still_cite_a_human_decision(self):
+        """The positive control the two stops above need: the comparison is
+        scoped to `adopted`, and an escalation naming the human decision that
+        resolved it is an ordinary, legal record. A check that compared the id
+        on every status would refuse it and lose the citation that connects an
+        escalation to its answer."""
+        seed_final(self.run_dir, budget_qid("e", 0), status="escalated", phase="P04",
+                   decision_id="H-900")
+        events = pas.quorum_events(str(self.run_dir))
+        self.assertEqual([event["decision_id"] for event in events], ["H-900"])
 
 
 class QuorumBudgetTests(unittest.TestCase):
@@ -11901,14 +11974,167 @@ class QuorumBudgetTests(unittest.TestCase):
         unconditional write would rewrite this file on every question the run
         ever raises. Asserted against the write CALL rather than against a
         timestamp: two writes of identical bytes inside one filesystem tick are
-        indistinguishable by mtime, and that is the case this is about."""
+        indistinguishable by mtime, and that is the case this is about.
+
+        Patched at `os.replace`, which is where the pin is PUBLISHED. The first
+        draft of this case patched `Path.write_text` — and went green for the
+        wrong reason the moment the writer stopped calling it, which is exactly
+        the shape a vacuous assertion has.
+        """
         ids = seed_adoptions(self.run_dir, "P04", 3)
         self.decisions(DECISION_HUMAN + budget_grant(granted=ids))
         self.budget()
         self.assertTrue((self.run_dir / "quorum" / "extensions.json").is_file())
-        with mock.patch.object(Path, "write_text",
+        with mock.patch.object(pas.os, "replace",
                                side_effect=AssertionError("the pin was rewritten")):
             self.assertEqual(self.budget()["phase_ceiling"], 6)
+
+    def test_the_pin_is_replaced_and_never_truncated_in_place(self):
+        """F2. `Path.write_text` opens with `O_TRUNC`, so a process killed
+        between the truncate and the write leaves a ZERO-BYTE pin — and that is
+        terminal, not merely a lost ceiling. It parses as nothing, so every
+        later budget check stops; and deleting it does not recover the run,
+        because one further adoption has since moved the set the grant was
+        signed against and `_live_grant` can never re-derive it. The run is
+        stopped holding a human grant that can never be honoured.
+
+        So the writer is asserted at the syscall: the pin is PUBLISHED by
+        `os.replace` onto a name that is never opened for truncation, and the
+        run survives the zero-byte file the old writer could leave behind.
+        """
+        ids = seed_adoptions(self.run_dir, "P04", 3)
+        self.decisions(DECISION_HUMAN + budget_grant(granted=ids))
+        pins = self.run_dir / "quorum" / "extensions.json"
+        real_replace = pas.os.replace
+        replaced = []
+
+        def record(source, target):
+            replaced.append((str(source), str(target)))
+            return real_replace(source, target)
+
+        with mock.patch.object(pas.os, "replace", side_effect=record):
+            self.assertEqual(self.budget()["phase_ceiling"], 6)
+        self.assertEqual([target for _source, target in replaced], [str(pins)],
+                         "the pin arrives by rename, not by opening its own name")
+        self.assertNotIn(str(pins), [source for source, _target in replaced])
+        writes = {node.func.attr
+                  for node in ast.walk(function_node(module_source(),
+                                                     "_pin_extensions"))
+                  if isinstance(node, ast.Call)
+                  and isinstance(node.func, ast.Attribute)}
+        self.assertIn("replace", writes)
+        self.assertNotIn("write_text", writes,
+                         "write_text opens with O_TRUNC; the pin's own name is "
+                         "never opened for writing")
+
+        #: WHY it must be a rename, stated as the state it avoids. This is
+        #: precisely what an interrupt between truncate and write left behind,
+        #: and it is terminal in both directions: the empty file parses as
+        #: nothing, and DELETING it does not recover the run once one further
+        #: adoption has moved the set the grant was signed against.
+        pins.write_text("", encoding="utf-8")
+        seed_adoptions(self.run_dir, "P04", 1, prefix="b")
+        with self.assertRaises(pas.TrackerError):
+            self.budget()
+        pins.unlink()
+        with self.assertRaises(pas.TrackerValidationError) as raised:
+            self.budget()
+        self.assertIn("Granted against", str(raised.exception))
+
+    def test_an_interrupted_pin_write_leaves_the_previous_pin_whole(self):
+        """The recovery claim the rename buys, driven at the kill itself.
+
+        A writer stopped before it publishes has changed nothing: the pin on
+        disk is the WHOLE of the previous content, not a truncated prefix of it
+        — so the run stops with `TrackerWriteError`, which promises a retry is
+        safe, and the very next check succeeds with no repair step and no file
+        for a human to delete. That is the whole of what `write_text` could not
+        offer, because its first act was to empty the file it was replacing.
+        """
+        ids = seed_adoptions(self.run_dir, "P04", 3)
+        self.decisions(DECISION_HUMAN + budget_grant(granted=ids))
+        self.budget()
+        pins = self.run_dir / "quorum" / "extensions.json"
+        before = pins.read_text(encoding="utf-8")
+        self.decisions(DECISION_HUMAN + budget_grant(granted=ids)
+                       + budget_grant("H-901", axis="drift-budget-p05",
+                                      scope="P05", granted=ids))
+        with mock.patch.object(pas.os, "replace",
+                               side_effect=OSError(errno.EIO, "killed")):
+            with self.assertRaises(pas.TrackerWriteError):
+                self.budget()
+        self.assertEqual(pins.read_text(encoding="utf-8"), before,
+                         "the previous pin is whole, not a truncated prefix")
+        self.assertEqual([grant["decision_id"] for grant in self.budget()["extensions"]],
+                         ["H-900", "H-901"])
+        self.assertEqual([grant["decision_id"] for grant in self.pins()],
+                         ["H-900", "H-901"])
+
+    def test_no_temp_file_is_left_beside_the_pin(self):
+        """The other half of a rename-based writer: nothing else ever removes
+        the staged file, and a stranded `.extensions.json.*.tmp` beside the pin
+        is indistinguishable from one a live writer is holding."""
+        ids = seed_adoptions(self.run_dir, "P04", 3)
+        self.decisions(DECISION_HUMAN + budget_grant(granted=ids))
+        self.budget()
+        quorum = self.run_dir / "quorum"
+        self.assertEqual(sorted(entry.name for entry in quorum.iterdir()
+                                if entry.is_file()),
+                         ["extensions.json"])
+
+    def test_a_pin_that_cannot_be_written_is_a_tracker_write_error(self):
+        """F7. The wrapper around the pin write is load-bearing and nothing
+        drove it: an `OSError` escaping here leaves every `except TrackerError`
+        a controller has written unmatched, and the run dies on a permission
+        rather than stopping read-only with the file named.
+
+        Driven at the real filesystem rather than at a mock, so it fails the day
+        the writer opens a name the directory mode does not cover."""
+        ids = seed_adoptions(self.run_dir, "P04", 3)
+        self.decisions(DECISION_HUMAN + budget_grant(granted=ids))
+        quorum = self.run_dir / "quorum"
+        self.addCleanup(quorum.chmod, 0o755)
+        quorum.chmod(0o555)
+        # Running as root, or on a filesystem that ignores the mode: chmod
+        # proves nothing and a green assertion here would be a false one.
+        if os.access(quorum, os.W_OK):
+            self.skipTest("cannot drop write permission for this user")
+        with self.assertRaises(pas.TrackerWriteError) as raised:
+            self.budget()
+        self.assertIn("extensions.json", str(raised.exception))
+        self.assertFalse((quorum / "extensions.json").exists())
+
+    def test_a_pin_write_that_fails_on_encoding_is_a_tracker_write_error(self):
+        """The `UnicodeError` half of the same wrapper, which the permission
+        case cannot reach: the two families are caught together because a write
+        that fails on the ENCODER has changed nothing either, and a caller told
+        `TrackerWriteError` may retry both."""
+        ids = seed_adoptions(self.run_dir, "P04", 3)
+        self.decisions(DECISION_HUMAN + budget_grant(granted=ids))
+        real_open = pas.os.fdopen
+
+        class _Refusing:
+            def __init__(self, handle):
+                self._handle = handle
+
+            def __enter__(self):
+                self._handle.__enter__()
+                return self
+
+            def __exit__(self, *exception):
+                return self._handle.__exit__(*exception)
+
+            def write(self, _text):
+                raise UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogate")
+
+        with mock.patch.object(pas.os, "fdopen",
+                               side_effect=lambda *a, **k: _Refusing(real_open(*a, **k))):
+            with self.assertRaises(pas.TrackerWriteError) as raised:
+                self.budget()
+        self.assertIn("extensions.json", str(raised.exception))
+        quorum = self.run_dir / "quorum"
+        self.assertEqual([entry.name for entry in quorum.iterdir() if entry.is_file()],
+                         [], "the staged file is removed on the failure path too")
 
     def test_the_pin_is_rewritten_when_a_second_grant_joins_it(self):
         """The positive control the case above needs: a writer that never wrote
@@ -12028,11 +12254,51 @@ class QuorumBudgetTests(unittest.TestCase):
         self.decisions(DECISION_HUMAN + budget_grant(revision="0", granted=ids))
         self.assertEqual(self.budget()["phase_ceiling"], 6)
 
+    def test_both_grant_numerics_are_ascii_digits_and_not_merely_isdigit(self):
+        """F6. `isdigit` alone is true of `'٣'` and `'²'`, and the two fail
+        differently: the first parses as an integer, so a grant spelled with it
+        is ACCEPTED and confers a ceiling nobody can read back; the second
+        raises `ValueError` from `int` — outside this module's exception family
+        — and kills the run instead of stopping it. Both numerics on a grant are
+        swept, because `_is_count` is one call per field and a field that lost
+        it is a field nothing here would notice.
+
+        `Source revision` is exercised with `'٠'` rather than `'٣'` on purpose:
+        `int('٣')` is 3, which is ahead of this run's revision 0, so a bare
+        `isdigit` would still be refused — for the wrong reason, and the case
+        would pass against the mutant it exists to kill.
+        """
+        cases = (("revision", "٠", "Source revision"),
+                 ("revision", "²", "Source revision"),
+                 ("through", "٦", "Authorized through"),
+                 ("through", "²", "Authorized through"))
+        for field, value, label in cases:
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(pas.TrackerValidationError) as raised:
+                    self.on_a_fresh_run(budget_grant(**{field: value},
+                                                     granted=("Q-" + budget_qid("a", 0),)))
+                self.assertIn(label, str(raised.exception))
+                self.assertIn("ASCII digits", str(raised.exception))
+        #: The positive control: the same two fields in ASCII are accepted, so
+        #: a validator that refused every numeric would not satisfy this.
+        self.assertEqual(
+            self.on_a_fresh_run(budget_grant(revision="0", through="6",
+                                             granted=("Q-" + budget_qid("a", 0),))
+                                )["phase_ceiling"], 6)
+
     def test_every_required_grant_field_is_required(self):
         """Derived from the module's own `_GRANT_FIELDS` plus the scope it
         reads, not from a list typed here: a field added to the discipline
-        without a stop is a grant that is generic in one more way."""
-        required = tuple(pas._GRANT_FIELDS) + ("scope",)
+        without a stop is a grant that is generic in one more way.
+
+        Rule 10: BOTH halves are derived. `_GRANT_FIELDS` is the module's
+        constant and `scope` is the field `_live_grant` reads on top of it —
+        taken from the call tree by `read_fields`, not remembered, so a sixth
+        field read without a stop here fails rather than being missed.
+        """
+        read = read_fields("_live_grant")
+        required = tuple(pas._GRANT_FIELDS) + tuple(
+            sorted(read - set(pas._GRANT_FIELDS)))
         self.assertEqual(
             sorted(required),
             ["authorized_run", "authorized_through", "granted_against",
@@ -12177,27 +12443,6 @@ class QuorumBudgetMalformedInputTests(unittest.TestCase):
     def setUp(self):
         self.root, self.run_dir = repo_with_a_run(self)
 
-    def read_fields(self, name: str) -> set:
-        """Every literal key `name` reads, taken from the CALL TREE.
-
-        Derived rather than remembered, because the totality claim below is
-        about what the function reads and a list typed by hand is about what
-        somebody remembered it read. Both `record.get("x")` and `entry["x"]`
-        count.
-        """
-        found = set()
-        for node in ast.walk(function_node(module_source(), name)):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "get" and node.args
-                    and isinstance(node.args[0], ast.Constant)
-                    and isinstance(node.args[0].value, str)):
-                found.add(node.args[0].value)
-            elif (isinstance(node, ast.Subscript)
-                  and isinstance(node.slice, ast.Constant)
-                  and isinstance(node.slice.value, str)):
-                found.add(node.slice.value)
-        return found
-
     def only_a_tracker_error(self, what: str) -> bool:
         """Either a usable budget or a stop inside the family — never an escape.
 
@@ -12223,7 +12468,7 @@ class QuorumBudgetMalformedInputTests(unittest.TestCase):
         asserted rather than described. Each field is varied with an unhashable
         value AND a wrong-typed scalar, because a bare `in` only raises on the
         first and a missing type check only shows on the second."""
-        fields = self.read_fields("_final_event")
+        fields = read_fields("_final_event")
         self.assertEqual(fields, {"qid", "status", "phase", "decision_id"},
                          "a field was added to _final_event's reads without a "
                          "case here; the totality claim is now false")
@@ -12242,22 +12487,73 @@ class QuorumBudgetMalformedInputTests(unittest.TestCase):
                         "survived")
 
     def test_every_field_a_pinned_grant_is_read_for_survives_any_json_value(self):
-        fields = self.read_fields("_pinned_grant")
+        """Rule 10, and the VERDICT is asserted, not merely the absence of an
+        escape.
+
+        The first draft of this case discarded `only_a_tracker_error`'s return
+        value, so it claimed only "nothing left the exception family" — which an
+        implementation that ACCEPTED EVERY MALFORMED PIN satisfies, and one did:
+        dropping `_TOKEN.fullmatch` from the phase check survived the whole
+        suite. So every value below is illegal for the field it is put in, and
+        every one is asserted refused.
+
+        That costs the corpus its "any JSON value" shape, because three of the
+        original values are legal SOMEWHERE: `7` is a lawful ceiling,
+        `["H-900"]` a lawful `granted_against`, `"0.85"` a lawful phase token.
+        Each is kept, in the fields where it is illegal, so the type coverage
+        survives the change and only the claim gets stronger.
+        """
+        fields = read_fields("_pinned_grant")
         self.assertEqual(
             fields,
             {"decision_id", "phase", "authorized_through", "granted_against"},
             "a field was added to _pinned_grant's reads without a case here")
         pins = self.run_dir / "quorum" / "extensions.json"
         pins.parent.mkdir(parents=True, exist_ok=True)
-        hostile = (["H-900"], {"a": 1}, 7, True, None, "", "0.85")
+        #: Illegal in all four fields: no string in it is filled in, no dict is
+        #: any of the four types, and `True` is refused as a ceiling by name.
+        hostile = ({"a": 1}, True, None, "", "  ")
+        #: Illegal in this field only, and each is legal in exactly one other.
+        each = {
+            "decision_id": (["H-900"], 7, "0.85", "Q-abc123def456", "H-01x"),
+            "phase": (["H-900"], 7, "not a phase!!", "P04 P05"),
+            "authorized_through": (["H-900"], "0.85", "6", 6.5, 3),
+            "granted_against": (7, "0.85", ["not an id"], [None], [["H-900"]]),
+        }
+        self.assertEqual(set(each), fields)
         for field in sorted(fields):
-            for value in hostile:
+            for value in hostile + each[field]:
                 with self.subTest(field=field, value=repr(value)):
                     entry = {"decision_id": "H-900", "phase": "P04",
                              "authorized_through": 6, "granted_against": []}
                     entry[field] = value
                     pins.write_text(json.dumps([entry]), encoding="utf-8")
-                    self.only_a_tracker_error(f"extensions.json {field}={value!r}")
+                    self.assertTrue(
+                        self.only_a_tracker_error(
+                            f"extensions.json {field}={value!r}"),
+                        f"{field}={value!r} is not a legal value of that field "
+                        "in a pin and must be REFUSED, not merely survived; a "
+                        "pin is never re-derived, so a pin this reader accepts "
+                        "is a ceiling nobody signed")
+
+    def test_a_pin_the_module_never_wrote_is_accepted_only_where_it_is_legal(self):
+        """The positive control the sweep above needs, and it is not the same as
+        the round-trip control further down: these are values a hand-edited pin
+        could carry which ARE legal, and a validator narrowed until every case
+        above passed would refuse them and lose the ceiling."""
+        pins = self.run_dir / "quorum" / "extensions.json"
+        pins.parent.mkdir(parents=True, exist_ok=True)
+        legal = ({"decision_id": "H-900", "phase": "0.85",
+                  "authorized_through": 7, "granted_against": ["H-900"]},
+                 {"decision_id": "H-1", "phase": "P04/sub",
+                  "authorized_through": 4, "granted_against": ["Q-abc123def456"]})
+        for entry in legal:
+            with self.subTest(entry=entry["decision_id"]):
+                pins.write_text(json.dumps([entry]), encoding="utf-8")
+                budget = pas.quorum_budget(str(self.run_dir), phase="P04")
+                self.assertEqual([grant["decision_id"]
+                                  for grant in budget["extensions"]],
+                                 [entry["decision_id"]])
 
     def test_a_status_that_is_not_a_string_is_a_violation_and_not_a_typeerror(self):
         """RULE 9, pinned at the one site where it bites. `_member` accepts
@@ -12290,9 +12586,33 @@ class QuorumBudgetMalformedInputTests(unittest.TestCase):
                     pas.quorum_budget(str(self.run_dir), phase="P04")
 
     def test_a_pin_file_that_is_not_a_list_of_grants_is_refused(self):
+        """Every member is illegal, so the claim is REFUSAL and not survival.
+
+        The phase and `granted_against` spellings are here because they are the
+        ones a hand-edited pin actually carries — a phase with a space in it, a
+        list of prose where a list of ids belongs — and because each names a
+        check that no other case in this file reaches: dropping `_TOKEN` from
+        the phase test, or the `_id_provenance` test from the shown list,
+        survived the whole suite before they were written down.
+        """
         pins = self.run_dir / "quorum" / "extensions.json"
         pins.parent.mkdir(parents=True, exist_ok=True)
         for text in ("{}", "[3]", "[[]]", "null", "[{}]",
+                     json.dumps([{"decision_id": "H-900", "phase": "not a phase!!",
+                                  "authorized_through": 6, "granted_against": []}]),
+                     json.dumps([{"decision_id": "H-900", "phase": "P04 P05",
+                                  "authorized_through": 6, "granted_against": []}]),
+                     json.dumps([{"decision_id": "H-900", "phase": "",
+                                  "authorized_through": 6, "granted_against": []}]),
+                     json.dumps([{"decision_id": "H-900", "phase": "P04",
+                                  "authorized_through": 6,
+                                  "granted_against": ["the ones I was shown"]}]),
+                     json.dumps([{"decision_id": "H-900", "phase": "P04",
+                                  "authorized_through": 6,
+                                  "granted_against": [["Q-abc123def456"]]}]),
+                     json.dumps([{"decision_id": "H-900", "phase": "P04",
+                                  "authorized_through": 6,
+                                  "granted_against": {"0": "H-901"}}]),
                      json.dumps([{"decision_id": "H-900", "phase": "P04",
                                   "authorized_through": 6, "granted_against": [],
                                   "extra": 1}]),
@@ -12328,6 +12648,48 @@ class QuorumBudgetMalformedInputTests(unittest.TestCase):
             with self.subTest(phase=repr(phase)):
                 with self.assertRaises(pas.QuorumError):
                     pas.quorum_budget(str(self.run_dir), phase=phase)
+
+    def test_the_phase_charged_against_is_held_to_the_grammar_a_record_uses(self):
+        """F4. The per-phase count is an equality against this argument, so a
+        phase no `final.json` could ever spell matches NOTHING: three adoptions
+        on the books, zero reported, and a caller handed a fresh three-adoption
+        budget. That is fail-open by unrecognisable token, on the axis where
+        failing open means the run keeps deciding past a ceiling a human set.
+
+        `_final_event` already holds a record's phase to `_TOKEN`; before this,
+        the public entry point held it to nothing at all.
+        """
+        seed_adoptions(self.run_dir, "P04", 3)
+        self.assertFalse(pas.quorum_budget(str(self.run_dir),
+                                           phase="P04")["may_raise"])
+        for phase in ("P04 P05", "not a phase!!", "-P04", "/P04",
+                      "P04|P05", "P04\tP05", "P04\nP05"):
+            with self.subTest(phase=repr(phase)):
+                with self.assertRaises(pas.QuorumError) as raised:
+                    pas.quorum_budget(str(self.run_dir), phase=phase)
+                self.assertIn("not a phase token", str(raised.exception))
+
+    def test_a_legal_phase_token_is_still_accepted_whatever_it_names(self):
+        """The half the stop above must not take with it, and the honest limit
+        of the check. `P05` is a phase with no adoptions and a full budget, and
+        so are `p04` and `banana`: this module has no registry of the run's
+        phases to check a token against — `## Phases` is empty for the whole of
+        the run in which questions are raised — so a typo that is ITSELF a legal
+        token still reports a fresh budget. The grammar is the boundary; naming
+        the right phase belongs to the caller, which writes the same string into
+        the `final.json` the adoption files."""
+        seed_adoptions(self.run_dir, "P04", 3)
+        for phase in ("P05", "p04", "P4", "banana", "P04/sub", "0.85"):
+            with self.subTest(phase=repr(phase)):
+                budget = pas.quorum_budget(str(self.run_dir), phase=phase)
+                self.assertEqual(budget["phase"], phase)
+                self.assertEqual(budget["phase_adoptions"], 0)
+                self.assertEqual(budget["run_adoptions"], 3)
+        #: And the surrounding whitespace a template leaves is still stripped
+        #: rather than refused, so the charged phase is the one it names.
+        padded = pas.quorum_budget(str(self.run_dir), phase="  P04  ")
+        self.assertEqual(padded["phase"], "P04")
+        self.assertEqual(padded["phase_adoptions"], 3)
 
 
 class JsonEntersWrappedTests(unittest.TestCase):

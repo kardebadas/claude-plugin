@@ -2497,6 +2497,61 @@ git commit -m "feat(pipeline-auto): classify every quorum interruption point fro
 
 ### Task 11: Clustering, rung strictness, and adoption
 
+> **QUORUM DECISION (three brains, unanimous on `mint-qid`; cluster rung
+> `code-evidenced` 0.85, at the adoption floor; runner-up cluster none).**
+> A question whose axis is the reserved literal `new` **is adopted like any
+> other.** The `## Quorum` row keeps `new` — `_validate_quorum` closes that
+> namespace to stage-03 question ids plus the literal, so a minted axis could
+> not be written there anyway. The decision record appended to `decisions.md`
+> carries **the question's own bare 12-hex qid** as its `Axis`.
+>
+> **Why not escalate.** It is refuted by committed artefacts, not merely
+> disfavoured: `tests/fixtures/valid-progress.md:56` is an adopted row on axis
+> `new`, `ReservedAxisLiteralTests.test_the_axis_literal_itself_stays_legal`
+> pins the literal as legal in the tracker, and `phase-05-dial-and-gate.md`
+> lines 2185-2190 already plan three `InheritedRungCapTests` around a `new`-axis
+> row with `outcome: adopted`. There is also no escalation reason token for it
+> anywhere in the gate chain. Escalating would be a schema change dressed as a
+> policy answer — and since stage 03 raises at most four questions, `new` is the
+> default for everything raised mid-run, so it would hand the human the common
+> case in a skill whose entire point is not doing that.
+>
+> **Why not a derived slug.** Nothing in the repository derives one, so the name
+> would be agent-invented and unrecomputable — the failure `derive_qid`'s own
+> comment names: "a qid no derivation can reproduce is a question that can never
+> be found again." `_ensure_decision_recorded` is idempotent and repairs an
+> interrupted write on the next call, so the axis must be recomputable
+> byte-identically.
+>
+> **Why the BARE qid and not `axis-<qid>`.** The fixture's stage-03 question ids
+> include `axis-2` (`## Questions`), so the `axis-` prefix namespace is already
+> occupied by the very ids a minted axis must not collide with.
+>
+> **Close the collision anyway.** A minted axis that happens to equal a stage-03
+> question id would bucket this decision with that axis's decisions and
+> manufacture a false contradiction — the fail-false twin of the fail-open this
+> reservation exists to prevent. Before writing, assert the minted axis is not
+> in `{row["id"] for row in tracker["questions"]}` and stop if it is. The writer
+> already holds the tracker; the check is one line and it is the only thing
+> standing between a 12-hex coincidence and a run that halts on a contradiction
+> that does not exist.
+>
+> **Known and accepted:** two questions that each open the *same* conceptual
+> axis mint different axes and will never be compared. That is bounded by the
+> drift budget (3 per phase, 10 per run) and the depth cap of 2, and it fails
+> silent-but-inspectable — the axis still resolves to the question that opened
+> it — rather than fail-open.
+
+> **DEFECT in this task's own Step 3, found by the same reading.**
+> `_ensure_decision_recorded` currently does `path.write_text(text + record)`
+> and THEN `parse_decisions(path.read_text(...))` to validate. On any record the
+> parser refuses — the reserved axis being exactly such a case before this
+> decision is applied — it writes the bad record into the append-only audit
+> trail and raises afterwards, leaving `decisions.md` permanently unparseable
+> and every later read a read-only stop. **Validate the rendered record before
+> writing it**, not after. The write is the irreversible half.
+
+
 **Files:**
 - Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
 - Test: `plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py`

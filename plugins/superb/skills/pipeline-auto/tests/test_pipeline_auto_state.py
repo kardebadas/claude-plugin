@@ -6821,6 +6821,457 @@ class RepoRootIsRecordedNeverDerivedTests(unittest.TestCase):
         self.assertEqual((run_dir / "progress.md").read_bytes(), before)
 
 
+#: The small repository a citation is resolved against. One line per file, so a
+#: case can name the line it means without counting.
+ENGINE_TEXT = "class PostgresEngine:\n    pass\n"
+POOL_TEXT = "PostgresEngine pool\n"
+SPEC_TEXT = "The session table is backed by PostgreSQL.\n"
+
+#: Two decision records in one file. The second exists so that a resolver which
+#: searched the WHOLE file instead of the cited record's own section would say
+#: yes to a quote that lives under a different D-ID.
+DECISIONS_TEXT = (
+    "<!-- pipeline-auto-decisions/v1 -->\n"
+    "\n"
+    "## H-001 — Session storage\n"
+    "\n"
+    "- **Answer:** postgres — the existing PostgreSQL instance.\n"
+    "\n"
+    "## H-002 — Cache backend\n"
+    "\n"
+    "- **Answer:** redis — a separate Redis process.\n"
+)
+
+
+def write_repo(root, relpath, text):
+    """One file inside a repository tree, parents created."""
+    path = Path(root) / relpath
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def populate_repo(root):
+    """The tree every evidence case in this file cites."""
+    write_repo(root, CITED_PATH, ENGINE_TEXT)
+    write_repo(root, "db/pool.py", POOL_TEXT)
+    write_repo(root, "spec.md", SPEC_TEXT)
+    write_repo(root, "decisions.md", DECISIONS_TEXT)
+    return root
+
+
+def spec_citation(quote: str) -> dict:
+    return {"kind": "spec", "path": "spec.md", "line": 1, "quote": quote}
+
+
+def decision_citation(decision: str, quote: str) -> dict:
+    return {"kind": "decision", "path": "decisions.md", "decision": decision,
+            "quote": quote}
+
+
+class EffectiveRungTests(unittest.TestCase):
+    """``effective_rung`` — where a brain's claim about its own grounding is
+    PRICED, by reading the file it cited.
+
+    A declared rung is a claim about where an answer came from, and every rung
+    above ``engineering-judgement`` is a claim that something on disk says so.
+    This is the only place that claim is checked against the disk. An
+    implementation that confirms the rung is in the enum and the evidence list
+    is non-empty — and never opens the file — returns ``specified`` for an
+    answer nothing supports, and every test that merely builds a real path
+    passes against it. So the cases below are stated in BOTH directions: a
+    citation that resolves keeps its rung, and a citation that resolves to a
+    real file at a real line whose text does not contain the claim demotes.
+
+    Demotion rather than rejection, and to a rung strictly below the adoption
+    floor: rejection discards the answer and hands a malformed brain a veto,
+    while demotion prices the claim at what it turned out to be worth and lets
+    the arithmetic defeat it. Demotion never PROMOTES — a ``speculation`` with
+    a broken citation stays ``speculation``.
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="pipeline-auto-evidence-"))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        populate_repo(self.root)
+
+    def rung(self, payload, root=None):
+        return pas.effective_rung(
+            payload, str(self.root) if root is None else str(root))
+
+    # --- the claim is read off the disk, not off the response ------------
+
+    def test_a_resolving_quoted_citation_keeps_the_declared_rung(self):
+        """The positive half. Without it every case below passes against an
+        implementation that demotes unconditionally, which would put the whole
+        run below the floor and escalate everything.
+        """
+        self.assertEqual(self.rung(response()), "code-evidenced")
+
+    def test_a_path_that_exists_at_a_line_that_does_not_contain_the_claim_demotes(self):
+        """THE NAMED FAULT of this task.
+
+        ``spec.md`` is really there and line 1 is really a line, so every check
+        short of reading the text says yes. The brain quoted something the line
+        does not say. A checker that only confirms the file exists is a rubber
+        stamp, and it passes every case that merely builds a real path.
+        """
+        payload = response(rung="specified",
+                           evidence=[spec_citation("backed by MySQL")])
+        self.assertEqual(self.rung(payload), "engineering-judgement")
+        self.assertLess(pas.RUNGS[self.rung(payload)], pas.ADOPTION_FLOOR,
+                        "an unquotable citation landed at or above the floor, "
+                        "so an inflated claim can still be adopted")
+
+    def test_the_same_citation_quoting_what_the_line_really_says_keeps_its_rung(self):
+        """The other direction of the case above: only the QUOTE differs, so a
+        difference in outcome can be attributed to the file's text and nothing
+        else.
+        """
+        payload = response(rung="specified",
+                           evidence=[spec_citation("backed by PostgreSQL")])
+        self.assertEqual(self.rung(payload), "specified")
+
+    def test_a_quote_differing_only_in_spacing_and_case_still_resolves(self):
+        """A brain retyping a line is not a brain inventing one. Whitespace
+        runs and case are normalised on both sides; the words are not.
+        """
+        payload = response(rung="specified",
+                           evidence=[spec_citation("backed   by\tpostgresql")])
+        self.assertEqual(self.rung(payload), "specified")
+
+    def test_a_blank_quote_demotes(self):
+        """The empty string is ``in`` every line. A citation whose quote is
+        whitespace would resolve against any file at any line, which is the
+        rubber stamp with the file read left in for appearances.
+        """
+        payload = response(evidence=[{"kind": "repo", "path": CITED_PATH,
+                                      "line": 1, "quote": "   "}])
+        self.assertEqual(self.rung(payload), "engineering-judgement")
+
+    def test_a_nonexistent_path_demotes(self):
+        payload = response(rung="specified",
+                           evidence=[{"kind": "spec", "path": "no/such/file.md",
+                                      "line": 1, "quote": "anything"}])
+        self.assertEqual(self.rung(payload), "engineering-judgement")
+
+    def test_a_directory_cited_as_a_file_demotes(self):
+        """``read_text`` on a directory raises ``IsADirectoryError`` — an
+        ``OSError``, which is a demotion and never an escaped crash.
+        """
+        payload = response(evidence=[{"kind": "repo", "path": "db", "line": 1,
+                                      "quote": "PostgresEngine"}])
+        self.assertEqual(self.rung(payload), "engineering-judgement")
+
+    def test_a_citation_outside_the_repository_root_demotes(self):
+        """An absolute citation, or one that climbs out with ``..``, resolves
+        identically against EVERY root — which is precisely the property the
+        recorded root exists to deny. A brain that cited one would be graded
+        against a file this run does not contain, and the wrong-root case below
+        could no longer tell a recorded root from a derived one.
+        """
+        outside = Path(tempfile.mkdtemp(prefix="pipeline-auto-outside-"))
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        write_repo(outside, "db/engine.py", ENGINE_TEXT)
+        climbing = os.path.relpath(outside / "db/engine.py", self.root)
+        for path in (str(outside / "db/engine.py"), climbing):
+            with self.subTest(path=path):
+                payload = response(evidence=[
+                    {"kind": "repo", "path": path, "line": 1,
+                     "quote": "PostgresEngine"}])
+                self.assertEqual(self.rung(payload), "engineering-judgement")
+
+    def test_a_line_number_past_the_end_of_the_file_demotes(self):
+        payload = response(evidence=[{"kind": "repo", "path": CITED_PATH,
+                                      "line": 900, "quote": "PostgresEngine"}])
+        self.assertEqual(self.rung(payload), "engineering-judgement")
+
+    def test_a_line_number_below_one_demotes(self):
+        """Lines are 1-based. ``0`` and ``-1`` are the two indices that a
+        ``0 <= n < len(lines)`` bound would silently accept, and ``-1`` would
+        resolve against the LAST line of the file — a citation to a place the
+        brain never named.
+        """
+        for number in (0, -1):
+            with self.subTest(line=number):
+                payload = response(evidence=[
+                    {"kind": "repo", "path": "db/pool.py", "line": number,
+                     "quote": "PostgresEngine"}])
+                self.assertEqual(self.rung(payload), "engineering-judgement")
+
+    def test_a_boolean_line_number_demotes(self):
+        """``True == 1``, so a flag that arrived where a line number belongs
+        would resolve against line 1 of whatever file was cited and grant the
+        top rung to a response that never named a line at all.
+        """
+        payload = response(evidence=[{"kind": "repo", "path": CITED_PATH,
+                                      "line": True, "quote": "PostgresEngine"}])
+        self.assertEqual(self.rung(payload), "engineering-judgement")
+
+    def test_a_dangling_citation_alongside_a_resolving_one_demotes(self):
+        """EVERY citation is resolved, not merely enough of them.
+
+        The first item here satisfies ``code-evidenced`` on its own, so a rule
+        that stopped once the rung's minimum was met would never look at the
+        second — and a brain could pad one true citation with any number of
+        invented ones and have them recorded as grounding nobody checked.
+        """
+        payload = response(evidence=[
+            {"kind": "repo", "path": CITED_PATH, "line": 1,
+             "quote": "PostgresEngine"},
+            {"kind": "repo", "path": "db/nowhere.py", "line": 1,
+             "quote": "PostgresEngine"}])
+        self.assertEqual(self.rung(payload), "engineering-judgement")
+
+    # --- what each rung must be able to show -----------------------------
+
+    def test_specified_cited_only_from_repository_code_demotes(self):
+        """``specified`` means a human said so. The default response's evidence
+        is ``repo`` kind and RESOLVES, so this case cannot be passed by a
+        resolver alone: code is not a specification, however real the file is.
+        """
+        self.assertEqual(self.rung(response(rung="specified")),
+                         "engineering-judgement")
+
+    def test_code_evidenced_cited_only_from_a_specification_demotes(self):
+        """The converse, so the kind check is not satisfied by "any kind at
+        all": a spec citation is not evidence about the code.
+        """
+        payload = response(rung="code-evidenced",
+                           evidence=[spec_citation("backed by PostgreSQL")])
+        self.assertEqual(self.rung(payload), "engineering-judgement")
+
+    def test_convention_cited_needs_two_exemplars(self):
+        """One occurrence is an instance; two are a convention."""
+        self.assertEqual(self.rung(response(rung="convention-cited")),
+                         "engineering-judgement")
+        two = response(rung="convention-cited", evidence=[
+            {"kind": "repo", "path": CITED_PATH, "line": 1,
+             "quote": "PostgresEngine"},
+            {"kind": "repo", "path": "db/pool.py", "line": 1,
+             "quote": "PostgresEngine"}])
+        self.assertEqual(self.rung(two), "convention-cited")
+
+    def test_the_second_exemplar_must_itself_resolve(self):
+        """Counting entries instead of resolutions would let one real file and
+        one invented one add up to a convention.
+        """
+        payload = response(rung="convention-cited", evidence=[
+            {"kind": "repo", "path": CITED_PATH, "line": 1,
+             "quote": "PostgresEngine"},
+            {"kind": "repo", "path": "db/nowhere.py", "line": 1,
+             "quote": "PostgresEngine"}])
+        self.assertEqual(self.rung(payload), "engineering-judgement")
+
+    def test_every_rung_states_its_own_evidence_requirement(self):
+        """No rung acquires its requirement by being absent from the table.
+
+        A rung missing from the mapping would need no evidence at all, and the
+        rung most likely to be forgotten is a new one added at the top.
+        """
+        self.assertEqual(set(pas._RUNG_EVIDENCE), set(pas.RUNGS))
+
+    def test_an_empty_evidence_list_demotes_a_grounded_rung(self):
+        """``evidence: []`` is SCHEMA-VALID — the response validator judges
+        shape and deliberately reads no file — so this function meets it, and
+        must demote rather than assume the list holds an item. Indexing it
+        would raise ``IndexError``, which is outside ``TrackerError`` and so
+        escapes every handler a controller has written.
+        """
+        for rung in ("specified", "code-evidenced", "convention-cited"):
+            with self.subTest(rung=rung):
+                self.assertEqual(self.rung(response(rung=rung, evidence=[])),
+                                 "engineering-judgement")
+
+    # --- decision citations ----------------------------------------------
+
+    def test_a_decision_citation_resolves_against_its_own_record(self):
+        payload = response(rung="specified", evidence=[
+            decision_citation("H-001", "the existing PostgreSQL instance")])
+        self.assertEqual(self.rung(payload), "specified")
+
+    def test_a_decision_citation_quoting_another_record_demotes(self):
+        """The quote is in the file — under ``H-002``. A resolver that searched
+        the whole document would attribute one record's words to another, and
+        ``consistent_with``/depth are computed from those attributions.
+        """
+        payload = response(rung="specified", evidence=[
+            decision_citation("H-002", "the existing PostgreSQL instance")])
+        self.assertEqual(self.rung(payload), "engineering-judgement")
+
+    def test_a_decision_id_that_is_not_in_the_file_demotes(self):
+        payload = response(rung="specified", evidence=[
+            decision_citation("H-404", "the existing PostgreSQL instance")])
+        self.assertEqual(self.rung(payload), "engineering-judgement")
+
+    # --- looking grounded without being grounded --------------------------
+
+    def test_a_second_best_in_the_same_rung_demotes(self):
+        """Two answers the brain grounds equally well is not a decision; it is
+        the brain reporting that it could not separate them.
+        """
+        payload = response(alternatives=[
+            {"answer_key": "sqlite", "rung": "code-evidenced",
+             "reason": "also in the tree"}])
+        self.assertEqual(self.rung(payload), "engineering-judgement")
+
+    def test_a_separable_second_best_keeps_the_rung(self):
+        """Stated so the case above is about the alternative's RUNG and not
+        about having alternatives at all.
+        """
+        self.assertEqual(self.rung(response()), "code-evidenced")
+
+    def test_an_empty_falsifier_demotes(self):
+        """An answer nothing could change is not grounded; it is held."""
+        self.assertEqual(self.rung(response(what_would_change_my_mind="   ")),
+                         "engineering-judgement")
+
+    def test_a_non_string_falsifier_demotes_rather_than_reading_as_a_repr(self):
+        """``str(None).strip()`` is ``'None'`` — truthy. Coercing the field
+        before testing it turns the declined field into the best-looking
+        falsifier in the run.
+        """
+        for value in (None, 0, [], {"why": "x"}):
+            with self.subTest(falsifier=value):
+                self.assertEqual(
+                    self.rung(response(what_would_change_my_mind=value)),
+                    "engineering-judgement")
+
+    def test_anchoring_in_repository_code_alone_demotes(self):
+        """An answer anchored only in what the code already does is an answer
+        with nothing the user actually said behind it.
+        """
+        payload = response(consistent_with=[{"kind": "repo",
+                                             "id": "db/engine.py:1"}])
+        self.assertEqual(self.rung(payload), "engineering-judgement")
+
+    def test_an_anchor_in_the_specification_is_enough(self):
+        """``spec`` as well as ``decision``, so the case above is about
+        repository-only anchoring and not about the literal ``decision``.
+        """
+        payload = response(consistent_with=[{"kind": "spec", "id": "S-1"}])
+        self.assertEqual(self.rung(payload), "code-evidenced")
+
+    def test_demotion_never_promotes_a_speculation(self):
+        """Every rule above is a demotion. ``_not_above`` takes the LOWER of
+        the two rungs; taking the demotion rung outright would RAISE a
+        speculation with no evidence and an empty falsifier to 0.55.
+        """
+        payload = response(rung="speculation", evidence=[],
+                           what_would_change_my_mind="")
+        self.assertEqual(self.rung(payload), "speculation")
+
+    # --- the root ---------------------------------------------------------
+
+    def test_a_wrong_repo_root_silently_demotes_every_grounded_answer(self):
+        """THE CASE BETWEEN THIS DESIGN AND A SILENT TOTAL FAILURE.
+
+        Both wrong roots below are real directories, so nothing raises. With
+        the wrong one nothing resolves, every ``specified`` and
+        ``code-evidenced`` answer falls to 0.55, every cluster lands below the
+        0.85 floor, and the run escalates every question it is ever asked while
+        looking like a correctly cautious quorum. The root is a ``## Run``
+        field and is never computed — this case is why.
+        """
+        payload = response()
+        self.assertEqual(self.rung(payload), "code-evidenced")
+        for wrong in (self.root / "db", self.root.parent):
+            with self.subTest(root=str(wrong)):
+                self.assertTrue(wrong.is_dir())
+                self.assertEqual(self.rung(payload, root=wrong),
+                                 "engineering-judgement")
+
+    def test_the_recorded_repo_root_is_the_one_citations_resolve_against(self):
+        """The whole path, end to end: a real run at its production depth, the
+        root read back out of its own tracker, and a citation priced against
+        it. The run sits three directories deep, so the roots directory
+        arithmetic would have produced resolve nothing.
+        """
+        root, run_dir = repo_with_a_run(self)
+        populate_repo(root)
+        recorded = pas.repo_root(pas.validate_run(run_dir))
+        self.assertEqual(pas.effective_rung(response(), recorded),
+                         "code-evidenced")
+        for depth in range(3):
+            with self.subTest(parents=depth):
+                self.assertEqual(
+                    pas.effective_rung(response(), str(run_dir.parents[depth])),
+                    "engineering-judgement",
+                    f"run_dir.parents[{depth}] priced a citation, so this case "
+                    "can no longer tell a recorded root from a derived one")
+        self.assertNotEqual(Path(recorded).resolve(), run_dir.resolve())
+
+    def test_a_root_that_is_not_a_directory_is_a_stop_and_not_a_demotion(self):
+        """The one wrong root this function CAN detect, made loud.
+
+        ``_validate_run`` checks the cell as a string and says so: "this path
+        is not where it was" is a fact for the code resolving a citation to
+        report. Demoting instead would be the silent total failure with a
+        cause nobody could find — every answer in the run at 0.55 and no
+        exception anywhere.
+        """
+        for bad in (str(self.root / "missing"), str(self.root / "spec.md"),
+                    "", None, 12):
+            with self.subTest(root=bad):
+                with self.assertRaises(pas.QuorumError):
+                    pas.effective_rung(response(), bad)
+
+    # --- no value arrives through an illegal door -------------------------
+
+    def test_an_unknown_rung_raises_and_is_never_defaulted(self):
+        """Defeats ``RUNGS.get(rung, 0.55)``: 0.55 is a legal value arriving
+        through an illegal door, and nothing downstream could tell it from a
+        brain that honestly reported engineering judgement.
+        """
+        for declared in ("high", "", None, 0.95, ["code-evidenced"]):
+            with self.subTest(rung=declared):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    self.rung(response(rung=declared))
+
+    def test_a_malformed_response_never_escapes_the_tracker_error_family(self):
+        """Any JSON value at all, in any of the fields this function reads.
+
+        ``alt.get(...)`` on a string raises ``AttributeError``; ``list(12)``
+        and ``for item in 12`` raise ``TypeError``; indexing an empty list
+        raises ``IndexError``. None of the three is a ``TrackerError``, so each
+        escapes every ``except TrackerError`` a controller has written and
+        kills the run on a brain's typo instead of demoting it.
+        """
+        malformed = [
+            response(evidence="db/engine.py"),
+            response(evidence=12),
+            response(evidence=["db/engine.py"]),
+            response(evidence=[None]),
+            response(evidence=[{"kind": "repo", "path": 12, "line": 1,
+                                "quote": "PostgresEngine"}]),
+            response(evidence=[{"kind": "repo", "path": CITED_PATH, "line": 1,
+                                "quote": 12}]),
+            response(evidence=[{"kind": "repo", "path": CITED_PATH,
+                                "line": "1", "quote": "PostgresEngine"}]),
+            response(evidence=[{"kind": "decision", "path": "decisions.md",
+                                "decision": 12, "quote": "postgres"}]),
+            response(alternatives="sqlite"),
+            response(alternatives=12),
+            response(alternatives=["sqlite"]),
+            response(consistent_with="H-001"),
+            response(consistent_with=12),
+            response(consistent_with=["H-001"]),
+        ]
+        for payload in malformed:
+            with self.subTest(payload=payload):
+                try:
+                    outcome = self.rung(payload)
+                except pas.TrackerError:
+                    continue
+                self.assertIn(outcome, pas.RUNGS)
+
+    def test_a_response_that_is_not_an_object_is_schema_invalid(self):
+        for payload in (None, 12, "code-evidenced", ["code-evidenced"]):
+            with self.subTest(payload=payload):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    self.rung(payload)
+
+
 def fixture_columns() -> dict[str, tuple[str, ...]]:
     """``{markdown heading: ordered dict keys}``, read out of the committed
     fixture's own header rows with nothing from the module.

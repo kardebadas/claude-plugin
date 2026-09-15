@@ -3419,3 +3419,274 @@ def validate_brain_response(payload: dict) -> list[str]:
     if blocker is not None and not _text(blocker):
         problems.append("blocker-not-a-string")
     return problems
+
+
+# --- pricing a claim: evidence resolution and rung demotion ---------------
+#
+# A declared rung is a CLAIM about where an answer came from, and every rung
+# above ``engineering-judgement`` is a claim that something on disk says so.
+# This is the only place that claim is ever checked against the disk. A brain
+# claiming ``specified`` or ``code-evidenced`` must cite a place that resolves
+# AND contains what it said was there; otherwise the answer is priced at
+# ``engineering-judgement``, which is strictly below the adoption floor, so an
+# inflated claim is defeated arithmetically rather than argued with.
+#
+# DEMOTION, NOT REJECTION. Rejecting a response discards the information in it
+# and hands a malformed brain a veto over the quorum; demotion prices the claim
+# at what it turned out to be worth and lets the floor do the rest. And
+# demotion never PROMOTES: a ``speculation`` with a dangling citation stays at
+# ``speculation``, because every rule here is a ceiling and a ceiling that
+# raised a weak answer would be a floor.
+#
+# WHAT WOULD HAPPEN IF THE RESOLUTION WERE SKIPPED, or run against the wrong
+# root: nothing visible. Every grounded answer falls to 0.55, every cluster
+# lands below 0.85, and the run escalates every question it is ever asked while
+# looking like a correctly cautious quorum. No error, no exception, no failing
+# test. That is why the root is a ``## Run`` field read back through
+# ``repo_root`` and is NEVER computed here -- not by ``parents[N]``, not by
+# walking for ``.git``, not from ``__file__`` -- and why a root that is not a
+# usable directory is a STOP rather than a demotion: it is the one wrong root
+# this function can detect, and detecting it silently would be the invisible
+# failure with a cause nobody could find.
+
+#: What each rung must be able to SHOW, checked only against evidence that
+#: resolved. Total over the five names on purpose: a rung absent from this
+#: table would require no evidence at all, which is how a new top rung gets
+#: added and quietly bypasses the only check that prices it. Keyed by name and
+#: asserted in the suite to cover ``RUNGS`` exactly, so the two cannot drift.
+#: ``convention-cited`` needs TWO exemplars because one occurrence is an
+#: instance and a convention is a repetition.
+_RUNG_EVIDENCE = MappingProxyType({
+    "specified": (frozenset({"spec", "intent-brief", "decision"}), 1),
+    "code-evidenced": (frozenset({"repo"}), 1),
+    "convention-cited": (frozenset({"repo"}), 2),
+    "engineering-judgement": (frozenset(), 0),
+    "speculation": (frozenset(), 0),
+})
+
+#: An answer anchored only in what the code already does has nothing the user
+#: actually said behind it. ``repo`` is a legal anchor kind and is deliberately
+#: not enough on its own.
+_INTENT_ANCHORS = frozenset({"decision", "spec"})
+
+
+def _decision_section(text: str, decision_id: str) -> str | None:
+    """One ``## <D-ID> — <title>`` record's own lines, or ``None``.
+
+    Scoped to the record rather than searched across the document because
+    ``decisions.md`` holds every decision the run has made: a quote looked up
+    document-wide attributes one record's words to another, and depth and
+    ``consistent_with`` are computed from exactly those attributions.
+    """
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if not line.startswith("## "):
+            continue
+        if line[3:].split("—")[0].strip() != decision_id:
+            continue
+        end = index + 1
+        while end < len(lines) and not lines[end].startswith("## "):
+            end += 1
+        return "\n".join(lines[index:end])
+    return None
+
+
+def _resolution_root(repo_root: str) -> Path:
+    """The recorded root, checked for being usable. Nothing is derived here.
+
+    ``_validate_run`` checks the ``## Run`` cell as a STRING and says why: a
+    tracker read from a checkout that has since moved must still parse, and
+    "this path is not where it was" is a fact for the code resolving a citation
+    to report. This is that code. A root that is blank, not a string, or not a
+    directory resolves NOTHING, so demoting on it would put every answer in the
+    run at 0.55 and escalate everything with no exception anywhere to find it
+    by. It is a stop, and it is ``QuorumError`` rather than
+    ``QuorumSchemaInvalid`` because no brain did anything wrong: re-dispatching
+    one would re-run the whole quorum against the same broken root.
+    """
+    if not isinstance(repo_root, str) or not repo_root.strip():
+        raise QuorumError(
+            f"repo_root {repo_root!r} is not a path: it is what every file:line "
+            "citation in this run is resolved against, and an unusable one "
+            "demotes every grounded answer in the run without raising")
+    root = Path(repo_root)
+    try:
+        usable = root.is_dir()
+    except OSError:
+        usable = False
+    if not usable:
+        raise QuorumError(
+            f"repo_root {repo_root!r} is not a directory this process can read; "
+            "every citation would fail to resolve, every cluster would land "
+            "below the adoption floor, and the run would escalate every "
+            "question while looking like a correctly cautious quorum")
+    return root.resolve()
+
+
+def _cited_file(item: dict, root: Path) -> str | None:
+    """The text of the file a citation names, or ``None`` if it is unreadable.
+
+    The resolved path must lie INSIDE the root. An absolute citation, or one
+    that climbs out with ``..``, reads the same file against every root, which
+    is exactly the property the recorded root exists to deny: such a citation
+    would be graded against a file this run does not contain and would resolve
+    identically no matter which repository the run was started against.
+    """
+    path = item.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return None
+    try:
+        target = (root / path).resolve()
+        if target != root and root not in target.parents:
+            return None
+        return target.read_text(encoding="utf-8")
+    except (OSError, UnicodeError, ValueError):
+        #: ``OSError`` covers the missing file, the directory cited as a file,
+        #: and the unreadable one; ``UnicodeError`` the binary one;
+        #: ``ValueError`` an embedded NUL. Each is a demotion, and none of them
+        #: may leave this module as an exception outside ``TrackerError``.
+        return None
+
+
+def _evidence_resolves(item, root: Path) -> bool:
+    """True only if the cited place exists AND says what the brain said it says.
+
+    THE WHOLE POINT IS THE SECOND HALF. A checker that confirms the file exists
+    is a rubber stamp: it passes every response that merely names a real path,
+    which is every response a brain could produce by guessing. The quote is
+    compared with whitespace runs squashed and case folded, because a brain
+    retyping a line is not a brain inventing one -- but the words themselves
+    are not relaxed, and a quote that squashes to nothing is refused outright
+    since the empty string is contained in every line of every file.
+
+    Total over any JSON value. A malformed citation is a citation that does not
+    resolve, never an exception: ``AttributeError`` from ``.get`` on a string
+    and ``TypeError`` from indexing an int are both outside ``TrackerError`` and
+    would kill the run on a brain's typo instead of demoting it.
+    """
+    if not isinstance(item, dict):
+        return False
+    quote = item.get("quote")
+    if not isinstance(quote, str):
+        return False
+    claim = _squash(quote)
+    if not claim:
+        return False
+    text = _cited_file(item, root)
+    if text is None:
+        return False
+    if item.get("kind") == "decision":
+        #: A decision citation carries ``decision`` where the others carry
+        #: ``line``: a record moves down the file every time another is
+        #: appended, so a line number into an append-only ledger is a citation
+        #: that rots.
+        decision = item.get("decision")
+        if not isinstance(decision, str):
+            return False
+        section = _decision_section(text, decision)
+        if section is None:
+            return False
+        return claim in _squash(section)
+    number = item.get("line")
+    #: ``True == 1`` holds, so a flag arriving where a line number belongs
+    #: would resolve against line 1 of whatever file was cited.
+    if not isinstance(number, int) or isinstance(number, bool):
+        return False
+    lines = text.splitlines()
+    #: One-based, and bounded at BOTH ends. ``0 <= number < len(lines)`` would
+    #: accept ``-1`` and read the last line of the file -- a citation to a place
+    #: the brain never named.
+    if not 1 <= number <= len(lines):
+        return False
+    return claim in _squash(lines[number - 1])
+
+
+def _not_above(rung: str, limit: str) -> str:
+    """The LOWER of two rungs, by index into the ladder and never by value.
+
+    Every rule in ``effective_rung`` is a ceiling. Returning the limit outright
+    would make it a floor, and a floor raises a ``speculation`` that cited
+    nothing to 0.55 -- the demotion rule promoting the answers it exists to
+    catch. Index, not float: a value comparison here would be the numeric
+    threshold this phase forbids.
+    """
+    return RUNG_ORDER[max(RUNG_ORDER.index(rung), RUNG_ORDER.index(limit))]
+
+
+def _demotion_reason(response: dict) -> str | None:
+    """Why this response only LOOKS grounded, or ``None`` if it does not.
+
+    Three ways to cite real files and still be ungrounded: an answer nothing
+    could change, a second-best the brain grounds exactly as well as its answer
+    (which is the brain reporting that it could not separate them), and an
+    answer anchored only in what the code already does.
+    """
+    falsifier = response.get("what_would_change_my_mind")
+    #: Tested as a string, never coerced: ``str(None).strip()`` is ``'None'``
+    #: and truthy, so coercion turns the declined field into the best-looking
+    #: falsifier in the run.
+    if not isinstance(falsifier, str) or not falsifier.strip():
+        return "empty-falsifier"
+    declared = response.get("rung")
+    alternatives = response.get("alternatives")
+    if not isinstance(alternatives, list):
+        alternatives = []
+    for alternative in alternatives:
+        if isinstance(alternative, dict) and alternative.get("rung") == declared:
+            return "second-best-in-the-same-rung"
+    anchors = response.get("consistent_with")
+    if not isinstance(anchors, list):
+        anchors = []
+    if not any(isinstance(anchor, dict)
+               and anchor.get("kind") in _INTENT_ANCHORS
+               for anchor in anchors):
+        return "anchored-only-in-repository-code"
+    return None
+
+
+def effective_rung(response: dict, repo_root: str) -> str:
+    """The rung this response actually EARNED, as a name.
+
+    Order is load-bearing: evidence is resolved from disk BEFORE any comparison
+    between responses. Resolving after the comparison lets a top-rung response
+    with a dangling citation win on a claim no file supports, and the winner is
+    then recorded as the rung it declared rather than the rung it earned.
+
+    An out-of-enum rung RAISES and is never defaulted. ``RUNGS.get(rung, 0.55)``
+    reads as defensive -- 0.55 is ``engineering-judgement``, already in this
+    module for the demotion rule -- and converts every malformed response into a
+    legal vote. The value that arrives is legal; the door it came through is
+    not, which is exactly why nothing downstream could detect it.
+    """
+    if not isinstance(response, dict):
+        raise QuorumSchemaInvalid(
+            f"a brain response is {type(response).__name__}, not an object; "
+            "there is no rung to price and none is supplied")
+    declared = response.get("rung")
+    if not _is_rung(declared):
+        raise QuorumSchemaInvalid(
+            f"rung {declared!r} is outside the enum and is never defaulted: a "
+            "substituted rung is a number arriving through an illegal door")
+    root = _resolution_root(repo_root)
+    evidence = response.get("evidence")
+    if not isinstance(evidence, list):
+        return _not_above(declared, DEMOTION_RUNG)
+    #: EVERY citation must resolve, not merely the ones that happen to. A
+    #: response that cites one real file and one invented one has shown the
+    #: invented one is not checked.
+    resolved = [item for item in evidence if _evidence_resolves(item, root)]
+    if len(resolved) != len(evidence):
+        return _not_above(declared, DEMOTION_RUNG)
+    #: Subscript, not a lookup with a fallback. The rung is already known to be
+    #: in the enum, and the table covers the enum exactly.
+    kinds, minimum = _RUNG_EVIDENCE[declared]
+    #: ``evidence: []`` is SCHEMA-VALID -- the response validator judges shape
+    #: and deliberately reads no file -- so counting is what meets it here.
+    #: Indexing the list instead would raise ``IndexError``, outside
+    #: ``TrackerError``, on the one path that exists to price a weak answer.
+    qualifying = sum(1 for item in resolved if item.get("kind") in kinds)
+    if qualifying < minimum:
+        return _not_above(declared, DEMOTION_RUNG)
+    if _demotion_reason(response) is not None:
+        return _not_above(declared, DEMOTION_RUNG)
+    return declared

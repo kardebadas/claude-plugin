@@ -5948,8 +5948,47 @@ def _loads(text, what: str):
             "exception family, never outside it") from exc
 
 
+def _require_regular_file(path: Path, what: str) -> None:
+    """The blocking half of ``_decisions_text``'s split, spelled once.
+
+    THE OPEN IS THE HAZARD, not the bytes. ``is_file()`` is false for a
+    DIRECTORY, for a dangling symlink, for a symlink LOOP and for a FIFO, and
+    the first three fail an open loudly and promptly. A FIFO does not: opening
+    one for reading BLOCKS until a writer arrives, and on a name inside a run
+    directory no writer is ever coming. Every reader below runs under the run
+    lock or inside a critical section that holds it, so that open does not fail
+    the run -- it hangs the run, holding the lock, with no diagnostic and no
+    timeout, and an unattended pipeline stops dead.
+
+    So the shape is asked BEFORE the open rather than discovered by it, and a
+    name that exists and is not a regular file is corruption -- never absence.
+    ``stat`` on a FIFO returns immediately; only ``open`` waits.
+
+    ABSENCE IS DELIBERATELY NOT ANSWERED HERE. Every caller has already decided
+    what a missing name means for it -- "never opened", "not finalised", "this
+    brain has not answered" -- and those three are not one state. A name that
+    is not there falls through to the caller's own read, which reports it as
+    the caller has always reported it.
+
+    ``QuorumSchemaInvalid`` RATHER THAN A BARE ``QuorumError``, and the class is
+    load-bearing rather than decorative: "was never opened" is a plain
+    ``QuorumError`` too, so a caller -- and a test -- that could only see the
+    family could not tell a quorum nobody dispatched from a quorum whose record
+    is a directory. Corruption is what this is, and corruption is what it says.
+    """
+    if not path.is_file() and os.path.lexists(path):
+        raise QuorumSchemaInvalid(
+            f"{what} at {str(path)!r} is a name this run directory carries and "
+            "cannot be read; a directory, a dangling link, a symlink loop or a "
+            "FIFO is corruption and never an absent record -- and the FIFO is "
+            "why the shape is asked before the open rather than by it, because "
+            "that open blocks under the run lock until a writer that never "
+            "comes")
+
+
 def _read_json(path: Path, what: str):
     """One JSON file from the run, read and parsed, or a stop that names it."""
+    _require_regular_file(path, what)
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
@@ -5964,9 +6003,22 @@ def _dumps(value) -> str:
     Sorted keys so a file rewritten from equal content is byte-identical, which
     is what lets the pin writer below skip a write instead of churning the
     directory on every budget check.
+
+    ``allow_nan=False``, which is NOT the default and is the whole reason this
+    call is spelled out. Python's ``json`` emits ``NaN``, ``Infinity`` and
+    ``-Infinity`` as bare tokens; RFC 8259 has no such literals, so a record
+    holding one is a file only Python can read back. That was tolerable while
+    this module serialized only records it had built itself, and it stopped
+    being tolerable when ARBITRARY AGENT-SUPPLIED CONTENT started passing
+    through here as a brain's ``response``: the immutable record is the audit
+    trail a human reads, and a trail a human's ``jq`` cannot open is a weaker
+    one. ``ValueError`` is what refuses it, which is already caught below, so
+    the refusal lands inside this module's exception family and -- at the one
+    caller that matters -- ahead of the attempt being counted.
     """
     try:
-        return json.dumps(value, indent=2, sort_keys=True) + "\n"
+        return json.dumps(value, indent=2, sort_keys=True,
+                          allow_nan=False) + "\n"
     except (TypeError, ValueError) as exc:
         raise QuorumError(
             f"a record carries {type(exc).__name__}-unserializable content and "
@@ -7343,8 +7395,14 @@ def _response_record(path: Path, qid: str, owner: str,
     another's. ``valid`` is required to AGREE with ``problems``: they are two
     spellings of one verdict, and a record claiming to be valid while listing
     violations is a malformed answer that would be clustered and adopted.
+
+    THE SHAPE OF THE NAME IS ASKED BEFORE THE OPEN, for
+    ``_require_regular_file``'s reason: ``_owner_attempts`` has already found
+    this name to exist, so what is left to establish is that it can be read --
+    and a FIFO answers that question by blocking rather than by failing.
     """
     what = f"{owner}'s attempt {attempt} for {qid}"
+    _require_regular_file(path, what)
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
@@ -7424,8 +7482,20 @@ def _owner_attempts(run_dir: Path, qid: str, owner: str) -> list[tuple[str, dict
 
 
 def record_brain_response(run_dir: str, *, qid: str, owner: str,
-                          payload) -> str:
+                          payload: object) -> str:
     """Phase 2: one immutable file per response, valid or not.
+
+    ``payload`` IS ANY JSON VALUE, not a ``dict``, and the annotation is a
+    departure from the pinned signature that is load-bearing rather than
+    cosmetic. What a brain returned is exactly what is in question here: a
+    reply that came back as a list, a string or ``null`` is a SCHEMA-INVALID
+    answer that must be RECORDED as one -- ``validate_brain_response`` answers
+    it with ``response-not-an-object`` and it buys the single re-dispatch --
+    and a ``dict`` annotation describes a caller that has already filtered out
+    the very shapes this function exists to record. The totality sweep depends
+    on it too: every non-object it hands this call must land inside the
+    ``TrackerError`` family, which it cannot do if the type says it never
+    arrives.
 
     Returns the SHA256 OF THE PUBLISHED BYTES -- ``publish_immutable``'s return
     value, for ``publish_immutable``'s reason. The response file's path stays
@@ -7451,11 +7521,14 @@ def record_brain_response(run_dir: str, *, qid: str, owner: str,
     equality of the two values. ``_dumps`` is the only spelling this module
     stores JSON in, so comparing serializations answers exactly the question
     ``publish_immutable`` would answer a moment later. ``==`` answers a
-    different one and gets it wrong in both directions: a payload holding
-    ``NaN`` never equals its own round trip, so every redelivery of it would
-    burn an attempt and then be refused, and a mapping keyed by ``1`` is stored
-    and read back keyed by ``"1"``, so the re-delivery of a response already on
-    disk would be published a second time under a fresh attempt number.
+    different one and gets it wrong wherever ``json`` holds fewer types than
+    Python does: a TUPLE is stored and read back as a list, and a mapping keyed
+    by ``1`` is stored and read back keyed by ``"1"``. Neither equals what was
+    handed in, so under ``==`` the redelivery of a response already on disk is
+    published a second time under a fresh attempt number -- the one re-dispatch
+    burned on a duplicate, and the delivery after that refused outright, while
+    the bytes on disk were identical all along and said so. (``NaN`` was the
+    sharpest case here until ``_dumps`` stopped writing it at all; see there.)
 
     NO RUN LOCK IS TAKEN, deliberately. Each response is a single-assignment
     cell and ``os.link`` is the atomic arbiter of it, so two writers racing one
@@ -7580,8 +7653,19 @@ def quorum_needs_redispatch(run_dir: str, *, qid: str) -> list[str]:
     ``open.json`` at all, because nothing was ever dispatched. Reading the open
     record first would report that shape as a stop rather than as a question
     that was never asked.
+
+    THE RUN IS VALIDATED FIRST even though this function writes nothing, and
+    the global constraint is why: a foreign, missing, malformed or unknown
+    schema is a read-only stop that preserves the directory, changes no files
+    and DISPATCHES NOTHING. This is the one function whose entire return value
+    IS who to dispatch, so honouring only the file-system half of that sentence
+    -- writing nothing while naming three brains to send a question to -- is
+    the sentence broken by the one route it was written for. A directory whose
+    ``progress.md`` belongs to ``superb:pipeline``, or is gone, is not a run
+    this module may read a debt out of.
     """
     run_dir = _run_path(run_dir)
+    validate_run(run_dir)
     qid = _quorum_qid(qid)
     final_path = _quorum_directory(run_dir, qid) / _FINAL_FILE
     if os.path.lexists(final_path):

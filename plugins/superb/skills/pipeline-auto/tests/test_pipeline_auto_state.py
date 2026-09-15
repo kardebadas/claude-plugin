@@ -13850,6 +13850,35 @@ class RecordBrainResponse(unittest.TestCase):
     def files(self):
         return sorted(path.name for path in self.responses.iterdir())
 
+    def without_hanging(self, call, seconds=20):
+        """`call`'s outcome, or a failed assertion — never a hung suite.
+
+        THE ONE FAULT WHOSE SYMPTOM IS NOT AN ERROR. A FIFO in the run
+        directory answers `open` by waiting for a writer, and on a name inside
+        a run directory no writer ever comes. A case that simply called the
+        function would therefore not FAIL when the guard is missing, it would
+        block for ever — the same thing the run does, and no way to find out
+        about it. So the call runs on a daemon thread that the interpreter
+        abandons at exit, and the timeout is the assertion.
+        """
+        outcome = {}
+
+        def run():
+            try:
+                outcome["value"] = call()
+            except BaseException as exc:          # noqa: BLE001 - reported
+                outcome["error"] = exc
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        thread.join(seconds)
+        self.assertFalse(
+            thread.is_alive(),
+            f"the call had not returned after {seconds}s: the open blocked on "
+            "a FIFO, which under the run lock is a run that stops for ever "
+            "with no diagnostic, no timeout and the lock still held")
+        return outcome
+
     def seed_final(self, status="escalated", decision_id=None):
         """A `final.json` this quorum's directory, valid to `_final_event`."""
         record = {"qid": self.qid, "status": status, "phase": QUESTION["phase"],
@@ -13904,6 +13933,22 @@ class RecordBrainResponse(unittest.TestCase):
                          self.stored("brain-c", 1)["response"])
         for owner in ("brain-a", "brain-b", "brain-c"):
             self.assertEqual(self.stored(owner, 1)["owner"], owner)
+        #: THE SECOND HALF OF THE NAME, made falsifiable. Nothing above would
+        #: fail if a write DID read another brain's file, so the quorum is
+        #: rebuilt with brain-a owed a re-dispatch and brain-c's record then
+        #: replaced with bytes nothing can parse. Brain-a's second answer must
+        #: still land. One record with three entries in it — or a write that
+        #: checked what the others had said before publishing — turns one
+        #: brain's corrupted reply into a quorum that can collect no answer at
+        #: all, which is the crash this shape exists to survive.
+        for path in self.responses.iterdir():
+            path.unlink()
+        self.record("brain-a", self.answer(rung="high"))
+        self.record("brain-c", self.answer())
+        self.path("brain-c", 1).write_text("{ not json", encoding="utf-8")
+        self.record("brain-a", self.answer())
+        self.assertEqual(self.files(), ["brain-a__1.json", "brain-a__2.json",
+                                        "brain-c__1.json"])
 
     def test_a_byte_identical_redelivery_is_inert(self):
         """A duplicate delivery costs nothing: no rewrite, no second file, and
@@ -13915,22 +13960,24 @@ class RecordBrainResponse(unittest.TestCase):
         self.assertEqual(self.path("brain-a", 1).read_bytes(), before)
 
     def test_a_redelivery_is_judged_on_the_bytes_and_not_on_python_equality(self):
-        """THE COMPARISON THE OBVIOUS SPELLING GETS WRONG IN BOTH DIRECTIONS.
+        """THE COMPARISON THE OBVIOUS SPELLING GETS WRONG.
 
         `stored["response"] == payload` is the natural way to write "is this
-        the same answer again", and it is not. A payload holding `NaN` never
-        equals its own round trip through `json`, so every redelivery of it
-        would be read as a NEW answer: the one re-dispatch is burned on a
-        duplicate and the delivery after that is refused outright. The mirror
-        case is a mapping keyed by `1`, which is stored and read back keyed by
-        `"1"` and is unequal for the same reason.
+        the same answer again", and it is not. `json` holds fewer types than
+        Python does, and the ones it drops are the ones a caller reaches for
+        without thinking: a TUPLE is stored and read back as a list, a mapping
+        keyed by `1` is stored and read back keyed by `"1"`. Neither is equal
+        to what was passed in, so under `==` each redelivery is read as a NEW
+        answer — the one re-dispatch burned on a duplicate and the delivery
+        after that refused outright — while the bytes on disk were identical
+        all along.
 
-        `NaN` is not exotic here: `json` emits and accepts it, so it survives
-        the whole path from a brain's reply to this call.
+        Every probe is asserted to differ from its own round trip FIRST, or
+        the case passes against the comparison it exists to refuse.
         """
-        for probe in (self.answer(cost=float("nan")),
-                      self.answer(weights={1: "a"})):
-            with self.subTest(probe=sorted(set(probe) - set(self.answer()))):
+        for label, probe in (("a tuple", self.answer(evidence=("a", "b"))),
+                             ("an int key", self.answer(weights={1: "a"}))):
+            with self.subTest(probe=label):
                 for path in self.responses.iterdir():
                     path.unlink()
                 self.assertNotEqual(
@@ -13943,6 +13990,38 @@ class RecordBrainResponse(unittest.TestCase):
                 self.assertEqual(self.files(), ["brain-a__1.json"])
                 self.assertEqual(self.owed(), ["brain-a"],
                                  "and the single re-dispatch is still unspent")
+
+    def test_a_record_only_python_could_read_back_never_reaches_the_trail(self):
+        """`NaN` and `Infinity` are Python's tokens, not JSON's.
+
+        `json.dumps` emits them bare by default and `json.loads` takes them
+        back, so a brain that answers with one produces a file the stdlib
+        round-trips happily and every strict RFC 8259 reader rejects — `jq`,
+        every other language's parser, and the human this phase writes the
+        audit trail FOR. The immutable record is the deliverable, so the token
+        is refused where an unstorable value is refused: inside the family,
+        before an attempt is spent, with the brain still owed its answer.
+
+        The control asserts that the default really would have written it, so
+        this case cannot pass because `NaN` never got this far.
+        """
+        self.assertIn("NaN", json.dumps({"cost": float("nan")}),
+                      "the stdlib default must emit the bare token, or this "
+                      "case is refusing a hazard that does not exist")
+        for label, probe in (("nan", self.answer(cost=float("nan"))),
+                             ("inf", self.answer(cost=float("inf"))),
+                             ("nested -inf",
+                              self.answer(evidence=[{"line": float("-inf")}]))):
+            with self.subTest(probe=label):
+                with self.assertRaises(pas.QuorumError) as caught:
+                    self.record("brain-a", probe)
+                self.assertIn("unserializable", str(caught.exception))
+                self.assertEqual(self.files(), [])
+        #: The attempt was never spent: the brain's real answer is still its
+        #: first, which is what "refused before an attempt" has to mean.
+        self.record("brain-a", self.answer())
+        self.assertEqual(self.files(), ["brain-a__1.json"])
+        self.assertEqual(self.stored("brain-a", 1)["attempt"], 1)
 
     def test_a_redelivery_of_an_EARLIER_attempt_is_inert_too(self):
         """A duplicate delivery is inert whichever attempt it repeats.
@@ -14001,14 +14080,70 @@ class RecordBrainResponse(unittest.TestCase):
             self.record("brain-a", self.answer())
         self.assertEqual(self.files(), [])
 
+    def test_a_foreign_run_directory_dispatches_nothing_either(self):
+        """The other half of the same constraint, at the reader.
+
+        "Preserve the directory, change no files, DISPATCH NOTHING" is one
+        sentence, and `quorum_needs_redispatch` is the one function in this
+        task whose entire return value IS who to dispatch. It writes nothing
+        whatever it does, so honouring only the file-system half of that
+        sentence costs nothing and proves nothing: the call would still hand a
+        controller three brain ids and a question belonging to another tool's
+        run, and report itself compliant while doing it.
+
+        A real debt is created FIRST, so the refusal cannot be an empty list
+        that happened to be empty. Both ways a directory stops being this
+        module's run are exercised — a tracker belonging to another schema,
+        and no tracker at all.
+        """
+        self.record("brain-a", self.answer(rung="high"))
+        self.assertEqual(self.owed(), ["brain-a"],
+                         "the fixture must owe a re-dispatch, or a refusal is "
+                         "indistinguishable from nothing being owed")
+        progress = self.run_dir / "progress.md"
+        for label, corrupt in (
+                ("another schema", lambda: progress.write_bytes(
+                    (FOREIGN_FIXTURES / "valid-v2-progress.md").read_bytes())),
+                ("no tracker at all", progress.unlink)):
+            with self.subTest(tracker=label):
+                corrupt()
+                with self.assertRaises(pas.ForeignSchemaError):
+                    self.owed()
+                self.assertEqual(self.files(), ["brain-a__1.json"],
+                                 "and the directory is preserved untouched")
+
     def test_an_answer_this_module_cannot_store_stops_before_an_attempt_is_spent(self):
         """A payload with no JSON serialization is refused inside the family,
-        and it does not count against the owner's one re-dispatch."""
+        and it does not count against the owner's one re-dispatch.
+
+        THE ORDERING IS THE CLAIM, and "nothing was written" cannot pin it:
+        that is equally true of a version that serialized the payload only
+        after reading the directory, because nothing is written until
+        `publish_immutable` either way. It needs a state the two orderings
+        answer differently, so the second half hands over an unstorable
+        payload while the attempts on record are ALSO corrupt. Serializing
+        first means the caller is told about the value it just passed;
+        serializing second means a caller who handed over something this
+        module cannot store gets a complaint about a file it has never seen —
+        and the only reason that read happened at all is that the call was on
+        its way to counting an attempt against the owner.
+        """
         with self.assertRaises(pas.QuorumError):
             self.record("brain-a", self.answer(evidence={1, 2}))
         self.assertEqual(self.files(), [])
-        self.assertEqual(self.record("brain-a", self.answer()),
+        self.assertEqual(self.record("brain-a", self.answer(rung="high")),
                          hashlib.sha256(self.path("brain-a", 1).read_bytes()).hexdigest())
+        self.assertEqual(self.stored("brain-a", 1)["attempt"], 1)
+        self.record("brain-a", self.answer())
+        self.path("brain-a", 1).unlink()
+        with self.assertRaises(pas.QuorumError) as caught:
+            self.record("brain-a", self.answer(evidence={1, 2}))
+        self.assertIn("unserializable", str(caught.exception))
+        self.assertNotIsInstance(
+            caught.exception, pas.QuorumSchemaInvalid,
+            "the gap in the attempts is what a directory read would have "
+            "complained about, and reaching it means the payload was "
+            "serialized on the way to spending an attempt")
 
     # --- invalid is recorded, never repaired and never discarded ----------
 
@@ -14382,20 +14517,146 @@ class RecordBrainResponse(unittest.TestCase):
                          "the fixture must owe a re-dispatch, or a silently "
                          "empty answer is indistinguishable from the truth")
         attempt = self.path("brain-a", 1)
-        for build in (lambda: attempt.mkdir(),
-                      lambda: attempt.symlink_to("nowhere-at-all")):
-            with self.subTest(shape=build.__name__):
+        for shape, build in (
+                ("a directory", attempt.mkdir),
+                ("a dangling symlink",
+                 lambda: attempt.symlink_to("nowhere-at-all")),
+                ("a symlink loop", lambda: attempt.symlink_to(attempt))):
+            with self.subTest(shape=shape):
                 attempt.unlink()
                 build()
-                with self.assertRaises(pas.QuorumError):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
                     self.owed()
-                with self.assertRaises(pas.TrackerError):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
                     self.record("brain-a", self.answer())
             if attempt.is_dir() and not attempt.is_symlink():
                 attempt.rmdir()
             else:
                 attempt.unlink()
             attempt.write_text("{}", encoding="utf-8")
+
+    def test_a_quorum_record_that_exists_and_cannot_be_read_is_never_absence(self):
+        """`_decisions_text`'s split at `open.json` and at `final.json`.
+
+        Both names are read as absence-or-presence and both absences MEAN
+        something specific, which is exactly why neither may swallow a name
+        that is there and cannot be read.
+
+        `open.json` missing is "this quorum was never opened" — the true shape
+        of a budget trip, `final.json` and nothing else. Answering a directory
+        or a dangling link with it invites the controller to raise the question
+        again, which re-dispatches three brains at a question already in
+        flight.
+
+        `final.json` missing is "not settled yet". Answering an unreadable one
+        with it tells the reader that a finalised quorum still owes its owners
+        a dispatch, and tells the writer to grow the record the outcome was
+        already computed from.
+
+        Each shape is asserted against BOTH entry points, and the class is the
+        discriminator: "was never opened" is a `QuorumError` too, so a case
+        that could only see the family would pass against the fold it exists
+        to refuse.
+        """
+        self.record("brain-a", self.answer(rung="high"))
+        self.assertEqual(self.owed(), ["brain-a"])
+        before = self.files()
+        shapes = (("a directory", lambda path: path.mkdir()),
+                  ("a dangling symlink",
+                   lambda path: path.symlink_to("nowhere-at-all")),
+                  ("a symlink loop", lambda path: path.symlink_to(path)))
+        for name in ("open.json", "final.json"):
+            path = self.directory / name
+            keep = path.read_bytes() if path.is_file() else None
+            for shape, build in shapes:
+                with self.subTest(name=name, shape=shape):
+                    if os.path.lexists(path):
+                        path.unlink()
+                    build(path)
+                    with self.assertRaises(pas.QuorumSchemaInvalid):
+                        self.owed()
+                    #: The writer's refusals differ by name and both are
+                    #: refusals: an unreadable `open.json` is corruption, and
+                    #: an unreadable `final.json` is a settled quorum this
+                    #: answer would be added to after the fact.
+                    with self.assertRaises(pas.QuorumError):
+                        self.record("brain-a", self.answer())
+                    self.assertEqual(self.files(), before)
+                if path.is_dir() and not path.is_symlink():
+                    path.rmdir()
+                else:
+                    path.unlink()
+            if keep is not None:
+                path.write_bytes(keep)
+        self.assertEqual(self.owed(), ["brain-a"],
+                         "and the fixture is back to owing exactly what it "
+                         "owed, or the cases above proved nothing in order")
+
+    def test_a_fifo_in_the_run_directory_is_refused_without_being_opened(self):
+        """THE SHAPE WHOSE FAILURE IS A HANG RATHER THAN AN ERROR.
+
+        A directory, a dangling link and a symlink loop all fail an open
+        loudly. A FIFO does not: `open` on one BLOCKS until a writer arrives,
+        and inside a run directory no writer is coming. Every reader here runs
+        under the run lock or inside a critical section holding it — this
+        function's own docstring requires it to stay callable from
+        `open_quorum` and from `locked_tracker_update`'s `mutate` — so the
+        consequence is not a failed call. It is an unattended run wedged for
+        ever, holding the lock, with nothing in any log to say why.
+
+        That is why the shape of a name is asked BEFORE the open and never
+        discovered by it. `stat` on a FIFO returns immediately; only `open`
+        waits.
+        """
+        self.record("brain-a", self.answer(rung="high"))
+        before = self.files()
+        for name, path in (("the open record", self.directory / "open.json"),
+                           ("the final record", self.directory / "final.json"),
+                           ("a response", self.path("brain-a", 1))):
+            with self.subTest(name=name):
+                keep = path.read_bytes() if path.is_file() else None
+                if os.path.lexists(path):
+                    path.unlink()
+                os.mkfifo(path)
+                #: The probe is asserted to be a WRITERLESS fifo without
+                #: waiting for a writer, so a case that passed because the
+                #: name was an ordinary file cannot happen.
+                os.close(os.open(path, os.O_RDONLY | os.O_NONBLOCK))
+                self.assertIsInstance(
+                    self.without_hanging(self.owed).get("error"),
+                    pas.QuorumSchemaInvalid)
+                self.assertIsInstance(
+                    self.without_hanging(
+                        lambda: self.record("brain-a", self.answer())
+                    ).get("error"), pas.QuorumError)
+                self.assertEqual(self.files(), before)
+                path.unlink()
+                if keep is not None:
+                    path.write_bytes(keep)
+
+    def test_the_digest_handed_back_is_the_bytes_on_disk_not_a_recomputation(self):
+        """A digest recomputed from the parse is right for every file this
+        module wrote and wrong for the only file it can be wrong for.
+
+        `_digest(_dumps(record))` and `_digest(text)` agree on every record
+        this module published, because `_dumps` is how it published them. They
+        diverge on a file a human has opened and saved back — the same values,
+        different whitespace — which is precisely the file whose identity a
+        caller needs to be told about. Handing back the digest of bytes that
+        are no longer on disk reports a record as unchanged while the bytes
+        under it have moved.
+        """
+        first = self.record("brain-a", self.answer())
+        self.path("brain-a", 1).write_text(
+            json.dumps(self.stored("brain-a", 1), indent=4, sort_keys=True),
+            encoding="utf-8")
+        rewritten = hashlib.sha256(
+            self.path("brain-a", 1).read_bytes()).hexdigest()
+        self.assertNotEqual(rewritten, first,
+                            "the rewrite must change the bytes, or the two "
+                            "spellings of the digest cannot disagree")
+        self.assertEqual(self.record("brain-a", self.answer()), rewritten)
+        self.assertEqual(self.files(), ["brain-a__1.json"])
 
     def test_a_response_dropped_from_the_record_leaves_a_verdict_over_nothing(self):
         self.record("brain-a", self.answer(rung="high"))

@@ -2429,6 +2429,13 @@ git commit -m "feat(pipeline-auto): separate the pre-replace and post-replace wr
 
 ---
 
+> **Recorded during Task 8 (commit `ad545cd`).** `_exclusive_lock` exists and is
+> proven to contend across processes, but **it has no caller.** Until this task
+> routes every mutation through it, "only the controller writes `progress.md`"
+> is a convention, not a mechanism — and every validator Tasks 3-7 built is
+> defeated by two writers interleaving. Wiring it is the point of this task, not
+> a detail of it.
+
 ## Task 10: `locked_tracker_update` — the only way state ever changes
 
 **Files:**
@@ -2669,6 +2676,13 @@ git commit -m "feat(pipeline-auto): route every durable transition through one i
 >
 > Accepted under the controller delegation recorded as H-011. The deviation is a
 > defect in this plan's text, not in the implementation.
+
+> **Also recorded during Task 8.** `.pipeline-auto.lock` is created in the run
+> directory and **never cleaned up, by design** — removing it races a second
+> acquirer. `initialize_run` must expect it to exist, and any assertion about a
+> run directory's contents must allow for it. A test that enumerates the
+> directory and expects only tracker files will fail for a reason that has
+> nothing to do with what it is testing.
 
 ## Task 11: `initialize_run` and `publish_immutable`
 

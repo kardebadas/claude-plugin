@@ -2162,6 +2162,28 @@ git commit -m "feat(pipeline-auto): propagate provisionality into the reviewer c
 
 ### Task 8: Rungs inherit downward — the minimum cap
 
+> **From P03's Unresolved item 5 — a spec threshold that is DEAD AS WRITTEN, and
+> this task owns it.** The spec's "Failure modes" section still says
+> provisionality propagates below **0.80**. That number comes from the
+> superseded six-tier ladder. Under the current five-rung ladder nothing exists
+> between `code-evidenced` (0.85) and `convention-cited` (0.70), so "below 0.80"
+> selects exactly `convention-cited`, `engineering-judgement` and `speculation`
+> — which is precisely the set that can never be adopted in the first place.
+> Applied literally, the rule fires only on answers no adoption path can
+> produce, so it would propagate nothing, ever, while looking implemented.
+>
+> **This task must use a rung NAME, not a number.** Pick it deliberately and say
+> why: the threshold's intent was "adopted, but not at full strength", and under
+> the current ladder the only adoptable rungs are `specified` and
+> `code-evidenced`. A cap expressed as a number reintroduces the same decay the
+> moment the ladder moves again — and standing rule 1 of P03 forbids numeric
+> comparison between clusters for exactly this reason.
+>
+> Note the type contract already pinned above: `inherited_rung_cap` returns a
+> **rung name** or `None`, and `None` means "no cap applies", never "cap to the
+> bottom". A number cannot express that distinction either.
+
+
 **Files:**
 - Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
 - Test: `plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py`

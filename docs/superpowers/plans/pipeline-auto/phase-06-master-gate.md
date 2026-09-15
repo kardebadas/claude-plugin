@@ -561,6 +561,22 @@ def suite_results(run_dir, *, third="", fourth="", order=None):
 > `run_dir` in would make that derivation constructible and silently blunt the
 > only guard against this phase's invisible failure.
 
+> **From the P03 Task 4 fix round (`8e85d59`) — BINDING ON ADOPTION.**
+> `templates/decisions.md:63` says "an axis holds at most one `Adopted`
+> decision", and `parse_decisions` now **enforces** it. So a later adoption on
+> an axis that already carries an Adopted record must **supersede, never
+> append**: flip the standing record to `Status: Superseded` AND append the new
+> one carrying `- **Supersedes:** <id>`. Both halves, in one write, or the file
+> stops parsing and every later read is a read-only stop.
+>
+> `Supersedes` is validated in both directions, including one successor per
+> retirement — so two records superseding the same id, a successor naming an id
+> the file does not hold, and a `Superseded` record with no successor are all
+> refusals. Writing only the append half leaves two Adopted records on one axis;
+> writing only the retirement half leaves a `Superseded` record nothing
+> supersedes. Neither is recoverable by a later write, because the file is
+> append-only and already unparseable.
+
 ## Tasks
 
 ### Task 1: The phase-set freeze

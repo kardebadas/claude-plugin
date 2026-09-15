@@ -10,6 +10,7 @@ direction — not here, not later.
 
 from __future__ import annotations
 
+import copy
 import errno
 import os
 import time
@@ -2091,3 +2092,120 @@ def _replace_tracker(run_dir, text: str, transition_id: str) -> None:
             "Reconcile revision and last_transition before retrying — a blind "
             f"retry can double-apply: {exc}"
         ) from exc
+
+
+#: The four ``## Run`` cells that say WHICH run this is. No transition changes
+#: any of them: a run that can rename itself, restate its schema, move its base
+#: commit or retarget its branch is one whose entire history can be reattributed
+#: by a single mutation, and every artifact already written would still look
+#: consistent with the new identity.
+_IDENTITY_KEYS = ("run_id", "schema", "base_commit", "target_branch")
+
+#: Every top-level key a tracker dict carries. ``mutate`` is free to rebuild the
+#: dict rather than edit the one it was handed, and a rebuild that drops a
+#: section is a real mistake — one that would otherwise surface as a ``KeyError``
+#: from whichever guard happened to touch that section first, which tells the
+#: caller nothing about what it did wrong.
+_TRACKER_KEYS = frozenset(key for _, key, _ in _SECTIONS)
+
+
+def _guard_frozen_intent(current: dict, proposed: dict) -> None:
+    """The reconciled intent brief is immutable once stage 03 closes.
+
+    A contradicting finding escalates and a human amends it; no transition
+    rewrites it in place. Without this guard a later stage could quietly
+    substitute a different brief and every downstream artifact would still
+    look consistent — with the brief it now cites, rather than with the one the
+    user actually approved at the gate.
+
+    Scoped to a FROZEN brief on purpose. Stages 01 to 03 exist to write this
+    row: the readers publish into it, the reconciliation names its result, and
+    the gate freezes it. A guard that refused every ``## Intent`` edit would
+    make the section unwritable by the only stages that ever write it.
+    """
+    frozen = [row for row in current["intent"]
+              if row["id"] == "brief" and row["state"] == "frozen"]
+    if not frozen:
+        return
+    after = [row for row in proposed["intent"] if row["id"] == "brief"]
+    if len(after) != 1 or after[0] != frozen[0]:
+        raise TrackerValidationError(
+            "the intent brief is immutable once stage 03 closes; a contradicting "
+            "finding escalates and the human amends it"
+        )
+
+
+def locked_tracker_update(run_dir: Path, *, transition_id: str, mutate,
+                          timeout_s: float = DEFAULT_LOCK_TIMEOUT_S) -> dict:
+    """Apply exactly one idempotent durable transition. The only way state changes.
+
+    ``mutate`` is called with a deep copy of the current tracker and returns a
+    tracker. ``transition_id`` names the transition and is its replay key.
+
+    Order, and why each step is where it is:
+
+    1. reject a malformed ``transition_id`` first. It is the replay key, so an
+       id a resume cannot reproduce character for character is one whose replay
+       would not be recognised as one;
+    2. validate before locking, so a foreign or malformed run stops without
+       ever creating a lock file inside somebody else's directory. Its result
+       is deliberately discarded — see step 3;
+    3. take the exclusive run lock, then **re-read and re-validate under it**.
+       Anything read before the lock is stale by definition: the whole reason
+       the lock exists is that another writer may land in the window between
+       the preflight read and the acquisition, and a transaction that mutates
+       the pre-lock snapshot overwrites whatever landed. It serialises nothing
+       while looking exactly as though it does;
+    4. replay check, against the state just read under the lock: the same
+       ``transition_id`` returns current state and calls nothing, so a resume
+       that re-issues its interrupted transition is inert. Checking the
+       pre-lock snapshot instead would miss the case this contract is for — the
+       resume racing the predecessor it is resuming;
+    5. apply ``mutate`` to a DEEP copy. Shallow would alias ``current["run"]``
+       and the ``## Intent`` rows into the proposal, and the two guards below
+       would compare each object with itself and pass;
+    6. refuse any change to run identity, and any rewrite of a frozen brief;
+    7. stamp ``revision`` and ``last_transition``, so neither is the caller's to
+       choose;
+    8. render, then **reparse the render** — the canary. A mutation that would
+       produce a tracker this module cannot read back is rejected before a
+       single byte reaches disk. Re-running the validators on the proposed dict
+       instead looks like the same check and is not: the dict is the input to
+       the render, and it is the render that has to survive;
+    9. replace atomically and return the REPARSED tracker, never the in-memory
+       one, so a caller only ever sees state that survived a round trip.
+
+    The three write outcomes cross this function unchanged. ``TrackerWriteError``
+    (including ``LockBusyError`` and ``LockUnavailableError``) means nothing
+    happened and a retry is safe; ``UpdateOutcomeUncertain`` means the
+    replacement landed and only its durability is in doubt, and the right
+    response to it is to re-issue this same ``transition_id`` and let the replay
+    check settle which. Neither is caught here: collapsing them is what makes an
+    autonomous retry double-apply.
+    """
+    if not _TOKEN.fullmatch(transition_id):
+        raise TrackerValidationError(
+            f"invalid transition identity {transition_id!r}: a transition id is "
+            "one token, because it is the key a resume replays against")
+    #: Read-only, outside the lock, and its result thrown away on purpose. It
+    #: is the foreign-schema stop, not the read this transition applies to.
+    validate_run(run_dir)
+    with _exclusive_lock(run_dir, timeout_s=timeout_s):
+        current = validate_run(run_dir)
+        if current["run"]["last_transition"] == transition_id:
+            return current
+        proposed = mutate(copy.deepcopy(current))
+        if not isinstance(proposed, dict) or frozenset(proposed) != _TRACKER_KEYS:
+            raise TrackerValidationError(
+                "mutate must return a tracker dict carrying every section; a "
+                "mutate that edits in place still has to return what it edited")
+        for key in _IDENTITY_KEYS:
+            if proposed["run"].get(key) != current["run"][key]:
+                raise TrackerValidationError(f"a transition cannot change {key}")
+        _guard_frozen_intent(current, proposed)
+        proposed["run"]["revision"] = str(int(current["run"]["revision"]) + 1)
+        proposed["run"]["last_transition"] = transition_id
+        canonical = render_tracker(proposed)
+        reparsed = parse_tracker(canonical)
+        _replace_tracker(run_dir, canonical, transition_id)
+        return reparsed

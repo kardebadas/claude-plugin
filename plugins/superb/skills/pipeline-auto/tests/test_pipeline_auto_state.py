@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import errno
 import importlib.util
 import multiprocessing
@@ -93,6 +94,21 @@ WIDE_GAP = "| 12 | pending | - |\n\n\n## Intent\n"
 #: carried by ``write_capable_calls`` below, scoped to ``validate_run``, and
 #: widening this allowlist to ``os`` does not touch it: ``validate_run``'s own
 #: subtree is still checked call by call.
+#: ``copy`` was added for ``locked_tracker_update``, which hands ``mutate`` a
+#: DEEP copy of the tracker it read under the lock. That copy is not a
+#: convenience: the identity guard and the frozen-brief guard both work by
+#: comparing the proposal against the state it came from, and under a shallow
+#: copy each would be comparing an object with itself and passing. The hand
+#: -rolled alternative — one ``dict`` per section plus one per row — is exact
+#: for the shape ``parse_tracker`` produces TODAY and silently aliases the day a
+#: section nests one level deeper, which is the opposite of how ``re`` and
+#: ``tempfile`` left this list: each of those was removed because the module
+#: could state the same thing at the SAME strictness, and a two-level copy
+#: states it at less. ``copy`` also adds no capability for this list to bound —
+#: it opens nothing, runs nothing, and reaches no filesystem — which is what
+#: separates it from every other candidate that has been argued for here. The
+#: phase plan's Tech Stack names it.
+#:
 #: ``tempfile`` was admitted here for the atomic replace and has since been
 #: taken back out, which is the outcome this list is supposed to make cheap.
 #: The temp file must be created inside the run directory — a name anywhere
@@ -108,8 +124,8 @@ WIDE_GAP = "| 12 | pending | - |\n\n\n## Intent\n"
 #: for convenience weakens it for everything admitted after. ``re`` is still
 #: absent and stays absent, and so, now, is ``tempfile``.
 ALLOWED_IMPORTS = frozenset({
-    "__future__", "contextlib", "errno", "fcntl", "hashlib", "msvcrt", "os",
-    "pathlib", "time",
+    "__future__", "contextlib", "copy", "errno", "fcntl", "hashlib", "msvcrt",
+    "os", "pathlib", "time",
 })
 
 #: Builtins that open a file or run generated code. Called anywhere in the
@@ -3166,6 +3182,41 @@ def hold_lock(run_dir: str, ready, release) -> None:
         release.wait(LOCK_HOLD_SECONDS)
 
 
+def reap_holder(case: unittest.TestCase, holder) -> None:
+    """Never leave a child behind, whatever the case did or failed to do."""
+    holder.join(HOLDER_WAIT_SECONDS)
+    if holder.is_alive():  # pragma: no cover - only on a wedged holder
+        holder.terminate()
+        holder.join(HOLDER_WAIT_SECONDS)
+
+
+def start_holder(case: unittest.TestCase, run_dir: Path):
+    """A second OS process, already holding the lock when this returns.
+
+    Module-level rather than a ``LockTests`` method because ``LockedUpdateTests``
+    below has to prove the same cross-process refusal one layer up: that
+    ``locked_tracker_update`` is actually wired to this lock. Copying ten lines
+    of process choreography into a second class is how one copy quietly
+    degrades to ``fork`` and starts proving nothing.
+    """
+    context = multiprocessing.get_context("spawn")
+    case.assertEqual(
+        context.get_start_method(), "spawn",
+        "a forked holder inherits this interpreter's descriptors, and a "
+        "flock belongs to the open file description, not the process")
+    ready, release = context.Event(), context.Event()
+    holder = context.Process(target=hold_lock,
+                             args=(str(run_dir), ready, release),
+                             daemon=True)
+    holder.start()
+    case.addCleanup(reap_holder, case, holder)
+    case.addCleanup(release.set)
+    case.assertTrue(
+        ready.wait(HOLDER_WAIT_SECONDS),
+        "the holder process never signalled that it acquired the lock")
+    return holder, release
+
+
 class FakeFlock:
     """A stand-in for ``fcntl`` whose ``flock`` always fails with one errno.
 
@@ -3213,32 +3264,6 @@ class LockTests(unittest.TestCase):
     individually well-formed and the loser's simply vanishes.
     """
 
-    def reap(self, holder) -> None:
-        """Never leave a child behind, whatever the case did or failed to do."""
-        holder.join(HOLDER_WAIT_SECONDS)
-        if holder.is_alive():  # pragma: no cover - only on a wedged holder
-            holder.terminate()
-            holder.join(HOLDER_WAIT_SECONDS)
-
-    def start_holder(self, run_dir: Path):
-        """A second OS process, already holding the lock when this returns."""
-        context = multiprocessing.get_context("spawn")
-        self.assertEqual(
-            context.get_start_method(), "spawn",
-            "a forked holder inherits this interpreter's descriptors, and a "
-            "flock belongs to the open file description, not the process")
-        ready, release = context.Event(), context.Event()
-        holder = context.Process(target=hold_lock,
-                                 args=(str(run_dir), ready, release),
-                                 daemon=True)
-        holder.start()
-        self.addCleanup(self.reap, holder)
-        self.addCleanup(release.set)
-        self.assertTrue(
-            ready.wait(HOLDER_WAIT_SECONDS),
-            "the holder process never signalled that it acquired the lock")
-        return holder, release
-
     def test_lock_errors_are_write_errors_so_callers_know_nothing_changed(self):
         """A caller that cannot take the lock has changed nothing, which is
         exactly what ``TrackerWriteError`` means. Raising something outside that
@@ -3276,7 +3301,7 @@ class LockTests(unittest.TestCase):
         and the same directory is locked successfully by this process.
         """
         run_dir = make_run(self)
-        holder, release = self.start_holder(run_dir)
+        holder, release = start_holder(self, run_dir)
         holder_pid = int((run_dir / HOLDER_PID_FILE).read_text(encoding="utf-8"))
         self.assertEqual(holder_pid, holder.pid)
         self.assertNotEqual(
@@ -3994,6 +4019,501 @@ class SuiteIsWhollyCollectedTests(unittest.TestCase):
             f"this process collects {running} tests but the file defines "
             f"{complete}: part of the suite is not being run")
 
+
+#: A contended update must be refused on the caller's deadline, not on the
+#: module's default. The bound sits between the two: comfortably above the
+#: 0.25 s a case asks for, and well below ``DEFAULT_LOCK_TIMEOUT_S``, so an
+#: implementation that drops ``timeout_s`` on the floor fails here instead of
+#: passing forty times slower.
+CONTENDED_UPDATE_BOUND_S = 5.0
+
+
+def bump_dispatches(tracker: dict) -> dict:
+    """The smallest real transition: one ``## Run`` counter, one cell."""
+    tracker["run"]["agent_dispatch_count"] = str(
+        int(tracker["run"]["agent_dispatch_count"]) + 1)
+    return tracker
+
+
+def setting_run_field(key: str, value: str):
+    """A mutate that writes one ``## Run`` cell and returns the tracker."""
+    def mutate(tracker: dict) -> dict:
+        tracker["run"][key] = value
+        return tracker
+    return mutate
+
+
+class Recorder:
+    """A mutate that records the tracker it was handed, every time.
+
+    "Was the callback invoked" is asserted directly rather than inferred from a
+    revision that stayed put. A revision can stay put because the mutation was
+    skipped, because the write failed, because the guard refused it, or because
+    the caller rolled it back — four different stories with one symptom, and
+    only one of them is the replay contract this class exists to pin.
+    """
+
+    def __init__(self, inner=bump_dispatches) -> None:
+        self.calls: list[dict] = []
+        self._inner = inner
+
+    def __call__(self, tracker: dict) -> dict:
+        self.calls.append(tracker)
+        return self._inner(tracker)
+
+
+def lock_wrapping(text: str):
+    """The real run lock, with ``progress.md`` rewritten to ``text`` INSIDE it.
+
+    This is how "re-read under the lock" is made falsifiable without a second
+    process: the tracker on disk moves on in the window between the preflight
+    read and the moment the lock is held, which is precisely the window a
+    contending writer occupies. An implementation that mutates its pre-lock
+    snapshot serialises nothing, and the only way to see that is to make the
+    two reads disagree.
+
+    The real lock is still taken, so the wrapper cannot pass by removing the
+    mechanism it is testing.
+    """
+    real = pas._exclusive_lock
+
+    @contextlib.contextmanager
+    def advancing_lock(run_dir, *, timeout_s=pas.DEFAULT_LOCK_TIMEOUT_S):
+        with real(run_dir, timeout_s=timeout_s):
+            (Path(run_dir) / "progress.md").write_text(text, encoding="utf-8")
+            yield
+
+    return mock.patch.object(pas, "_exclusive_lock", advancing_lock)
+
+
+class LockedUpdateTests(unittest.TestCase):
+    """``locked_tracker_update`` — the only way state ever changes.
+
+    Everything above this class is defeated by two writers interleaving a
+    read-modify-write on ``progress.md``: both halves of the interleaving are
+    individually well-formed, every validator in this file passes on each, and
+    the loser's transition simply disappears. The lock existed before this
+    class and had no caller, which made "only the controller writes
+    progress.md" a convention rather than a mechanism. These cases are what
+    make it a mechanism.
+    """
+
+    def tracker_bytes(self, run_dir: Path) -> bytes:
+        return (run_dir / "progress.md").read_bytes()
+
+    def test_a_successful_update_bumps_revision_and_records_the_transition(self):
+        run_dir = make_run(self)
+        result = pas.locked_tracker_update(run_dir, transition_id="dispatch-1",
+                                           mutate=bump_dispatches)
+        self.assertEqual(result["run"]["revision"], "13")
+        self.assertEqual(result["run"]["last_transition"], "dispatch-1")
+        self.assertEqual(result["run"]["agent_dispatch_count"], "49")
+        self.assertEqual(pas.validate_run(run_dir), result)
+
+    def test_an_update_takes_the_run_lock_and_strands_no_temp_file(self):
+        """The directory listing after one update, stated deliberately.
+
+        ``.pipeline-auto.lock`` is created by the lock and never unlinked, by
+        design — removing it races a second acquirer onto a second inode at one
+        path. Every directory-content assertion written before this task
+        expected ``["progress.md"]`` alone and was correct, because nothing
+        called the lock. This is the one that records the change rather than
+        loosening the others: the listing is pinned exactly, so a stranded
+        ``.progress.*.tmp`` still fails here.
+        """
+        run_dir = make_run(self)
+        pas.locked_tracker_update(run_dir, transition_id="dispatch-1",
+                                  mutate=bump_dispatches)
+        self.assertEqual(
+            sorted(path.name for path in run_dir.iterdir()),
+            [pas.LOCK_FILENAME, "progress.md"],
+            "either the update never took the run lock, or it left a temp file")
+
+    def test_an_update_is_refused_while_another_process_holds_the_run_lock(self):
+        """The named fault of this whole task: a transaction with no lock.
+
+        Every case in this class except this one passes against an
+        implementation that deletes the ``with _exclusive_lock(...)`` line —
+        they run one at a time in one interpreter, which is exactly the
+        condition a lock is not needed for. So the holder is a separate spawned
+        interpreter, the refusal is asserted against it, and the holder is
+        checked to be still alive afterwards so the refusal is evidence of
+        contention rather than of a holder that had already finished.
+
+        ``mutate`` is asserted un-called: a lock taken AFTER the caller's
+        mutation has already run serialises the write and not the
+        read-modify-write, which is the interleaving that loses a transition.
+
+        The elapsed bound pins that ``timeout_s`` reached the lock. Dropped, the
+        refusal still arrives — ten seconds later, on the module default — and
+        every other assertion here is satisfied.
+        """
+        run_dir = make_run(self)
+        before = self.tracker_bytes(run_dir)
+        holder, release = start_holder(self, run_dir)
+        self.assertNotEqual(
+            int((run_dir / HOLDER_PID_FILE).read_text(encoding="utf-8")), os.getpid(),
+            "the lock was taken inside this interpreter, so the refusal below "
+            "is not evidence of cross-process contention")
+        mutate = Recorder()
+        started = time.monotonic()
+        with self.assertRaises(pas.LockBusyError):
+            pas.locked_tracker_update(run_dir, transition_id="dispatch-1",
+                                      mutate=mutate, timeout_s=0.25)
+        elapsed = time.monotonic() - started
+        self.assertTrue(
+            holder.is_alive(),
+            "the holder exited before the refusal, so the refusal is not "
+            "evidence of contention")
+        self.assertEqual(
+            mutate.calls, [],
+            "the caller's mutation ran before the lock was held; the lock then "
+            "serialises the write alone and the read-modify-write still races")
+        self.assertLess(
+            elapsed, CONTENDED_UPDATE_BOUND_S,
+            "timeout_s never reached the lock: the refusal waited out the "
+            "module default instead of the caller's deadline")
+        self.assertEqual(self.tracker_bytes(run_dir), before)
+        release.set()
+        holder.join(HOLDER_WAIT_SECONDS)
+        self.assertEqual(
+            holder.exitcode, 0,
+            "the holder did not exit cleanly, so what it did with the lock is "
+            "unknown")
+        result = pas.locked_tracker_update(run_dir, transition_id="dispatch-1",
+                                           mutate=bump_dispatches)
+        self.assertEqual(
+            result["run"]["revision"], "13",
+            "the same directory could not be updated once the lock was free, "
+            "so the refusal above was never contention")
+
+    def test_the_tracker_is_re_read_under_the_lock_not_before_it(self):
+        """Anything read before the lock is stale by definition.
+
+        The preflight ``validate_run`` runs unlocked on purpose — it is what
+        stops a foreign directory before a lock file is created in it. Reusing
+        its result as the state to mutate is the mistake: the whole point of
+        the lock is that another writer may land between that read and the
+        acquisition, and a transaction that applies to the pre-lock snapshot
+        overwrites whatever landed. It serialises nothing while looking exactly
+        like it does.
+
+        Here the tracker moves from revision 12 to 20 and from 48 dispatches to
+        60 inside that window. Under the fault the result reads 13 and 49.
+        """
+        run_dir = make_run(self)
+        moved_on = swap(
+            "| revision | 12 |", "| revision | 20 |",
+            swap("| agent_dispatch_count | 48 |", "| agent_dispatch_count | 60 |"))
+        with lock_wrapping(moved_on):
+            result = pas.locked_tracker_update(run_dir, transition_id="dispatch-1",
+                                               mutate=bump_dispatches)
+        self.assertEqual(
+            result["run"]["revision"], "21",
+            "the revision was derived from the pre-lock read, so a transition "
+            "that landed while this one waited has just been overwritten")
+        self.assertEqual(result["run"]["agent_dispatch_count"], "61")
+        self.assertEqual(pas.validate_run(run_dir), result)
+
+    def test_a_replay_is_judged_against_the_state_read_under_the_lock(self):
+        """The replay check is only as fresh as the read it consults.
+
+        A resume races its own predecessor: the transition it is re-issuing may
+        land, from the process it is resuming, in the window between this
+        caller's preflight read and its acquisition. Checking the pre-lock
+        snapshot's ``last_transition`` then sees the OLD value, applies a second
+        time, and doubles exactly what the replay contract exists to protect.
+        """
+        run_dir = make_run(self)
+        already_applied = swap(
+            "| last_transition | ratchet-P02-accumulated-surface |",
+            "| last_transition | dispatch-1 |")
+        mutate = Recorder()
+        with lock_wrapping(already_applied):
+            result = pas.locked_tracker_update(run_dir, transition_id="dispatch-1",
+                                               mutate=mutate)
+        self.assertEqual(
+            mutate.calls, [],
+            "the replay check consulted the pre-lock snapshot, so a transition "
+            "that had already landed was applied a second time")
+        self.assertEqual(result["run"]["revision"], "12")
+        self.assertEqual(
+            (run_dir / "progress.md").read_text(encoding="utf-8"), already_applied,
+            "a replay wrote to the tracker")
+
+    def test_a_replayed_transition_returns_current_state_without_mutating(self):
+        """Every resume path re-issues the transition it was interrupted in. If
+        replay applies a second time, a resumed run silently doubles whatever
+        that transition recorded."""
+        run_dir = make_run(self)
+        pas.locked_tracker_update(run_dir, transition_id="dispatch-1",
+                                  mutate=bump_dispatches)
+        after_first = self.tracker_bytes(run_dir)
+        mutate = Recorder()
+        replayed = pas.locked_tracker_update(run_dir, transition_id="dispatch-1",
+                                             mutate=mutate)
+        self.assertEqual(
+            mutate.calls, [],
+            "the mutate callback ran on a replay; a callback with any effect "
+            "of its own has now run twice for one transition")
+        self.assertEqual(self.tracker_bytes(run_dir), after_first)
+        self.assertEqual(replayed["run"]["revision"], "13")
+        self.assertEqual(replayed["run"]["agent_dispatch_count"], "49")
+
+    def test_a_distinct_transition_after_one_applies_is_not_treated_as_a_replay(self):
+        """The positive control the case above needs. An implementation that
+        refuses every second transition is idempotent in the most useless
+        possible way, and nothing else in this class catches it."""
+        run_dir = make_run(self)
+        pas.locked_tracker_update(run_dir, transition_id="dispatch-1",
+                                  mutate=bump_dispatches)
+        second = pas.locked_tracker_update(run_dir, transition_id="dispatch-2",
+                                           mutate=bump_dispatches)
+        self.assertEqual(second["run"]["revision"], "14")
+        self.assertEqual(second["run"]["agent_dispatch_count"], "50")
+        self.assertEqual(second["run"]["last_transition"], "dispatch-2")
+
+    def test_the_reparse_canary_rejects_a_mutation_that_renders_invalid_state(self):
+        run_dir = make_run(self)
+        before = self.tracker_bytes(run_dir)
+
+        def regress_stage(tracker):
+            tracker["stages"][0]["stage_state"] = "pending"
+            return tracker
+
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.locked_tracker_update(run_dir, transition_id="regress-1",
+                                      mutate=regress_stage)
+        self.assertEqual(self.tracker_bytes(run_dir), before)
+
+    def test_the_canary_reparses_the_render_rather_than_re_checking_the_dict(self):
+        """The canary is a ROUND TRIP, and only a round trip catches this.
+
+        ``a | b`` in a free cell is a perfectly good Python string: every
+        semantic validator in this module accepts the dict that holds it. It is
+        the RENDER that is unreadable — the cell becomes a column separator and
+        the row comes back one cell too wide. Re-running the validators on the
+        proposed dict, which looks like the same check and is cheaper, writes
+        this tracker to disk and the corruption is discovered on the next load,
+        by a different process, with nothing left to attribute it to.
+        """
+        run_dir = make_run(self)
+        before = self.tracker_bytes(run_dir)
+
+        def smuggle_a_separator(tracker):
+            tracker["gates"][2]["findings"] = "a | b"
+            return tracker
+
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.locked_tracker_update(run_dir, transition_id="smuggle-1",
+                                      mutate=smuggle_a_separator)
+        self.assertEqual(self.tracker_bytes(run_dir), before)
+
+    def test_the_returned_tracker_is_the_reparsed_one_not_the_in_memory_dict(self):
+        """Callers only ever see state that survived a round trip.
+
+        A cell handed in with surrounding whitespace renders wide and parses
+        back trimmed, so the dict written and the dict proposed are not the
+        same dict. Returning the in-memory one hands the caller a value that is
+        not what any later reader of this tracker will see — and a controller
+        that branches on it branches on a value that exists nowhere on disk.
+        """
+        run_dir = make_run(self)
+        result = pas.locked_tracker_update(
+            run_dir, transition_id="pad-1",
+            mutate=setting_run_field("agent_dispatch_count", " 60 "))
+        self.assertEqual(result["run"]["agent_dispatch_count"], "60")
+        self.assertEqual(pas.validate_run(run_dir), result)
+
+    def test_a_transition_cannot_change_run_identity(self):
+        """Also the case that kills a shallow copy.
+
+        ``mutate`` is handed a DEEP copy. Under a shallow one, ``proposed["run"]``
+        and ``current["run"]`` are one dict, so a mutation to ``run_id`` changes
+        both, the comparison below finds them equal, and the rebranded tracker
+        is written. The guard would still be there, still be executed, and
+        catch nothing.
+        """
+        run_dir = make_run(self)
+        before = self.tracker_bytes(run_dir)
+        for key, value in (("run_id", "2026-09-14-somebody-elses-run"),
+                           ("schema", "pipeline-auto/v2"),
+                           ("base_commit", "1" * 40),
+                           ("target_branch", "main")):
+            with self.subTest(key=key):
+                with self.assertRaises(pas.TrackerValidationError) as caught:
+                    pas.locked_tracker_update(run_dir, transition_id="rebrand-1",
+                                              mutate=setting_run_field(key, value))
+                self.assertIn(key, str(caught.exception))
+                self.assertEqual(self.tracker_bytes(run_dir), before)
+
+    def test_the_intent_brief_is_immutable_once_stage_03_closes(self):
+        """A contradicting finding escalates and a human amends the brief; no
+        transition rewrites it in place. Without the guard a later stage
+        substitutes a different brief and every downstream artifact still looks
+        consistent with the one it now cites."""
+        run_dir = make_run(self)
+        before = self.tracker_bytes(run_dir)
+
+        def rewrite_brief(tracker):
+            brief = next(row for row in tracker["intent"] if row["id"] == "brief")
+            brief["result"] = "scratch/intent-brief-v2.md"
+            return tracker
+
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.locked_tracker_update(run_dir, transition_id="brief-2",
+                                      mutate=rewrite_brief)
+        self.assertEqual(self.tracker_bytes(run_dir), before)
+
+    def test_the_brief_is_still_writable_while_it_is_unfrozen(self):
+        """The positive control. A guard that refused every ``## Intent`` edit
+        would also pass the case above, while making stages 01-03 unable to
+        record the readings and the reconciliation they exist to produce."""
+        run_dir = make_run(self, with_row("intent", "brief", {"state": "published"}))
+
+        def publish_brief(tracker):
+            brief = next(row for row in tracker["intent"] if row["id"] == "brief")
+            brief["result"] = "scratch/intent-brief-v2.md"
+            return tracker
+
+        result = pas.locked_tracker_update(run_dir, transition_id="brief-1",
+                                           mutate=publish_brief)
+        self.assertEqual(
+            next(row for row in result["intent"] if row["id"] == "brief")["result"],
+            "scratch/intent-brief-v2.md")
+
+    def test_a_foreign_tracker_is_refused_before_mutate_is_ever_called(self):
+        """And before a lock file is created in somebody else's directory.
+
+        This is the whole reason the preflight validation is outside the lock.
+        ``superb:pipeline`` runs in directories that look exactly like this one;
+        dropping ``.pipeline-auto.lock`` into a live run of the other skill is a
+        write, in a read-only stop that promises none.
+        """
+        foreign = (FOREIGN_FIXTURES / "valid-v2-progress.md").read_bytes()
+        run_dir = make_run(self, foreign.decode("utf-8"))
+        mutate = Recorder()
+        with self.assertRaises(pas.ForeignSchemaError):
+            pas.locked_tracker_update(run_dir, transition_id="dispatch-1",
+                                      mutate=mutate)
+        self.assertEqual(mutate.calls, [])
+        self.assertEqual(self.tracker_bytes(run_dir), foreign)
+        self.assertEqual(
+            sorted(path.name for path in run_dir.iterdir()), ["progress.md"],
+            "a lock file was created inside a directory this skill does not own")
+
+    def test_mutate_must_return_a_tracker_dict(self):
+        """``None`` is the common shape of this bug — a mutate that edits in
+        place and forgets to return — but it is not the only one, and the other
+        two reach further into the transaction before anything notices."""
+        run_dir = make_run(self)
+        before = self.tracker_bytes(run_dir)
+        for description, returns in (
+            ("None, from a mutate that edited in place", lambda tracker: None),
+            ("a list of sections", lambda tracker: list(tracker.items())),
+            ("a dict with ## Intent dropped",
+             lambda tracker: {key: value for key, value in tracker.items()
+                              if key != "intent"}),
+        ):
+            with self.subTest(returns=description):
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.locked_tracker_update(run_dir, transition_id="bad-1",
+                                              mutate=returns)
+                self.assertEqual(self.tracker_bytes(run_dir), before)
+
+    def test_an_invalid_transition_identity_is_rejected(self):
+        """Before the lock and before ``mutate``. The id is the replay key: an
+        id carrying a space is one a later resume cannot reproduce exactly, so
+        its replay would not be recognised as one."""
+        run_dir = make_run(self)
+        before = self.tracker_bytes(run_dir)
+        mutate = Recorder()
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.locked_tracker_update(run_dir, transition_id="not a token",
+                                      mutate=mutate)
+        self.assertEqual(mutate.calls, [])
+        self.assertEqual(self.tracker_bytes(run_dir), before)
+        self.assertEqual(
+            sorted(path.name for path in run_dir.iterdir()), ["progress.md"],
+            "a malformed transition id still created a lock file")
+
+    def test_the_transition_arguments_are_keyword_only(self):
+        """Every call site in the master plan names them. A positional
+        signature accepts ``(run_dir, mutate, transition_id)`` in the wrong
+        order just as happily, and the tracker then records the mutate
+        function's repr as the transition that ran."""
+        run_dir = make_run(self)
+        with self.assertRaises(TypeError):
+            pas.locked_tracker_update(run_dir, "dispatch-1", bump_dispatches)
+
+    def test_a_mutate_that_raises_partway_changes_nothing_on_disk(self):
+        """mutate gets a deep copy, so a worker that dies halfway through a
+        transition cannot leave a half-applied tracker behind — and the lock is
+        released on that path, which the update afterwards is what proves."""
+        run_dir = make_run(self)
+        before = self.tracker_bytes(run_dir)
+
+        def half_apply(tracker):
+            tracker["run"]["agent_dispatch_count"] = "999"
+            raise RuntimeError("worker died mid-transition")
+
+        with self.assertRaises(RuntimeError):
+            pas.locked_tracker_update(run_dir, transition_id="half-1",
+                                      mutate=half_apply)
+        self.assertEqual(self.tracker_bytes(run_dir), before)
+        self.assertEqual(pas.validate_run(run_dir)["run"]["agent_dispatch_count"], "48")
+        recovered = pas.locked_tracker_update(run_dir, transition_id="half-2",
+                                              mutate=bump_dispatches)
+        self.assertEqual(
+            recovered["run"]["agent_dispatch_count"], "49",
+            "the run lock was never released, so one exception from a caller's "
+            "mutate wedges the whole run")
+
+    def test_a_pre_replace_failure_reaches_the_caller_as_nothing_happened(self):
+        """The three write outcomes must stay distinguishable THROUGH this
+        function. Swallowing ``TrackerWriteError`` here — or re-raising it as
+        the uncertain one — makes a retrying controller reconcile a transition
+        that provably did not happen, or, the other way round, blindly retry
+        one that did."""
+        run_dir = make_run(self)
+        before = self.tracker_bytes(run_dir)
+        with mock.patch.object(pas, "_sync_file",
+                               side_effect=OSError(errno.EIO, "simulated fsync")):
+            with self.assertRaises(pas.TrackerWriteError) as caught:
+                pas.locked_tracker_update(run_dir, transition_id="dispatch-1",
+                                          mutate=bump_dispatches)
+        self.assertNotIsInstance(caught.exception, pas.UpdateOutcomeUncertain)
+        self.assertEqual(self.tracker_bytes(run_dir), before)
+        retried = pas.locked_tracker_update(run_dir, transition_id="dispatch-1",
+                                            mutate=bump_dispatches)
+        self.assertEqual(
+            retried["run"]["agent_dispatch_count"], "49",
+            "either the lock outlived the failure or the retry double-applied")
+
+    def test_a_post_replace_failure_is_uncertain_and_its_replay_settles_it(self):
+        """The compaction story, end to end.
+
+        The replacement landed; only its durability is in doubt, and the
+        exception says so. The caller cannot know which, so it re-issues the
+        same transition — and the replay check, reading what is actually on
+        disk, tells it the transition is already recorded and refuses to apply
+        it again. Report this as ``TrackerWriteError`` instead and the caller
+        is told nothing happened; the replay check is then the only thing
+        between it and a doubled dispatch count.
+        """
+        run_dir = make_run(self)
+        with mock.patch.object(pas, "_sync_directory",
+                               side_effect=OSError(errno.EIO, "simulated dirsync")):
+            with self.assertRaises(pas.UpdateOutcomeUncertain):
+                pas.locked_tracker_update(run_dir, transition_id="dispatch-1",
+                                          mutate=bump_dispatches)
+        self.assertEqual(pas.validate_run(run_dir)["run"]["agent_dispatch_count"], "49")
+        mutate = Recorder()
+        settled = pas.locked_tracker_update(run_dir, transition_id="dispatch-1",
+                                            mutate=mutate)
+        self.assertEqual(mutate.calls, [])
+        self.assertEqual(settled["run"]["agent_dispatch_count"], "49")
+        self.assertEqual(settled["run"]["revision"], "13")
 
 if __name__ == "__main__":
     unittest.main()

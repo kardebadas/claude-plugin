@@ -1632,6 +1632,333 @@ class GrammarTests(unittest.TestCase):
                       "a,b", "a|b", "naïve", "a\tb"):
             self.assertFalse(pas._TOKEN.fullmatch(value), value)
 
+    def test_a_digest_is_sixty_four_lowercase_hex_characters(self):
+        """``_SHA256`` was ``re.compile(r"[0-9a-f]{64}")`` before ``re`` left.
+        Both halves of that pattern are load-bearing and neither is obvious in a
+        hand-written grammar: a width check without the character class accepts
+        sixty-four of anything, and a character class without the width accepts
+        a truncated digest that still looks like hex."""
+        digest = "4f1c0a2b3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8"
+        self.assertTrue(pas._SHA256.fullmatch(digest))
+        self.assertTrue(pas._SHA256.fullmatch("0" * 64))
+        for value in (digest.upper(), digest[:63], digest + "0", "g" * 64, "",
+                      "-", " " + digest[1:]):
+            self.assertFalse(pas._SHA256.fullmatch(value), value)
+
+    def test_a_qid_is_twelve_hex_characters_and_its_decision_prefixes_them(self):
+        """``Q-<qid>`` and ``<qid>`` are the same twelve characters, and the
+        prefix is the whole difference between a machine decision and the human
+        decision ``H-<n>``. Catches a decision grammar that accepts the bare qid
+        or any ``Q-`` token: either one lets a cell that is not a quorum
+        decision stand where downstream reads a quorum decision."""
+        self.assertTrue(pas._QID.fullmatch("3f2a1b0c9d8e"))
+        for value in ("3f2a1b0c9d8", "3f2a1b0c9d8e0", "3F2A1B0C9D8E", "",
+                      "Q-3f2a1b0c9d8e", "zzzzzzzzzzzz"):
+            self.assertFalse(pas._QID.fullmatch(value), value)
+        self.assertTrue(pas._QUORUM_DECISION.fullmatch("Q-3f2a1b0c9d8e"))
+        for value in ("3f2a1b0c9d8e", "H-1", "Q-", "Q-3f2a1b0c9d8", "q-3f2a1b0c9d8e",
+                      "Q-3F2A1B0C9D8E", "XQ-3f2a1b0c9d8e"):
+            self.assertFalse(pas._QUORUM_DECISION.fullmatch(value), value)
+
+    def test_a_quorum_outcome_is_two_exact_words_or_a_reasoned_rejection(self):
+        """The alternation ``adopted|escalated|rejected-[a-z][a-z-]*``, stated
+        without a regex engine. The two adopting words are exact and everything
+        else must announce itself as a rejection AND carry a reason, so neither
+        a bare ``rejected`` nor a near-miss like ``adopted-later`` gets in."""
+        for value in ("adopted", "escalated", "rejected-contradicts-human",
+                      "rejected-x", "rejected-a-b-c"):
+            self.assertTrue(pas._QUORUM_OUTCOME.fullmatch(value), value)
+        for value in ("", "-", "approved", "adopted-later", "escalated ",
+                      "rejected", "rejected-", "rejected-Human", "rejected-1",
+                      "rejected-contradicts human", "Adopted"):
+            self.assertFalse(pas._QUORUM_OUTCOME.fullmatch(value), value)
+
+
+#: The fixture's one finalized quorum row, quoted whole so every surgery below
+#: names exactly the cell it changed instead of re-typing the row it meant to
+#: leave alone. Its ``Axis`` is the literal ``new`` and its ``Phase`` is
+#: ``P01``, because that is what the committed fixture says; ``swap`` refuses a
+#: pattern the fixture no longer contains, so a copy that drifts from it fails
+#: loudly here rather than quietly building its case on an untouched tracker.
+ADOPTED_ROW = (
+    "| 3f2a1b0c9d8e | new | P01 | finalized | brain-1,brain-2,brain-3 | "
+    "4f1c0a2b3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8 | "
+    "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90 | "
+    "scratch/q1-brain-1.json,scratch/q1-brain-2.json,scratch/q1-brain-3.json | "
+    "1 | specified | adopted | Q-3f2a1b0c9d8e |"
+)
+
+#: The in-flight row's payload digest, which the schema requires to exist
+#: *before* the three brains are dispatched.
+IN_FLIGHT_PAYLOAD = "b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1"
+IN_FLIGHT_TAIL = "scratch/q2-brain-4.json | - | - | - | - |"
+
+
+def adopted_with(old: str, new: str) -> str:
+    """The fixture with ONE cell of its adopted quorum row changed.
+
+    Guarded on both levels. ``str.replace`` with an absent pattern is a silent
+    no-op, and a rejection case built on one asserts against the untouched
+    fixture — which parses, so that case merely fails — while a POSITIVE case
+    built on one passes while exercising nothing at all. The inner check catches
+    a cell that has moved inside the row; ``swap`` catches a row that has moved
+    inside the fixture.
+    """
+    if old not in ADOPTED_ROW:
+        raise AssertionError(f"the adopted quorum row no longer contains {old!r}")
+    return swap(ADOPTED_ROW, ADOPTED_ROW.replace(old, new))
+
+
+class QuorumSectionTests(unittest.TestCase):
+    """``## Quorum`` is the record of every decision no human made.
+
+    A quorum row is the only place a machine-made decision is written down, so
+    what this section refuses is the whole of what stops the run from deciding
+    something it had no authority to decide. P02 checks that a row is a
+    *possible state of the protocol*; whether an adoption was *correct* —
+    floor, strictness, contradiction, budget — is P03's arithmetic over these
+    same cells and is deliberately absent here.
+    """
+
+    def test_a_rung_outside_the_enum_is_schema_invalid(self):
+        """THE named fault of this task. A brain never types a number: it
+        selects a grounding rung and the controller derives the value, so a
+        rung the enum does not contain is a malformed response, not a weak one.
+
+        Catches the natural implementation ``RUNGS.get(rung_id, 0.55)``. 0.55 is
+        ``engineering-judgement`` and is already in the module for the
+        citation-demotion rule, so defaulting to it reads as principled and
+        defensive — and silently converts every malformed brain response into a
+        legal vote. The value that arrives is legal; the door it came through is
+        not, which is why nothing downstream can detect it.
+        """
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(adopted_with("| specified |", "| high |"))
+
+    def test_the_five_rung_names_are_the_only_ones_a_row_may_carry(self):
+        """The enum, exercised one name at a time rather than once. Catches a
+        membership test written against a subset — the two rungs at or above the
+        adoption floor, say — which would reject the three legal rungs a
+        ``rejected-*`` or ``escalated`` row records to explain why it did not
+        adopt, and so erase the evidence that the floor did its job."""
+        for rung in pas.RUNG_NAMES:
+            with self.subTest(rung=rung):
+                text = adopted_with("| 1 | specified | adopted | Q-3f2a1b0c9d8e |",
+                                    f"| 1 | {rung} | escalated | - |")
+                self.assertEqual(pas.parse_tracker(text)["quorum"][0]["rung"], rung)
+
+    def test_two_brains_are_rejected_because_a_count_is_never_reduced(self):
+        """Exactly three brains per quorum. Catches accepting a short roster
+        when capacity is tight: two responses can only ever agree or split, so
+        the spread rule that decides adoption has nothing to measure."""
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(adopted_with("brain-1,brain-2,brain-3", "brain-1,brain-2"))
+
+    def test_three_owner_slots_must_be_three_distinct_brains(self):
+        """Catches checking the COUNT alone. One brain dispatched twice fills
+        three slots and votes twice, and a quorum of two independent readings
+        with one of them doubled is a majority manufactured out of a single
+        opinion."""
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(
+                adopted_with("brain-1,brain-2,brain-3", "brain-1,brain-1,brain-3"))
+
+    def test_an_in_flight_quorum_cannot_carry_a_computed_result(self):
+        """The three-phase record exists so an interruption is classifiable: a
+        row is either dispatched-and-undecided or finalized-and-decided, and a
+        resuming controller reads which from the state. Catches letting a row be
+        both, which is the one shape that answers neither question."""
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(swap(
+                IN_FLIGHT_TAIL,
+                "scratch/q2-brain-4.json | 1 | specified | adopted | Q-7c6b5a4938d2 |"))
+
+    def test_an_in_flight_quorum_must_already_carry_its_payload_digest(self):
+        """The digest is persisted BEFORE dispatch, not written back with the
+        responses. Catches accepting ``-`` until the brains answer: the run
+        crashes mid-dispatch, and nothing afterwards can prove which payload the
+        three responses on disk were answers to."""
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(swap(f"| {IN_FLIGHT_PAYLOAD} |", "| - |"))
+
+    def test_one_payload_digest_binds_all_three_brains(self):
+        """The three brains get different reading assignments, but the
+        assignment rule is a frozen constant, so brain n's payload is determined
+        by the shared payload plus n and ONE digest binds all three. The
+        positive control for that: a single sha256 cell, not one per brain."""
+        tracker = pas.parse_tracker(valid_text())
+        self.assertEqual(tracker["quorum"][1]["payload_digest"], IN_FLIGHT_PAYLOAD)
+        self.assertEqual(
+            [column for column in pas._QUORUM_HEADER if column.endswith("Digest")],
+            ["Payload Digest", "Context Digest"])
+
+    def test_a_digest_spelled_in_uppercase_hex_is_rejected(self):
+        """Catches a case-insensitive digest grammar. The same bytes hashed
+        twice must render the same cell, and a row whose digest differs only in
+        case matches no response file and no re-computation, so the binding the
+        digest exists to provide silently holds against nothing."""
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(adopted_with(
+                "4f1c0a2b3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8",
+                "4F1C0A2B3D4E5F60718293A4B5C6D7E8F90A1B2C3D4E5F60718293A4B5C6D7E8"))
+
+    def test_adoption_requires_all_three_responses_on_disk(self):
+        """Catches adopting on the responses that happened to arrive. Two
+        responses cannot produce the strictly-higher winning rung adoption
+        needs, so a two-file adoption is one where the rule was not applied."""
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(adopted_with(
+                "scratch/q1-brain-1.json,scratch/q1-brain-2.json,"
+                "scratch/q1-brain-3.json",
+                "scratch/q1-brain-1.json,scratch/q1-brain-2.json"))
+
+    def test_one_response_file_cited_twice_is_not_two_responses(self):
+        """Catches counting cited paths rather than distinct ones: three
+        citations of two files satisfy a length check and a two-brain quorum
+        passes as three, with one brain's answer weighted double."""
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(adopted_with(
+                "scratch/q1-brain-2.json", "scratch/q1-brain-1.json"))
+
+    def test_an_adopted_quorum_records_a_quorum_decision_id(self):
+        """``Q-<qid>``, not any non-empty cell. Catches accepting ``H-9``: a
+        machine decision then wears the provenance of a human one, and the
+        contradiction check that protects human answers reads it as one of
+        theirs."""
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(adopted_with("| Q-3f2a1b0c9d8e |", "| H-9 |"))
+
+    def test_an_adopted_quorum_records_its_winning_rung(self):
+        """Catches an adoption with no rung. The rung IS the authority the
+        decision was made on; without it nothing can later check the adoption
+        against the ``code-evidenced`` floor, and an unrecorded rung is
+        indistinguishable from one below it."""
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(adopted_with("| 1 | specified | adopted |",
+                                           "| 1 | - | adopted |"))
+
+    def test_an_adopted_quorum_records_its_decision_depth(self):
+        """Depth is capped at 2 and human decisions are depth 0. Catches an
+        adoption with no depth: the cap is enforced over these cells, and a row
+        that records none is one no cap can count."""
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(adopted_with("| 1 | specified | adopted |",
+                                           "| - | specified | adopted |"))
+
+    def test_a_decision_depth_spelled_in_non_ascii_digits_is_rejected(self):
+        """``'١'.isdigit()`` is True and ``int('²')`` raises. Catches writing
+        the depth check as ``isdigit`` alone: a depth of ``²`` passes here and
+        then fails the depth cap with a bare ``ValueError``, outside this
+        module's exception family, where a caller branching on ``TrackerError``
+        never sees the stop."""
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(adopted_with("| 1 | specified |", "| ١ | specified |"))
+
+    def test_an_escalated_quorum_cannot_carry_a_decision(self):
+        """Only an adopted quorum decides anything. Catches leaving the decision
+        cell unjudged on the other outcomes: the row says it escalated to the
+        human and names a ``Q-`` decision in the same breath, and everything
+        downstream cites the decision."""
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(adopted_with("| adopted | Q-3f2a1b0c9d8e |",
+                                           "| escalated | Q-3f2a1b0c9d8e |"))
+
+    def test_an_escalated_quorum_records_what_it_found_without_deciding_it(self):
+        """The positive control for the outcome rules. An escalation is the
+        normal, correct end of a quorum that could not clear the bar, and it
+        still records the rung and depth it reached. Catches requiring a
+        decision on every finalized row, which would make escalating impossible
+        to write down and adoption the only expressible outcome."""
+        tracker = pas.parse_tracker(
+            adopted_with("| adopted | Q-3f2a1b0c9d8e |", "| escalated | - |"))
+        self.assertEqual(tracker["quorum"][0]["outcome"], "escalated")
+        self.assertEqual(tracker["quorum"][0]["decision"], "-")
+
+    def test_an_axis_must_be_a_stage_03_question_or_the_literal_new(self):
+        """Adoption checks the axis against the human decisions already made on
+        it. Catches leaving the axis a free token: a quorum that writes an axis
+        name matching no stage-03 question contradicts nothing by construction,
+        so it clears the contradiction check by being unrecognisable rather than
+        by being compatible — the same fail-open ``_BLAST_RADII`` is closed
+        against."""
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(adopted_with("| new |", "| axis-9 |"))
+
+    def test_a_quorum_axis_may_name_a_stage_03_question(self):
+        """The positive control for the same rule, and the case the fixture no
+        longer carries. A quorum deepening an axis the human already answered is
+        legal — it is the contradiction, not the axis, that adoption refuses —
+        so a rule written as 'the axis is always the literal new' would refuse a
+        state the protocol produces."""
+        tracker = pas.parse_tracker(adopted_with("| new |", "| C-001 |"))
+        self.assertEqual(tracker["quorum"][0]["axis"], "C-001")
+
+    def test_a_quorum_row_cannot_name_a_phase_the_run_has_no_record_of(self):
+        """The drift budget is three adoptions per phase and ten per run,
+        counted by filtering these rows on ``Phase``. Catches leaving the phase
+        a free token: an adoption filed under a phase that does not exist is
+        counted against no phase's budget at all."""
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(adopted_with("| P01 |", "| P99 |"))
+
+    def test_a_qid_is_twelve_lowercase_hex_characters(self):
+        """The qid is a digest of the question and its axis, and every
+        escalation, task and decision id in the run points back through it.
+        Catches accepting any token: a row keyed by something no derivation can
+        reproduce is one whose question can never be found again."""
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(adopted_with("| 3f2a1b0c9d8e |", "| 3F2A1B0C9D8E |"))
+
+    def test_a_duplicate_qid_is_rejected_because_one_adopted_answer_per_qid(self):
+        """One adopted answer per qid per run. Catches accepting two rows on one
+        qid: the second is the run re-asking a question it already answered
+        until it gets the answer it wants, and both rows are citable."""
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(swap(ADOPTED_ROW, ADOPTED_ROW + "\n" + ADOPTED_ROW))
+
+    def test_an_unknown_quorum_state_is_rejected_rather_than_read_as_finalized(self):
+        """The enum is checked BEFORE anything branches on it, for the reason
+        ``_validate_stages`` checks its own first. Catches ``if state ==
+        'in_flight': ... else: <finalized rules>``, under which an unknown state
+        falls into the finalized branch and a row nobody can classify is judged
+        by the rules for the one state it is not in."""
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(adopted_with("| finalized |", "| dispatched |"))
+
+    def test_an_unknown_outcome_word_is_rejected(self):
+        """Catches an open outcome grammar. ``approved`` is not ``adopted``, so
+        every adoption rule below skips it and the row records an outcome no
+        reader can classify, having been judged by nothing.
+
+        The decision cell is cleared in the same surgery, and that is what makes
+        this test about the outcome. Left as ``Q-3f2a1b0c9d8e``, the row is
+        refused by 'only an adopted quorum carries a decision' whatever the
+        outcome grammar does — the test passes with the grammar deleted, which
+        is the case it was written to catch."""
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(
+                adopted_with("| adopted | Q-3f2a1b0c9d8e |", "| approved | - |"))
+
+    def test_a_rejection_outcome_is_accepted_without_p02_enumerating_the_reasons(self):
+        """P02 closes the SHAPE of a rejection, not its vocabulary: naming the
+        reasons is P03's contract, and an enum here would have to be edited in
+        two places every time one is added. Catches closing it anyway, which
+        halts the run on a reason a specified writer actually emits."""
+        tracker = pas.parse_tracker(adopted_with(
+            "| 1 | specified | adopted | Q-3f2a1b0c9d8e |",
+            "| - | - | rejected-contradicts-human | - |"))
+        self.assertEqual(tracker["quorum"][0]["outcome"], "rejected-contradicts-human")
+
+    def test_a_bare_rejected_carries_no_reason_and_is_refused(self):
+        """The other half of that shape. Catches accepting the prefix alone: the
+        one thing P02 can require of a rejection is that it says why, and
+        ``rejected`` on its own is the outcome recorded with the reason
+        dropped."""
+        for outcome in ("rejected", "rejected-", "rejected-Contradicts"):
+            with self.subTest(outcome=outcome):
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(adopted_with(
+                        "| adopted | Q-3f2a1b0c9d8e |", f"| {outcome} | - |"))
 
 class SuiteIsWhollyCollectedTests(unittest.TestCase):
     """``if __name__ == "__main__": unittest.main()`` must be the LAST statement.

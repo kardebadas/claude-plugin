@@ -52,7 +52,7 @@
 ## Quorum
 | QID | Axis | Phase | State | Owners | Payload Digest | Context Digest | Responses | Depth | Rung | Outcome | Decision |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 3f2a1b0c9d8e | axis-1 | P01 | finalized | brain-1,brain-2,brain-3 | 4f1c0a2b3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8 | a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90 | scratch/q1-brain-1.json,scratch/q1-brain-2.json,scratch/q1-brain-3.json | 1 | specified | adopted | Q-3f2a1b0c9d8e |
+| 3f2a1b0c9d8e | new | P01 | finalized | brain-1,brain-2,brain-3 | 4f1c0a2b3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8 | a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90 | scratch/q1-brain-1.json,scratch/q1-brain-2.json,scratch/q1-brain-3.json | 1 | specified | adopted | Q-3f2a1b0c9d8e |
 | 7c6b5a4938d2 | new | P02 | in_flight | brain-4,brain-5,brain-6 | b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1 | a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90 | scratch/q2-brain-4.json | - | - | - | - |
 
 ## Escalations

@@ -392,6 +392,54 @@ _ESCALATION_ID = _Numbered("E-")
 _CONFLICT_ID = _Numbered("C-")
 
 
+#: Lowercase hex, and lowercase is not an accident of taste. A digest is
+#: compared byte for byte against a recomputation and against the file names
+#: the responses were written under, so a cell differing only in case matches
+#: nothing while looking exactly like a match to a reader.
+_HEX = "0123456789abcdef"
+
+#: The ASCII lowercase letters, spelled out for the same reason ``_Numbered``
+#: spells out its digits: ``str.islower`` is true of characters ``[a-z]`` is
+#: not, and a rejection reason spelled in them renders back into the tracker
+#: looking like a word nothing downstream can match.
+_LOWER = "abcdefghijklmnopqrstuvwxyz"
+
+
+class _Hex:
+    """``<prefix>[0-9a-f]{width}``: a fixed-width lowercase hex digest.
+
+    The third grammar shape this module states directly rather than compiling.
+    Both halves are load-bearing and neither survives being written casually: a
+    width check alone accepts sixty-four of anything, and a character class
+    alone accepts a truncated digest that still looks like hex — and a
+    truncated digest is the one failure that reads as a successful binding.
+    """
+
+    __slots__ = ("_prefix", "_width")
+
+    def __init__(self, width: int, prefix: str = "") -> None:
+        self._prefix = prefix
+        self._width = width
+
+    def fullmatch(self, value: str) -> bool:
+        digits = value[len(self._prefix):]
+        return (value.startswith(self._prefix) and len(digits) == self._width
+                and all(character in _HEX for character in digits))
+
+
+#: The payload and context digests a quorum row binds its three brains to.
+_SHA256 = _Hex(64)
+#: ``qid = sha256(normalize(question) || "\x00" || axis)``, truncated. It keys
+#: the row, and every escalation and task decision in the run points back
+#: through it, so a qid no derivation can reproduce is a question that can never
+#: be found again.
+_QID = _Hex(12)
+#: ``Q-<qid>`` is a quorum's decision id and ``H-<n>`` is a human's. The prefix
+#: is the entire difference between a decision a machine made and one the user
+#: made, and it is what the contradiction check reads to tell them apart.
+_QUORUM_DECISION = _Hex(12, "Q-")
+
+
 def _stage_state(tracker: dict, stage: str) -> str:
     """The state of one stage row.
 
@@ -665,6 +713,175 @@ def _validate_escalations(tracker: dict) -> None:
             "one AskUserQuestion call")
 
 
+class _QuorumOutcome:
+    """``adopted``, ``escalated``, or ``rejected-<reason>``.
+
+    P02 closes the SHAPE of an outcome and not the rejection vocabulary: naming
+    the reasons is P03's contract, and an enum here would have to be edited in
+    two places every time one is added — the kind of duplication that ends with
+    a specified writer emitting a reason this module halts the run on.
+
+    What is closed is that the two non-rejecting words are exact, and that
+    anything else must both announce itself as a rejection and carry a reason.
+    A bare ``rejected`` is the outcome recorded with the reason dropped, and the
+    reason is the only part a human reading the run afterwards can act on.
+    """
+
+    __slots__ = ()
+
+    _EXACT = ("adopted", "escalated")
+    _PREFIX = "rejected-"
+    _REASON = _CharClass(_LOWER, _LOWER + "-")
+
+    def fullmatch(self, value: str) -> bool:
+        return value in self._EXACT or (
+            value.startswith(self._PREFIX)
+            and self._REASON.fullmatch(value[len(self._PREFIX):]))
+
+
+_QUORUM_OUTCOME = _QuorumOutcome()
+
+#: Two states, and the pair is the whole recovery story for a quorum. A row is
+#: either dispatched-and-undecided or finalized-and-decided; there is no third
+#: state, because a third one would be a row an interrupted run cannot classify.
+_QUORUM_STATES = ("in_flight", "finalized")
+
+#: Exactly three brains, exactly three responses. Stated once, because the two
+#: places it is checked below mean the same fact and a run that reduced either
+#: to fit capacity has replaced a quorum with a straw poll.
+_BRAINS = 3
+
+
+def _validate_quorum(tracker: dict) -> None:
+    """The three-phase quorum record, structurally.
+
+    ``## Quorum`` is the only place a decision no human made is written down,
+    so what this refuses is the whole of what stops the run from deciding
+    something it had no authority to decide.
+
+    The record has three phases and two of them are states: a row appears
+    ``in_flight`` carrying its three owner ids and its payload digest **before**
+    dispatch, and becomes ``finalized`` carrying the computed result. The digest
+    is persisted first on purpose — a run that crashes mid-dispatch must still
+    be able to prove which payload the responses on disk were answers to — and
+    a row that is both in flight and decided is the one shape an interrupted
+    controller cannot classify at all.
+
+    One ``Payload Digest`` binds all three brains. The three get different
+    reading assignments, but the assignment rule is a frozen constant, so brain
+    n's payload is determined by the shared payload plus n; a digest per brain
+    would be three copies of one fact, free to disagree.
+
+    P02 checks that a row is a *possible state of the protocol*. Whether the
+    adoption was *correct* — the ``code-evidenced`` floor, the strictly-higher
+    winning rung, contradiction with a human decision, the depth cap, the drift
+    budget — is P03's arithmetic over these same cells and is deliberately
+    absent here. The one policy fact this module does hold is the rung ENUM,
+    because a rung outside it is not a weak vote: it is a malformed response,
+    and defaulting it to any legal value is how a malformed brain buys a vote.
+    """
+    rows = tracker["quorum"]
+    #: The axis namespace is the stage-03 question id namespace, plus the
+    #: literal ``new`` for an axis the run discovered after the gate closed.
+    #: Closed for the reason ``_BLAST_RADII`` is closed: adoption checks the
+    #: axis against the human decisions already recorded on it, so an axis
+    #: matching no question contradicts nothing BY CONSTRUCTION and clears that
+    #: check by being unrecognisable rather than by being compatible.
+    axes = {row["id"] for row in tracker["questions"]} | {"new"}
+    phases = {row["id"] for row in tracker["phases"]}
+    if len({row["qid"] for row in rows}) != len(rows):
+        raise TrackerValidationError(
+            "duplicate qid: there is one adopted answer per qid per run, and a "
+            "second row on one qid is the run re-asking until it likes the answer")
+    for row in rows:
+        if not _QID.fullmatch(row["qid"]):
+            raise TrackerValidationError(
+                "a qid is twelve lowercase hex characters; a row keyed by "
+                "anything else is one whose question cannot be found again")
+        if row["axis"] not in axes:
+            raise TrackerValidationError(
+                f"quorum axis {row['axis']!r} is neither a stage-03 question id "
+                "nor the literal 'new'")
+        if row["phase"] != "-" and row["phase"] not in phases:
+            raise TrackerValidationError(
+                "quorum row refers to an unknown phase; the drift budget is "
+                "counted by filtering these rows on Phase")
+        #: Ahead of every rule that branches on the state, for the reason
+        #: ``_validate_stages`` checks its enum first: an ``in_flight`` test
+        #: with an ``else`` would judge an unclassifiable row by the rules for
+        #: the one state it is certainly not in.
+        if row["state"] not in _QUORUM_STATES:
+            raise TrackerValidationError(f"unknown quorum state {row['state']!r}")
+        owners = _csv(row["owners"])
+        if len(owners) != _BRAINS or len(set(owners)) != _BRAINS:
+            raise TrackerValidationError(
+                f"a quorum dispatches exactly {_BRAINS} DISTINCT brains; a count "
+                "is never reduced to fit capacity, and one brain dispatched "
+                "twice is a majority manufactured from a single opinion")
+        for key in ("payload_digest", "context_digest"):
+            if not _SHA256.fullmatch(row[key]):
+                raise TrackerValidationError(
+                    f"{key} must be lowercase sha256 hex and is persisted before "
+                    "dispatch, not written back with the responses")
+        responses = _csv(row["responses"])
+        if len(responses) > _BRAINS or len(set(responses)) != len(responses):
+            raise TrackerValidationError(
+                f"a quorum records at most {_BRAINS} distinct response files; one "
+                "file cited twice is one brain's answer weighted double")
+        if row["state"] == "in_flight":
+            if any(row[key] != "-" for key in ("depth", "rung", "outcome", "decision")):
+                raise TrackerValidationError(
+                    "an in-flight quorum carries no computed result; the "
+                    "three-phase record exists so an interruption is always "
+                    "classifiable, and a row that is both in flight and decided "
+                    "classifies as neither")
+            continue
+        if not _QUORUM_OUTCOME.fullmatch(row["outcome"]):
+            raise TrackerValidationError(
+                f"unknown quorum outcome {row['outcome']!r}: 'adopted', "
+                "'escalated', or a 'rejected-<reason>' that states its reason")
+        #: THE check this section exists for. A brain never types a number: it
+        #: selects a grounding rung and the controller derives the value. A rung
+        #: the enum does not contain is therefore a malformed response, and the
+        #: obvious defence — ``RUNGS.get(rung, 0.55)``, where 0.55 is
+        #: ``engineering-judgement`` and is already in P03 for the
+        #: citation-demotion rule — silently converts every malformed response
+        #: into a legal vote. The value that arrives is legal; the door it came
+        #: through is not, which is precisely why nothing downstream can detect
+        #: it. Schema-invalid means schema-invalid: re-dispatch that brain once,
+        #: then escalate, and never default.
+        if row["rung"] != "-" and row["rung"] not in RUNG_NAMES:
+            raise TrackerValidationError(
+                f"rung {row['rung']!r} is outside the enum; an out-of-enum rung "
+                "is schema-invalid and is NEVER defaulted to a legal value")
+        #: ``isdigit`` alone is true of ``'١'`` and ``'²'``. The first parses as
+        #: an integer and the second raises ``ValueError`` — outside this
+        #: module's exception family — when the depth cap finally reads it.
+        if row["depth"] != "-" and not (
+            row["depth"].isascii() and row["depth"].isdigit()
+        ):
+            raise TrackerValidationError(
+                "decision depth must be a non-negative integer in ASCII digits")
+        if row["outcome"] == "adopted":
+            if len(responses) != _BRAINS:
+                raise TrackerValidationError(
+                    f"adoption requires {_BRAINS} valid responses on disk; fewer "
+                    "cannot produce the strictly-higher winning rung it needs")
+            if not _QUORUM_DECISION.fullmatch(row["decision"]):
+                raise TrackerValidationError(
+                    "an adopted quorum records its Q-<qid> decision, so its "
+                    "provenance survives even if the Provenance field is lost "
+                    "and so a machine decision never wears a human one's id")
+            if row["rung"] == "-" or row["depth"] == "-":
+                raise TrackerValidationError(
+                    "an adopted quorum records its winning rung and decision "
+                    "depth; an unrecorded rung cannot be checked against the "
+                    "adoption floor and is indistinguishable from one below it")
+        elif row["decision"] != "-":
+            raise TrackerValidationError(
+                "only an adopted quorum carries a decision")
+
+
 def _validate_tracker_semantics(tracker: dict) -> None:
     """Every per-section semantic rule, run as the last step of a parse.
 
@@ -683,6 +900,10 @@ def _validate_tracker_semantics(tracker: dict) -> None:
     #: roster is four rows and the origins are in the enum, which is what the
     #: two validators above have just proven.
     _validate_intent_conflicts(tracker)
+    #: Before ``_validate_escalations``, which resolves an escalation's ``QID``
+    #: against this section: a qid set that has not been proven well-formed is
+    #: not one to look a reference up in.
+    _validate_quorum(tracker)
     _validate_escalations(tracker)
 
 

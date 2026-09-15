@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import errno
+import hashlib
 import importlib.util
 import multiprocessing
 import os
@@ -4515,6 +4516,449 @@ class LockedUpdateTests(unittest.TestCase):
         self.assertEqual(settled["run"]["agent_dispatch_count"], "49")
         self.assertEqual(settled["run"]["revision"], "13")
 
+
+#: The arguments a run is born with, in one place so a case that varies one of
+#: them varies exactly one of them. Every value here is real: the base commit is
+#: this repository's own, and the branch is the shape a run actually targets.
+NEW_RUN = {
+    "run_id": "2026-09-14-example",
+    "base_commit": "c8bddd610119f52b54bf077d284c7f5d8362ae77",
+    "target_branch": "feat/example",
+    "worker_limit": 6,
+}
+
+
+def unborn_run(case: unittest.TestCase) -> Path:
+    """A path a run directory does NOT exist at yet. Removed when the case ends.
+
+    ``make_run`` and ``empty_run`` both create the directory, and neither can
+    stand in here: initialization has to create the directory it writes into,
+    and a case handed an existing one would never exercise that.
+    """
+    root = Path(tempfile.mkdtemp(prefix="pipeline-auto-init-"))
+    case.addCleanup(shutil.rmtree, root, ignore_errors=True)
+    return root / "run"
+
+
+def new_run(case: unittest.TestCase, **overrides) -> tuple[Path, dict]:
+    run_dir = unborn_run(case)
+    return run_dir, pas.initialize_run(run_dir, **{**NEW_RUN, **overrides})
+
+
+class InitializeRunTests(unittest.TestCase):
+    """The first write of a run — the one write that does not go through the lock.
+
+    ``locked_tracker_update`` is the sole writer of an EXISTING tracker, and it
+    cannot create one: every step of it reads and re-reads a tracker that has to
+    be there already. Creation is the other operation, and it is bounded by a
+    different mechanism — ``os.link``, which fails rather than replaces, so two
+    controllers racing to start a run in one directory produce one winner and
+    one refusal instead of one silent clobber.
+    """
+
+    def refusal(self, error, **overrides):
+        """Initialize with one argument changed, and require a read-only stop.
+
+        "Raises" is half the contract. The other half is that the directory is
+        untouched: an argument check that runs AFTER the write leaves a tracker
+        on disk for a run the caller was just told it could not start.
+        """
+        run_dir = unborn_run(self)
+        with self.assertRaises(error) as caught:
+            pas.initialize_run(run_dir, **{**NEW_RUN, **overrides})
+        self.assertFalse(
+            (run_dir / "progress.md").exists(),
+            "a refused initialization still left a tracker on disk")
+        return caught.exception
+
+    def test_a_new_run_opens_stage_01_and_leaves_the_other_eleven_pending(self):
+        """Twelve pending stages is the shape that reported an untouched run as
+        ``complete``: the run would end at stage 00 with every artifact
+        unwritten and nothing erroring. ``derive_next_action`` now raises on it
+        instead, so a fresh tracker that opens no stage cannot be acted on at
+        all — which makes this the one assertion initialization cannot omit.
+        """
+        _, tracker = new_run(self)
+        self.assertEqual([row["stage_state"] for row in tracker["stages"]],
+                         ["active"] + ["pending"] * 11)
+        self.assertEqual([row["next_action"] for row in tracker["stages"][1:]],
+                         ["-"] * 11)
+        opening = tracker["stages"][0]["next_action"]
+        self.assertNotEqual(opening, "-")
+        self.assertEqual(pas.derive_next_action(tracker), opening)
+        self.assertNotEqual(pas.derive_next_action(tracker), "complete")
+
+    def test_a_new_run_starts_at_revision_zero_with_every_table_empty(self):
+        _, tracker = new_run(self)
+        self.assertEqual(tracker["run"]["revision"], "0")
+        self.assertEqual(tracker["run"]["last_transition"], "initialized")
+        self.assertEqual(tracker["run"]["agent_dispatch_count"], "0")
+        self.assertEqual(tracker["run"]["schema"], pas.SCHEMA)
+        for key in ("intent", "questions", "quorum", "escalations", "tasks",
+                    "task_review", "fix_rounds", "phases", "gates"):
+            self.assertEqual(tracker[key], [], key)
+
+    def test_the_first_transition_of_a_new_run_lands_at_revision_one(self):
+        """What makes ``revision`` 0 mean something rather than look tidy.
+
+        ``revision`` counts durable transitions, and ``locked_tracker_update``
+        derives the next one by adding to what it reads. A run born at 1 claims
+        a transition that never happened and every later revision is off by one
+        against the decisions and findings that cite it.
+        """
+        run_dir, _ = new_run(self)
+        after = pas.locked_tracker_update(run_dir, transition_id="dispatch-1",
+                                          mutate=bump_dispatches)
+        self.assertEqual(after["run"]["revision"], "1")
+        self.assertEqual(after["run"]["agent_dispatch_count"], "1")
+
+    def test_run_artifacts_are_addressed_under_the_run_id_convention(self):
+        """The spec puts a run's artifacts under
+        ``docs/superpowers/runs/<run-id>/``. Two runs sharing an artifact path
+        append into one another's audit trail, and the decision record is
+        append-only, so nothing later can separate them again.
+        """
+        _, tracker = new_run(self)
+        base = "docs/superpowers/runs/2026-09-14-example"
+        self.assertEqual(tracker["run"]["decisions"], f"{base}/decisions.md")
+        self.assertEqual(tracker["run"]["findings"], f"{base}/findings.md")
+        self.assertEqual(tracker["run"]["completeness_proposals"],
+                         f"{base}/completeness-proposals.md")
+
+    def test_an_artifact_a_new_run_has_not_written_is_absent_not_predicted(self):
+        """``spec``, ``master_plan`` and ``phase_plans`` are produced by stages
+        05, 06 and 07. Pre-filling the paths they will eventually take makes the
+        tracker name three files that do not exist, and a resuming controller
+        reading a cell cannot tell a promise from a product — it would skip the
+        stage that was supposed to write it.
+        """
+        _, tracker = new_run(self)
+        for key in ("spec", "master_plan", "phase_plans"):
+            self.assertEqual(tracker["run"][key], "-", key)
+
+    def test_run_identity_is_recorded_exactly_as_it_was_given(self):
+        """These four cells are the ones no transition may ever change, so a
+        value mistyped here is not correctable later by any legal write — the
+        run has to be thrown away and started again.
+        """
+        _, tracker = new_run(self)
+        self.assertEqual(tracker["run"]["run_id"], NEW_RUN["run_id"])
+        self.assertEqual(tracker["run"]["base_commit"], NEW_RUN["base_commit"])
+        self.assertEqual(tracker["run"]["target_branch"], NEW_RUN["target_branch"])
+        self.assertEqual(tracker["run"]["worker_limit"], "6")
+
+    def test_the_bytes_on_disk_are_the_canonical_render_of_what_is_returned(self):
+        """Initialization returns state read back THROUGH the parser, never the
+        dict it rendered. A caller acting on the in-memory dict acts on
+        something no later read reproduces, and the first byte-level
+        disagreement between the two surfaces as a foreign-schema stop halfway
+        through the run.
+        """
+        run_dir, tracker = new_run(self)
+        text = (run_dir / "progress.md").read_text(encoding="utf-8")
+        self.assertEqual(text, pas.render_tracker(tracker))
+        self.assertEqual(pas.validate_run(run_dir), tracker)
+
+    def test_a_run_never_targets_main_or_master(self):
+        """Success leaves a clean, committed feature branch and nothing is
+        merged or pushed. A run whose target IS the default branch commits
+        straight onto it, and ``target_branch`` is an identity cell no later
+        transition can correct.
+        """
+        for branch in ("main", "master"):
+            with self.subTest(branch=branch):
+                self.refusal(pas.TrackerValidationError, target_branch=branch)
+
+    def test_a_target_branch_that_is_not_one_token_is_rejected(self):
+        """A ``|`` in a branch name renders as a cell boundary and a space
+        renders as a two-word cell. Both reach the parser as a malformed table,
+        so the message a human gets describes the table instead of the argument
+        that was actually wrong — and the canary catches it one layer too late
+        to say what to fix.
+        """
+        for branch in ("feat/a|b", "feat/a b", "", "-"):
+            with self.subTest(target_branch=branch):
+                self.refusal(pas.TrackerValidationError, target_branch=branch)
+
+    def test_a_base_commit_that_is_not_a_full_object_name_is_rejected(self):
+        """``base_commit`` is one end of every range proof the run makes. An
+        abbreviation names a different object as the repository grows and a
+        symbolic name resolves somewhere else tomorrow: neither is an end a
+        proof can be made between, and both read like one.
+        """
+        for value in ("c8bddd61", "HEAD", "HEAD~1", "feat/example", "",
+                      "C8BDDD610119F52B54BF077D284C7F5D8362AE77",
+                      "c8bddd610119f52b54bf077d284c7f5d8362ae7z",
+                      "c8bddd610119f52b54bf077d284c7f5d8362ae771"):
+            with self.subTest(base_commit=value):
+                self.refusal(pas.TrackerValidationError, base_commit=value)
+
+    def test_a_worker_limit_below_one_is_rejected(self):
+        """A run with no workers dispatches nothing, completes nothing, and
+        reports itself healthy the whole time.
+        """
+        for limit in (0, -1):
+            with self.subTest(worker_limit=limit):
+                self.refusal(pas.TrackerValidationError, worker_limit=limit)
+
+    def test_a_worker_limit_that_is_not_an_integer_stays_inside_the_family(self):
+        """``int('six')`` raises ValueError and ``int(6.5)`` silently truncates.
+        The first escapes this module's exception family, so a caller branching
+        on ``TrackerError`` never sees the stop; the second records a limit the
+        caller never asked for, in a cell nothing later re-derives.
+        """
+        for limit in ("6", 6.5, None):
+            with self.subTest(worker_limit=limit):
+                self.refusal(pas.TrackerValidationError, worker_limit=limit)
+
+    def test_a_worker_limit_below_four_is_legal_and_serialises(self):
+        """``worker_limit >= 4`` is required for CONCURRENCY, not for legality:
+        below it tasks serialise so the three brain slots stay free. Refusing it
+        here would make a single-worker run impossible to start at all, which is
+        a different rule from the one the spec states.
+        """
+        _, tracker = new_run(self, worker_limit=2)
+        self.assertEqual(tracker["run"]["worker_limit"], "2")
+
+    def test_a_run_id_that_escapes_its_own_run_directory_is_rejected(self):
+        """The run id is interpolated into three artifact paths. A separator or
+        a leading dot in it addresses ``decisions.md`` outside the run directory
+        — over another run's audit trail, or over a repository file — and all
+        three cells still read as well-formed paths afterwards.
+        """
+        for value in ("../2026-09-14-other", "2026/09/14", "", ".hidden",
+                      "a b", "-leading", "run|id"):
+            with self.subTest(run_id=value):
+                self.refusal(pas.TrackerValidationError, run_id=value)
+
+    def test_initializing_over_an_existing_tracker_is_refused_and_changes_nothing(self):
+        """A second controller starting a run in an occupied directory must
+        LOSE, not clobber. ``os.replace`` would overwrite the first controller's
+        tracker, and that controller would carry on against state it still
+        believes it wrote — the one failure no later read can detect, because
+        the replacement is itself a valid tracker.
+        """
+        run_dir = make_run(self)
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(pas.TrackerWriteError) as caught:
+            pas.initialize_run(run_dir, **NEW_RUN)
+        self.assertNotIsInstance(caught.exception, pas.UpdateOutcomeUncertain)
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+        self.assertIn("resume the existing run", str(caught.exception).lower(),
+                      "the refusal does not say what to do instead")
+
+    def test_a_second_controller_starting_a_different_run_loses(self):
+        run_dir, _ = new_run(self)
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(pas.TrackerWriteError):
+            pas.initialize_run(run_dir, **{**NEW_RUN, "run_id": "2026-09-14-other"})
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+        self.assertEqual(pas.validate_run(run_dir)["run"]["run_id"],
+                         NEW_RUN["run_id"])
+
+    def test_re_initializing_the_identical_untouched_run_is_inert(self):
+        """The no-clobber rule is about CONTENT, not about the call count. A
+        controller that crashed between writing its tracker and recording that
+        it had one must find its run on the retry, not a refusal it has no way
+        to act on. Identical bytes are the same fact written twice, and the
+        file is not rewritten to say so.
+        """
+        run_dir, first = new_run(self)
+        inode = (run_dir / "progress.md").stat().st_ino
+        second = pas.initialize_run(run_dir, **NEW_RUN)
+        self.assertEqual(second, first)
+        self.assertEqual((run_dir / "progress.md").stat().st_ino, inode)
+
+    def test_a_tracker_that_cannot_be_read_back_never_reaches_the_disk(self):
+        """The canary, and what it is worth.
+
+        Every argument is checked before the render, so a render this module
+        cannot read back can only come from a bug in this module — which is
+        exactly the case the canary is for. Remove it and the bad bytes land,
+        and the read-back at the end reports the same fault having already left
+        an unparseable tracker in the directory: still a stop, no longer a
+        READ-ONLY one, and the next controller to look finds a run it can
+        neither start nor resume. The exception is the same either way, so the
+        assertion that discriminates is the one about the disk.
+        """
+        run_dir = unborn_run(self)
+        with mock.patch.object(pas, "render_tracker",
+                               return_value=f"{pas.MARKER}\nnot a tracker\n"):
+            with self.assertRaises(pas.TrackerValidationError):
+                pas.initialize_run(run_dir, **NEW_RUN)
+        self.assertFalse(
+            (run_dir / "progress.md").exists(),
+            "a tracker that failed its own canary was written anyway")
+
+    def test_the_run_directory_holds_the_tracker_and_then_its_lock(self):
+        """Two facts one enumeration proves.
+
+        Initialization takes no lock: a directory that does not exist yet cannot
+        contend with anything, and creating a lock file to find out whether a
+        directory is a run is exactly what ``locked_tracker_update`` refuses to
+        do inside somebody else's directory. So a fresh run holds one file.
+
+        The first real transition creates ``.pipeline-auto.lock`` and never
+        removes it — unlinking it races a second acquirer onto a lock file
+        nobody else can still see. Any later assertion that enumerates a run
+        directory has to expect it, and one that does not fails for a reason
+        unrelated to what it is testing.
+        """
+        run_dir, _ = new_run(self)
+        self.assertEqual(sorted(path.name for path in run_dir.iterdir()),
+                         ["progress.md"])
+        pas.locked_tracker_update(run_dir, transition_id="dispatch-1",
+                                  mutate=bump_dispatches)
+        self.assertEqual(sorted(path.name for path in run_dir.iterdir()),
+                         sorted(["progress.md", pas.LOCK_FILENAME]))
+
+
+class PublishImmutableTests(unittest.TestCase):
+    """Write-once artifacts, and the digest that binds a row to one.
+
+    Everything the run later reasons about — a brain's response, a worker's
+    result, a review package — is bound into the tracker by a digest rather than
+    carried in anyone's context. A file that can be rewritten under a digest
+    already recorded makes every one of those bindings a claim about bytes that
+    are no longer there, and nothing in the tracker can notice.
+    """
+
+    def scratch(self, name: str) -> Path:
+        """A path inside a run's ``scratch/``, which does not exist yet."""
+        return make_run(self) / "scratch" / name
+
+    def test_publishing_returns_the_sha256_of_the_bytes_written(self):
+        """The digest, not the path. A publisher returning where it put the
+        file hands the caller something that stays true when the contents
+        change, which is the one thing the return value exists to prevent.
+        """
+        path = self.scratch("q1-brain-1.json")
+        digest = pas.publish_immutable(path, '{"rung": "specified"}')
+        self.assertEqual(digest,
+                         hashlib.sha256(b'{"rung": "specified"}').hexdigest())
+        self.assertEqual(path.read_text(encoding="utf-8"), '{"rung": "specified"}')
+
+    def test_the_digest_is_over_the_utf8_bytes_that_reached_the_disk(self):
+        """A payload digest that does not reproduce from the published file
+        proves nothing about what the three brains were given. Non-ASCII is the
+        case that separates "digested the bytes written" from "digested
+        something adjacent to them": another encoding produces a digest that is
+        still 64 hex characters and still looks like a binding.
+        """
+        path = self.scratch("payload.md")
+        content = "rationale: la décision — naïve, résumé\n"
+        digest = pas.publish_immutable(path, content)
+        self.assertEqual(digest, hashlib.sha256(path.read_bytes()).hexdigest())
+        self.assertEqual(path.read_bytes(), content.encode("utf-8"))
+
+    def test_republishing_identical_content_is_inert(self):
+        """Not merely "does not raise": the file is not rewritten. An artifact
+        republished by unlink-and-recreate satisfies every content assertion
+        while breaking each hard link and inode reference an audit trail holds
+        to it — and it resets the timestamps a human reads to order the run.
+        """
+        path = self.scratch("result.md")
+        first = pas.publish_immutable(path, "same\n")
+        inode = path.stat().st_ino
+        second = pas.publish_immutable(path, "same\n")
+        self.assertEqual(first, second)
+        self.assertEqual(path.read_text(encoding="utf-8"), "same\n")
+        self.assertEqual(path.stat().st_ino, inode)
+
+    def test_republishing_different_content_is_refused_and_changes_nothing(self):
+        """An immutable artifact that can be overwritten is not immutable, and
+        an audit trail built on overwritable files informs nobody. A second
+        publish of different bytes under one identity is conflicting evidence,
+        not an update, and the original is what survives it.
+        """
+        path = self.scratch("result.md")
+        first = pas.publish_immutable(path, "original\n")
+        with self.assertRaises(pas.TrackerWriteError) as caught:
+            pas.publish_immutable(path, "tampered\n")
+        self.assertNotIsInstance(caught.exception, pas.UpdateOutcomeUncertain)
+        self.assertIn(str(path), str(caught.exception))
+        #: The remedy is the publisher's, not the initializer's. One shared
+        #: sentence would tell whoever published a second worker result under
+        #: one identity to "resume the run", which is neither the question they
+        #: face nor an action that resolves it.
+        self.assertIn("reconcil", str(caught.exception).lower())
+        self.assertNotIn("resume", str(caught.exception).lower())
+        self.assertEqual(path.read_text(encoding="utf-8"), "original\n")
+        self.assertEqual(pas.publish_immutable(path, "original\n"), first)
+
+    def test_publishing_leaves_no_temp_file_behind_whether_it_lands_or_is_refused(self):
+        """Both paths, because their cleanups differ and only one of them is on
+        the happy path. Nothing else ever removes this file, and a stranded
+        ``.result.md.*.tmp`` in a run directory is indistinguishable from one a
+        live writer is holding open right now.
+        """
+        path = self.scratch("result.md")
+        pas.publish_immutable(path, "original\n")
+        self.assertEqual([entry.name for entry in path.parent.iterdir()],
+                         ["result.md"])
+        with self.assertRaises(pas.TrackerWriteError):
+            pas.publish_immutable(path, "tampered\n")
+        self.assertEqual([entry.name for entry in path.parent.iterdir()],
+                         ["result.md"])
+
+    def test_publishing_creates_the_directories_its_path_names(self):
+        """``scratch/`` is per-run ephemera the spec places INSIDE the run
+        directory, and it does not exist until the first thing is published into
+        it. A publisher that required its parent to be there would make every
+        caller create directories for it, and each of them would guess a mode.
+        """
+        run_dir = make_run(self)
+        path = run_dir / "scratch" / "quorum" / "q1" / "brain-1.json"
+        pas.publish_immutable(path, '{"rung": "code-evidenced"}\n')
+        self.assertTrue(path.is_file())
+
+    def test_a_publish_that_cannot_be_created_reports_that_nothing_happened(self):
+        """An OSError escaping as itself is a stop outside this module's
+        exception family: a caller branching on ``TrackerError`` never sees it.
+        A read-only stop that escapes its own family is not one.
+        """
+        run_dir = make_run(self)
+        (run_dir / "scratch").write_text("not a directory", encoding="utf-8")
+        with self.assertRaises(pas.TrackerWriteError) as caught:
+            pas.publish_immutable(run_dir / "scratch" / "result.md", "x\n")
+        self.assertNotIsInstance(caught.exception, pas.UpdateOutcomeUncertain)
+        self.assertEqual((run_dir / "scratch").read_text(encoding="utf-8"),
+                         "not a directory")
+
+    def test_a_publish_whose_directory_sync_fails_is_uncertain_not_failed(self):
+        """The third outcome, kept distinguishable here too. The file is already
+        visible and only its durability is in doubt. Reporting
+        ``TrackerWriteError`` would tell the caller nothing happened, and a
+        caller that believes that republishes — and is then refused by its own
+        first write as conflicting evidence, with no way to tell which write
+        was the tampering.
+        """
+        run_dir = make_run(self)
+        path = run_dir / "scratch" / "result.md"
+        with mock.patch.object(pas, "_sync_directory",
+                               side_effect=OSError(errno.EIO, "simulated dirsync")):
+            with self.assertRaises(pas.UpdateOutcomeUncertain):
+                pas.publish_immutable(path, "content\n")
+        self.assertEqual(path.read_text(encoding="utf-8"), "content\n")
+
+    def test_a_published_artifact_carries_the_mode_the_module_names(self):
+        """``mkstemp`` picks 0600 silently and the link carries that mode onto
+        the artifact forever. An audit trail a second account cannot open is not
+        one, and the cap at 0644 is the other half: the tracker and its
+        artifacts exist to be read, never rewritten from outside this module.
+
+        The umask is pinned for the duration, so this asserts the module's
+        choice rather than the environment's.
+        """
+        run_dir = make_run(self)
+        path = run_dir / "scratch" / "result.md"
+        previous = os.umask(0o022)
+        try:
+            pas.publish_immutable(path, "content\n")
+        finally:
+            os.umask(previous)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(pas.TRACKER_MODE & 0o022, 0)
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import errno
+import hashlib
 import os
 import time
 from contextlib import contextmanager
@@ -2209,3 +2210,281 @@ def locked_tracker_update(run_dir: Path, *, transition_id: str, mutate,
         reparsed = parse_tracker(canonical)
         _replace_tracker(run_dir, canonical, transition_id)
         return reparsed
+
+
+#: A run id, and the whole grammar of one: an alphanumeric, then any number of
+#: alphanumerics, dots, underscores and hyphens. No path separator, on purpose.
+#: The id is interpolated into ``docs/superpowers/runs/<run_id>/decisions.md``,
+#: so a ``/`` or a leading ``.`` in it addresses another run's audit trail — or
+#: a repository file — while all three artifact cells still read as well-formed
+#: paths afterwards. ``_TOKEN`` is the wrong grammar here for exactly that
+#: reason: it admits ``/`` because the cells IT judges are paths.
+_RUN_ID = _CharClass(_ALNUM, _ALNUM + "._-")
+
+#: Where a run's own artifacts live. The spec: run artifacts under
+#: ``docs/superpowers/runs/<run-id>/``, with large ephemera in a ``scratch/``
+#: inside the run directory.
+RUN_ARTIFACT_ROOT = "docs/superpowers/runs"
+
+#: What an initialized run is waiting to do. Stage 01 dispatches exactly three
+#: intent readers; the count is never reduced to fit capacity, and the action
+#: names the dispatch rather than the stage so a resuming controller reads an
+#: instruction instead of a label.
+_FIRST_NEXT_ACTION = "dispatch-intent-readers"
+
+#: The transition a run is born at. It occupies ``last_transition`` so that the
+#: cell is never empty and so that the first real transition has a predecessor
+#: to differ from; it is also a legal replay key, which is what keeps a second
+#: identical initialization inert rather than ambiguous.
+_INITIAL_TRANSITION = "initialized"
+
+
+def _link_publish(path: Path, data: bytes, what: str, remedy: str) -> None:
+    """Write bytes to a temp name, then LINK them into place so an existing
+    file wins.
+
+    ``os.replace`` — what ``_replace_tracker`` uses one screen up — overwrites
+    whatever is at the target. That is right for an update, where the caller
+    has read the current state under the lock and is replacing it deliberately,
+    and it is wrong for both callers here. A first tracker must never overwrite
+    a tracker a second controller already wrote, and an immutable artifact that
+    can be overwritten is not immutable. ``os.link`` raises ``FileExistsError``
+    rather than replacing, which is precisely that behaviour, and it is the
+    atomic arbiter as well: two writers racing produce one winner and one
+    ``FileExistsError``, with no window in which either sees a partial file.
+
+    ``remedy`` is the one sentence appended when the conflict is refused, and
+    it is a parameter rather than a constant because the two callers leave a
+    human with genuinely different work to do: an occupied run directory is
+    resumed, while two results published under one artifact identity have to be
+    reconciled before either can be believed.
+
+    Identical bytes are not a conflict. A controller that crashed between the
+    link and recording that it had linked must find its own work on the retry,
+    not a refusal it cannot act on, so the same content published twice is
+    inert — and inert means the file is not rewritten, because an
+    unlink-and-recreate would satisfy every content check while breaking each
+    hard link and inode reference an audit trail holds to it.
+
+    The temp file is created inside ``path``'s own directory, so ``os.link``
+    stays within one filesystem — a cross-device link raises instead of
+    linking, and the atomicity this exists for would be gone. It is created
+    with ``O_CREAT | O_EXCL | O_WRONLY``: the open either creates that name or
+    fails, so no file belonging to a second writer is ever opened or truncated.
+
+    The two durability points are two blocks, for the same reason they are in
+    ``_replace_tracker``. Everything up to and including the link is "nothing
+    has happened yet" and fails as ``TrackerWriteError``. The directory fsync
+    afterwards is "it already happened, durably or not" and fails as
+    ``UpdateOutcomeUncertain``.
+    """
+    descriptor = -1
+    temporary: str | None = None
+    linked = False
+    try:
+        #: Inside the ``try``, not ahead of it. A parent that cannot be created
+        #: — a plain file sitting where a directory is named — raises
+        #: ``NotADirectoryError``, and an OSError that escapes as itself is a
+        #: stop outside this module's exception family: a caller branching on
+        #: ``TrackerError`` never sees it.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        #: pid and a nanosecond timestamp, like ``_replace_tracker``'s: the
+        #: exclusivity is carried by ``O_EXCL``, and this name only has to
+        #: avoid colliding with what a CRASHED earlier writer left behind.
+        candidate = path.parent / f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+        #: ``TRACKER_MODE``, and the same reasoning reaches both callers: the
+        #: link carries the temp file's mode onto the published name forever,
+        #: and a run artifact created 0600 is an audit trail a human reading
+        #: back what the run decided cannot open.
+        descriptor = os.open(
+            candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, TRACKER_MODE)
+        #: Assigned only AFTER the open succeeds. On EEXIST the path names a
+        #: file this call did not create, and the cleanup below must not
+        #: unlink another writer's work.
+        temporary = str(candidate)
+        with os.fdopen(descriptor, "wb") as handle:
+            #: The handle owns the descriptor from here, so the cleanup path
+            #: below must not close it a second time.
+            descriptor = -1
+            handle.write(data)
+            _sync_file(handle)
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if path.read_bytes() != data:
+                raise TrackerWriteError(
+                    f"{what} already exists at {path} with different content, "
+                    "and is never overwritten: a second write under one "
+                    f"identity is conflicting evidence, not an update. {remedy}"
+                ) from None
+        else:
+            linked = True
+    except OSError as exc:
+        raise TrackerWriteError(
+            f"cannot publish {what} at {path}; nothing was written: {exc}") from exc
+    finally:
+        #: In ``finally`` rather than in the ``except OSError``, for the reason
+        #: ``_replace_tracker`` spells out: what ESCAPES is a write outcome
+        #: only for an OSError, but what gets CLEANED UP is every path out of
+        #: this block. The temp name is unlinked even when the link SUCCEEDED —
+        #: the published file is a second link to the same inode, and the temp
+        #: name is this call's own leftover either way.
+        if descriptor >= 0:
+            #: Only reachable when ``os.fdopen`` itself failed; past that the
+            #: handle owns the descriptor and has closed it.
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+    if not linked:
+        #: The identical-content case. This call created nothing, so there is
+        #: no new directory entry for a sync to make durable, and claiming an
+        #: uncertain outcome for it would be a lie in the safe direction.
+        return
+    try:
+        _sync_directory(path.parent)
+    except OSError as exc:
+        raise UpdateOutcomeUncertain(
+            f"{what} at {path} was created, then the directory sync failed; it "
+            "may or may not survive a crash. Re-read it before binding a digest "
+            f"to it — a blind republish is refused as conflicting evidence: {exc}"
+        ) from exc
+
+
+def publish_immutable(path: Path, content: str) -> str:
+    """Publish content once, at a path that can never be rewritten.
+
+    Returns the **sha256 hex digest of the published bytes**, not the path.
+    That digest is the identity a later phase binds a worker result, a brain
+    response or a quorum payload to, and it is the return value precisely
+    because a path stays true when the contents change — which is the one thing
+    this function exists to prevent.
+    """
+    data = content.encode("utf-8")
+    _link_publish(
+        Path(path), data, "immutable artifact",
+        "Publish the second result under its own identity; which of the two "
+        "is the real one is a reconciliation, never an overwrite.")
+    return hashlib.sha256(data).hexdigest()
+
+
+def initialize_run(run_dir: Path, *, run_id: str, base_commit: str,
+                   target_branch: str, worker_limit: int) -> dict:
+    """Create the first tracker for a run, or refuse and change nothing.
+
+    This is the one write that does not go through ``locked_tracker_update``,
+    and deliberately so in both directions. It *cannot* go through it: every
+    step of that function reads, re-reads and replays against a tracker that has
+    to be there already, and there is none. It does not *need* to: a run
+    directory that does not exist yet cannot contend with anything, and the one
+    race that remains — two controllers starting a run in the same directory —
+    is arbitrated by ``os.link`` itself, atomically, with the loser told so.
+    Taking the run lock here would also create ``.pipeline-auto.lock`` inside a
+    directory before anything has established that it is this skill's to write
+    in, which is the very thing ``locked_tracker_update`` validates first in
+    order to avoid.
+
+    Every argument is checked before the filesystem is touched, so a refusal is
+    a read-only stop: a check that ran after the write would leave a tracker on
+    disk for a run the caller was just told it could not start.
+
+    The returned tracker is read back THROUGH the parser rather than being the
+    dict that was rendered, so a caller only ever acts on state that survived a
+    round trip.
+    """
+    if not _RUN_ID.fullmatch(run_id):
+        raise TrackerValidationError(
+            f"invalid run id {run_id!r}: an alphanumeric then alphanumerics, "
+            "dots, underscores and hyphens. It names a directory under "
+            f"{RUN_ARTIFACT_ROOT}/, so a separator or a leading dot in it "
+            "addresses another run's artifacts")
+    if not _COMMIT.fullmatch(base_commit):
+        raise TrackerValidationError(
+            f"base commit {base_commit!r} is not a full 40-character object "
+            "name: it is one end of every range proof this run makes, and an "
+            "abbreviation or a symbolic name resolves elsewhere tomorrow")
+    if not _TOKEN.fullmatch(target_branch):
+        raise TrackerValidationError(
+            f"invalid target branch {target_branch!r}: a branch name is one "
+            "token, because it is written into a table cell")
+    if target_branch in ("main", "master"):
+        raise TrackerValidationError(
+            "pipeline-auto never targets main or master: success leaves a "
+            "clean committed feature branch, and nothing is merged or pushed")
+    #: ``int(worker_limit)`` would be the shorter spelling and is the wrong
+    #: one twice over: it raises ``ValueError`` on a string, which escapes this
+    #: module's exception family, and it truncates a float into a limit the
+    #: caller never asked for, in a cell nothing downstream re-derives.
+    if not isinstance(worker_limit, int) or worker_limit < 1:
+        raise TrackerValidationError(
+            f"worker_limit {worker_limit!r} is not a positive integer; a run "
+            "with no workers dispatches nothing and reports itself healthy")
+    artifacts = f"{RUN_ARTIFACT_ROOT}/{run_id}"
+    tracker = {
+        "run": {
+            "run_id": run_id,
+            "schema": SCHEMA,
+            "base_commit": base_commit,
+            "target_branch": target_branch,
+            "worker_limit": str(worker_limit),
+            "agent_dispatch_count": "0",
+            #: Absent, never predicted. Stages 05, 06 and 07 write these three.
+            #: A path filled in now names a file that does not exist, and a
+            #: resuming controller reading a cell cannot tell a promise from a
+            #: product — it would skip the stage that was to produce it.
+            "spec": "-",
+            "master_plan": "-",
+            "phase_plans": "-",
+            "decisions": f"{artifacts}/decisions.md",
+            "findings": f"{artifacts}/findings.md",
+            "completeness_proposals": f"{artifacts}/completeness-proposals.md",
+            #: Zero durable transitions so far, and the count is exact rather
+            #: than decorative: ``locked_tracker_update`` derives the next
+            #: revision by adding to what it reads, so a run born at 1 claims a
+            #: transition that never happened and every later revision is off
+            #: by one against the records that cite it.
+            "revision": "0",
+            "last_transition": _INITIAL_TRANSITION,
+        },
+        #: Stage 01 is ACTIVE, not pending. Twelve pending stages is monotone,
+        #: so it would pass every ordering check — and then there is no row to
+        #: read an action from, and no grounds to call the run complete. That
+        #: shape once reported an untouched run as finished, ending it at stage
+        #: 00 with every artifact unwritten and nothing erroring.
+        "stages": [
+            {
+                "stage": stage,
+                "stage_state": "active" if stage == STAGES[0] else "pending",
+                "next_action": _FIRST_NEXT_ACTION if stage == STAGES[0] else "-",
+            }
+            for stage in STAGES
+        ],
+        #: Every other table starts empty, including ``## Intent``: its four
+        #: rows are written together when stage 01 opens, and a partial roster
+        #: is refused rather than read as "in progress".
+        "intent": [],
+        "questions": [],
+        "quorum": [],
+        "escalations": [],
+        "tasks": [],
+        "task_review": [],
+        "fix_rounds": [],
+        "phases": [],
+        "gates": [],
+    }
+    canonical = render_tracker(tracker)
+    #: The same canary ``locked_tracker_update`` runs, and for the same reason:
+    #: a tracker this module cannot read back is rejected before a byte of it
+    #: reaches disk. Re-validating the dict instead looks like the same check
+    #: and is not — the dict is the INPUT to the render, and it is the render
+    #: that has to survive.
+    parse_tracker(canonical)
+    _link_publish(
+        run_dir / "progress.md", canonical.encode("utf-8"), "initial tracker",
+        "Resume the existing run rather than initializing over it.")
+    return validate_run(run_dir)

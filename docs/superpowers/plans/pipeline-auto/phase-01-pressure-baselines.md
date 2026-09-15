@@ -891,6 +891,20 @@ Expected: the `git diff --name-only` command prints nothing.
 
 ---
 
+> **Forward risk recorded during Task 2's review (commit `f0dfcaa`).**
+> `check_file` applies every rule — `Skill present: none`, the placeholder ban,
+> and the foreign-label scan — to `simulated/` records as well as
+> `actual-agent/` ones. That is this plan's own Step 3 text, not an implementer
+> deviation, but it means a legitimate hand-written simulated record must carry a
+> real `Agent id` and `Agent model`, must say `Skill present: none`, must contain
+> no `TBD`, and must never contain the string `ACTUAL_AGENT` anywhere — including
+> inside prose describing what an actual-agent record would look like. Any of
+> those makes the whole tree exit 1.
+>
+> Whichever task first files something under `simulated/` should expect this and
+> either meet the rules or change them deliberately, not discover it as a
+> mysterious gate failure.
+
 ## Task 3: Controller-only oracles, record template, records tree
 
 Nothing in this task is committed. Task 1's `.gitignore` is what makes that

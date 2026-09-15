@@ -5552,6 +5552,42 @@ class SddWorkspaceTests(unittest.TestCase):
 _RUNG_WORDS = ("RUNGS", "RUNG_ORDER", "RUNG_NAMES", "_RUNG_VALUES", "ADOPTABLE",
                "_RUNG_EVIDENCE")
 
+#: The corpus the detector is proven against — one fallback per SHAPE it
+#: refuses, and at least one per WORD in ``_RUNG_WORDS``. Both coverings are
+#: asserted below, the words by
+#: ``test_every_word_the_detector_refuses_is_a_word_the_corpus_spells``.
+#:
+#: The word covering is what stops the tuple drifting silently. A word no
+#: spelling here uses can be deleted from ``_RUNG_WORDS``, or mistyped into it,
+#: with the whole suite green and the comment above still claiming the detector
+#: is proven against everything it refuses. ``_RUNG_EVIDENCE`` was found in
+#: exactly that state: six spellings, every one of them saying ``RUNGS``.
+_DEFAULTING_SPELLINGS = (
+    "def f(rung):\n    return RUNGS.get(rung, 0.55)\n",
+    "def f(rung):\n    return dict(RUNGS).get(rung, DEMOTION_RUNG)\n",
+    "def f(rung):\n    return RUNGS.setdefault(rung, 0.55)\n",
+    "def f(rung):\n    return RUNGS.get(rung) or 0.55\n",
+    "def f(rung):\n    return RUNGS[rung] if rung in RUNGS else 0.55\n",
+    "def f(rung):\n    try:\n        return RUNGS[rung]\n"
+    "    except KeyError:\n        return 0.55\n",
+    #: The evidence table is the second place a rung can acquire a fallback:
+    #: an unlisted rung would be handed no evidence requirement at all.
+    "def f(declared):\n"
+    "    return _RUNG_EVIDENCE.get(declared, (frozenset(), 0))\n",
+    #: A rung the order does not contain, scored as if it were the bottom one.
+    "def f(rung):\n"
+    "    return RUNG_ORDER.index(rung) if rung in RUNG_ORDER else 0\n",
+    #: The value table behind the proxy, defaulted before the proxy sees it.
+    "def f(rung):\n    return _RUNG_VALUES.get(rung, 0.55)\n",
+    #: A name read positionally, with the last rung standing in past the end.
+    "def f(i):\n"
+    "    return RUNG_NAMES[i] if i < len(RUNG_NAMES) else RUNG_NAMES[-1]\n",
+    #: An adoption test that answers yes when the rung is unrecognised. Each
+    #: spelling above names exactly ONE of the words, so deleting any one of
+    #: them from the tuple leaves that spelling undetected and fails the suite.
+    "def f(rung):\n    return rung in ADOPTABLE or rung == \"specified\"\n",
+)
+
 
 def rung_defaulting_nodes(source: str) -> list[str]:
     """Every place the rung enum could acquire a fallback, by SHAPE not by name.
@@ -5765,17 +5801,28 @@ class QuorumRungLadderTests(unittest.TestCase):
         the file it reads is empty, and when the pattern was never findable in
         the first place. Each spelling of the hole is put in front of it here.
         """
-        for spelling in (
-            "def f(rung):\n    return RUNGS.get(rung, 0.55)\n",
-            "def f(rung):\n    return dict(RUNGS).get(rung, DEMOTION_RUNG)\n",
-            "def f(rung):\n    return RUNGS.setdefault(rung, 0.55)\n",
-            "def f(rung):\n    return RUNGS.get(rung) or 0.55\n",
-            "def f(rung):\n    return RUNGS[rung] if rung in RUNGS else 0.55\n",
-            "def f(rung):\n    try:\n        return RUNGS[rung]\n"
-            "    except KeyError:\n        return 0.55\n",
-        ):
+        for spelling in _DEFAULTING_SPELLINGS:
             with self.subTest(spelling=spelling.splitlines()[-1].strip()):
                 self.assertNotEqual(rung_defaulting_nodes(spelling), [])
+
+    def test_every_word_the_detector_refuses_is_a_word_the_corpus_spells(self):
+        """What makes the comment over ``_RUNG_WORDS`` true rather than aspirational.
+
+        The tuple is the detector's whole notion of "rung-related", and a word
+        no spelling in the corpus uses is a word whose deletion — or whose
+        typo — leaves every case above green while quietly reopening the door
+        it names. ``_RUNG_EVIDENCE`` was in exactly that state: the six
+        spellings all said ``RUNGS``, so the newest entry was the one nothing
+        proved. Enumerated from the tuple, so a seventh word fails here on the
+        day it is added rather than sitting unproven.
+        """
+        for word in _RUNG_WORDS:
+            with self.subTest(word=word):
+                self.assertTrue(
+                    any(word in spelling for spelling in _DEFAULTING_SPELLINGS),
+                    f"{word} is refused by the detector but no spelling in "
+                    "_DEFAULTING_SPELLINGS uses it, so nothing would notice if "
+                    "it were deleted from _RUNG_WORDS or mistyped into it")
 
     def test_the_rung_values_are_not_run_configuration(self):
         """They are schema constants and never enter ``## Run``.
@@ -6336,6 +6383,46 @@ class ValidateBrainResponseTests(unittest.TestCase):
         good = {"kind": "decision", "path": "decisions.md", "quote": "postgres",
                 "decision": "H-001"}
         self.assertEqual(pas.validate_brain_response(response(evidence=[good])), [])
+
+    def test_an_unhashable_kind_is_a_violation_and_never_a_type_error(self):
+        """All three enum fields, over the shapes that cannot be hashed.
+
+        ``["repo"] in _EVIDENCE_KINDS`` raises ``TypeError: unhashable type``.
+        A JSON array and a JSON object are both things a brain can put in
+        ``kind``, and neither can be hashed — so a bare ``in`` against the
+        frozenset does not classify the response, it kills the process. The
+        ``TypeError`` is outside this module's exception family, so it escapes
+        every ``except TrackerError`` a controller has written: the run dies on
+        a brain's typo instead of that brain being re-dispatched once and the
+        quorum escalating if it repeats.
+
+        This is the same fault ``effective_rung`` was carrying one function
+        along, and the same fix — ``_member``, which establishes the type
+        before it tests membership. The case is here because nothing else in
+        this class varies ``kind`` past a wrong STRING: every existing spelling
+        (``"rumour"``, ``"because"``, ``"hunch"``, a missing key) is hashable,
+        so reverting any of the three sites to a bare ``in`` passed the whole
+        suite.
+        """
+        for kind in (["repo"], ["repo", "decision"], [], {"kind": "repo"}, {}):
+            with self.subTest(kind=kind):
+                self.assertIn(
+                    "evidence-item-malformed",
+                    pas.validate_brain_response(response(evidence=[
+                        {"kind": kind, "path": "db/engine.py", "line": 1,
+                         "quote": "PostgresEngine"}])),
+                    "_evidence_problems hashed a brain-supplied kind")
+                self.assertIn(
+                    "consequence-item-malformed",
+                    pas.validate_brain_response(response(consequences=[
+                        {"kind": kind, "subject": "db/session.sql",
+                         "value": "present"}])),
+                    "_consequence_problems hashed a brain-supplied kind")
+                self.assertIn(
+                    "consistent-with-item-malformed",
+                    pas.validate_brain_response(response(consistent_with=[
+                        {"kind": kind, "id": "H-001"}])),
+                    "_anchor_problems hashed a brain-supplied kind")
 
     def test_evidence_that_is_not_a_list_is_reported_not_iterated(self):
         """``for item in payload["evidence"]`` over an int raises TypeError, and

@@ -1,0 +1,15 @@
+# TEMPORARY, AND DELIBERATELY SO. oracles.md carries the pass predicates for
+# every scenario. While P01 is measuring, committing it would put the answers in
+# a repository the unaided agents can read, and the whole point of the RED
+# measurement is that they cannot. This line is REMOVED by P01's final task,
+# which commits oracles.md once every RED record is captured and validated --
+# after that point P07 publishes the same information in SKILL.md and secrecy
+# buys nothing while costing P08 its GREEN predicates.
+# Do not remove this line early. Do not leave it here once P01 closes.
+# tests/test_oracle_disclosure_order.py enforces both directions.
+oracles.md
+
+# records/ holds raw transcripts: workspace-local evidence, not project
+# documentation. P08 depends on RED-baseline.md, which IS committed, so a
+# different workspace loses nothing that matters.
+records/

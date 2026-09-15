@@ -3,12 +3,31 @@
 from __future__ import annotations
 
 import ast
+import os
+import re
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 FIXTURES = SKILL_DIR / "tests" / "fixtures"
+
+#: The *real* fixtures of the *other* skill, read at their real path rather than
+#: copied here. A copy would drift from the file `superb:pipeline` actually
+#: writes, and the foreign-schema stop would then be proven against a stale
+#: snapshot instead of against the skill that exists. These are read, never
+#: written: `git diff --name-only -- plugins/superb/skills/pipeline/` must stay
+#: empty. Derived from this file's own location, never an absolute path.
+FOREIGN_FIXTURES = SKILL_DIR.parent / "pipeline" / "tests" / "fixtures"
+
+#: ``superb:pipeline`` is a PREFIX of ``superb:pipeline-auto``, so asserting the
+#: former as a plain substring can never fail — the diagnostic names this skill
+#: in every sentence. The negative lookahead is the difference between "the
+#: message mentions us" and "the message tells the user which OTHER skill owns
+#: this directory", which is the whole point of the diagnostic.
+NAMES_THE_OTHER_SKILL = re.compile(r"superb:pipeline(?!-auto)")
 
 #: A fixture row a blank line can be inserted ahead of, inside a table body.
 BLANK_TARGET = "| 10 | pending | - |\n"
@@ -25,9 +44,12 @@ WIDE_GAP = "| 12 | pending | - |\n\n\n## Intent\n"
 #: ALLOWLIST, not a snapshot of what it imports today: each name was put here
 #: deliberately, after checking it opens no file and runs no generated code.
 #: ``hashlib`` is listed for the payload and context digests the quorum rows
-#: carry. Widening this set is a decision to be argued for, never a step taken
-#: incidentally to make a failing test pass.
-ALLOWED_IMPORTS = frozenset({"__future__", "hashlib"})
+#: carry. ``pathlib`` is listed because ``validate_run`` must READ a run
+#: directory; it is the narrowest way to do that, and — unlike ``os`` or
+#: ``shutil`` — it gives the module no way to delete or rename anything it did
+#: not already open. Widening this set is a decision to be argued for, never a
+#: step taken incidentally to make a failing test pass.
+ALLOWED_IMPORTS = frozenset({"__future__", "hashlib", "pathlib"})
 
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
 
@@ -150,12 +172,16 @@ class RoundTripTests(unittest.TestCase):
         reach that file. Nor is "the input string is unmutated" worth asserting:
         ``str`` is immutable, so that holds of Python, not of this module.
 
-        What is falsifiable is the capability itself. The module reads and
-        writes nothing: it imports only from the reviewed ``ALLOWED_IMPORTS``
-        allowlist and calls no builtin that opens a file or runs generated
-        code. Add an ``import os``, an ``open()`` or an ``eval()`` and this
-        fails — which is what "read-only stop" in the exception docstrings is
-        actually claiming. The allowlist, not an exact import set, is the
+        What is falsifiable is the capability itself. Since ``validate_run``
+        the module may READ a run directory, but it still cannot write one: it
+        imports only from the reviewed ``ALLOWED_IMPORTS`` allowlist — whose
+        members open no file for writing and run no generated code — and calls
+        no builtin that does either. Add an ``import os``, an ``import
+        shutil``, an ``open()`` or an ``eval()`` and this fails — which is what
+        "read-only stop" in the exception docstrings is actually claiming, and
+        it is why the separate read-only-file test below exists: this one pins
+        what the module *can* do, that one pins what it *does*.
+        The allowlist, not an exact import set, is the
         property worth pinning: the module is allowed to grow an import, it is
         not allowed to grow a capability.
         """
@@ -274,6 +300,153 @@ class RoundTripTests(unittest.TestCase):
         del tracker["tasks"][0]["provisional"]
         with self.assertRaises(pas.TrackerValidationError):
             pas.render_tracker(tracker)
+
+
+def make_run(case: unittest.TestCase, text: str | None = None) -> Path:
+    """A temp run directory holding one progress.md. Removed when the case ends."""
+    run_dir = Path(tempfile.mkdtemp(prefix="pipeline-auto-"))
+    case.addCleanup(shutil.rmtree, run_dir, ignore_errors=True)
+    (run_dir / "progress.md").write_text(
+        valid_text() if text is None else text, encoding="utf-8"
+    )
+    return run_dir
+
+
+def empty_run(case: unittest.TestCase) -> Path:
+    run_dir = Path(tempfile.mkdtemp(prefix="pipeline-auto-"))
+    case.addCleanup(shutil.rmtree, run_dir, ignore_errors=True)
+    return run_dir
+
+
+class ForeignSchemaStopTests(unittest.TestCase):
+    """Every rejection path leaves the run directory exactly as it was found.
+
+    `superb:pipeline` works today. A `pipeline-auto` controller that parsed one
+    of its trackers would rewrite it into `pipeline-auto/v1` shape on the first
+    transition, destroying a live run of the other skill. The marker check is
+    the only thing standing between the two, so each case here asserts the
+    exception AND the bytes AND that no file was added to the directory.
+    """
+
+    def assert_untouched(self, run_dir: Path, names: list[str]) -> None:
+        self.assertEqual(sorted(entry.name for entry in run_dir.iterdir()), names)
+
+    def test_a_pipeline_run_v2_tracker_is_rejected_and_left_byte_identical(self):
+        """The named fault: delete the marker check and a v2 run is parsed,
+        then rewritten into pipeline-auto shape by the first transition."""
+        foreign = (FOREIGN_FIXTURES / "valid-v2-progress.md").read_bytes()
+        self.assertIn(b"pipeline-run/v2", foreign)
+        run_dir = make_run(self, foreign.decode("utf-8"))
+        progress = run_dir / "progress.md"
+        with self.assertRaises(pas.ForeignSchemaError) as caught:
+            pas.validate_run(run_dir)
+        self.assertEqual(progress.read_bytes(), foreign)
+        self.assert_untouched(run_dir, ["progress.md"])
+        self.assertRegex(str(caught.exception), NAMES_THE_OTHER_SKILL)
+        self.assertIn("pipeline-run/v2", str(caught.exception))
+        self.assertIn("no files were changed", str(caught.exception))
+
+    def test_a_legacy_v1_tracker_is_rejected_and_left_byte_identical(self):
+        """The other skill's pre-marker format: no marker line at all."""
+        legacy = (FOREIGN_FIXTURES / "legacy-v1-progress.md").read_bytes()
+        run_dir = make_run(self, legacy.decode("utf-8"))
+        with self.assertRaises(pas.ForeignSchemaError) as caught:
+            pas.validate_run(run_dir)
+        self.assertEqual((run_dir / "progress.md").read_bytes(), legacy)
+        self.assert_untouched(run_dir, ["progress.md"])
+        self.assertRegex(str(caught.exception), NAMES_THE_OTHER_SKILL)
+        self.assertIn("pipeline-run/v1", str(caught.exception))
+
+    def test_an_unknown_marker_is_rejected(self):
+        """The dangerous one: exactly what a FUTURE version of this same skill
+        would write. Accepting it is how a newer run's state gets mangled by an
+        older controller, so an unrecognised marker stops just as hard as a
+        foreign one."""
+        text = "<!-- pipeline-auto/v9 -->\n# Whatever\n"
+        run_dir = make_run(self, text)
+        with self.assertRaises(pas.ForeignSchemaError):
+            pas.validate_run(run_dir)
+        self.assertEqual((run_dir / "progress.md").read_text(encoding="utf-8"), text)
+        self.assert_untouched(run_dir, ["progress.md"])
+
+    def test_a_missing_progress_file_is_a_read_only_stop(self):
+        run_dir = empty_run(self)
+        with self.assertRaises(pas.ForeignSchemaError):
+            pas.validate_run(run_dir)
+        self.assertEqual(list(run_dir.iterdir()), [])
+
+    def test_an_empty_progress_file_is_a_read_only_stop(self):
+        """Zero bytes has no marker to check, and must not be mistaken for a
+        fresh run this module may initialise over the top of."""
+        run_dir = make_run(self, "")
+        with self.assertRaises(pas.ForeignSchemaError):
+            pas.validate_run(run_dir)
+        self.assertEqual((run_dir / "progress.md").read_bytes(), b"")
+        self.assert_untouched(run_dir, ["progress.md"])
+
+    def test_each_read_only_stop_has_a_distinguishable_diagnostic(self):
+        """A user who ran both skills in one repository has to learn WHICH
+        skill owns this directory, not just that a schema did not match. Four
+        different faults, four different sentences."""
+        details = []
+        for text in (None, "", "# Pipeline — Progress Tracker\n",
+                     "<!-- pipeline-auto/v2 -->\n"):
+            run_dir = empty_run(self) if text is None else make_run(self, text)
+            with self.assertRaises(pas.ForeignSchemaError) as caught:
+                pas.validate_run(run_dir)
+            details.append(str(caught.exception).replace(str(run_dir), "<run>"))
+        self.assertEqual(len(set(details)), 4, details)
+        for detail in details:
+            self.assertRegex(detail, NAMES_THE_OTHER_SKILL)
+            self.assertIn("no files were changed", detail)
+
+    def test_a_malformed_but_correctly_marked_tracker_raises_validation_not_foreign(self):
+        """Ours-but-broken is a different fault from not-ours, and telling a
+        user the wrong one sends them to the wrong skill."""
+        broken = valid_text().replace("| worker_limit | 6 |", "| worker_limit | 6 | 6 |")
+        self.assertNotEqual(broken, valid_text())
+        run_dir = make_run(self, broken)
+        with self.assertRaises(pas.TrackerValidationError) as caught:
+            pas.validate_run(run_dir)
+        self.assertNotIsInstance(caught.exception, pas.ForeignSchemaError)
+        self.assertEqual((run_dir / "progress.md").read_text(encoding="utf-8"), broken)
+        self.assert_untouched(run_dir, ["progress.md"])
+
+    def test_a_valid_run_returns_its_tracker(self):
+        run_dir = make_run(self)
+        tracker = pas.validate_run(run_dir)
+        self.assertEqual(tracker["run"]["schema"], pas.SCHEMA)
+        self.assertEqual(len(tracker["stages"]), 12)
+        self.assert_untouched(run_dir, ["progress.md"])
+
+    def test_a_valid_run_is_not_rewritten_by_being_validated(self):
+        """Validation is a read. An implementation that normalised on read
+        would pass every rejection test above and still corrupt a live run."""
+        run_dir = make_run(self)
+        before = (run_dir / "progress.md").read_bytes()
+        pas.validate_run(run_dir)
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+        self.assert_untouched(run_dir, ["progress.md"])
+
+    def test_validating_a_read_only_tracker_succeeds(self):
+        """The byte check above cannot see a normalising read.
+
+        ``render_tracker(parse_tracker(valid))`` is byte-identical to ``valid``
+        by construction, so a validator that helpfully rewrote what it read
+        would leave the same bytes behind and every assertion above would still
+        pass. Taking write permission away makes the capability itself the
+        thing under test: a validator that writes raises PermissionError here,
+        whatever bytes it intended to write. It also pins the real case —
+        a tracker on a read-only checkout must still be *readable*.
+        """
+        run_dir = make_run(self)
+        progress = run_dir / "progress.md"
+        self.addCleanup(progress.chmod, 0o644)
+        progress.chmod(0o444)
+        if os.access(progress, os.W_OK):  # running as root: chmod proves nothing
+            self.skipTest("cannot drop write permission for this user")
+        tracker = pas.validate_run(run_dir)
+        self.assertEqual(tracker["run"]["schema"], pas.SCHEMA)
 
 
 if __name__ == "__main__":

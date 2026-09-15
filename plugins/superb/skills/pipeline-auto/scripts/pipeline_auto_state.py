@@ -10,6 +10,8 @@ direction — not here, not later.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 SCHEMA = "pipeline-auto/v1"
 MARKER = f"<!-- {SCHEMA} -->"
 TITLE = "# Pipeline Auto — Progress Tracker"
@@ -255,3 +257,56 @@ def render_tracker(tracker: dict) -> str:
             raise TrackerValidationError(f"{heading} row is missing field {exc}") from exc
         blocks.append([heading, *_render_table(header, rows)])
     return "\n\n".join("\n".join(block) for block in blocks) + "\n"
+
+
+def _diagnostic(run_dir: Path, detail: str) -> str:
+    """One sentence a human can act on, plus the ownership fact behind it.
+
+    Naming ``superb:pipeline`` matters more than it looks: the user who hits
+    this has run both skills in one repository, and a bare "schema mismatch"
+    tells them nothing about which skill owns which run directory.
+    """
+    return (
+        f"{run_dir}: {detail}; no files were changed. "
+        f"superb:pipeline-auto reads only {SCHEMA}. It does not interoperate "
+        "with superb:pipeline (pipeline-run/v1, pipeline-run/v2) and there is "
+        "no migration in either direction."
+    )
+
+
+def validate_run(run_dir: str) -> dict:
+    """Read and validate a run without mutating anything on disk.
+
+    Every rejection path leaves the directory exactly as it was found. That is
+    the whole contract: a foreign, missing, empty or malformed tracker stops
+    the run rather than being repaired into a guess.
+
+    An unrecognised *pipeline-auto* marker is refused as hard as a foreign one.
+    That case is the dangerous one, because it is what a future version of this
+    same skill would write: accepting it on the grounds that the prefix matches
+    is how a newer run's state gets mangled by an older controller.
+    """
+    run_dir = Path(run_dir)
+    progress = run_dir / "progress.md"
+    if not progress.is_file():
+        raise ForeignSchemaError(_diagnostic(run_dir, "missing progress.md"))
+    try:
+        text = progress.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ForeignSchemaError(
+            _diagnostic(run_dir, f"unreadable progress.md ({exc})")) from exc
+    if not text:
+        raise ForeignSchemaError(_diagnostic(run_dir, "progress.md is empty"))
+    lines = text.splitlines()
+    first = lines[0] if lines else ""
+    if first != MARKER:
+        raise ForeignSchemaError(
+            _diagnostic(run_dir, f"schema marker is {first!r}, not {MARKER!r}"))
+    #: Marked as ours and still unparseable is a *different* fault from not
+    #: ours, and conflating them sends the user to the wrong skill. The
+    #: subclass, not just the message, is what the caller branches on.
+    try:
+        return parse_tracker(text)
+    except TrackerValidationError as exc:
+        raise TrackerValidationError(
+            _diagnostic(run_dir, f"malformed {SCHEMA} tracker ({exc})")) from exc

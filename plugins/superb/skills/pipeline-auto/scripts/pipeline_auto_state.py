@@ -5362,7 +5362,19 @@ def check_admissible(record: dict) -> list[str]:
     supplied = record.get("options_supplied")
     if not isinstance(supplied, bool):
         problems.append("options-supplied-is-not-a-boolean")
-    elif supplied:
+    #: CRITERION 4 IS JUDGED OVER WHAT TRAVELS, never over what the raiser
+    #: DECLARES. ``options`` is projected into all three payloads verbatim and
+    #: unconditionally, so a record that states options has stated them to
+    #: every brain whatever ``options_supplied`` says -- and gating the test on
+    #: the flag handed the raiser a switch that turned criterion 4 off while
+    #: the options it was meant to judge went out anyway. ``Options supplied:
+    #: no`` beside ``Options: modern`` was admitted, and omitting the flag line
+    #: entirely did the same, because it defaults to ``False``.
+    #:
+    #: The genuine no-options question stays admissible, which is the half a
+    #: blanket rule breaks: a record that states none is judged by P07's prose,
+    #: and there is nothing here for criterion 4 to be applied to.
+    if supplied is True or record.get("options"):
         keys, option_problems = _option_keys(record.get("options"))
         problems.extend(option_problems)
         if len(keys) < 2:
@@ -5392,19 +5404,65 @@ _QUESTION_TEXT_FIELDS = ("question", "axis", "phase", "raiser", "recommendation"
 #: Record fields that are a comma-separated list of strings.
 _QUESTION_LIST_FIELDS = ("blocks", "owners", "candidate_answers", "challenge")
 
-#: The record fields a CONTENT screen is run over, for the reason
-#: ``_SCREENED_FIELDS`` exists one section up: the payload's FIELD whitelist
-#: withholds every rung value, the adoption floor and the budget, and a raiser
-#: who writes "which engine? we need at least 0.85 grounding here" hands all
-#: three to every brain anyway, inside a field the whitelist has already
-#: approved. A brain that knows the bar clears the bar.
-#:
-#: These are exactly the record's free text that REACHES a payload. ``raiser``,
-#: ``recommendation`` and ``candidate_answers`` are deliberately absent: they
-#: are structurally unreachable from ``_shared_payload``, so screening them
-#: would stop real records to protect a path that does not exist. The option
-#: keys are screened separately, in the same pass, because they travel too.
-_QUESTION_SCREENED = ("question", "axis")
+
+def _record_projection(record: dict) -> dict:
+    """The record's WHOLE contribution to a payload, stated in ONE place.
+
+    ``_shared_payload`` emits exactly this, and the content screen in
+    ``parse_question`` walks exactly this. Named once for the reason
+    ``_SCREENED_FIELDS`` is named once one section up -- so that the projection
+    and the screen cannot come to disagree about what travels.
+
+    THE RESTATED LIST THIS REPLACES IS WHY. It named ``question`` and ``axis``
+    and said of itself that those were "exactly the record's free text that
+    reaches a payload"; meanwhile ``challenge`` and every reading root were
+    projected verbatim to all three brains and screened by nothing. A second
+    list is right on the day it is written and silently wrong afterwards.
+
+    ``raiser``, ``recommendation`` and ``candidate_answers`` are absent, and
+    their absence IS the whitelist: they are recorded for audit and have no
+    route into a payload at all, so there is nothing about them to screen.
+    """
+    return {
+        #: Identical, verbatim, for all three. Fair comparison requires it.
+        "question": record["question"],
+        "axis": record["axis"],
+        "options": [{"key": option["key"]} for option in record["options"]],
+        #: Raiser-authored paths, projected here and a second time inside
+        #: ``build_payload``'s reading assignment.
+        "reading_roots": dict(record["reading_roots"]),
+        #: Empty except on a re-open, which carries the challenging evidence
+        #: but never the challenged answer's rung or its owner. It is
+        #: agent-authored free text written at the one moment a rung is being
+        #: argued about, which is when the ladder is nearest to hand.
+        "challenge": list(record["challenge"]),
+    }
+
+
+def _projected_strings(value, label: str) -> list:
+    """``(where, text)`` for every string inside a projected value.
+
+    MAPPING KEYS ARE WALKED TOO, not only their values: a reading root's source
+    name is written by the raiser and travels in ``reading_roots`` beside the
+    path it names.
+
+    The walk is over the projection rather than over the record, so a field
+    added to ``_record_projection`` is screened on the day it starts
+    travelling, and a field the record grows that is NOT projected costs a
+    raiser nothing.
+    """
+    if isinstance(value, str):
+        return [(label, value)]
+    found: list = []
+    if isinstance(value, dict):
+        for key in sorted(value):
+            found.extend(_projected_strings(key, f"{label}/{key}"))
+            found.extend(_projected_strings(value[key], f"{label}/{key}"))
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            found.extend(_projected_strings(item, f"{label}[{index}]"))
+    return found
+
 
 #: ``yes``/``no``, and nothing else. A record is hand-editable, and ``true``,
 #: ``1`` and ``Y`` each read as a boolean to somebody; admitting them all means
@@ -5511,23 +5569,24 @@ def parse_question(text: str) -> dict:
     record["reading_roots"] = roots
     #: THE CONTENT SCREEN, run at parse time exactly as ``parse_decisions``
     #: runs it over ``decisions.md``: a rung value or a hyphenated rung name
-    #: quoted inside the question reaches a brain through a field the payload
-    #: whitelist has already approved. A HIT IS A STOP AND NEVER A STRIP --
-    #: silently editing the question would leave the record and what the brains
-    #: were asked disagreeing about the question.
-    for name in _QUESTION_SCREENED:
-        leaked = _rung_leak(record[name])
-        if leaked is not None:
-            raise QuorumSchemaInvalid(
-                f"the question record's {name} quotes the grounding ladder "
-                f"({leaked}); every brain would read the bar it is being "
-                "measured against, and a brain that knows the bar clears it")
-    for option in record["options"]:
-        leaked = _rung_leak(option["key"])
-        if leaked is not None:
-            raise QuorumSchemaInvalid(
-                f"option key {option['key']!r} quotes the grounding ladder "
-                f"({leaked}); the options travel in the payload verbatim")
+    #: quoted anywhere the record is projected from reaches a brain through a
+    #: field the payload whitelist has already approved. A HIT IS A STOP AND
+    #: NEVER A STRIP -- silently editing the record would leave it and what the
+    #: brains were asked disagreeing about the question.
+    #:
+    #: DERIVED FROM THE PROJECTION, never restated beside it. Screening a list
+    #: somebody typed out is how ``challenge`` and the reading roots came to
+    #: travel unscreened under a comment claiming the opposite.
+    projected = _record_projection(record)
+    for name in sorted(projected):
+        for where, quoted in _projected_strings(projected[name], name):
+            leaked = _rung_leak(quoted)
+            if leaked is not None:
+                raise QuorumSchemaInvalid(
+                    f"the question record's {where} quotes the grounding "
+                    f"ladder ({leaked}); it is projected into every brain's "
+                    "payload verbatim, and a brain that knows the bar clears "
+                    "the bar")
     return record
 
 
@@ -5616,12 +5675,19 @@ def _run_relative(run_dir, name: str) -> str:
 def _shared_payload(qid: str, run_dir) -> dict:
     """The index-INDEPENDENT half of every brain's payload.
 
-    A WHITELIST CONSTRUCTOR. Every key it emits is named right here, so the
-    prohibited material is not filtered out -- it is never reachable. The
-    raiser's identity, the raiser's candidate answers and recommendation, the
-    adoption floor, the drift budget, every rung VALUE, and any elapsed-time or
-    cost signal have no route through this function. A filter can be defeated
-    by a field somebody adds later; a whitelist cannot.
+    A WHITELIST CONSTRUCTOR. Every key it emits is named here or in
+    ``_record_projection``, so the prohibited material is not filtered out --
+    it is never reachable. The raiser's identity, the raiser's candidate
+    answers and recommendation, the adoption floor, the drift budget, every
+    rung VALUE, and any elapsed-time or cost signal have no route through this
+    function. A filter can be defeated by a field somebody adds later; a
+    whitelist cannot.
+
+    The record's half is named in ``_record_projection`` rather than inline,
+    and that is the point of it: the content screen ``parse_question`` runs is
+    derived from the same function, so a key added to the projection is
+    screened the day it starts travelling instead of the day somebody
+    remembers to add it to a second list.
 
     Rung NAMES travel and rung VALUES do not. A brain that knows the bar clears
     the bar, so it selects a name and the controller derives the value.
@@ -5638,23 +5704,17 @@ def _shared_payload(qid: str, run_dir) -> dict:
     #: ``decisions_effective`` carries it so any brain may cite it; both are
     #: this value, so they cannot disagree.
     projection = _run_relative(run_dir, _PROJECTION_FILE)
-    roots = dict(record["reading_roots"])
-    roots[_DERIVED_ROOT] = projection
+    projected = _record_projection(record)
+    projected["reading_roots"][_DERIVED_ROOT] = projection
     return {
         "qid": qid.strip(),
-        #: Identical, verbatim, for all three. Fair comparison requires it.
-        "question": record["question"],
-        "axis": record["axis"],
-        "options": [{"key": option["key"]} for option in record["options"]],
-        "reading_roots": roots,
+        #: The record's half, whitelisted and screened in one place.
+        **projected,
         "decisions_effective": projection,
         #: NAMES only, never values.
         "rungs": list(RUNG_ORDER),
         "response_schema": _RESPONSE_SCHEMA_DOC,
         "you_are_one_of_several": True,
-        #: Empty except on a re-open, which carries the challenging evidence
-        #: but never the challenged answer's rung or its owner.
-        "challenge": list(record["challenge"]),
     }
 
 
@@ -5701,7 +5761,7 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def payload_digest(qid: str, *, run_dir) -> str:
+def payload_digest(qid: str, *, run_dir: str) -> str:
     """ONE digest binding all three brains' payloads.
 
     It covers the shared payload and the decisions projection, and that is
@@ -5733,7 +5793,7 @@ def payload_digest(qid: str, *, run_dir) -> str:
     return _digest(_canonical(_shared_payload(qid, run_dir)) + "\x00" + text)
 
 
-def build_payload(qid: str, brain_index: int, *, run_dir) -> dict:
+def build_payload(qid: str, brain_index: int, *, run_dir: str) -> dict:
     """The exact material one brain receives: the shared payload plus its rule.
 
     PURE WITH RESPECT TO ``brain_index``, and pure with respect to run state

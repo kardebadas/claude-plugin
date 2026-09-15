@@ -10742,6 +10742,81 @@ class CheckAdmissible(unittest.TestCase):
             pas.check_admissible(dict(QUESTION, options_supplied=False, options=[])),
             [])
 
+    def test_the_options_test_cannot_be_switched_off_by_the_raiser(self):
+        """Criterion 4 is judged over what TRAVELS, not over what is DECLARED.
+
+        ``options`` is projected into all three payloads verbatim and
+        unconditionally, so a record that states options has stated them to
+        every brain whatever ``options_supplied`` says. Gating the test on the
+        flag handed the raiser one switch that turned the two-option bar, the
+        adjective bar and the duplicate bar off together — while the options
+        those bars exist to judge went out to the brains anyway.
+        """
+        for options, expected in (
+                ([{"key": "modern"}, {"key": "traditional"}],
+                 "options-fail-the-options-test"),
+                ([{"key": "postgres"}], "fewer-than-two-options"),
+                ([{"key": "postgres"}, {"key": "postgres"}],
+                 "duplicate-options")):
+            with self.subTest(options=repr(options)):
+                self.assertIn(expected, pas.check_admissible(
+                    dict(QUESTION, options_supplied=False, options=options)))
+        #: THE ACCEPT HALF, restated here beside the rejections it is paired
+        #: with: a record that supplies none is judged by P07's prose, and
+        #: there is nothing for criterion 4 to be applied to.
+        self.assertEqual(pas.check_admissible(
+            dict(QUESTION, options_supplied=False, options=[])), [])
+
+    def test_a_record_that_omits_the_supplied_flag_still_has_its_options_judged(self):
+        """Omitting the line is the same switch as writing ``no``.
+
+        ``parse_question`` defaults the flag to ``False`` when the record does
+        not state it, so a reader that gated criterion 4 on the flag could be
+        got past by deleting one line rather than by writing anything false.
+        """
+        record = pas.parse_question(question_text(
+            drop=("options_supplied",), options="modern, traditional"))
+        self.assertFalse(record["options_supplied"])
+        self.assertEqual(record["options"],
+                         [{"key": "modern"}, {"key": "traditional"}])
+        self.assertIn("options-fail-the-options-test",
+                      pas.check_admissible(record))
+
+    def test_the_options_screen_sits_where_an_unhashable_key_can_reach_it(self):
+        """RULE 9's only call site in this task, pinned STRUCTURALLY.
+
+        No input can tell the two placements apart. Under an ``if _text(key)``
+        guard the left operand is always a string, so ``key.casefold() in
+        frozenset(...)`` cannot raise — which makes a mutant that moves the
+        screen down there and drops ``_member`` behaviourally equivalent. It
+        passes the whole suite while deleting this section's only rule-9 site,
+        and what it removes is the PROPERTY, not a behaviour. So the property
+        is what is asserted: ``_option_keys`` screens through ``_member``, and
+        no ``_member`` call in it sits under a ``_text`` guard where no
+        unhashable value could ever arrive.
+        """
+        node = function_node(module_source(), "_option_keys")
+
+        def member_calls(tree) -> list:
+            return [inner for inner in ast.walk(tree)
+                    if isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Name)
+                    and inner.func.id == "_member"]
+
+        self.assertTrue(
+            member_calls(node),
+            "_option_keys no longer screens option keys through _member; a "
+            "bare `in` HASHES its left operand and raises TypeError — outside "
+            "TrackerError — on a raiser's ``['modern']``")
+        guarded = [ast.unparse(call)
+                   for branch in ast.walk(node)
+                   if isinstance(branch, ast.If) and "_text" in ast.dump(branch.test)
+                   for call in member_calls(branch)]
+        self.assertEqual(
+            guarded, [],
+            "the options screen sits under a _text guard, where no unhashable "
+            f"key can reach it and the rule-9 pin is unobservable: {guarded}")
+
     def test_a_question_blocking_nothing_is_an_opinion(self):
         self.assertIn("blocks-nothing",
                       pas.check_admissible(dict(QUESTION, blocks=[])))
@@ -10836,6 +10911,32 @@ class CheckAdmissible(unittest.TestCase):
                 self.assertIn("options-supplied-is-not-a-boolean",
                               pas.check_admissible(
                                   dict(QUESTION, options_supplied=supplied)))
+
+    def test_the_supplied_flag_on_disk_is_a_grammar_and_not_a_truthiness_test(self):
+        """The ON-DISK half of the case above, which only ``parse_question``
+        reaches. ``check_admissible`` is handed a dict whose flag is already a
+        bool, so no case there can watch ``_question_flag`` read a spelling.
+
+        A reader that fell back to ``bool(raw.strip())`` for an unrecognised
+        spelling turns ``Options supplied: false`` into ``True`` — exactly what
+        the flag's own error message says it exists to stop: a spelling nobody
+        agreed on is read as true by whichever reader is least careful.
+        """
+        for spelling in ("true", "false", "1", "0", "y", "n", "Y", "N",
+                         "on", "off", "", "maybe"):
+            with self.subTest(options_supplied=repr(spelling)):
+                with self.assertRaises(pas.QuorumSchemaInvalid) as caught:
+                    pas.parse_question(question_text(options_supplied=spelling))
+                self.assertIn("Options supplied", str(caught.exception))
+        #: THE ACCEPT HALF, both values and folded: a reader that refused every
+        #: spelling would satisfy every rejection above and parse no record.
+        for spelling, expected in (("yes", True), ("no", False), ("YES", True),
+                                   ("No", False), (" yes ", True)):
+            with self.subTest(options_supplied=repr(spelling)):
+                self.assertIs(
+                    pas.parse_question(question_text(
+                        options_supplied=spelling))["options_supplied"],
+                    expected)
 
     def test_a_record_that_is_not_an_object_is_refused_by_type(self):
         for record in ("", [], None, 0, ["question"]):
@@ -11093,6 +11194,92 @@ class BuildPayload(unittest.TestCase):
             pas.parse_question(question_text(
                 question="Which engine handles 85 open connections?"))["question"],
             "Which engine handles 85 open connections?")
+
+    def test_every_field_the_payload_projects_from_the_record_is_screened(self):
+        """RULE 10: the screen's coverage claim is DERIVED, not remembered.
+
+        The corpus below is checked against ``_record_projection``'s own keys,
+        so a field added to the payload's record half and not to this case
+        fails here. That is the defect this replaces: the screen restated
+        ``("question", "axis")`` under a comment claiming they were "exactly
+        the record's free text that reaches a payload", while ``challenge``
+        and every reading root travelled to all three brains unscreened.
+        """
+        planted = {
+            "question": dict(question="Which engine? we need 0.85 grounding"),
+            "axis": dict(axis="storage-engine-0.85"),
+            "options": dict(options="postgres, convention-cited"),
+            "reading_roots": dict(reading_roots=QUESTION_FIELDS[9][1].replace(
+                "tests=tests,", "tests=tests/at-0.85-grounding,")),
+            "challenge": dict(extra=(
+                "- **Challenge:** the earlier answer was only convention-cited",)),
+        }
+        self.assertEqual(
+            set(planted), set(pas._record_projection(QUESTION)),
+            "a field was added to (or removed from) the record's half of the "
+            "payload and this corpus was not derived from it again")
+        for field, overrides in sorted(planted.items()):
+            with self.subTest(field=field):
+                with self.assertRaises(pas.QuorumSchemaInvalid) as caught:
+                    pas.parse_question(question_text(**overrides))
+                self.assertIn(field, str(caught.exception))
+
+    def test_the_challenge_a_reopen_carries_reaches_all_three_brains(self):
+        """``challenge`` is agent-authored free text and it is WHITELISTED.
+
+        Task 13 fills it on a re-open, with evidence written at the one moment
+        a rung is being argued about — which is when the ladder is nearest to
+        hand. It travels to all three brains verbatim, so a challenge reading
+        "only convention-cited at 0.70" hands the adoption floor and a rung
+        name to every brain through a field the whitelist has approved.
+
+        The accept half is stated first deliberately: a screen over a field
+        nothing projects guards nothing, so the path is proved real before the
+        refusals claim to close it.
+        """
+        clean = "the earlier answer cited no test and no spec section"
+        for index in range(3):
+            payload = self.rebuild(
+                text=question_text(extra=(f"- **Challenge:** {clean}",)),
+                index=index)
+            with self.subTest(brain=index):
+                self.assertEqual(payload["challenge"], [clean])
+        for spelling in ("the earlier answer was only convention-cited",
+                         "the earlier answer reached 0.70 and no further",
+                         "beaten on evidence, not on the .85 bar"):
+            with self.subTest(challenge=spelling):
+                with self.assertRaises(pas.QuorumSchemaInvalid) as caught:
+                    pas.parse_question(question_text(
+                        extra=(f"- **Challenge:** {spelling}",)))
+                self.assertIn("challenge", str(caught.exception))
+
+    def test_a_reading_root_quoting_the_ladder_is_refused_like_the_question(self):
+        """A root is raiser-authored text, and it is projected TWICE.
+
+        Once in ``reading_roots``, which every brain sees, and again inside the
+        assigned brain's ``reading_assignment.read[].root``. The SOURCE NAME
+        travels beside the path and is raiser-written too, so the screen walks
+        mapping keys as well as their values.
+        """
+        for root in ("tests/at-0.85-grounding", "tests/code-evidenced-only"):
+            with self.subTest(root=root):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.parse_question(question_text(
+                        reading_roots=QUESTION_FIELDS[9][1].replace(
+                            "tests=tests,", f"tests={root},")))
+        with self.subTest(source="a rung name as a source name"):
+            with self.assertRaises(pas.QuorumSchemaInvalid):
+                pas.parse_question(question_text(
+                    reading_roots=QUESTION_FIELDS[9][1]
+                    + ", convention-cited=docs/notes.md"))
+        #: The accept half, and the proof that the screened value really does
+        #: travel: an ordinary root reaches the payload in both places.
+        payload = self.rebuild(index=1, text=question_text(
+            reading_roots=QUESTION_FIELDS[9][1].replace(
+                "tests=tests,", "tests=tests/unit,")))
+        self.assertEqual(payload["reading_roots"]["tests"], "tests/unit")
+        self.assertIn({"source": "tests", "root": "tests/unit"},
+                      payload["reading_assignment"]["read"])
 
     def test_the_payload_offers_rung_names_so_a_brain_can_select_one(self):
         for payload in self.payloads:
@@ -11364,11 +11551,23 @@ class BuildPayload(unittest.TestCase):
         A run directory that does not lie inside the recorded root has no
         repo-root-relative spelling at all, and inventing one would hand every
         brain a path whose citations can only be refused.
+
+        THE DEPTH OF THIS PATH IS LOAD-BEARING — flattening it is not a
+        simplification. The mutant this case exists to kill is ``root =
+        path.resolve().parents[3]``, the directory arithmetic ``_run_relative``
+        warns against in its own docstring. At ``<tmpdir>/run`` that mutant
+        dies of ``IndexError: 3``, because the run has exactly three ancestors
+        — so the case passed while never distinguishing "reads the root back"
+        from "derives it". Four levels down ``parents[3]`` RESOLVES: the mutant
+        fabricates ``a/b/c/run`` as the repository root, hands it to every
+        brain and raises nothing at all, which is standing rule 8's silent
+        failure exactly. Only at this depth does the assertion below do the
+        work it claims to.
         """
         elsewhere = Path(tempfile.mkdtemp(prefix="pipeline-auto-outside-"))
         self.addCleanup(shutil.rmtree, elsewhere, ignore_errors=True)
-        run_dir = elsewhere / "run"
-        run_dir.mkdir()
+        run_dir = elsewhere / "a" / "b" / "c" / "run"
+        run_dir.mkdir(parents=True)
         pas.initialize_run(run_dir, **{**NEW_RUN, "repo_root": str(self.root)})
         directory = run_dir / "quorum" / self.qid
         directory.mkdir(parents=True)
@@ -11386,9 +11585,13 @@ class BuildPayload(unittest.TestCase):
         """
         pairs = (
             (["ab", "c"], ["a", "bc"]),
-            #: The pair a TAG without a LENGTH cannot tell apart: "s"+"a" then
-            #: "s"+"sb" is the same run of characters as "s"+"as" then "s"+"b".
-            (["a", "sb"], ["as", "b"]),
+            #: The pair a TAG WITHOUT A LENGTH cannot tell apart. The
+            #: delimiter must be inside the strings for this to bite: under
+            #: ``f"s:{value}"`` both of these render as ``[s:xs:ys:z]``, while
+            #: ``["a", "sb"]`` against ``["as", "b"]`` — which this case used
+            #: to name — is separated by the ``:`` alone and so proves nothing
+            #: about the length prefix.
+            (["xs:y", "z"], ["x", "ys:z"]),
             ({"a": "bc"}, {"ab": "c"}),
             ({"a": ""}, {"a": [], "": ""}),
             ([1, 2], ["1", "2"]),

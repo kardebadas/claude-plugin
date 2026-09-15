@@ -18,6 +18,20 @@
 
 ---
 
+## Carried forward from P02 Task 6's review (commit `0ecfa77`)
+
+**`tainting_decisions` must check existence, not just citation.** It matches
+`record["id"] in cited`, so a well-formed but non-existent `Q-<12 hex>` in a
+task's `Decisions` cell silently produces **no taint** — the task looks clean
+because the decision it rests on cannot be found, which is the opposite of what
+should happen.
+
+P02 deliberately validates the `Decisions` column by grammar only. Resolution is
+against `decisions.md`, which the state module never opens, so P02's grammar
+check is what stops garbage reaching you — but existence is yours. A cited id
+that resolves to nothing is a tracker that disagrees with its own decision
+record, and it should raise rather than quietly mark a tainted task clean.
+
 ## Global Constraints
 
 Copied verbatim from the master plan. Every task's requirements implicitly include this section.

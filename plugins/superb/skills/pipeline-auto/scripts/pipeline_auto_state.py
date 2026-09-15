@@ -1041,6 +1041,20 @@ def _validate_quorum(tracker: dict) -> None:
     #: axis against the human decisions already recorded on it, so an axis
     #: matching no question contradicts nothing BY CONSTRUCTION and clears that
     #: check by being unrecognisable rather than by being compatible.
+    #:
+    #: ``new`` IS LEGAL HERE AND ILLEGAL IN ``parse_decisions``, DELIBERATELY.
+    #: A row and the decision record it produced record different facts: this
+    #: row records WHAT WAS ASKED, and a question raised after the stage-03 gate
+    #: closed was asked on no stable axis, so the row keeps ``new`` for the life
+    #: of the run. The record appended to ``decisions.md`` records THE AXIS THAT
+    #: QUESTION OPENED, and ``parse_decisions`` refuses the placeholder there
+    #: because every untagged decision would otherwise share one contradiction
+    #: bucket; that record carries the question's own bare 12-hex qid instead.
+    #: Because this namespace is closed to the stage-03 ids plus the literal, a
+    #: minted qid axis could not be written into this cell anyway -- the two
+    #: namespaces do not overlap and are not meant to. A ``new``-axis row whose
+    #: ``Decision`` is ``Q-<qid>`` and whose record's ``Axis`` is that same bare
+    #: ``<qid>`` is the INTENDED shape, and is pinned end to end in the suite.
     axes = {row["id"] for row in tracker["questions"]} | {_RESERVED_AXIS}
     phases = {row["id"] for row in tracker["phases"]}
     if len({row["qid"] for row in rows}) != len(rows):
@@ -3748,8 +3762,26 @@ _EXTENSION_ACTIONS = frozenset({"quorum.extend-budget", "dispatch.extend-budget"
 #: for a quorum answer of "proceed" exactly as it holds for a human's. The
 #: empty string is a member so that a present-but-blank ``Answer`` is caught by
 #: the same rule rather than by the absence of one.
+#:
+#: WIDER THAN THE FOUR THE BRIEF NAMED, ON PURPOSE, and the widening is declared
+#: here rather than left to be inferred from the set. Every member past
+#: ``approved``/``yes``/``continue``/``proceed`` is a RUBBER STAMP: a token that
+#: signals assent to whatever was proposed and carries no content of its own, so
+#: two of them recorded on one axis key identically and "agree" without either
+#: having said anything. ``ok``/``okay``/``lgtm``/``sure``/``agreed``/``sounds
+#: good`` are assent to a proposal; ``go``/``do it`` are assent to an action;
+#: ``pending user response`` is the placeholder standing where an answer will
+#: go. None of them names the thing chosen.
+#:
+#: ``no`` IS NOT A MEMBER, and its absence is the boundary of the rule. A rubber
+#: stamp is always affirmative -- it is the reflex of waving something through --
+#: and a refusal is the one thing a reflex never produces. "no" to "should we add
+#: a second datastore?" is a human's legitimate rejection: it settles the axis,
+#: it is what the user actually said, and the record must be able to hold it.
+#: Refusing it would make the one answer a generic-approval rule exists to
+#: protect unwritable.
 _GENERIC_ANSWERS = frozenset({
-    "", "approved", "yes", "no", "continue", "proceed", "go", "ok", "okay",
+    "", "approved", "yes", "continue", "proceed", "go", "ok", "okay",
     "agreed", "sounds good", "lgtm", "sure", "do it", "pending user response",
 })
 
@@ -3793,6 +3825,38 @@ _DECISION_FIELD_ALIASES = MappingProxyType({"action": "decision_action"})
 #: reach no brain until somebody decides it may, and a blacklist grants the
 #: opposite default.
 _PROJECTED_FIELDS = ("question", "answer", "provenance")
+
+#: Every rung NAME and every rung VALUE, as the strings the projection screens
+#: its two free-text fields against. Derived from ``RUNGS`` rather than typed
+#: out, so a ladder that gains a rung gains the screen for it on the same day.
+#:
+#: The whitelist above is a FIELD screen and this is a CONTENT screen, and the
+#: field screen alone is not the guarantee the docstring claims: ``Answer:
+#: postgres -- adopted at 0.85, code-evidenced, runner-up speculation`` is
+#: carried by ``answer``, which is projected, so every value the whitelist
+#: withholds arrives anyway inside a field it cannot inspect.
+_RUNG_STRINGS = tuple(sorted(
+    set(RUNGS) | {str(value) for value in RUNGS.values()}))
+
+
+def _rung_leak(value: str) -> str | None:
+    """The first rung name or rung value quoted inside ``value``, or ``None``.
+
+    Substring rather than token, and deliberately so: the leak this screens for
+    is a brain reading a number, and ``(0.85)``, ``at 0.85,`` and ``rung=0.85``
+    all deliver it. A token split would pass every one of them.
+
+    The cost is a false positive on prose that happens to contain a rung word --
+    "the behaviour specified in the RFC" is the realistic one. That is the
+    direction to fail in: the stop is loud, it names the record and the word, and
+    the fix is to reword one sentence of an audit-trail entry. The other
+    direction ships a number into a payload and is silent forever.
+    """
+    lowered = value.casefold()
+    for token in _RUNG_STRINGS:
+        if token in lowered:
+            return token
+    return None
 
 
 def _id_provenance(did: str) -> str | None:
@@ -3928,6 +3992,38 @@ def _consequence_map(raw: str, did: str) -> dict:
     return mapping
 
 
+def _decision_anchors(raw: str, did: str) -> list[str]:
+    """``Consistent with`` as a list of decision ids, or a stop.
+
+    READ BY EVERY LATER PHASE AND, UNTIL NOW, VALIDATED BY NOTHING: ``\x00``,
+    ``|``, ``0.85``, an em dash and three hundred commas all parsed straight
+    through into a live anchor list. That is the Task-2 carry-forward hazard
+    verbatim -- an anchor without an id lets a brain claim grounding in a
+    decision it never names, and the claim reads as checked because a list came
+    back.
+
+    DECISION IDS ONLY, because ``decisions.md`` already has a field for the
+    other kind of anchor: the template gives ``Sources`` the spec lines and
+    ``file:line`` citations a record rests on, and ``Consistent with`` the
+    decisions it stands beside. One field taking both would make an entry that
+    resolves to neither indistinguishable from one that simply has the other
+    shape.
+    """
+    anchors = []
+    for entry in (part.strip() for part in raw.split(",") if part.strip()):
+        if _id_provenance(entry) is None:
+            raise TrackerValidationError(
+                f"{did}: Consistent with entry {entry!r} is not a decision id "
+                "(H-<n> or Q-<qid>); an anchor without an id lets a record claim "
+                "grounding in a decision it never names")
+        if entry in anchors:
+            raise TrackerValidationError(
+                f"{did}: Consistent with cites {entry!r} twice; one citation is "
+                "one claim of grounding and a repeat weights it double")
+        anchors.append(entry)
+    return anchors
+
+
 def parse_decisions(text: str) -> dict:
     """Parse ``decisions.md`` into records plus a validated axis index.
 
@@ -4037,10 +4133,36 @@ def parse_decisions(text: str) -> dict:
             #: question, and the run would stop on a contradiction that does not
             #: exist. Whoever writes the record assigns the stable axis; the
             #: placeholder never reaches the audit trail.
+            #:
+            #: THIS IS THE OTHER HALF OF ``_validate_quorum``'s AXIS NAMESPACE,
+            #: AND THE DIFFERENCE IS DELIBERATE. ``_validate_quorum`` ACCEPTS
+            #: ``new`` in a ``## Quorum`` row's ``Axis`` cell; this function
+            #: REFUSES it in a decision record's ``Axis`` field. The two are not
+            #: in conflict because they record different facts about the same
+            #: adoption:
+            #:
+            #: * the tracker row records WHAT WAS ASKED. A question raised after
+            #:   the stage-03 gate closed was asked on no stable axis, and the
+            #:   row keeps saying so forever. ``_validate_quorum`` closes that
+            #:   cell to the stage-03 question ids plus this literal, so a freshly
+            #:   minted axis could not be written there even if a writer tried.
+            #: * the decision record records THE AXIS THAT QUESTION OPENED. A
+            #:   question whose axis is ``new`` is adopted like any other, and
+            #:   the record appended here carries the question's own bare 12-hex
+            #:   qid as its ``Axis``: reproducible from the question, unique to
+            #:   it, and -- unlike ``new`` -- a bucket shared with nothing.
+            #:
+            #: So an adopted ``new``-axis row and its decision record legally
+            #: disagree about the word in that cell, and the pair is pinned end
+            #: to end in the suite rather than left as two comments that happen
+            #: to coexist. The minting itself belongs to the adoption path, not
+            #: here; this function only refuses the placeholder.
             raise TrackerValidationError(
                 f"{did}: Axis {_RESERVED_AXIS!r} is the reserved literal for an "
                 "untagged question, not an axis; a decision recorded against it "
-                "shares one axis bucket with every other untagged decision")
+                "shares one axis bucket with every other untagged decision. The "
+                "## Quorum row keeps " f"{_RESERVED_AXIS!r}" "; the record "
+                "carries the question's own qid as its axis")
         depth_raw = fields["depth"].strip()
         if not _is_count(depth_raw):
             raise TrackerValidationError(
@@ -4066,9 +4188,8 @@ def parse_decisions(text: str) -> dict:
             "depth": depth,
             "question": fields["question"].strip(),
             "consequences": _consequence_map(fields.get("consequences", ""), did),
-            "consistent_with": [entry.strip() for entry
-                                in fields.get("consistent_with", "").split(",")
-                                if entry.strip()],
+            "consistent_with": _decision_anchors(
+                fields.get("consistent_with", ""), did),
         })
         decisions[did] = record
         axis_index.setdefault(axis, []).append(did)
@@ -4076,6 +4197,12 @@ def parse_decisions(text: str) -> dict:
     for axis, ids in sorted(axis_index.items()):
         adopted = [decisions[did] for did in ids
                    if decisions[did]["status"] == "Adopted"]
+        #: The contradiction check runs FIRST even though the count rule below
+        #: subsumes it. Both stop the same files; only one of them says what
+        #: actually disagreed, and "these two assert opposite things about
+        #: db/session.sql" is the message that tells a human which record to
+        #: retire. Ordered the other way, the specific diagnosis would be
+        #: unreachable and ``_contradiction`` would be dead code.
         for index, left in enumerate(adopted):
             for right in adopted[index + 1:]:
                 clash = _contradiction(left, right)
@@ -4085,6 +4212,88 @@ def parse_decisions(text: str) -> dict:
                         f"{left['id']} and {right['id']} ({clash}); this run is "
                         "a read-only stop -- the audit trail holds both answers "
                         "and no reader can tell which one the run is bound by")
+        if len(adopted) > 1:
+            #: ONE ADOPTED DECISION PER AXIS, which is what
+            #: ``templates/decisions.md`` states and the template is the
+            #: authority this contract was built against. Two that merely AGREE
+            #: today are still two records standing on one axis: the axis index
+            #: has one ``Decision`` column and can name only one of them, every
+            #: later reader picks by accident of iteration order, and the pair
+            #: becomes a contradiction the first time either is amended.
+            #:
+            #: THIS BINDS THE ADOPTION PATH. A later adoption on an axis that
+            #: already carries an Adopted record SUPERSEDES that record -- flips
+            #: it to ``Superseded`` and appends the new one with a ``Supersedes``
+            #: line -- and never appends a second Adopted one.
+            raise TrackerValidationError(
+                f"axis {axis} holds {len(adopted)} Adopted decisions "
+                f"({[record['id'] for record in adopted]}); an axis holds at "
+                "most one, and a later adoption supersedes the record standing "
+                "there rather than appending beside it -- the axis index names "
+                "one decision per axis and cannot say which of two is binding")
+
+    #: ``Supersedes`` is the other half of the one legal in-place mutation.
+    #: ``templates/decisions.md`` states that ``Adopted -> Superseded`` is
+    #: performed by appending the superseding record WITH ITS OWN
+    #: ``Supersedes`` LINE, so a record retired with nothing naming it is an
+    #: audit trail that records a decision being withdrawn and not what replaced
+    #: it -- which is the one question a reader of a retired record has.
+    claimed: dict = {}
+    for did in sorted(decisions):
+        target = decisions[did].get("supersedes", "").strip()
+        if not target:
+            continue
+        if _id_provenance(target) is None:
+            raise TrackerValidationError(
+                f"{did}: Supersedes {target!r} is not a decision id (H-<n> or "
+                "Q-<qid>); a record that names no id supersedes nothing")
+        if target == did:
+            raise TrackerValidationError(
+                f"{did}: Supersedes names the record itself; a decision cannot "
+                "replace the thing it is")
+        if target not in decisions:
+            raise TrackerValidationError(
+                f"{did}: Supersedes {target!r}, which this file does not hold; "
+                "the audit trail is append-only, so the record being replaced is "
+                "still in it and a name that resolves to nothing retires nothing")
+        if decisions[target]["status"] != "Superseded":
+            raise TrackerValidationError(
+                f"{did}: Supersedes {target!r}, whose Status is "
+                f"{decisions[target]['status']!r} and not 'Superseded'; the "
+                "mutation is both halves or neither, and half of it leaves two "
+                "live records where one was retired")
+        if target in claimed:
+            raise TrackerValidationError(
+                f"{did} and {claimed[target]} both supersede {target!r}; one "
+                "retired decision has one successor, and two make the axis index "
+                "unable to say which record replaced it")
+        claimed[target] = did
+    orphaned = sorted(did for did in decisions
+                      if decisions[did]["status"] == "Superseded"
+                      and did not in claimed)
+    if orphaned:
+        raise TrackerValidationError(
+            f"{orphaned} are Superseded and nothing supersedes them; the one "
+            "legal in-place mutation appends the superseding record with its own "
+            "Supersedes line, and a retirement with no successor is a decision "
+            "withdrawn without recording what took its place")
+
+    #: Anchors resolve, or the grounding they claim is unverifiable. A
+    #: ``Consistent with`` naming a record this file does not hold is the
+    #: carried-forward Task-2 hazard in its markdown spelling: a brain claims
+    #: grounding in a decision the audit trail cannot produce, and every reader
+    #: downstream of it inherits a citation that looks checked and is not.
+    for did in sorted(decisions):
+        for anchor in decisions[did]["consistent_with"]:
+            if anchor == did:
+                raise TrackerValidationError(
+                    f"{did}: Consistent with names the record itself; a decision "
+                    "is not evidence that it is consistent with anything")
+            if anchor not in decisions:
+                raise TrackerValidationError(
+                    f"{did}: Consistent with cites {anchor!r}, which this file "
+                    "does not hold; an anchor naming a decision the audit trail "
+                    "cannot produce is grounding nothing can check")
     return {"decisions": decisions, "axis_index": axis_index}
 
 
@@ -4135,6 +4344,23 @@ def project_decisions(decisions: dict) -> str:
     The three fields are whitelisted rather than the others blacklisted.
     ``decisions.md`` is hand-editable and grows fields; a blacklist ships every
     new one to a brain until somebody remembers to add it.
+
+    THE WHITELIST IS A FIELD SCREEN AND IS NOT THE WHOLE CLAIM. Two of the three
+    projected fields are free text a human or a brain wrote, so a rung name or a
+    rung value quoted INSIDE one of them reaches a brain through a field the
+    whitelist has already approved -- ``Answer: postgres -- adopted at 0.85,
+    code-evidenced, runner-up speculation`` leaks all three. ``question`` and
+    ``answer`` are therefore screened for rung names and rung values as CONTENT,
+    and a hit is a STOP rather than a strip: a decision record whose prose quotes
+    the ladder is a record that should never have been written, and silently
+    editing the audit trail on its way to a brain would leave the file and what
+    the brain read disagreeing about what was decided.
+
+    Record KEYS are screened too, before anything is sorted. A key that is not a
+    decision id is projected as ``## 1`` or ``## ('a',)`` -- a heading no
+    ``_id_provenance`` would accept, in the one file a brain reads -- and a
+    mixture of key types raises ``TypeError`` out of ``sorted`` itself, which is
+    outside ``TrackerError``.
     """
     if not isinstance(decisions, dict) or not isinstance(
             decisions.get("decisions"), dict):
@@ -4143,6 +4369,20 @@ def project_decisions(decisions: dict) -> str:
             "records alone: it is handed what a brain will read, and a shape "
             "it cannot read would project an empty file that looks like a run "
             "with no decisions in it")
+    unreadable = [key for key in decisions["decisions"]
+                  if not isinstance(key, str) or _id_provenance(key) is None]
+    if unreadable:
+        #: BEFORE ``sorted``, not after. A dict mixing ``1`` and ``"H-001"``
+        #: raises ``TypeError`` out of the sort -- outside ``TrackerError``, so
+        #: it escapes every handler a controller has written -- and a dict
+        #: holding only ``1`` does not raise at all: it emits ``## 1`` as a
+        #: decision heading. ``repr`` on the way into the message because the
+        #: keys are not necessarily comparable with each other.
+        raise TrackerValidationError(
+            f"decision keys {sorted(map(repr, unreadable))} are not decision ids "
+            "(H-<n> or Q-<qid>); a projection heading no id grammar accepts is a "
+            "decision no task in the run can cite, written into the one file a "
+            "brain reads")
     lines = ["<!-- pipeline-auto-decisions-effective/v1 -->", "",
              "# Decisions in effect", "",
              "Read-only and generated. Do not cite a value; there is none here.",
@@ -4172,6 +4412,15 @@ def project_decisions(decisions: dict) -> str:
             raise TrackerValidationError(
                 f"{did}: cannot be projected without {missing}; a decision shown "
                 "to a brain without its question is an answer to nothing")
+        for name in ("question", "answer"):
+            leaked = _rung_leak(record[name])
+            if leaked is not None:
+                raise TrackerValidationError(
+                    f"{did}: {name.capitalize()} quotes {leaked!r}, a rung name "
+                    "or a rung value; a brain reading 'adopted at 0.85' treats "
+                    "the decision as soft and reverses it, and a record whose "
+                    "prose carries the ladder is a record that should never have "
+                    "been written -- so this is a stop and never a silent strip")
         lines.append(f"## {did}")
         lines.append("")
         lines.extend(f"- **{name.capitalize()}:** {record[name].strip()}"

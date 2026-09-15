@@ -2655,6 +2655,21 @@ git commit -m "feat(pipeline-auto): route every durable transition through one i
 
 ---
 
+> **Constraint added during execution of Task 3 (commit `3458d40`).**
+> `initialize_run` MUST write stage 01 as `active`. It may not leave all twelve
+> stages `pending`.
+>
+> Why: this plan's `derive_next_action` originally fell through to a bare
+> `return "complete"`. That reports an *untouched* run as complete — the run
+> ends at stage 00 with every artifact unwritten, and nothing errors. Task 3
+> replaced the fallthrough: `"complete"` is returned only when all twelve stages
+> are complete, and any other unrecognised shape raises
+> `TrackerValidationError`. An `initialize_run` that leaves twelve pending
+> stages therefore now fails loudly instead of silently declaring victory.
+>
+> Accepted under the controller delegation recorded as H-011. The deviation is a
+> defect in this plan's text, not in the implementation.
+
 ## Task 11: `initialize_run` and `publish_immutable`
 
 **Files:**

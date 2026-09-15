@@ -8805,7 +8805,7 @@ class ParseDecisionsTests(DecisionContractCase):
                              because="generic approval")
 
     def test_go_is_a_language_and_not_a_rubber_stamp(self):
-        """``go`` is refused for the same shape as ``no`` and a different reason.
+        """``go`` is removed for the same shape as ``no`` and a different reason.
 
         The generic-approval rule is applied to the derived ``answer_key`` as
         well as to the whole answer, which is what closed the hole where
@@ -8813,12 +8813,28 @@ class ParseDecisionsTests(DecisionContractCase):
         ``yes``. That same reach is what makes ``go`` dangerous: it is a
         language, so refusing it makes a legal adopted answer unrecordable.
 
-        The asymmetry with ``yes`` is principled, not a judgement call. The
-        spec's admissibility criterion 4 is the options test — blank the title,
-        keep the options, and a reader must still be able to tell what is being
-        decided. ``go`` / ``rust`` passes it; ``yes`` / ``no`` fails it, so a
-        question whose options are yes and no is inadmissible before it is ever
-        asked, and ``yes`` can only ever arrive here as the rubber stamp.
+        **``go`` and ``yes`` were BOTH inherited members**, which is why the
+        difference has to be argued rather than asserted. The rule this one
+        carries over from tests the WHOLE answer
+        (``plugins/superb/skills/pipeline/scripts/pipeline_state.py:1926``) and
+        contains ``go``. This module added the ``answer_key`` reach, and that
+        reach is what turned "go — it compiles fast" from passing into refused.
+        So every inherited member that could be a legitimate KEY needed
+        re-examining under the new reach. ``go`` is the one that could, and
+        removing it restores the inherited behaviour for that case rather than
+        departing from it.
+
+        ``yes`` has no such carrier, and the rule does not vary by provenance:
+        the spec states the uniformity at lines 752-753 ("a quorum answer of
+        ``proceed`` is as empty as a human's") and names ``yes`` as the reflex
+        at line 427 ("the reflex answer to 'may I continue?' is yes"). An
+        earlier version of this docstring argued it from the options test
+        instead. That was the wrong reason for a right conclusion, and it is
+        worth naming because it is the reason a reader would reach for again:
+        a human gate question failing admissibility is dropped BEFORE the gate,
+        so the options test governs human questions too, and a quorum question
+        with no options tells the brain to answer in prose — so the two are not
+        split the way they appear to be.
         """
         self.assertNotIn("go", pas._GENERIC_ANSWERS)
         for answer in ("go — it compiles fast and the team knows it",

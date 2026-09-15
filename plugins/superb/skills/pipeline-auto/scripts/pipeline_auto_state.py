@@ -3769,7 +3769,7 @@ _EXTENSION_ACTIONS = frozenset({"quorum.extend-budget", "dispatch.extend-budget"
 #: signals assent to whatever was proposed and carries no content of its own, so
 #: two of them recorded on one axis key identically and "agree" without either
 #: having said anything. ``ok``/``okay``/``lgtm``/``sure``/``agreed``/``sounds
-#: good`` are assent to a proposal; ``go``/``do it`` are assent to an action;
+#: good`` are assent to a proposal; ``do it`` is assent to an action;
 #: ``pending user response`` is the placeholder standing where an answer will
 #: go. None of them names the thing chosen.
 #:
@@ -3785,13 +3785,47 @@ _EXTENSION_ACTIONS = frozenset({"quorum.extend-budget", "dispatch.extend-budget"
 #: answer. "go" answering "which language backs the worker pool?" is a real
 #: choice, and refusing it would make a legal adopted answer unrecordable.
 #:
-#: ``yes`` stays, and the asymmetry with ``no`` and ``go`` is principled rather
-#: than a judgement call. The spec's admissibility criterion 4 is the options
-#: test: blank the title, keep the options, and a reader must still be able to
-#: tell what is being decided. ``go`` / ``rust`` passes it. ``yes`` / ``no``
-#: fails it outright, so a question whose options are yes and no is inadmissible
-#: before it is ever asked -- meaning ``yes`` can only ever arrive here as the
-#: rubber stamp, never as an answer key some admissible question produced.
+#: ``yes`` STAYS, in every record, and the rule does not vary by provenance.
+#: The spec settles both halves outright. On uniformity, lines 752-753: "The
+#: generic-approval rejection carries over unchanged: a quorum answer of
+#: ``proceed`` is as empty as a human's" -- stated with the human case as the
+#: baseline the quorum case is measured against, so relaxing it for human
+#: records inverts the sentence. On ``yes`` specifically, line 427 names it as
+#: THE reflex: "the reflex answer to 'may I continue?' is yes."
+#:
+#: An earlier draft of this comment argued from the options test instead, and
+#: that argument was wrong -- not because the conclusion was wrong, but because
+#: the options test is an admissibility criterion and the reasoning ran the
+#: wrong way through it. It is recorded here because the wrong reason is the
+#: one a future reader would reach for again: a human gate question that fails
+#: admissibility is dropped BEFORE the gate, so the test governs human
+#: questions too; and a quorum question with no options tells the brain to
+#: answer in prose, so prose-without-options is a quorum shape, not a
+#: human-only one. The two are not split the way they look.
+#:
+#: ``yes`` is also not UNRECORDABLE, only unkeyable. ``answer_key`` is the text
+#: before the em dash, so "proceed with the destructive migration -- the backup
+#: is verified" parses today. Only the spellings where ``yes`` is the KEY are
+#: refused, which is exactly where ``yes`` is doing a decision key's job.
+#:
+#: Two things would break if this were relaxed for human records.
+#: ``_contradiction`` compares ``answer_key`` with no provenance test, so a
+#: string legal in an ``H-`` record and illegal in a ``Q-`` record on one axis
+#: is a disagreement nothing checks. And the relaxed branch would admit
+#: "pending user response -- awaiting the user" into an ADOPTED record: the
+#: Open-status exact match never sees that spelling, so ``_PENDING_ANSWER``
+#: would lose its only guard and an unanswered question would be recorded as a
+#: settled decision.
+#:
+#: Why ``go`` differs from ``yes``, since both were inherited members. The
+#: rule this one carries over from tests the WHOLE answer
+#: (``plugins/superb/skills/pipeline/scripts/pipeline_state.py:1926``) and does
+#: contain ``go``. This module added the ``answer_key`` reach, and that reach is
+#: what turned "go -- it compiles fast" from passing into refused. So every
+#: inherited member that could be a legitimate KEY had to be re-examined under
+#: the new reach; ``go`` is the one that could, and removing it restores the
+#: inherited behaviour for that case rather than departing from it. ``yes`` has
+#: no such carrier.
 _GENERIC_ANSWERS = frozenset({
     "", "approved", "yes", "continue", "proceed", "ok", "okay",
     "agreed", "sounds good", "lgtm", "sure", "do it", "pending user response",

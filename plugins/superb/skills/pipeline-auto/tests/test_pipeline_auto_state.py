@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import ast
+import errno
 import importlib.util
+import multiprocessing
 import os
 import re
 import shutil
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -59,13 +62,38 @@ WIDE_GAP = "| 12 | pending | - |\n\n\n## Intent\n"
 #: the answer to the one human gate, which is the authority that gate exists to
 #: withhold, and ``GrammarTests`` below pins each grammar against that.
 #:
+#: ``errno``, ``os``, ``time``, ``contextlib``, ``fcntl`` and ``msvcrt`` were
+#: added, together and on purpose, for the run-local exclusive lock and for
+#: nothing else. The lock is the one mechanism that makes "only the controller
+#: writes progress.md" a fact rather than a convention, and it cannot be built
+#: out of the three names above it: an OS-backed exclusive lock needs a real
+#: file descriptor (``os.open``/``os.fstat``/``os.close``), the platform lock
+#: call (``fcntl.flock``, or ``msvcrt.locking`` where there is no ``fcntl``),
+#: the errno constants that separate "somebody else holds it" from "this lock
+#: is broken" (``errno``), a monotonic deadline (``time``), and
+#: ``contextlib.contextmanager`` so the release is in a ``finally``. The phase
+#: plan's Tech Stack names exactly this set. ``re`` is still absent and stays
+#: absent.
+#:
+#: ``os.open`` is not the banned bare builtin ``open``: ``FORBIDDEN_BUILTINS``
+#: below is a ban on bare-NAME calls and is unchanged in strictness, and no
+#: bare ``open`` is used anywhere in the module. The distinction is real —
+#: ``os.open`` returns a descriptor the lock call needs and a file object
+#: cannot supply — but it is a distinction, not a narrowing, and it is written
+#: down here so that it stays a deliberate exception rather than a loophole.
+#:
 #: What this allowlist does NOT prove is that the module cannot write. ``pathlib``
 #: is not a narrower capability than ``os`` or ``shutil``: ``Path.write_text``,
 #: ``write_bytes``, ``unlink``, ``rename``, ``replace``, ``mkdir``, ``rmdir``,
 #: ``touch``, ``chmod``, ``symlink_to`` and ``open(mode=...)`` all exist, and an
 #: earlier revision of this file claimed otherwise. The read-only guarantee is
-#: carried by ``write_capable_calls`` below, scoped to ``validate_run``.
-ALLOWED_IMPORTS = frozenset({"__future__", "hashlib", "pathlib"})
+#: carried by ``write_capable_calls`` below, scoped to ``validate_run``, and
+#: widening this allowlist to ``os`` does not touch it: ``validate_run``'s own
+#: subtree is still checked call by call.
+ALLOWED_IMPORTS = frozenset({
+    "__future__", "contextlib", "errno", "fcntl", "hashlib", "msvcrt", "os",
+    "pathlib", "time",
+})
 
 #: Builtins that open a file or run generated code. Called anywhere in the
 #: module, by any function, they are refused — this half is module-wide.
@@ -3072,6 +3100,316 @@ class FixRoundSectionTests(unittest.TestCase):
                 text = with_fix("P01-T01", "1", {"commits": value})
                 with self.assertRaises(pas.TrackerValidationError):
                     pas.parse_tracker(text)
+
+
+#: How long the holder process keeps the lock if nobody ever releases it. It is
+#: a backstop, not a wait: every case sets the release event itself. A holder
+#: that blocked forever would wedge the whole suite behind a process this
+#: interpreter cannot kill from a failed assertion.
+LOCK_HOLD_SECONDS = 20.0
+
+#: Where the holder records the pid of the interpreter that took the lock.
+HOLDER_PID_FILE = "holder.pid"
+
+#: How long a case waits on another process. Generous, because a spawned
+#: interpreter has to import this module from cold, and bounded, because an
+#: unbounded wait is the deadlock this constant exists to refuse.
+HOLDER_WAIT_SECONDS = 30.0
+
+
+def hold_lock(run_dir: str, ready, release) -> None:
+    """Take the run lock in a SEPARATE process and hold it until told to stop.
+
+    Top-level and importable by name because the ``spawn`` start method
+    re-imports this module in the child rather than cloning this interpreter.
+    ``spawn`` is chosen deliberately, not for portability: a ``fork``ed child
+    inherits this process's open file descriptors, and a ``flock`` lock belongs
+    to the open file DESCRIPTION rather than to the process, so a forked holder
+    could be sharing the parent's own lock instead of competing for it. The
+    contention test would then pass while proving nothing at all.
+    """
+    import pipeline_auto_state as module
+    with module._exclusive_lock(Path(run_dir), timeout_s=5.0):
+        #: Written by the code that actually holds the lock, so the caller can
+        #: check WHICH interpreter that was rather than take it on trust.
+        (Path(run_dir) / HOLDER_PID_FILE).write_text(str(os.getpid()),
+                                                     encoding="utf-8")
+        ready.set()
+        release.wait(LOCK_HOLD_SECONDS)
+
+
+class FakeFlock:
+    """A stand-in for ``fcntl`` whose ``flock`` always fails with one errno.
+
+    The real ``flock`` on this platform returns either success or ``EWOULDBLOCK``
+    and nothing else, so the branch that decides which errnos mean "somebody
+    else holds it" and which mean "this primitive is broken" is unreachable
+    from a real filesystem. It is reachable from here.
+    """
+
+    LOCK_EX = 2
+    LOCK_NB = 4
+    LOCK_UN = 8
+
+    def __init__(self, number: int | None = None) -> None:
+        self.number = number
+        self.operations: list[int] = []
+
+    def flock(self, descriptor: int, operation: int) -> None:
+        self.operations.append(operation)
+        if operation == self.LOCK_UN or self.number is None:
+            return
+        raise OSError(self.number, os.strerror(self.number))
+
+
+class FakeLocking:
+    """A stand-in for ``msvcrt``, recording whether it was reached at all."""
+
+    LK_NBLCK = 1
+    LK_UNLCK = 0
+
+    def __init__(self) -> None:
+        self.operations: list[int] = []
+
+    def locking(self, descriptor: int, mode: int, length: int) -> None:
+        self.operations.append(mode)
+
+
+class LockTests(unittest.TestCase):
+    """The run lock, which is what turns "only the controller writes" into a
+    mechanism instead of a sentence in a skill file.
+
+    This module runs under many concurrent agents. Every rule the validators
+    above enforce is defeated by two writers interleaving a read-modify-write
+    on ``progress.md``, and no validator can see that happen: both writes are
+    individually well-formed and the loser's simply vanishes.
+    """
+
+    def reap(self, holder) -> None:
+        """Never leave a child behind, whatever the case did or failed to do."""
+        holder.join(HOLDER_WAIT_SECONDS)
+        if holder.is_alive():  # pragma: no cover - only on a wedged holder
+            holder.terminate()
+            holder.join(HOLDER_WAIT_SECONDS)
+
+    def start_holder(self, run_dir: Path):
+        """A second OS process, already holding the lock when this returns."""
+        context = multiprocessing.get_context("spawn")
+        self.assertEqual(
+            context.get_start_method(), "spawn",
+            "a forked holder inherits this interpreter's descriptors, and a "
+            "flock belongs to the open file description, not the process")
+        ready, release = context.Event(), context.Event()
+        holder = context.Process(target=hold_lock,
+                                 args=(str(run_dir), ready, release),
+                                 daemon=True)
+        holder.start()
+        self.addCleanup(self.reap, holder)
+        self.addCleanup(release.set)
+        self.assertTrue(
+            ready.wait(HOLDER_WAIT_SECONDS),
+            "the holder process never signalled that it acquired the lock")
+        return holder, release
+
+    def test_lock_errors_are_write_errors_so_callers_know_nothing_changed(self):
+        """A caller that cannot take the lock has changed nothing, which is
+        exactly what ``TrackerWriteError`` means. Raising something outside that
+        family would make a contended controller look like an uncertain one and
+        invite the reconciliation a clean refusal does not need."""
+        self.assertTrue(issubclass(pas.LockUnavailableError, pas.TrackerWriteError))
+        self.assertTrue(issubclass(pas.LockBusyError, pas.TrackerWriteError))
+        self.assertFalse(issubclass(pas.LockBusyError, pas.UpdateOutcomeUncertain))
+        self.assertFalse(issubclass(pas.LockBusyError, pas.LockUnavailableError))
+        self.assertFalse(issubclass(pas.LockUnavailableError, pas.LockBusyError))
+
+    def test_a_second_process_is_refused_while_the_first_still_holds_the_lock(self):
+        """The mistake: a lock that is really a re-entrancy guard.
+
+        Acquiring twice inside ONE interpreter can be refused by a flag, a
+        thread lock, or a set of held paths — none of which stops the OTHER
+        agent, in the other process, that this module actually has to survive.
+        So the first holder is a separate spawned interpreter, and the refusal
+        is asserted against it.
+
+        The second failure this guards against is a refusal that proves nothing
+        because the holder had already finished: the holder cannot leave its
+        ``with`` block until ``release`` is set or ``LOCK_HOLD_SECONDS`` elapse,
+        neither of which has happened inside a 0.2 s timeout, so asserting it is
+        still alive after the refusal pins that the lock was genuinely held at
+        that moment.
+
+        The pid the holder writes from INSIDE its ``with`` block is compared
+        against this interpreter's own, so "another process" is asserted rather
+        than assumed: a rewrite to a thread, or to a same-process second
+        acquire, fails here instead of quietly proving something weaker.
+
+        The third is a refusal that is not contention at all — an acquire that
+        can never succeed would also raise here — so the holder is then released
+        and the same directory is locked successfully by this process.
+        """
+        run_dir = make_run(self)
+        holder, release = self.start_holder(run_dir)
+        holder_pid = int((run_dir / HOLDER_PID_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(holder_pid, holder.pid)
+        self.assertNotEqual(
+            holder_pid, os.getpid(),
+            "the lock was taken inside this interpreter, so whatever the "
+            "refusal below proves, it is not cross-process contention")
+        with self.assertRaises(pas.LockBusyError):
+            with pas._exclusive_lock(run_dir, timeout_s=0.2):
+                pass
+        self.assertTrue(
+            holder.is_alive(),
+            "the holder exited before the refusal, so the refusal is not "
+            "evidence of contention")
+        release.set()
+        holder.join(HOLDER_WAIT_SECONDS)
+        self.assertEqual(
+            holder.exitcode, 0,
+            "the holder did not exit cleanly, so what it was doing with the "
+            "lock is unknown")
+        with pas._exclusive_lock(run_dir, timeout_s=5.0):
+            pass
+
+    def test_the_lock_is_reacquirable_once_released(self):
+        """A lock that is never released is indistinguishable from a deadlock
+        one run later. ``flock`` binds to the open file description, so the
+        second ``os.open`` here is a genuinely different contender even within
+        one process."""
+        run_dir = make_run(self)
+        with pas._exclusive_lock(run_dir, timeout_s=1.0):
+            pass
+        with pas._exclusive_lock(run_dir, timeout_s=1.0):
+            pass
+
+    def test_the_lock_survives_an_exception_raised_while_it_is_held(self):
+        """A mutation that dies mid-write must not strand the lock, or the run
+        wedges on its own error path rather than reporting it."""
+        run_dir = make_run(self)
+        with self.assertRaises(ZeroDivisionError):
+            with pas._exclusive_lock(run_dir, timeout_s=1.0):
+                raise ZeroDivisionError("a mutation blew up under the lock")
+        with pas._exclusive_lock(run_dir, timeout_s=1.0):
+            pass
+
+    def test_the_lock_is_handed_back_explicitly_and_not_only_by_closing(self):
+        """The two cases above cannot see the release call, and that is a real
+        hole rather than a pedantic one.
+
+        A POSIX ``flock`` is dropped when the last descriptor on the open file
+        description closes, so "can I lock it again" stays green even if
+        ``release`` is deleted outright — a mutation replacing the release with
+        ``return None`` left both of those cases passing. What they actually
+        pin is the ``finally``: remove release AND close and they fail. So the
+        release is pinned here instead, as the operation the module issues, on
+        the real ``_exclusive_lock`` against a recording stand-in for the
+        primitive. It matters beyond tidiness: ``msvcrt`` byte-range locks are
+        not guaranteed to be dropped by a close, and a later caller that holds
+        the descriptor open across two mutations would keep the lock forever.
+        """
+        run_dir = make_run(self)
+        fake = FakeFlock()
+        self.addCleanup(setattr, pas, "fcntl", pas.fcntl)
+        pas.fcntl = fake
+        expected = [fake.LOCK_EX | fake.LOCK_NB, fake.LOCK_UN]
+        with pas._exclusive_lock(run_dir, timeout_s=1.0):
+            self.assertEqual(fake.operations, expected[:1],
+                             "released while the body was still running")
+        self.assertEqual(fake.operations, expected)
+        fake.operations.clear()
+        with self.assertRaises(ZeroDivisionError):
+            with pas._exclusive_lock(run_dir, timeout_s=1.0):
+                raise ZeroDivisionError("a mutation blew up under the lock")
+        self.assertEqual(fake.operations, expected,
+                         "a body that raised left the lock unreleased")
+
+    def test_the_lock_file_lives_in_the_run_directory_and_is_never_unlinked(self):
+        """Unlinking a lock file is the classic way to hold a lock and still
+        lose: two holders open two different inodes at the same path, each locks
+        its own, and both believe they won. So the path is created once and
+        kept, and its inode is the same one after a second acquisition."""
+        run_dir = make_run(self)
+        with pas._exclusive_lock(run_dir, timeout_s=1.0):
+            pass
+        lock_path = run_dir / ".pipeline-auto.lock"
+        self.assertTrue(lock_path.is_file(), sorted(p.name for p in run_dir.iterdir()))
+        inode = lock_path.stat().st_ino
+        with pas._exclusive_lock(run_dir, timeout_s=1.0):
+            pass
+        self.assertEqual(lock_path.stat().st_ino, inode)
+
+    def test_no_os_lock_primitive_is_an_explicit_failure_not_a_silent_no_lock(self):
+        """Falling back to "no lock" would turn every concurrency guarantee in
+        this module into a comment, and the failure would only ever surface as
+        corrupted state long after the run that caused it. A module present but
+        lacking the call is the same case as a module that is absent."""
+        with self.assertRaises(pas.LockUnavailableError):
+            pas.select_lock_impl(None, None)
+        with self.assertRaises(pas.LockUnavailableError):
+            pas.select_lock_impl(types.SimpleNamespace(), types.SimpleNamespace())
+
+    def test_the_posix_primitive_is_preferred_over_the_unverified_windows_one(self):
+        """``msvcrt.locking`` is executable here but has never been run against
+        a native Windows kernel; ``fcntl.flock`` is what this platform actually
+        proves. Reaching for the unverified path while the proven one is present
+        would ship an untested lock everywhere."""
+        posix, windows = FakeFlock(errno.EWOULDBLOCK), FakeLocking()
+        acquire, _, description = pas.select_lock_impl(posix, windows)
+        self.assertFalse(acquire(0))
+        self.assertEqual(posix.operations, [posix.LOCK_EX | posix.LOCK_NB])
+        self.assertEqual(windows.operations, [])
+        self.assertIn("flock", description)
+
+    def test_only_a_contention_errno_is_reported_as_busy(self):
+        """The one judgement ``select_lock_impl`` makes, and the one a real
+        filesystem cannot exercise: which failures mean "wait your turn".
+
+        Widening the set is the dangerous direction. ``ENOLCK`` — the kernel is
+        out of lock records — and ``EDEADLOCK`` are not contention: swallowing
+        them as "busy" makes the loop spin out its timeout and then report a
+        competing holder that does not exist, sending a controller to retry a
+        lock that will never be grantable. ``flock`` performs no deadlock
+        detection, so ``EDEADLOCK`` from it means something is badly wrong.
+        """
+        for number in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK):
+            with self.subTest(contention=errno.errorcode[number]):
+                acquire, _, _ = pas.select_lock_impl(FakeFlock(number), None)
+                self.assertFalse(acquire(0))
+        for number in (errno.EPERM, errno.EIO, errno.ENOLCK, errno.EDEADLOCK,
+                       errno.EBADF):
+            with self.subTest(fault=errno.errorcode[number]):
+                acquire, _, _ = pas.select_lock_impl(FakeFlock(number), None)
+                with self.assertRaises(OSError) as caught:
+                    acquire(0)
+                self.assertEqual(caught.exception.errno, number)
+
+    def test_a_broken_lock_primitive_is_unavailable_rather_than_busy(self):
+        """``LockBusyError`` tells a caller to wait and retry. Reporting a
+        primitive that cannot work as "busy" would make the controller retry
+        forever; the two are siblings so that assertion cannot pass by
+        inheritance."""
+        run_dir = make_run(self)
+        self.addCleanup(setattr, pas, "fcntl", pas.fcntl)
+        pas.fcntl = FakeFlock(errno.ENOLCK)
+        with self.assertRaises(pas.LockUnavailableError) as caught:
+            with pas._exclusive_lock(run_dir, timeout_s=0.2):
+                pass
+        self.assertNotIsInstance(caught.exception, pas.LockBusyError)
+
+    def test_a_negative_timeout_is_rejected(self):
+        """A negative deadline is already past, so the loop would refuse a free
+        lock on its first pass and report contention that never existed."""
+        run_dir = make_run(self)
+        with self.assertRaises(pas.LockUnavailableError):
+            with pas._exclusive_lock(run_dir, timeout_s=-1.0):
+                pass
+
+    def test_a_zero_timeout_still_gets_one_honest_attempt(self):
+        """``timeout_s=0`` means "do not wait", not "do not try". A caller that
+        polls with zero would otherwise never acquire an uncontended lock."""
+        run_dir = make_run(self)
+        with pas._exclusive_lock(run_dir, timeout_s=0.0):
+            pass
 
 
 class SuiteIsWhollyCollectedTests(unittest.TestCase):

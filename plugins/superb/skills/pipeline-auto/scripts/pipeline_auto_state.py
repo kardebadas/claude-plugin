@@ -10,7 +10,27 @@ direction — not here, not later.
 
 from __future__ import annotations
 
+import errno
+import os
+import time
+from contextlib import contextmanager
 from pathlib import Path
+
+#: Exactly one of these two is present on any platform this runs on, and the
+#: lock refuses to proceed if neither is. They are imported here, guarded,
+#: rather than inside the lock, so that "which primitive does this interpreter
+#: have" is a fact established once at import and passed to
+#: ``select_lock_impl`` as an argument — which is what lets a test drive the
+#: selection without a second platform.
+try:  # POSIX
+    import fcntl
+except ImportError:  # pragma: no cover - only reachable on Windows
+    fcntl = None
+
+try:  # Windows
+    import msvcrt
+except ImportError:  # pragma: no cover - only reachable on POSIX
+    msvcrt = None
 
 SCHEMA = "pipeline-auto/v1"
 MARKER = f"<!-- {SCHEMA} -->"
@@ -1766,3 +1786,167 @@ def validate_run(run_dir: Path) -> dict:
     except TrackerValidationError as exc:
         raise TrackerValidationError(
             _diagnostic(run_dir, f"malformed {SCHEMA} tracker ({exc})")) from exc
+
+
+class LockUnavailableError(TrackerWriteError):
+    """No usable OS lock primitive, or the lock resource changed underfoot.
+
+    Distinct from ``LockBusyError`` on purpose, and a SIBLING of it rather than
+    a parent: "wait and retry" is the right response to contention and exactly
+    the wrong response to a primitive that cannot work, which would retry until
+    the timeout and then retry again. A caller that does not care may catch
+    ``TrackerWriteError`` and know only what that promises — nothing changed.
+    """
+
+
+class LockBusyError(TrackerWriteError):
+    """Another holder has the run lock. Nothing was changed."""
+
+
+#: The lock file is run-local and its name is stable. It is NOT ``progress.md``:
+#: locking the tracker itself would mean holding a descriptor on the very inode
+#: the atomic replace is about to swap out from under it.
+LOCK_FILENAME = ".pipeline-auto.lock"
+
+DEFAULT_LOCK_TIMEOUT_S = 10.0
+
+#: Which ``flock`` failures mean "somebody else holds it". Deliberately narrow.
+#: Everything outside this set is a broken primitive, not a competitor, and is
+#: raised rather than retried: spinning out a timeout on ``ENOLCK`` would report
+#: a contending holder that does not exist. ``flock`` performs no deadlock
+#: detection, so ``EDEADLOCK`` is not in the POSIX set — it belongs only to the
+#: Windows path, where ``msvcrt.locking`` does report it for contention.
+_POSIX_CONTENTION = {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}
+_WINDOWS_CONTENTION = {errno.EACCES, errno.EDEADLOCK}
+
+
+def select_lock_impl(fcntl_module, msvcrt_module):
+    """Return ``(acquire, release, description)`` for the best primitive present.
+
+    Takes the two modules as arguments rather than reading the globals so that
+    the selection can be driven from a test without a second operating system.
+
+    There is deliberately no third branch. A "no lock available, proceed
+    anyway" fallback would turn every concurrency guarantee in this module into
+    a comment: the tracker is the sole mutable state, many agents run at once,
+    and two interleaved read-modify-writes each produce a well-formed file that
+    no validator here can tell from a correct one. The loser's transition
+    simply disappears. An explicit refusal is recoverable; that is not.
+
+    The POSIX branch is preferred wherever it exists. The Windows branch is
+    executable and follows the sibling skill's implementation, but it has never
+    been run against a native Windows kernel, which its description says.
+    """
+    if fcntl_module is not None and hasattr(fcntl_module, "flock"):
+        def acquire(descriptor: int) -> bool:
+            try:
+                fcntl_module.flock(descriptor,
+                                   fcntl_module.LOCK_EX | fcntl_module.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in _POSIX_CONTENTION:
+                    return False
+                raise
+            return True
+
+        def release(descriptor: int) -> None:
+            fcntl_module.flock(descriptor, fcntl_module.LOCK_UN)
+
+        return acquire, release, "POSIX flock"
+
+    if msvcrt_module is not None and hasattr(msvcrt_module, "locking"):
+        def acquire(descriptor: int) -> bool:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            try:
+                msvcrt_module.locking(descriptor, msvcrt_module.LK_NBLCK, 1)
+            except OSError as exc:
+                if exc.errno in _WINDOWS_CONTENTION:
+                    return False
+                raise
+            return True
+
+        def release(descriptor: int) -> None:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt_module.locking(descriptor, msvcrt_module.LK_UNLCK, 1)
+
+        return acquire, release, "msvcrt locking; native Windows verification pending"
+
+    raise LockUnavailableError(
+        "no OS-backed lock primitive: fcntl.flock and msvcrt.locking are both "
+        "unavailable, and this module never proceeds without a lock"
+    )
+
+
+@contextmanager
+def _exclusive_lock(run_dir, *, timeout_s: float = DEFAULT_LOCK_TIMEOUT_S):
+    """Hold the run-local exclusive lock, never unlinking its path.
+
+    Unlinking a lock file on release is the classic way to hold a lock and
+    still lose: a second holder opens the path, the first unlinks it, a third
+    creates it afresh, and two holders end up locking two different inodes at
+    one path while each believes it won. So the path is created once and kept
+    forever, and the identity check after acquisition catches the case where
+    somebody else removed and recreated it while this caller was waiting.
+
+    ``timeout_s`` bounds the wait, not the attempt: zero means one honest,
+    non-blocking try. A negative timeout is a caller bug rather than
+    contention — its deadline is already past, so the loop would refuse a
+    completely free lock and report a competitor that does not exist — and it
+    is refused as ``LockUnavailableError`` because every non-contention lock
+    failure here is that error. Both are ``TrackerWriteError``: nothing changed.
+    """
+    if timeout_s < 0:
+        raise LockUnavailableError(
+            f"lock timeout must be non-negative, not {timeout_s!r}")
+    run_dir = Path(run_dir)
+    lock_path = run_dir / LOCK_FILENAME
+    try:
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as exc:
+        raise LockUnavailableError(
+            f"cannot open run lock {lock_path}: {exc}") from exc
+    acquired = False
+    release = None
+    try:
+        acquire, release, _ = select_lock_impl(fcntl, msvcrt)
+        #: One byte, because msvcrt.locking cannot lock a zero-length region.
+        #: Written before acquisition, which is safe only because the content
+        #: is meaningless: two racing creators write the same byte at the same
+        #: offset of the same inode, and neither reads it back.
+        if os.fstat(descriptor).st_size == 0:
+            os.write(descriptor, b"\0")
+            os.fsync(descriptor)
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                acquired = acquire(descriptor)
+            except OSError as exc:
+                raise LockUnavailableError(
+                    f"cannot acquire run lock {lock_path}: {exc}") from exc
+            if acquired:
+                break
+            if time.monotonic() >= deadline:
+                raise LockBusyError(
+                    f"run lock {lock_path} busy after {timeout_s:.3f}s; "
+                    "nothing changed")
+            time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+        try:
+            held = os.fstat(descriptor)
+            named = os.stat(lock_path)
+        except OSError as exc:
+            raise LockUnavailableError(
+                f"cannot verify run lock identity {lock_path}: {exc}") from exc
+        if (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino):
+            raise LockUnavailableError(
+                f"the run lock resource changed while acquiring {lock_path}")
+        yield
+    finally:
+        #: Releasing explicitly rather than relying on close, so that a release
+        #: failure is separable from a close failure; the close then drops the
+        #: lock regardless. Both run even when the body raised, or the run
+        #: wedges on its own error path.
+        if acquired and release is not None:
+            try:
+                release(descriptor)
+            except OSError:
+                pass
+        os.close(descriptor)

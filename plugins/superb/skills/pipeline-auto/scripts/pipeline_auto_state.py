@@ -5166,3 +5166,615 @@ def decision_depth(decisions: dict, consistent_with: list) -> int:
         if depth > deepest:
             deepest = depth
     return deepest + 1
+
+
+# --- admissibility and the per-brain payload ------------------------------
+#
+# Three instances of one model reading one payload are NOT three independent
+# samples. They are one prior sampled three times: shared weights plus a shared
+# prompt produce correlated error, so agreement between them is far weaker
+# evidence than a headcount makes it look. Independence is MANUFACTURED here,
+# and by exactly two moves.
+#
+#   * Every brain gets the IDENTICAL VERBATIM question. That is what makes the
+#     three answers comparable at all -- three brains asked three paraphrases
+#     have not disagreed about an answer, they have answered three questions.
+#   * Every brain gets a DIFFERENT READING ASSIGNMENT, which biases it toward a
+#     SOURCE and never toward an answer. A bias toward a source is the only
+#     kind that decorrelates without also deciding.
+#
+# The second move is also what makes the rung distribution informative: three
+# brains that each looked somewhere different and none of them found grounding
+# is the mechanical signature of drift, and that signature is unavailable if
+# all three read the same shelf.
+
+
+#: Three assignments, each biased toward a SOURCE and never toward an answer.
+#:
+#: A constant RULE rather than data, frozen beside ``RUNGS`` for the same
+#: reason those are: a controller that can write its own assignment rule can
+#: change what a brain was asked after the fact. Because the rule is constant
+#: and ``build_payload`` is pure with respect to the index, brain n's payload is
+#: determined entirely by ``(shared payload, n)``. That is what lets ONE digest
+#: bind all three, and it is what makes a re-dispatch of brain n reproducible
+#: from ``(payload_digest, n)``. It stops being true the moment anything about
+#: the assignment is read from the tracker or from run state, at which point the
+#: partial-quorum recovery path would silently re-send a brain a payload it had
+#: never received and compare the answer against the wrong question.
+READING_ASSIGNMENTS = (
+    MappingProxyType({"index": 0, "label": "spec-and-intent",
+                      "read": ("spec", "intent-brief")}),
+    MappingProxyType({"index": 1, "label": "code-and-tests",
+                      "read": ("repo", "tests")}),
+    MappingProxyType({"index": 2, "label": "decisions-and-plan",
+                      "read": ("decisions-effective", "phase-plan")}),
+)
+
+#: Every source some brain is sent to, in assignment order. Derived, never
+#: retyped: a second list of the six names would pass on the day it was written
+#: and send a brain to an unstated root the day either copy was edited.
+_ASSIGNED_SOURCES = tuple(
+    source for assignment in READING_ASSIGNMENTS for source in assignment["read"]
+)
+
+#: The one reading root the RUN states and the raiser may not. Where the
+#: effective decisions projection lives is a fact about this run, not a claim
+#: the raising worker gets to make, and two spellings of one path is one path
+#: too many: the raiser's copy is what brain 2 would be sent to read while the
+#: payload's ``decisions_effective`` says somewhere else, and the disagreement
+#: surfaces only as citations that do not resolve.
+_DERIVED_ROOT = "decisions-effective"
+
+#: The roots the question record must state, because nothing else knows them.
+_DECLARED_ROOTS = tuple(
+    source for source in _ASSIGNED_SOURCES if source != _DERIVED_ROOT
+)
+
+#: Adjectives describe how someone feels about a choice instead of naming it,
+#: and an answer to them cannot be written down as a decision. This is the
+#: options test from ``plugins/superb/agents/architecture-discovery.md:54-73``,
+#: stated mechanically: blank the title, keep the options, and a reader can
+#: still tell what is being decided -- which is false of every word below.
+#:
+#: Folded spellings only. ``check_admissible`` folds the candidate before it
+#: asks, so a capitalised ``Modern`` is caught and an entry typed here with a
+#: capital would be unreachable.
+_NON_OPTIONS = frozenset({
+    "modern", "traditional", "scalable", "simple", "pragmatic", "robust",
+    "clean", "flexible", "best-practice", "best practice", "standard",
+    "idiomatic", "lightweight",
+})
+
+#: What a brain is told to send back. It names the response keys and it names
+#: the prohibition that makes the whole ladder work -- select a rung BY NAME,
+#: never write a number -- and it carries no number of its own for a brain to
+#: read a bar off.
+_RESPONSE_SCHEMA_DOC = (
+    "Return one JSON object and nothing else. Required keys: qid, answer_key, "
+    "answer, rung, evidence, consequences, consistent_with, forecloses, blast, "
+    "alternatives, what_would_change_my_mind, blocker. Any other key is "
+    "rejected. Select a rung by name from `rungs`; never write a number "
+    "anywhere in the response. Every evidence item must quote text that is "
+    "actually at the place it cites. `alternatives` must name a rejected "
+    "second-best with a real reason. If you cannot answer, set `blocker`."
+)
+
+
+def _entries(value) -> list:
+    """The non-blank strings in a JSON list, or ``[]`` for anything else.
+
+    A BARE STRING IS NOT A LIST OF ONE. ``"T04"`` iterates as three characters,
+    each of them ``_text``-true, so a caller that simply iterated would read a
+    single mistyped cell as three blockers -- and a question that blocks
+    nothing would be admitted on the strength of a typo. A number does not
+    iterate at all and raises ``TypeError``, outside ``TrackerError``, from a
+    function whose whole job is to return a list of problems.
+    """
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [entry.strip() for entry in value if _text(entry)]
+
+
+def _option_keys(options) -> tuple[list, list]:
+    """``(stated keys, problems)`` for a record's options.
+
+    Returns the raw key of EVERY option, folded where folding is possible, so
+    that the options test below sees values a bare ``in`` would have raised on.
+    """
+    problems: list[str] = []
+    keys: list[str] = []
+    if not isinstance(options, (list, tuple)):
+        return keys, ["options-are-not-a-list"]
+    for option in options:
+        #: An option is ``{"key": ...}``; a bare string is read as its own key
+        #: so that a record which skipped the wrapper is still judged rather
+        #: than waved through as "no options at all".
+        key = option.get("key") if isinstance(option, dict) else option
+        #: FOLD ONLY WHAT CAN BE FOLDED, and let ``_member`` judge the rest.
+        #: This is the call site rule 9 exists for and it is placed ABOVE the
+        #: ``_text`` screen deliberately: a JSON option key may legally be
+        #: ``["modern"]`` or ``{"modern": 1}``, both unhashable, and
+        #: ``value in frozenset(...)`` HASHES its left operand. Reverting this
+        #: to a bare ``in`` raises ``TypeError`` -- outside ``TrackerError``,
+        #: so it escapes every handler a controller has written -- on a
+        #: raiser's typo. Below a ``_text`` guard no unhashable value could
+        #: ever reach it and the pin would be unobservable.
+        folded = key.casefold() if isinstance(key, str) else key
+        if _member(folded, _NON_OPTIONS):
+            problems.append("options-fail-the-options-test")
+        if _text(key):
+            keys.append(key.strip())
+        else:
+            problems.append("option-key-is-not-text")
+    return keys, problems
+
+
+def check_admissible(record: dict) -> list[str]:
+    """Mechanical admissibility, as a list of problem codes; ``[]`` admits.
+
+    ONLY the criteria that can be enforced mechanically. Criterion 2
+    ("decidable from the repository") and criterion 5 ("one decision, not
+    several") are judgment calls carried by P07's prose and by the raiser's own
+    declaration; criteria 1, 3 and 4 are checked here:
+
+    * **1 -- it blocks something.** A question that blocks no task is an
+      opinion, and a quorum spent on an opinion is three dispatches and a
+      decision record for something nothing was waiting on.
+    * **3 -- it names an axis.** The axis is the contradiction bucket. A
+      question with no axis contradicts nothing BY CONSTRUCTION and clears the
+      contradiction check by being unrecognisable rather than by being
+      compatible -- the same fail-open shape ``_BLAST_RADII`` is closed
+      against.
+    * **4 -- the options test.** Blank the title, keep the options, and a
+      reader can still tell what is being decided. Mechanically: adjectives are
+      not options, and fewer than two options is not a question.
+
+    Every problem is reported, not just the first, because a raiser fixing one
+    at a time pays a dispatch round per fix. Codes are de-duplicated: the list
+    is a set of faults, and a record with four adjectives has one fault.
+
+    NOTHING HERE RAISES ON CONTENT. The record is agent-supplied JSON-shaped
+    data and every field may legally hold any JSON value; a validator that
+    raises on a malformed record has not classified it.
+    """
+    if not isinstance(record, dict):
+        raise QuorumSchemaInvalid(
+            f"a question record is {type(record).__name__}, not an object; "
+            "admissibility is a judgement about fields, and a record with no "
+            "fields is not an inadmissible question, it is not a question")
+    problems: list[str] = []
+    if not _entries(record.get("blocks")):
+        problems.append("blocks-nothing")
+    if not _text(record.get("axis")):
+        problems.append("missing-axis")
+    if not _text(record.get("question")):
+        problems.append("missing-question")
+    owners = _entries(record.get("owners"))
+    if (not isinstance(record.get("owners"), (list, tuple))
+            or len(record["owners"]) != _BRAINS or len(owners) != _BRAINS):
+        problems.append("owner-count-is-not-three")
+    elif len(set(owners)) != _BRAINS:
+        #: ``_validate_quorum`` refuses a row whose three owners are not
+        #: distinct, for the reason it states there: one brain dispatched twice
+        #: is a majority manufactured from a single opinion. Catching it here
+        #: refuses the question instead of the row it would have produced.
+        problems.append("duplicate-owners")
+    supplied = record.get("options_supplied")
+    if not isinstance(supplied, bool):
+        problems.append("options-supplied-is-not-a-boolean")
+    elif supplied:
+        keys, option_problems = _option_keys(record.get("options"))
+        problems.extend(option_problems)
+        if len(keys) < 2:
+            problems.append("fewer-than-two-options")
+        if len(set(keys)) != len(keys):
+            problems.append("duplicate-options")
+    deduped: list[str] = []
+    for problem in problems:
+        if problem not in deduped:
+            deduped.append(problem)
+    return deduped
+
+
+# --- the question record on disk ------------------------------------------
+
+#: The quorum tree, and the one file in it this task reads.
+_QUORUM_DIRNAME = "quorum"
+_QUESTION_FILE = "question.md"
+
+#: The projection handed to brains, by both of its names: the file inside the
+#: run, and the path a brain must CITE it as.
+_PROJECTION_FILE = "decisions-effective.md"
+
+#: Record fields that are one string.
+_QUESTION_TEXT_FIELDS = ("question", "axis", "phase", "raiser", "recommendation")
+
+#: Record fields that are a comma-separated list of strings.
+_QUESTION_LIST_FIELDS = ("blocks", "owners", "candidate_answers", "challenge")
+
+#: The record fields a CONTENT screen is run over, for the reason
+#: ``_SCREENED_FIELDS`` exists one section up: the payload's FIELD whitelist
+#: withholds every rung value, the adoption floor and the budget, and a raiser
+#: who writes "which engine? we need at least 0.85 grounding here" hands all
+#: three to every brain anyway, inside a field the whitelist has already
+#: approved. A brain that knows the bar clears the bar.
+#:
+#: These are exactly the record's free text that REACHES a payload. ``raiser``,
+#: ``recommendation`` and ``candidate_answers`` are deliberately absent: they
+#: are structurally unreachable from ``_shared_payload``, so screening them
+#: would stop real records to protect a path that does not exist. The option
+#: keys are screened separately, in the same pass, because they travel too.
+_QUESTION_SCREENED = ("question", "axis")
+
+#: ``yes``/``no``, and nothing else. A record is hand-editable, and ``true``,
+#: ``1`` and ``Y`` each read as a boolean to somebody; admitting them all means
+#: the empty string is the only thing that is not true.
+_QUESTION_FLAGS = MappingProxyType({"yes": True, "no": False})
+
+
+def _question_flag(raw: str, field: str) -> bool:
+    if raw.strip().casefold() not in _QUESTION_FLAGS:
+        raise QuorumSchemaInvalid(
+            f"{field} is {raw.strip()!r}, not {sorted(_QUESTION_FLAGS)}; a flag "
+            "whose spelling nobody agreed on is read as true by whichever "
+            "reader is least careful")
+    return _QUESTION_FLAGS[raw.strip().casefold()]
+
+
+def _reading_roots(raw: str) -> dict:
+    """``source=path`` entries, as the mapping a brain is sent to read.
+
+    EVERY PATH HERE IS REPO-ROOT-RELATIVE, and that is checked rather than
+    documented. ``effective_rung`` resolves a brain's ``evidence[].path``
+    against the recorded repository root and refuses a result that escapes it,
+    so a root that is absolute, or that climbs out with ``..``, sends a brain
+    to a place whose citations can only be refused -- and a citation that does
+    not resolve DEMOTES SILENTLY. Every grounded answer then falls to
+    ``engineering-judgement``, every cluster lands under the floor, and the run
+    escalates every question it is ever asked while looking correctly cautious.
+    """
+    roots: dict = {}
+    for entry in (part.strip() for part in raw.split(",") if part.strip()):
+        source, assigned, path = entry.partition("=")
+        source, path = source.strip(), path.strip()
+        if not assigned or not source or not path:
+            raise QuorumSchemaInvalid(
+                f"reading root {entry!r} is not source=path; a source with no "
+                "path sends a brain nowhere, and a brain that read nowhere "
+                "reports the same empty hands as a brain that looked and found "
+                "nothing")
+        if source in roots:
+            raise QuorumSchemaInvalid(
+                f"reading root {source!r} is stated twice; one of the two is "
+                "the place that brain will be sent and nothing says which")
+        parts = path.split("/")
+        if path.startswith("/") or ".." in parts or "\\" in path:
+            raise QuorumSchemaInvalid(
+                f"reading root {source}={path!r} is not repo-root-relative; a "
+                "brain sent outside the recorded repository root produces "
+                "citations effective_rung must refuse, and a refused citation "
+                "demotes without raising")
+        roots[source] = path
+    return roots
+
+
+def parse_question(text: str) -> dict:
+    """One question record's markdown, as the record dict the payload reads.
+
+    A WHITELIST, exactly like ``project_decisions``' field whitelist and for
+    the same reason: the record is hand-editable and will grow fields, and a
+    reader that carried every field it found would ship each new one onward
+    until somebody remembered to stop it. Only the fields named above are read;
+    anything else in the file is data for a human and is unreachable from here.
+
+    The record's durable form is markdown, not JSON, because this module's
+    import allowlist is a capability boundary that holds no JSON parser and a
+    hand-rolled one would be strictly weaker than the format it imitated. The
+    field grammar is the one ``decisions.md`` already uses, read by the same
+    ``_decision_sections``, so a record and a decision are one grammar apart
+    from a reader instead of two.
+    """
+    sections = _decision_sections(text)
+    if len(sections) != 1:
+        raise QuorumSchemaInvalid(
+            f"a question record holds exactly one ## section, not {len(sections)}; "
+            "a file holding two questions has no single identity, and a file "
+            "holding none states a question nothing can be keyed by")
+    _heading, fields = sections[0]
+    record: dict = {}
+    for key in _QUESTION_TEXT_FIELDS:
+        record[key] = fields[key].strip() if key in fields else ""
+    for key in _QUESTION_LIST_FIELDS:
+        record[key] = [entry for entry in _csv(fields[key]) if entry] if key in fields else []
+    record["options_supplied"] = (
+        _question_flag(fields["options_supplied"], "Options supplied")
+        if "options_supplied" in fields else False)
+    record["options"] = [
+        {"key": key} for key in (_csv(fields["options"]) if "options" in fields else ())
+        if key
+    ]
+    roots = _reading_roots(fields["reading_roots"]) if "reading_roots" in fields else {}
+    if _DERIVED_ROOT in roots:
+        raise QuorumSchemaInvalid(
+            f"the question record states a {_DERIVED_ROOT!r} reading root; where "
+            "this run's decisions projection lives is a fact about the run and "
+            "not a claim the raiser makes, and a second spelling of it is the "
+            "one brain 2 is sent to read while the payload cites the other")
+    missing = [source for source in _DECLARED_ROOTS if source not in roots]
+    if missing:
+        raise QuorumSchemaInvalid(
+            f"the question record states no reading root for {missing}; every "
+            "source some brain is assigned to must have one, because a brain "
+            "sent to an empty root reports exactly what a brain that looked and "
+            "found nothing reports -- and that is the signature the rung "
+            "distribution is read for")
+    record["reading_roots"] = roots
+    #: THE CONTENT SCREEN, run at parse time exactly as ``parse_decisions``
+    #: runs it over ``decisions.md``: a rung value or a hyphenated rung name
+    #: quoted inside the question reaches a brain through a field the payload
+    #: whitelist has already approved. A HIT IS A STOP AND NEVER A STRIP --
+    #: silently editing the question would leave the record and what the brains
+    #: were asked disagreeing about the question.
+    for name in _QUESTION_SCREENED:
+        leaked = _rung_leak(record[name])
+        if leaked is not None:
+            raise QuorumSchemaInvalid(
+                f"the question record's {name} quotes the grounding ladder "
+                f"({leaked}); every brain would read the bar it is being "
+                "measured against, and a brain that knows the bar clears it")
+    for option in record["options"]:
+        leaked = _rung_leak(option["key"])
+        if leaked is not None:
+            raise QuorumSchemaInvalid(
+                f"option key {option['key']!r} quotes the grounding ladder "
+                f"({leaked}); the options travel in the payload verbatim")
+    return record
+
+
+def _question_record(run_dir, qid: str) -> dict:
+    """The record for one qid, read from the run and bound to its own identity.
+
+    THE QID IS RE-DERIVED AND COMPARED. A record is addressed by the directory
+    it sits in, and a directory can be copied, renamed or half-restored from a
+    backup; a record whose own question and axis do not hash to the qid it is
+    filed under is a question answered under another question's identity, and
+    every response, digest and decision keyed by that qid would look
+    well-formed.
+    """
+    if not _text(qid):
+        raise QuorumSchemaInvalid(
+            f"qid {qid!r} is not a question id; a payload keyed by nothing is a "
+            "payload no response can be matched back to")
+    path = _run_path(run_dir) / _QUORUM_DIRNAME / qid.strip() / _QUESTION_FILE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise QuorumError(
+            f"no readable question record for {qid}: {exc}; a payload cannot be "
+            "built from a question nobody wrote down") from exc
+    record = parse_question(text)
+    problems = check_admissible(record)
+    if problems:
+        raise QuorumSchemaInvalid(
+            f"the question record for {qid} is inadmissible ({problems}); a "
+            "payload built from it would dispatch brains at a question the run "
+            "had already decided it may not ask")
+    derived = derive_qid(record["question"], record["axis"])
+    if derived != qid.strip():
+        raise QuorumSchemaInvalid(
+            f"the question record filed under {qid} derives {derived}; a record "
+            "answering under another question's identity produces responses, "
+            "digests and a decision that all look well-formed and all belong to "
+            "a question nobody asked")
+    return record
+
+
+def _run_path(run_dir) -> Path:
+    """``run_dir`` as a ``Path``, with anything else refused rather than coerced.
+
+    ``Path(5)`` raises ``TypeError``, which is outside ``TrackerError`` and so
+    escapes every handler a controller has written. The run directory is the
+    one argument every function in this section takes and the one most likely
+    to arrive as ``None`` from a caller that lost it.
+    """
+    if not isinstance(run_dir, (str, Path)):
+        raise QuorumError(
+            f"run_dir is {type(run_dir).__name__}, not a path; coercing it "
+            "would build a payload against a directory named by a repr")
+    return Path(run_dir)
+
+
+def _run_relative(run_dir, name: str) -> str:
+    """A file inside the run, expressed the way a brain must CITE it.
+
+    REPO-ROOT-RELATIVE, because ``effective_rung`` resolves every citation
+    against the recorded repository root and refuses one that escapes it. Hand
+    a brain the bare ``decisions-effective.md`` and every decision citation it
+    makes resolves to ``<repo_root>/decisions-effective.md``, which does not
+    exist -- and a citation that does not resolve demotes silently. Since
+    ``specified`` requires a spec, intent-brief or decision anchor, the top rung
+    becomes unreachable, everything lands under the floor, and the run escalates
+    every question it is ever asked while looking correctly cautious.
+
+    The root is READ BACK here, never derived. A run lives at
+    ``docs/superpowers/runs/<id>/``, so the arithmetic says ``parents[3]`` --
+    until a run sits somewhere else, and there is no index right for both.
+    """
+    path = _run_path(run_dir)
+    root = Path(repo_root(validate_run(path))).resolve()
+    try:
+        inside = path.resolve().relative_to(root)
+    except ValueError:
+        raise QuorumError(
+            f"run_dir {str(path)!r} is not inside the recorded repo_root "
+            f"{str(root)!r}; a brain handed a path it cannot cite produces "
+            "evidence that never resolves, and evidence that never resolves "
+            "demotes without raising") from None
+    return (inside / name).as_posix()
+
+
+def _shared_payload(qid: str, run_dir) -> dict:
+    """The index-INDEPENDENT half of every brain's payload.
+
+    A WHITELIST CONSTRUCTOR. Every key it emits is named right here, so the
+    prohibited material is not filtered out -- it is never reachable. The
+    raiser's identity, the raiser's candidate answers and recommendation, the
+    adoption floor, the drift budget, every rung VALUE, and any elapsed-time or
+    cost signal have no route through this function. A filter can be defeated
+    by a field somebody adds later; a whitelist cannot.
+
+    Rung NAMES travel and rung VALUES do not. A brain that knows the bar clears
+    the bar, so it selects a name and the controller derives the value.
+
+    ``options`` are whitelisted while ``candidate_answers`` are excluded, and
+    the distinction is load-bearing rather than fussy: the prohibition is on the
+    raiser's preferred ANSWERS, and the named options are part of the QUESTION
+    -- admissibility criterion 4 requires them and ``answer_key`` comparison is
+    defined against them.
+    """
+    record = _question_record(run_dir, qid)
+    #: ONE spelling of the projection's location, derived from the run.
+    #: ``reading_roots`` carries it so brain 2 is sent somewhere, and
+    #: ``decisions_effective`` carries it so any brain may cite it; both are
+    #: this value, so they cannot disagree.
+    projection = _run_relative(run_dir, _PROJECTION_FILE)
+    roots = dict(record["reading_roots"])
+    roots[_DERIVED_ROOT] = projection
+    return {
+        "qid": qid.strip(),
+        #: Identical, verbatim, for all three. Fair comparison requires it.
+        "question": record["question"],
+        "axis": record["axis"],
+        "options": [{"key": option["key"]} for option in record["options"]],
+        "reading_roots": roots,
+        "decisions_effective": projection,
+        #: NAMES only, never values.
+        "rungs": list(RUNG_ORDER),
+        "response_schema": _RESPONSE_SCHEMA_DOC,
+        "you_are_one_of_several": True,
+        #: Empty except on a re-open, which carries the challenging evidence
+        #: but never the challenged answer's rung or its owner.
+        "challenge": list(record["challenge"]),
+    }
+
+
+def _canonical(value) -> str:
+    """One serialization of the payload, byte-stable across processes.
+
+    Not JSON. This module states its own durable formats and holds no JSON
+    writer; what a digest needs is not JSON but INJECTIVITY, so strings are
+    length-prefixed and every type carries a tag. Two different payloads
+    therefore cannot serialize to one string, which is the only property the
+    digest rests on.
+
+    Mapping keys are sorted, so a payload built twice from one record digests
+    the same however the dicts were assembled.
+    """
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, str):
+        return f"s{len(value)}:{value}"
+    if isinstance(value, int):
+        return f"i{value};"
+    if isinstance(value, (list, tuple)):
+        return "[" + "".join(_canonical(item) for item in value) + "]"
+    if isinstance(value, dict):
+        keys = sorted(value)
+        if any(not isinstance(key, str) for key in keys):
+            raise QuorumSchemaInvalid(
+                "a payload mapping is keyed by something other than a string; "
+                "sorting a mixture raises out of this module's family and one "
+                "key type answering for another digests two payloads alike")
+        return "{" + "".join(f"{_canonical(key)}{_canonical(value[key])}"
+                             for key in keys) + "}"
+    raise QuorumSchemaInvalid(
+        f"a payload carries {type(value).__name__}, which has no stable "
+        "serialization; a digest over a repr binds the object's address")
+
+
+def _digest(text: str) -> str:
+    """Lowercase sha256 hex, the one spelling ``## Quorum`` will accept."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def payload_digest(qid: str, *, run_dir) -> str:
+    """ONE digest binding all three brains' payloads.
+
+    It covers the shared payload and the decisions projection, and that is
+    sufficient rather than a shortcut: the reading assignment is a constant rule
+    rather than data, and ``build_payload`` is pure with respect to the index,
+    so a re-dispatch of brain n is reproducible from ``(payload_digest, n)``.
+    It stops binding the moment anything about the assignment is read from the
+    tracker or from run state, at which point the partial-quorum recovery path
+    would silently re-send a brain a different payload than it first received.
+
+    The projection is read from the RUN directory and cited to a brain as a
+    repo-root-relative path. Those are two names for one file, and the one that
+    belongs in a digest is the CONTENT: a projection whose text changed is a
+    different context, and the responses on disk were answers to the old one.
+    """
+    projection = _run_path(run_dir) / _PROJECTION_FILE
+    try:
+        text = projection.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        #: A run with no decisions yet has an empty projection, not a missing
+        #: context. Every other read failure is a real one and is not swallowed
+        #: into "there was nothing to read".
+        text = ""
+    except (OSError, UnicodeError) as exc:
+        raise QuorumError(
+            f"unreadable decisions projection for {qid}: {exc}; a digest that "
+            "quietly treated it as empty would bind the responses to a context "
+            "nobody saw") from exc
+    return _digest(_canonical(_shared_payload(qid, run_dir)) + "\x00" + text)
+
+
+def build_payload(qid: str, brain_index: int, *, run_dir) -> dict:
+    """The exact material one brain receives: the shared payload plus its rule.
+
+    PURE WITH RESPECT TO ``brain_index``, and pure with respect to run state
+    beyond the question record, the projection and the recorded repository root.
+    Nothing here consults the tracker's quorum rows, the drift budget, the clock
+    or the dispatch history -- which is what makes the three payloads one digest
+    apart and a re-dispatch reproducible.
+
+    The assignment names a source and hands over its root. It is a BIAS toward a
+    place to look, never a hint about an answer, and the other roots travel too:
+    a brain is steered, not fenced, because a fenced brain that finds nothing
+    cannot tell the difference between absence and a wall.
+    """
+    if (isinstance(brain_index, bool) or not isinstance(brain_index, int)
+            or not 0 <= brain_index < len(READING_ASSIGNMENTS)):
+        raise QuorumError(
+            f"brain_index {brain_index!r} is outside the {_BRAINS}-brain quorum; "
+            "a count is never reduced to fit capacity and a fourth brain is "
+            "never dispatched, so there is no index here to fall back to")
+    assignment = READING_ASSIGNMENTS[brain_index]
+    payload = _shared_payload(qid, run_dir)
+    roots = payload["reading_roots"]
+    #: STATED HERE TOO, though ``parse_question`` already refuses a record that
+    #: omits one. The two guards answer different questions -- "is this record
+    #: complete?" against "is THIS BRAIN being sent somewhere?" -- and this is
+    #: the one that stays right the day the assignment rule gains a source.
+    #: The alternative spellings are both wrong in the silent direction:
+    #: ``roots[source]`` raises ``KeyError``, outside ``TrackerError``, and
+    #: ``roots.get(source, "")`` dispatches a brain to nowhere, which reports
+    #: exactly what a brain that looked and found nothing reports.
+    unstated = [source for source in assignment["read"]
+                if not _text(roots.get(source))]
+    if unstated:
+        raise QuorumError(
+            f"brain {brain_index} is assigned to {unstated}, which this "
+            "question states no reading root for; a brain sent nowhere reports "
+            "the same empty hands as a brain that looked and found nothing, "
+            "and that is the signature the rung distribution is read for")
+    payload["reading_assignment"] = {
+        "label": assignment["label"],
+        "read": [{"source": source, "root": roots[source]}
+                 for source in assignment["read"]],
+    }
+    return payload

@@ -8,6 +8,7 @@ import errno
 import hashlib
 import importlib.util
 import inspect
+import json
 import multiprocessing
 import os
 import re
@@ -10589,6 +10590,790 @@ class DecisionDepthTests(DecisionContractCase):
                         "leave this module") from escaped
                 self.assertIsInstance(depth, int)
                 self.assertGreaterEqual(depth, 1)
+
+# --- admissibility and the per-brain payload ------------------------------
+
+#: The published question record, read at its real path. The in-memory
+#: ``QUESTION`` below is asserted to be exactly what this file parses to, so
+#: the fixture and the dict every case reasons about cannot drift apart.
+QUESTION_RECORD = FIXTURES / "quorum" / "question-record.md"
+
+#: The qid the canonical question and axis derive to. Written out rather than
+#: computed so that a change to ``derive_qid`` shows up here as a failure
+#: instead of silently re-keying every case in this section.
+QID = "ee1433c675a3"
+
+#: The record's fields, in file order, as ``(label, value)``. ``question_text``
+#: renders these; a case that needs one field wrong overrides exactly it.
+QUESTION_FIELDS = (
+    ("Question", "Which storage engine backs the session table?"),
+    ("Axis", "storage-engine"),
+    ("Phase", "P04"),
+    ("Blocks", "T04"),
+    ("Raiser", "worker-7"),
+    ("Options supplied", "yes"),
+    ("Options", "postgres, sqlite"),
+    ("Candidate answers", "postgres because we already run it"),
+    ("Recommendation", "postgres"),
+    ("Reading roots",
+     "spec=docs/superpowers/specs/design.md, "
+     "intent-brief=docs/superpowers/runs/R/intent-brief.md, "
+     "repo=., tests=tests, "
+     "phase-plan=docs/superpowers/plans/phase-04.md"),
+    ("Owners", "brain-a, brain-b, brain-c"),
+)
+
+#: The record as ``parse_question`` produces it. Stated literally, not derived
+#: from the parser: a dict built by the code under test agrees with that code
+#: by construction and would keep agreeing with it while both were wrong.
+QUESTION = {
+    "question": "Which storage engine backs the session table?",
+    "axis": "storage-engine",
+    "phase": "P04",
+    "blocks": ["T04"],
+    "raiser": "worker-7",
+    "options_supplied": True,
+    "options": [{"key": "postgres"}, {"key": "sqlite"}],
+    "candidate_answers": ["postgres because we already run it"],
+    "recommendation": "postgres",
+    "reading_roots": {
+        "spec": "docs/superpowers/specs/design.md",
+        "intent-brief": "docs/superpowers/runs/R/intent-brief.md",
+        "repo": ".",
+        "tests": "tests",
+        "phase-plan": "docs/superpowers/plans/phase-04.md",
+    },
+    "owners": ["brain-a", "brain-b", "brain-c"],
+    "challenge": [],
+}
+
+#: Every JSON value a field may legally hold that is NOT the shape the reader
+#: expects. The two unhashable entries are the ones ``x in frozenset(...)``
+#: raises ``TypeError`` on; the scalars are the ones a coercing reader turns
+#: into a legal-looking value.
+HOSTILE_VALUES = ([], ["modern"], {}, {"modern": 1}, 0, 1, 1.5, True, None, "",
+                  "  ", "modern")
+
+
+def question_text(*, heading=f"## Q-{QID} — Session storage", drop=(),
+                  extra=(), **overrides) -> str:
+    """The question record's markdown, with named fields changed or removed.
+
+    Keyed by the dict key the field parses to (``options_supplied``), not by
+    its display label, so a case names the thing the module reads.
+    """
+    lines = ["<!-- pipeline-auto/v1 -->", "", heading, ""]
+    for label, value in QUESTION_FIELDS:
+        key = label.lower().replace(" ", "_")
+        if key in drop:
+            continue
+        lines.append(f"- **{label}:** {overrides.get(key, value)}")
+    lines.extend(extra)
+    return "\n".join(lines) + "\n"
+
+
+class CheckAdmissible(unittest.TestCase):
+    """Admissibility, at exactly the three criteria a machine can settle.
+
+    Criterion 2 ("decidable from the repository") and criterion 5 ("one
+    decision, not several") are judgment calls and stay with P07's prose. What
+    is here is criterion 1 (it blocks something), criterion 3 (it names an
+    axis) and criterion 4 (the options test) — plus the shape rules the quorum
+    row will be held to anyway, caught at the question rather than at the row.
+    """
+
+    def test_the_fixture_on_disk_is_the_record_these_cases_reason_about(self):
+        """The two halves of every case below, pinned to each other.
+
+        Without this the dict is one author's memory of the file and the file
+        is nobody's. It is also where a case that "depends on a fixture
+        property" states the property: ``QUESTION`` carries the raiser and a
+        candidate answer, which is the whole of what the payload cases prove
+        is dropped.
+        """
+        self.assertEqual(pas.parse_question(QUESTION_RECORD.read_text(encoding="utf-8")),
+                         QUESTION)
+        self.assertEqual(pas.parse_question(question_text()), QUESTION)
+        self.assertEqual(QUESTION["raiser"], "worker-7")
+        self.assertEqual(QUESTION["candidate_answers"],
+                         ["postgres because we already run it"])
+        self.assertEqual(QUESTION["recommendation"], "postgres")
+
+    def test_a_well_formed_question_is_admissible(self):
+        """THE ACCEPT CASE. Every stricter bar below is paired with this one:
+        an implementation that refused everything would satisfy all of them and
+        dispatch nothing for the life of the run.
+        """
+        self.assertEqual(pas.check_admissible(QUESTION), [])
+
+    def test_a_question_that_supplies_no_options_is_still_admissible(self):
+        """The second accept case, and the one a blanket ``options`` rule
+        breaks: criterion 4 judges the options a record SUPPLIES, and a record
+        that supplies none is judged by P07's prose instead.
+        """
+        self.assertEqual(
+            pas.check_admissible(dict(QUESTION, options_supplied=False, options=[])),
+            [])
+
+    def test_a_question_blocking_nothing_is_an_opinion(self):
+        self.assertIn("blocks-nothing",
+                      pas.check_admissible(dict(QUESTION, blocks=[])))
+
+    def test_a_bare_string_is_not_a_list_of_blockers(self):
+        """``"T04"`` iterates as three ``_text``-true characters.
+
+        A reader that simply iterated would read one mistyped cell as three
+        blockers and admit a question that blocks nothing on the strength of
+        a typo.
+        """
+        self.assertIn("blocks-nothing",
+                      pas.check_admissible(dict(QUESTION, blocks="T04")))
+
+    def test_an_axis_is_required(self):
+        self.assertIn("missing-axis", pas.check_admissible(dict(QUESTION, axis="")))
+
+    def test_a_question_is_required(self):
+        self.assertIn("missing-question",
+                      pas.check_admissible(dict(QUESTION, question="   ")))
+
+    def test_adjectives_are_not_options(self):
+        bad = dict(QUESTION, options=[{"key": "modern"}, {"key": "pragmatic"}])
+        self.assertIn("options-fail-the-options-test", pas.check_admissible(bad))
+
+    def test_the_options_test_folds_before_it_asks(self):
+        """``Modern`` is the same non-option as ``modern``.
+
+        ``_NON_OPTIONS`` holds folded spellings only, so a screen that forgot
+        to fold would admit every capitalised adjective — which is how they are
+        actually typed at the head of an option list.
+        """
+        bad = dict(QUESTION, options=[{"key": "Modern"}, {"key": "PRAGMATIC"}])
+        self.assertIn("options-fail-the-options-test", pas.check_admissible(bad))
+
+    def test_an_unhashable_option_key_is_judged_and_never_raises(self):
+        """RULE 9, at the one call site in this function that can see one.
+
+        ``["modern"] in frozenset(...)`` HASHES its left operand and raises
+        ``TypeError`` — outside ``TrackerError``, so it escapes every handler a
+        controller has written and kills the run on a raiser's typo. The screen
+        is placed ABOVE the ``_text`` guard for exactly this reason: below it,
+        no unhashable value could ever arrive and this case would pass against
+        a bare ``in``.
+        """
+        for hostile in ([], ["modern"], {}, {"modern": 1}):
+            with self.subTest(key=repr(hostile)):
+                problems = pas.check_admissible(
+                    dict(QUESTION, options=[{"key": hostile}, {"key": "sqlite"}]))
+                self.assertIn("option-key-is-not-text", problems)
+                self.assertIn("fewer-than-two-options", problems)
+
+    def test_an_option_key_is_not_coerced_into_a_legal_option(self):
+        """``str(["modern"])`` is ``"['modern']"``: non-empty, and an option.
+
+        A reader that coerced would count it toward the two options criterion 4
+        requires, so a record with one real option and one list would pass the
+        test criterion 4 exists to apply.
+        """
+        self.assertIn("fewer-than-two-options", pas.check_admissible(
+            dict(QUESTION, options=[{"key": "postgres"}, {"key": ["sqlite"]}])))
+
+    def test_a_single_option_is_not_a_question(self):
+        self.assertIn("fewer-than-two-options", pas.check_admissible(
+            dict(QUESTION, options=[{"key": "postgres"}])))
+
+    def test_two_spellings_of_one_option_are_one_option(self):
+        self.assertIn("duplicate-options", pas.check_admissible(
+            dict(QUESTION, options=[{"key": "postgres"}, {"key": "postgres"}])))
+
+    def test_exactly_three_owners_are_required(self):
+        for owners in (["brain-a", "brain-b"],
+                       ["brain-a", "brain-b", "brain-c", "brain-d"],
+                       "abc", (), None):
+            with self.subTest(owners=repr(owners)):
+                self.assertIn("owner-count-is-not-three",
+                              pas.check_admissible(dict(QUESTION, owners=owners)))
+
+    def test_one_brain_dispatched_twice_is_not_three_brains(self):
+        """``_validate_quorum`` refuses the ROW; this refuses the QUESTION.
+
+        One brain dispatched twice is a majority manufactured from a single
+        opinion, and catching it here costs nothing while catching it at the
+        row costs three dispatches.
+        """
+        self.assertIn("duplicate-owners", pas.check_admissible(
+            dict(QUESTION, owners=["brain-a", "brain-a", "brain-c"])))
+
+    def test_options_supplied_is_a_boolean_and_not_a_spelling_of_one(self):
+        for supplied in ("yes", "true", 1, "false", None):
+            with self.subTest(options_supplied=repr(supplied)):
+                self.assertIn("options-supplied-is-not-a-boolean",
+                              pas.check_admissible(
+                                  dict(QUESTION, options_supplied=supplied)))
+
+    def test_a_record_that_is_not_an_object_is_refused_by_type(self):
+        for record in ("", [], None, 0, ["question"]):
+            with self.subTest(record=repr(record)):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.check_admissible(record)
+
+    def record_fields_read(self) -> set:
+        """Every record field ``check_admissible`` reads, FROM ITS OWN BODY.
+
+        Rule 10: a totality claim derives its case list from the call tree, not
+        from what the author remembers writing. Every ``record.get("X")`` and
+        ``record["X"]`` in the function is collected here, so a field added to
+        the reader and not to the corpus below fails this file.
+        """
+        node = function_node(module_source(), "check_admissible")
+        fields = set()
+        for inner in ast.walk(node):
+            if (isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Attribute)
+                    and inner.func.attr == "get"
+                    and isinstance(inner.func.value, ast.Name)
+                    and inner.func.value.id == "record"
+                    and inner.args
+                    and isinstance(inner.args[0], ast.Constant)):
+                fields.add(inner.args[0].value)
+            if (isinstance(inner, ast.Subscript)
+                    and isinstance(inner.value, ast.Name)
+                    and inner.value.id == "record"
+                    and isinstance(inner.slice, ast.Constant)):
+                fields.add(inner.slice.value)
+        return fields
+
+    def test_the_field_sweep_finds_the_fields_this_file_claims_it_does(self):
+        """A test of the test. The sweep below is only a totality claim if the
+        extractor actually finds fields; against a broken one it would return
+        an empty set and every case would pass by covering nothing.
+        """
+        self.assertEqual(
+            self.record_fields_read(),
+            {"blocks", "axis", "question", "owners", "options_supplied", "options"})
+
+    def test_no_value_in_any_field_it_reads_escapes_the_tracker_error_family(self):
+        """Every field from the sweep above, crossed with every hostile value.
+
+        ``check_admissible`` is handed agent-authored data, and every field may
+        legally hold any JSON value. A validator that raises has not classified
+        the record, and anything outside ``TrackerError`` escapes every handler
+        a controller has written.
+        """
+        fields = sorted(self.record_fields_read())
+        self.assertTrue(fields, "the field sweep found nothing to vary")
+        probes = [dict(QUESTION, **{field: value})
+                  for field in fields for value in HOSTILE_VALUES]
+        #: The option list's own members, which the sweep above cannot see:
+        #: the field is ``options`` and the hostile value is one level in.
+        probes.extend(dict(QUESTION, options=[value]) for value in HOSTILE_VALUES)
+        probes.extend(dict(QUESTION, options=[{"key": value}])
+                      for value in HOSTILE_VALUES)
+        probes.extend(dict(QUESTION, options=[{"key": "postgres"}, value])
+                      for value in HOSTILE_VALUES)
+        #: Two options that fail the same way. The de-duplication claim below
+        #: is only a claim if some probe can actually produce a repeat.
+        probes.append(dict(QUESTION, options=[{"key": "modern"}, {"key": "pragmatic"}]))
+        probes.append(dict(QUESTION, options=[{"key": []}, {"key": {}}]))
+        for probe in probes:
+            with self.subTest(probe=repr(probe)[:90]):
+                try:
+                    problems = pas.check_admissible(probe)
+                except pas.TrackerError:
+                    continue
+                except Exception as escaped:    # noqa: BLE001 - that is the claim
+                    raise AssertionError(
+                        f"{type(escaped).__name__}({escaped}) escaped "
+                        "check_admissible; nothing outside TrackerError may "
+                        "leave this module") from escaped
+                self.assertIsInstance(problems, list)
+                self.assertEqual(len(set(problems)), len(problems),
+                                 "a fault was reported twice; the list is a set "
+                                 "of faults and a repeat reads as two problems")
+                for problem in problems:
+                    self.assertIsInstance(problem, str)
+
+
+class ReadingAssignments(unittest.TestCase):
+    """The rule that manufactures independence, and its frozenness.
+
+    Three instances of one model reading one payload are not three independent
+    samples — they are one prior sampled three times. What decorrelates them is
+    a different PLACE TO LOOK, never a different question and never a hint
+    about an answer.
+    """
+
+    def test_there_is_one_assignment_per_brain_and_it_is_index_addressed(self):
+        self.assertEqual(len(pas.READING_ASSIGNMENTS), 3)
+        self.assertEqual(len(pas.READING_ASSIGNMENTS), pas._BRAINS)
+        for index, assignment in enumerate(pas.READING_ASSIGNMENTS):
+            with self.subTest(index=index):
+                self.assertEqual(assignment["index"], index)
+
+    def test_each_assignment_names_a_source_and_never_an_answer(self):
+        self.assertEqual(
+            [assignment["label"] for assignment in pas.READING_ASSIGNMENTS],
+            ["spec-and-intent", "code-and-tests", "decisions-and-plan"])
+        self.assertEqual(
+            [tuple(assignment["read"]) for assignment in pas.READING_ASSIGNMENTS],
+            [("spec", "intent-brief"), ("repo", "tests"),
+             ("decisions-effective", "phase-plan")])
+
+    def test_no_two_brains_are_sent_to_the_same_shelf(self):
+        """The whole mechanism. Two brains reading one source are two samples
+        of one prior again, and the rung distribution stops being the drift
+        signature it is read as.
+        """
+        sources = [source for assignment in pas.READING_ASSIGNMENTS
+                   for source in assignment["read"]]
+        self.assertEqual(len(sources), len(set(sources)))
+
+    def test_the_assignment_rule_is_frozen(self):
+        """A controller that can write its own assignment rule can change what
+        a brain was asked after the fact. Frozen at the language level, both
+        ways: the mapping refuses a write and the tuple refuses a swap.
+        """
+        with self.assertRaises(TypeError):
+            pas.READING_ASSIGNMENTS[0]["read"] = ("repo",)
+        with self.assertRaises(TypeError):
+            pas.READING_ASSIGNMENTS[0] = {"index": 0, "label": "x", "read": ()}
+
+
+class BuildPayload(unittest.TestCase):
+    """The exact material one brain receives.
+
+    Everything here is a statement about ONE function's purity, because the
+    partial-quorum recovery path rests on it: a re-dispatch of brain n must be
+    reproducible from ``(payload_digest, n)``, and that holds only while the
+    assignment is a frozen constant and nothing about the payload is read from
+    the tracker or from run state.
+    """
+
+    def setUp(self):
+        self.root, self.run_dir = repo_with_a_run(self)
+        self.qid = pas.derive_qid(QUESTION["question"], QUESTION["axis"])
+        self.assertEqual(self.qid, QID)
+        self.write_record()
+        self.payloads = [pas.build_payload(self.qid, index, run_dir=str(self.run_dir))
+                         for index in range(3)]
+
+    def write_record(self, text=None, qid=None):
+        directory = self.run_dir / "quorum" / (qid or self.qid)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "question.md").write_text(
+            question_text() if text is None else text, encoding="utf-8")
+        return directory
+
+    def rebuild(self, text=None, qid=None, index=0):
+        self.write_record(text=text, qid=qid)
+        return pas.build_payload(qid or self.qid, index, run_dir=str(self.run_dir))
+
+    def test_the_question_is_identical_across_all_three_brains(self):
+        """Fair comparison requires it. Three brains asked three paraphrases
+        have not disagreed about an answer; they have answered three questions.
+        """
+        questions = {payload["question"] for payload in self.payloads}
+        self.assertEqual(len(questions), 1)
+        self.assertEqual(questions.pop(), QUESTION["question"])
+
+    def test_the_reading_assignments_differ(self):
+        labels = [payload["reading_assignment"]["label"] for payload in self.payloads]
+        self.assertEqual(len(set(labels)), 3)
+        self.assertEqual(labels, ["spec-and-intent", "code-and-tests",
+                                  "decisions-and-plan"])
+
+    def test_each_assignment_is_the_frozen_rule_applied_to_the_records_roots(self):
+        """The purity claim, stated as an equation rather than as a shape.
+
+        Computed here from the frozen constant and the payload's own roots, so
+        a ``build_payload`` that consulted the tracker, the clock or the
+        dispatch history to choose an assignment fails — which is the only
+        thing standing between the recovery path and re-sending a brain a
+        payload it never received.
+        """
+        for index, payload in enumerate(self.payloads):
+            with self.subTest(index=index):
+                assignment = pas.READING_ASSIGNMENTS[index]
+                self.assertEqual(payload["reading_assignment"], {
+                    "label": assignment["label"],
+                    "read": [{"source": source,
+                              "root": payload["reading_roots"][source]}
+                             for source in assignment["read"]],
+                })
+
+    def test_every_assigned_brain_is_sent_somewhere_real(self):
+        """A root that came back empty would send that brain nowhere, and a
+        brain that read nowhere reports exactly what a brain that looked and
+        found nothing reports — which is the signature the rung distribution is
+        read for.
+        """
+        for payload in self.payloads:
+            for item in payload["reading_assignment"]["read"]:
+                with self.subTest(source=item["source"]):
+                    self.assertTrue(item["root"].strip())
+
+    def test_the_payload_never_carries_the_raisers_candidates(self):
+        """The whitelist, proved against a record that really carries them."""
+        record = QUESTION_RECORD.read_text(encoding="utf-8")
+        for secret in ("worker-7", "because we already run it", "Recommendation"):
+            self.assertIn(secret, record,
+                          "the fixture does not carry the material these "
+                          "assertions claim is dropped, so they prove nothing")
+        for payload in self.payloads:
+            rendered = json.dumps(payload)
+            self.assertNotIn("worker-7", rendered)
+            self.assertNotIn("because we already run it", rendered)
+            self.assertNotIn("recommendation", rendered.casefold())
+            self.assertNotIn("candidate", rendered.casefold())
+
+    def test_the_payload_never_carries_the_floor_or_any_rung_value(self):
+        """A brain that knows the bar clears the bar.
+
+        The values are read off ``RUNGS`` rather than typed out, so a ladder
+        that gains a rung gains the screen for it on the same day.
+        """
+        leaks = [str(value) for value in pas.RUNGS.values()]
+        leaks.extend(("adoption_floor", "floor", "budget", "elapsed", "deadline",
+                      "cost"))
+        self.assertIn("0.85", leaks)
+        for payload in self.payloads:
+            rendered = json.dumps(payload).casefold()
+            for leak in leaks:
+                with self.subTest(leak=leak):
+                    self.assertNotIn(leak.casefold(), rendered)
+
+    def test_a_question_quoting_the_ladder_is_refused_rather_than_stripped(self):
+        """The hole the field whitelist cannot close.
+
+        ``question`` is projected verbatim — it has to be — so a raiser who
+        writes the bar into it hands the bar to all three brains through a
+        field the whitelist has already approved. Screened at parse time, with
+        exactly the screen ``parse_decisions`` runs over ``decisions.md``, and
+        a hit is a STOP: editing the question silently would leave the record
+        and what the brains were asked disagreeing.
+        """
+        for spelling in ("Which engine? we need 0.85 grounding",
+                         "Which engine? code-evidenced at least",
+                         "Which engine, at .85 or better?"):
+            with self.subTest(question=spelling):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.parse_question(question_text(question=spelling))
+        with self.subTest(option="a rung name as an option key"):
+            with self.assertRaises(pas.QuorumSchemaInvalid):
+                pas.parse_question(
+                    question_text(options="postgres, convention-cited"))
+        #: The accept half: ordinary prose that merely resembles the ladder.
+        self.assertEqual(
+            pas.parse_question(question_text(
+                question="Which engine handles 85 open connections?"))["question"],
+            "Which engine handles 85 open connections?")
+
+    def test_the_payload_offers_rung_names_so_a_brain_can_select_one(self):
+        for payload in self.payloads:
+            self.assertEqual(tuple(payload["rungs"]), pas.RUNG_ORDER)
+
+    def test_a_brain_index_outside_the_three_is_refused(self):
+        """Including the indices that are integers only by accident. ``True``
+        is ``1`` in every comparison Python makes, so a flag that reached here
+        would silently be dispatched as brain 1.
+        """
+        for index in (3, -1, 4, True, False, "0", 1.0, None, [0], 1.5):
+            with self.subTest(brain_index=repr(index)):
+                with self.assertRaises(pas.QuorumError):
+                    pas.build_payload(self.qid, index, run_dir=str(self.run_dir))
+
+    def test_the_three_payloads_differ_only_in_the_assignment_block(self):
+        shared = []
+        for payload in self.payloads:
+            stripped = dict(payload)
+            stripped.pop("reading_assignment")
+            shared.append(json.dumps(stripped, indent=2, sort_keys=True))
+        self.assertEqual(len(set(shared)), 1)
+        #: And the block that was stripped really did differ, or the case above
+        #: is satisfied by three identical payloads.
+        self.assertEqual(
+            len({json.dumps(payload["reading_assignment"], sort_keys=True)
+                 for payload in self.payloads}), 3)
+
+    def test_one_digest_binds_all_three_and_rebuilds_each_byte_for_byte(self):
+        """THE ASSERTION THE PARTIAL-RECOVERY RULE RESTS ON.
+
+        Nothing else in the design checks it: a re-dispatch of brain n must be
+        reproducible from ``(payload_digest, n)``. It stops holding the moment
+        ``build_payload`` reads anything from the tracker or from run state.
+        """
+        digest = pas.payload_digest(self.qid, run_dir=str(self.run_dir))
+        rendered = [json.dumps(payload, indent=2, sort_keys=True)
+                    for payload in self.payloads]
+        for index in range(3):
+            rebuilt = pas.build_payload(self.qid, index, run_dir=str(self.run_dir))
+            self.assertEqual(json.dumps(rebuilt, indent=2, sort_keys=True),
+                             rendered[index])
+        self.assertEqual(pas.payload_digest(self.qid, run_dir=str(self.run_dir)),
+                         digest)
+
+    def test_the_digest_is_the_one_spelling_the_quorum_row_accepts(self):
+        """``_validate_quorum`` refuses a ``Payload Digest`` cell that is not
+        lowercase sha256 hex, so a digest of any other width is a value this
+        module computes and its own tracker will not hold.
+        """
+        digest = pas.payload_digest(self.qid, run_dir=str(self.run_dir))
+        self.assertTrue(pas._SHA256.fullmatch(digest), digest)
+
+    def test_the_digest_covers_the_decisions_projection(self):
+        """A projection whose text changed is a different context, and the
+        responses on disk were answers to the old one. The payload itself does
+        NOT change with it — the projection is context, not question — so both
+        halves are stated.
+        """
+        before = pas.payload_digest(self.qid, run_dir=str(self.run_dir))
+        projection = self.run_dir / "decisions-effective.md"
+        self.assertFalse(projection.exists())
+        projection.write_text("## H-001\n\n- **Answer:** postgres\n", encoding="utf-8")
+        after = pas.payload_digest(self.qid, run_dir=str(self.run_dir))
+        self.assertNotEqual(before, after)
+        self.assertEqual(
+            json.dumps(pas.build_payload(self.qid, 0, run_dir=str(self.run_dir)),
+                       sort_keys=True),
+            json.dumps(self.payloads[0], sort_keys=True))
+
+    def test_the_digest_moves_when_the_question_does(self):
+        """The accept half of the case above: a digest that never moved would
+        satisfy "one digest binds all three" by binding nothing.
+        """
+        before = pas.payload_digest(self.qid, run_dir=str(self.run_dir))
+        self.write_record(text=question_text(
+            options="postgres, sqlite, mysql",
+            reading_roots=QUESTION_FIELDS[9][1].replace("tests=tests", "tests=t")))
+        self.assertNotEqual(
+            pas.payload_digest(self.qid, run_dir=str(self.run_dir)), before)
+
+    def test_a_field_nobody_whitelisted_is_unreachable_rather_than_filtered(self):
+        """WHY IT IS A WHITELIST. A filter can be defeated by a new field.
+
+        The record grows a field that carries the adoption floor, the budget and
+        the raiser's preference. The payload is byte-identical to the payload
+        built before the field existed, at two layers: ``parse_question`` names
+        the fields it reads and ``_shared_payload`` names the keys it emits.
+        """
+        grown = question_text(extra=(
+            "- **Adoption floor:** 0.85",
+            "- **Drift budget remaining:** 2",
+            "- **Raiser prefers:** postgres, obviously",
+            "- **Elapsed:** 41 minutes",
+        ))
+        self.assertIn("0.85", grown)
+        rebuilt = self.rebuild(text=grown)
+        self.assertEqual(json.dumps(rebuilt, sort_keys=True),
+                         json.dumps(self.payloads[0], sort_keys=True))
+
+    def test_the_projection_is_cited_the_way_effective_rung_resolves_it(self):
+        """THE TASK 3 CORRECTION, and the failure it prevents is invisible.
+
+        ``effective_rung`` resolves ``evidence[].path`` against the RECORDED
+        repository root. Hand a brain the bare ``decisions-effective.md`` and
+        every decision citation resolves to ``<repo_root>/decisions-effective.md``,
+        which does not exist — and a citation that does not resolve demotes
+        silently. Since ``specified`` requires a spec, intent-brief or decision
+        anchor, the top rung becomes unreachable and the run escalates every
+        question it is ever asked while looking correctly cautious.
+        """
+        cited = self.payloads[0]["decisions_effective"]
+        self.assertNotEqual(cited, "decisions-effective.md")
+        self.assertFalse(Path(cited).is_absolute())
+        self.assertEqual((self.root / cited).resolve(),
+                         (self.run_dir / "decisions-effective.md").resolve())
+        #: And brain 2, the one actually sent to read it, is sent to the same
+        #: place — one spelling, so the two cannot disagree.
+        self.assertEqual(self.payloads[2]["reading_roots"]["decisions-effective"],
+                         cited)
+        self.assertEqual(
+            self.payloads[2]["reading_assignment"]["read"][0],
+            {"source": "decisions-effective", "root": cited})
+
+    def test_the_raiser_may_not_state_where_the_projection_lives(self):
+        """Two spellings of one path is one path too many: the raiser's copy is
+        where brain 2 would be sent while the payload cites the other, and the
+        disagreement surfaces only as citations that will not resolve.
+        """
+        with self.assertRaises(pas.QuorumSchemaInvalid):
+            pas.parse_question(question_text(
+                reading_roots=QUESTION_FIELDS[9][1]
+                + ", decisions-effective=decisions-effective.md"))
+
+    def test_a_reading_root_a_brain_is_assigned_to_must_exist(self):
+        """A missing root is the silent case: the brain is handed nothing,
+        reports no grounding, and the rung distribution reads as drift.
+        """
+        for source in ("spec", "intent-brief", "repo", "tests", "phase-plan"):
+            with self.subTest(source=source):
+                roots = ", ".join(
+                    f"{name}={path}"
+                    for name, path in QUESTION["reading_roots"].items()
+                    if name != source)
+                with self.assertRaises(pas.QuorumSchemaInvalid) as caught:
+                    pas.parse_question(question_text(reading_roots=roots))
+                self.assertIn(source, str(caught.exception))
+
+    def test_a_reading_root_that_escapes_the_repository_is_refused(self):
+        """A brain sent outside the recorded root produces citations
+        ``effective_rung`` must refuse, and a refused citation demotes without
+        raising.
+        """
+        for path in ("/etc", "../outside", "docs/../../elsewhere", "C:\\repo"):
+            with self.subTest(root=path):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.parse_question(question_text(
+                        reading_roots=QUESTION_FIELDS[9][1].replace(
+                            "repo=.", f"repo={path}")))
+        #: The accept half: the repository itself, and a nested directory.
+        self.assertEqual(
+            pas.parse_question(question_text(
+                reading_roots=QUESTION_FIELDS[9][1].replace(
+                    "repo=.", "repo=src/app")))["reading_roots"]["repo"],
+            "src/app")
+
+    def test_a_record_filed_under_another_questions_identity_is_refused(self):
+        """A directory can be copied, renamed, or half-restored from a backup.
+        A record whose own question and axis do not hash to the qid it is filed
+        under produces responses, digests and a decision that all look
+        well-formed and all belong to a question nobody asked.
+        """
+        other = pas.derive_qid("Which cache backend?", "cache-backend")
+        self.assertNotEqual(other, self.qid)
+        self.write_record(text=question_text(), qid=other)
+        with self.assertRaises(pas.QuorumSchemaInvalid) as caught:
+            pas.build_payload(other, 0, run_dir=str(self.run_dir))
+        self.assertIn(self.qid, str(caught.exception))
+
+    def test_an_inadmissible_record_never_becomes_a_payload(self):
+        """A payload is a dispatch. Building one for a question the run has
+        already decided it may not ask spends three brains and a decision
+        record on it anyway.
+        """
+        with self.assertRaises(pas.QuorumSchemaInvalid) as caught:
+            self.rebuild(text=question_text(owners="brain-a, brain-b"))
+        self.assertIn("owner-count-is-not-three", str(caught.exception))
+
+    def test_a_missing_or_unreadable_record_stops_inside_the_family(self):
+        directory = self.run_dir / "quorum" / self.qid
+        (directory / "question.md").unlink()
+        with self.assertRaises(pas.QuorumError):
+            pas.build_payload(self.qid, 0, run_dir=str(self.run_dir))
+        with self.assertRaises(pas.QuorumError):
+            pas.payload_digest(self.qid, run_dir=str(self.run_dir))
+        (directory / "question.md").write_bytes(b"\xff\xfe not utf-8 \xff")
+        with self.assertRaises(pas.QuorumError):
+            pas.build_payload(self.qid, 0, run_dir=str(self.run_dir))
+
+    def test_a_record_with_no_single_question_in_it_is_refused(self):
+        """A file holding two questions has no single identity, and a file
+        holding none states a question nothing can be keyed by.
+
+        The two-section case uses DISTINCT headings deliberately: two identical
+        headings are already refused by ``_decision_sections``, so a case built
+        from them would pass against a reader that accepted any number of
+        sections above zero.
+        """
+        for text, why in (("", "no section at all"),
+                          (question_text()
+                           + question_text(heading="## Q-other — Cache backend"),
+                           "two sections"),
+                          ("- **Question:** orphaned field\n", "no heading")):
+            with self.subTest(record=why):
+                with self.assertRaises(pas.TrackerError):
+                    pas.parse_question(text)
+
+    def test_one_source_may_not_name_two_places_to_look(self):
+        """One of the two is where that brain is sent and nothing says which."""
+        with self.assertRaises(pas.QuorumSchemaInvalid):
+            pas.parse_question(question_text(
+                reading_roots=QUESTION_FIELDS[9][1] + ", repo=src"))
+
+    def test_a_brain_assigned_to_an_unstated_root_is_refused_not_sent_nowhere(self):
+        """The second guard on the same fact, at the seam that outlives the first.
+
+        ``parse_question`` refuses a record that omits a root some brain is
+        assigned to, so this can only be reached by widening the assignment
+        rule — which is exactly the day it matters. The failure it prevents is
+        silent twice over: ``roots.get(source, "")`` dispatches a brain to
+        nowhere, and its empty-handed answer is indistinguishable from a brain
+        that looked and found nothing.
+        """
+        thinner = tuple(source for source in pas._DECLARED_ROOTS
+                        if source != "tests")
+        self.assertNotIn("tests", thinner)
+        roots = ", ".join(f"{name}={path}"
+                          for name, path in QUESTION["reading_roots"].items()
+                          if name != "tests")
+        with mock.patch.object(pas, "_DECLARED_ROOTS", thinner):
+            self.write_record(text=question_text(reading_roots=roots))
+            with self.assertRaises(pas.QuorumError) as caught:
+                pas.build_payload(self.qid, 1, run_dir=str(self.run_dir))
+            self.assertIn("tests", str(caught.exception))
+            #: The brains that were not assigned to it are unaffected.
+            self.assertEqual(
+                pas.build_payload(self.qid, 0, run_dir=str(self.run_dir))
+                ["reading_assignment"]["label"], "spec-and-intent")
+
+    def test_nothing_outside_the_tracker_error_family_escapes_the_payload_builders(self):
+        """``run_dir`` and ``qid`` are the two arguments a caller most often
+        loses track of, and ``Path(5)`` raises ``TypeError`` — outside this
+        module's family, so it escapes every handler a controller has written.
+        """
+        for run_dir in (5, None, [], {}, True, b"bytes"):
+            for call in (lambda value: pas.build_payload(self.qid, 0, run_dir=value),
+                         lambda value: pas.payload_digest(self.qid, run_dir=value)):
+                with self.subTest(run_dir=repr(run_dir), call=call):
+                    with self.assertRaises(pas.TrackerError):
+                        call(run_dir)
+        for qid in (None, 5, [], {}, "", "   ", True):
+            with self.subTest(qid=repr(qid)):
+                with self.assertRaises(pas.TrackerError):
+                    pas.build_payload(qid, 0, run_dir=str(self.run_dir))
+
+    def test_a_run_outside_its_recorded_repository_cannot_cite_its_own_files(self):
+        """``_run_relative`` reads the root back and refuses to guess.
+
+        A run directory that does not lie inside the recorded root has no
+        repo-root-relative spelling at all, and inventing one would hand every
+        brain a path whose citations can only be refused.
+        """
+        elsewhere = Path(tempfile.mkdtemp(prefix="pipeline-auto-outside-"))
+        self.addCleanup(shutil.rmtree, elsewhere, ignore_errors=True)
+        run_dir = elsewhere / "run"
+        run_dir.mkdir()
+        pas.initialize_run(run_dir, **{**NEW_RUN, "repo_root": str(self.root)})
+        directory = run_dir / "quorum" / self.qid
+        directory.mkdir(parents=True)
+        (directory / "question.md").write_text(question_text(), encoding="utf-8")
+        with self.assertRaises(pas.QuorumError) as caught:
+            pas.build_payload(self.qid, 0, run_dir=str(run_dir))
+        self.assertIn("repo_root", str(caught.exception))
+
+    def test_the_payload_serialization_is_injective_over_what_it_carries(self):
+        """The digest binds nothing that two different payloads can share.
+
+        Concatenation is the whole failure mode: ``["ab", "c"]`` and
+        ``["a", "bc"]`` are one string apart under a naive join, and a digest
+        that cannot tell them apart binds a brain to the wrong question.
+        """
+        pairs = (
+            (["ab", "c"], ["a", "bc"]),
+            #: The pair a TAG without a LENGTH cannot tell apart: "s"+"a" then
+            #: "s"+"sb" is the same run of characters as "s"+"as" then "s"+"b".
+            (["a", "sb"], ["as", "b"]),
+            ({"a": "bc"}, {"ab": "c"}),
+            ({"a": ""}, {"a": [], "": ""}),
+            ([1, 2], ["1", "2"]),
+            ([True], [1]),
+            ([None], ["null"]),
+            ({"a": {"b": "c"}}, {"a": {"b": "c", "": ""}}),
+        )
+        for left, right in pairs:
+            with self.subTest(left=repr(left), right=repr(right)):
+                self.assertNotEqual(pas._canonical(left), pas._canonical(right))
+        self.assertEqual(pas._canonical({"b": 1, "a": 2}),
+                         pas._canonical({"a": 2, "b": 1}))
 
 
 if __name__ == "__main__":

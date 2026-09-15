@@ -730,6 +730,18 @@ git commit -m "feat(pipeline-auto): reject brain responses that type a number or
 
 ---
 
+> **From Task 2 (`58d22ba`).** `evidence: []` is **schema-valid** — the schema
+> validator judges shape, not grounding, and deliberately reads no file. So
+> `effective_rung` must demote an empty evidence list rather than assume it holds
+> at least one item. An `IndexError` here would escape `TrackerError` entirely,
+> which is the defect Task 2 just removed from its own validator.
+>
+> Also: the context's `new_run(stack)` helper **collides** with the existing
+> `new_run(case, **overrides)` at `test_pipeline_auto_state.py:4570`. Rename one
+> — do not shadow — or the real-depth `repo_root` assertion silently never runs,
+> and that assertion is the only thing standing between this task and the failure
+> where every citation fails to resolve while the run looks correctly cautious.
+
 ### Task 3: Evidence resolution and rung demotion
 
 **Files:**
@@ -1215,6 +1227,12 @@ git commit -m "feat(pipeline-auto): validate the decisions contract and project 
 ```
 
 ---
+
+> **From Task 2 (`58d22ba`).** `consistent_with` anchors are validated by `kind`
+> only, so `{"kind": "decision"}` with no `id` passes the schema. `decision_depth`
+> must decide what an anchor without an id means — the violation code
+> `consistent-with-item-malformed` is reserved for it. Treating it as depth 0 by
+> accident would let a brain claim grounding in a decision it never names.
 
 ### Task 5: Contradiction detection and decision depth
 

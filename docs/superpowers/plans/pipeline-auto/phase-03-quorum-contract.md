@@ -164,7 +164,7 @@ def initialize_run(run_dir: Path, *, run_id: str, base_commit: str,
                    repo_root: str) -> dict: ...            # repo_root is REQUIRED
 def classify_filesystem(path: str) -> str: ...             # unknown => the run does not start
 def locked_tracker_update(run_dir: str, *, transition_id: str, mutate) -> dict: ...
-def publish_immutable(path: str, content: str) -> str: ...
+def publish_immutable(path: Path, content: str) -> str: ...   # takes a PATH, returns a DIGEST
 def derive_next_action(tracker: dict) -> str: ...
 
 def repo_root(tracker: dict) -> str: ...            # the `## Run` field; NEVER derived
@@ -175,7 +175,7 @@ def append_row(tracker: dict, section: str, row: dict) -> dict: ...
 Three behaviours P03 depends on and must not re-implement:
 
 - `locked_tracker_update` validates, takes an exclusive lock, re-reads, revalidates, applies `mutate`, renders, reparses, atomically replaces. **A replayed `transition_id` returns current state without calling `mutate` at all.** That is what makes `finalize_quorum` replay-inert.
-- `publish_immutable(path, content)` writes once; a byte-identical second call is a no-op returning the same path; a differing second call raises. That is what makes every response file and `final.json` a single-assignment cell.
+- `publish_immutable(path, content)` writes once; a byte-identical second call is a no-op **returning the same sha256 digest of the published bytes**; a differing second call raises. That is what makes every response file and `final.json` a single-assignment cell. **Two corrections a worker must not re-derive from the old text:** it takes a `Path`, not a `str` — handing it a `str` raises `AttributeError`, outside `TrackerError` — and it returns a **digest, never a path**. Both were written wrongly here and cost Task 9 two brief defects; the digest is the identity later phases bind a response to.
 - `repo_root(tracker)` returns the `## Run` field that `initialize_run` recorded. **P03 never computes a repository root** — not by `parents[N]`, not by walking for `.git`. See the standing rule below; this is the single most dangerous line in the phase.
 
 P03 owns the quorum lifecycle, so **P03 writes its own `## Quorum` and `## Escalations` rows**, through `section_columns` and `append_row`, inside `locked_tracker_update`. No phase writes another phase's rows and no phase re-declares another phase's columns: every row P03 builds is checked against `section_columns(...)` before the write, so a column change in P02 breaks loudly at the seam instead of drifting into a mismatched write.
@@ -4083,6 +4083,18 @@ guessed at in code beyond the minimum noted; each needs a ruling.
 9. **The findings ledger marker `pipeline-auto-findings/v1` is derived, not
    specified.** It follows the schema family name; the spec fixes only the
    tracker marker. This is the only item still open, and it is cosmetic.
+
+10. **`problems` is an OPAQUE non-empty list, and downstream must never match it
+    against `validate_brain_response`'s vocabulary.** Task 9 records a response
+    whose own `qid` disagrees with the directory it sits in as *invalid*, by
+    appending a problem code the validator never returns. That is the right
+    call — the designed remedy for a brain that answered the wrong question is
+    the one re-dispatch, and refusing outright leaves the controller holding an
+    answer it may neither record nor retry — but it means `valid` is not
+    reproducible from `response` alone, and a consumer switching on the exact
+    problem set will silently miss this case. Today nothing reads `problems`
+    except a shape check; `group_responses`, `classify_quorum` and
+    `finalize_quorum` must keep it that way.
 
 Items 1, 2 and 8 are closed by coordinator ruling. Items 3–7 and 9 remain
 reported; none blocks execution of this phase.

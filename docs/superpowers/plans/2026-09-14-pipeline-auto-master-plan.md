@@ -29,6 +29,8 @@
 - Python: standard library only. No new dependencies in any phase.
 - No absolute home-directory paths in any committed file. Repository-relative paths only.
 - No push, no publish, no PR, no merge into `main`/`master`.
+- **Agent-supplied JSON is never tested for membership with a bare `in` against a set.** `x in frozenset(...)` hashes `x`, and a JSON value may legally be a list or an object — both unhashable, and the resulting `TypeError` is outside `TrackerError`, so it escapes every handler a controller has written and kills the run on an agent's typo. Use `_member(value, allowed)`. Every call site must be pinned: reverting it to a bare `in` must fail the suite. Found in `effective_rung` by review, then in three more places where the source was already correct and nothing would have noticed it changing.
+- **A test claiming totality derives its case list from the function's call tree**, not from what the author remembers reading. Vary every field with both an unhashable value and a wrong-typed scalar.
 
 ---
 

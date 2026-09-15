@@ -42,18 +42,96 @@ WIDE_GAP = "| 12 | pending | - |\n\n\n## Intent\n"
 
 #: Modules ``pipeline_auto_state`` is permitted to import. This is an
 #: ALLOWLIST, not a snapshot of what it imports today: each name was put here
-#: deliberately, after checking it opens no file and runs no generated code.
-#: ``hashlib`` is listed for the payload and context digests the quorum rows
-#: carry. ``pathlib`` is listed because ``validate_run`` must READ a run
-#: directory; it is the narrowest way to do that, and — unlike ``os`` or
-#: ``shutil`` — it gives the module no way to delete or rename anything it did
-#: not already open. Widening this set is a decision to be argued for, never a
-#: step taken incidentally to make a failing test pass.
+#: deliberately, and widening it is a decision to be argued for, never a step
+#: taken incidentally to make a failing test pass. ``hashlib`` is listed for the
+#: payload and context digests the quorum rows carry. ``pathlib`` is listed
+#: because ``validate_run`` takes its run directory as a ``Path`` and READS
+#: through it.
+#:
+#: What this allowlist does NOT prove is that the module cannot write. ``pathlib``
+#: is not a narrower capability than ``os`` or ``shutil``: ``Path.write_text``,
+#: ``write_bytes``, ``unlink``, ``rename``, ``replace``, ``mkdir``, ``rmdir``,
+#: ``touch``, ``chmod``, ``symlink_to`` and ``open(mode=...)`` all exist, and an
+#: earlier revision of this file claimed otherwise. The read-only guarantee is
+#: carried by ``write_capable_calls`` below, scoped to ``validate_run``.
 ALLOWED_IMPORTS = frozenset({"__future__", "hashlib", "pathlib"})
+
+#: Builtins that open a file or run generated code. Called anywhere in the
+#: module, by any function, they are refused — this half is module-wide.
+FORBIDDEN_BUILTINS = ("open", "__import__", "eval", "exec", "compile")
+
+#: ``pathlib.Path`` attributes that create, replace, remove or re-permission
+#: something on disk. Any ``write*`` name is added to these by prefix, which
+#: also covers ``write``, ``write_text``, ``write_bytes`` and ``writelines``.
+#: ``open`` is judged separately: a bare ``.open()`` reads, so only a mode
+#: argument makes it write-capable.
+#:
+#: The test is by attribute NAME, so it cannot tell ``Path.replace`` from
+#: ``str.replace``. That over-strictness is deliberate and points the safe way:
+#: a read-only function has no need to call anything named ``replace``, and the
+#: alternative — inferring the receiver's type — is exactly the inference an
+#: attacker of this guarantee would defeat first.
+WRITE_CAPABLE = frozenset({
+    "unlink", "rename", "replace", "mkdir", "rmdir", "touch", "chmod",
+    "symlink_to",
+})
 
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
 
 import pipeline_auto_state as pas  # noqa: E402
+
+
+def module_source() -> str:
+    return Path(pas.__file__).read_text(encoding="utf-8")
+
+
+def function_node(source: str, name: str) -> ast.FunctionDef:
+    """The single ``def name`` node in ``source``, as an AST subtree."""
+    found = [node for node in ast.walk(ast.parse(source))
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and node.name == name]
+    if len(found) != 1:
+        raise AssertionError(f"expected exactly one def {name!r}, found {len(found)}")
+    return found[0]
+
+
+def write_capable_calls(source: str, name: str) -> list[str]:
+    """Every write-capable call inside ONE function's own subtree.
+
+    Scoped to a function rather than to the module on purpose. The module is
+    allowed to grow a writer — a later phase lands the atomic tracker write —
+    and a module-wide ban would have to be deleted the day that arrives, taking
+    the guarantee with it. Scoped here, the writer lands beside ``validate_run``
+    and ``validate_run`` still cannot write.
+
+    Calls that ``validate_run`` makes into OTHER module functions are outside
+    the subtree and unchecked; the claim is about this function's own body.
+    """
+    calls = []
+    for node in ast.walk(function_node(source, name)):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        attr = node.func.attr
+        if attr.startswith("write") or attr in WRITE_CAPABLE:
+            calls.append(attr)
+        elif attr == "open" and (
+            node.args or any(word.arg == "mode" for word in node.keywords)
+        ):
+            calls.append("open(mode)")
+    return calls
+
+
+def with_statement_in(source: str, name: str, statement: str) -> str:
+    """The real module source with one statement spliced into ``name``'s body.
+
+    Structural rather than textual: the statement is placed immediately before
+    the function's last top-level statement, at that statement's own indent, so
+    it lands inside the body no matter how the body is later reshaped.
+    """
+    last = function_node(source, name).body[-1]
+    lines = source.splitlines(keepends=True)
+    lines.insert(last.lineno - 1, " " * last.col_offset + statement + "\n")
+    return "".join(lines)
 
 
 def valid_text() -> str:
@@ -163,29 +241,29 @@ class RoundTripTests(unittest.TestCase):
         with self.assertRaises(pas.TrackerValidationError):
             pas.parse_tracker(text)
 
-    def test_a_rejection_is_read_only_because_the_module_cannot_write(self):
+    def test_a_rejection_is_read_only_because_validate_run_cannot_write(self):
         """Pins the property that actually makes every rejection read-only.
 
-        This assertion used to write a temp file, parse its text, and check the
-        bytes were unchanged. It could not fail: ``parse_tracker`` takes a
-        ``str`` and returns a dict, so no parse — accepted or rejected — can
-        reach that file. Nor is "the input string is unmutated" worth asserting:
-        ``str`` is immutable, so that holds of Python, not of this module.
+        Three separate claims, each stated as narrowly as it is checked:
 
-        What is falsifiable is the capability itself. Since ``validate_run``
-        the module may READ a run directory, but it still cannot write one: it
-        imports only from the reviewed ``ALLOWED_IMPORTS`` allowlist — whose
-        members open no file for writing and run no generated code — and calls
-        no builtin that does either. Add an ``import os``, an ``import
-        shutil``, an ``open()`` or an ``eval()`` and this fails — which is what
-        "read-only stop" in the exception docstrings is actually claiming, and
-        it is why the separate read-only-file test below exists: this one pins
-        what the module *can* do, that one pins what it *does*.
-        The allowlist, not an exact import set, is the
-        property worth pinning: the module is allowed to grow an import, it is
-        not allowed to grow a capability.
+        1. The module imports nothing outside ``ALLOWED_IMPORTS``. That bounds
+           what is reachable; it does NOT bound writing, because ``pathlib``
+           alone can write, unlink, rename and mkdir. An earlier revision of
+           this docstring promised the allowlist's members "open no file for
+           writing", which was false of ``pathlib`` the day it was added.
+        2. No ``FORBIDDEN_BUILTINS`` call appears anywhere in the module — the
+           whole file, every function, unchanged in strictness.
+        3. ``validate_run``'s own body contains no write-capable call. This is
+           the read-only stop the exception docstrings claim, and it is scoped
+           to the one function that claims it, so the atomic tracker writer a
+           later phase adds elsewhere in this module does not have to weaken it.
+
+        The separate read-only-directory test below is the runtime companion:
+        this one pins what ``validate_run`` *can* do, that one pins what it
+        *does* when the filesystem refuses.
         """
-        tree = ast.parse(Path(pas.__file__).read_text(encoding="utf-8"))
+        source = module_source()
+        tree = ast.parse(source)
         imported = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -197,8 +275,73 @@ class RoundTripTests(unittest.TestCase):
             "module imports outside ALLOWED_IMPORTS; widen it on purpose only")
         called = {node.func.id for node in ast.walk(tree)
                   if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
-        for builtin in ("open", "__import__", "eval", "exec", "compile"):
+        for builtin in FORBIDDEN_BUILTINS:
             self.assertNotIn(builtin, called)
+        self.assertEqual(
+            write_capable_calls(source, "validate_run"), [],
+            "validate_run must stay read-only; it may not create, replace, "
+            "remove or re-permission anything on disk")
+
+    def test_the_read_only_check_fails_on_a_write_inside_validate_run(self):
+        """A test of the test: the guarantee above must be falsifiable.
+
+        The previous check was scoped to the whole module and looked only at
+        imports and bare-name builtins. A review spliced a function calling
+        ``write_text``, ``unlink``, ``rename`` and ``mkdir`` into the module and
+        the suite stayed green; splicing ``unlink`` into ``validate_run``
+        itself also stayed green, because a no-op unlink leaves the bytes and
+        the directory listing alone and nothing else was watching.
+
+        So each write-capable call is spliced into the REAL module source, one
+        at a time, and must be detected. Failing this means the read-only claim
+        above has quietly stopped being a claim.
+        """
+        source = module_source()
+        for statement in (
+            '(run_dir / "progress.md").write_text("owned", encoding="utf-8")',
+            '(run_dir / "progress.md").write_bytes(b"owned")',
+            '(run_dir / "stale.md").unlink(missing_ok=True)',
+            '(run_dir / "progress.md").rename(run_dir / "progress.bak")',
+            '(run_dir / "staged.md").replace(run_dir / "progress.md")',
+            '(run_dir / "scratch").mkdir(exist_ok=True)',
+            '(run_dir / "scratch").rmdir()',
+            '(run_dir / "progress.md").touch()',
+            '(run_dir / "progress.md").chmod(0o644)',
+            '(run_dir / "link.md").symlink_to(run_dir / "progress.md")',
+            '(run_dir / "note.md").open("w").close()',
+            '(run_dir / "note.md").open(mode="w").close()',
+        ):
+            mutant = with_statement_in(source, "validate_run", statement)
+            with self.subTest(statement=statement):
+                self.assertNotEqual(mutant, source)
+                self.assertNotEqual(
+                    write_capable_calls(mutant, "validate_run"), [],
+                    "a write-capable call inside validate_run went undetected")
+
+    def test_the_read_only_check_leaves_the_rest_of_the_module_free_to_write(self):
+        """The scope is a promise in both directions.
+
+        A later phase lands an atomic tracker writer in this same module. It
+        must not have to argue with this test, or the test gets deleted and the
+        guarantee goes with it. The same calls that are refused inside
+        ``validate_run`` are unremarkable outside it — and a bare, read-mode
+        ``.open()`` stays legal inside it, since it is the mode that writes.
+        """
+        source = module_source()
+        writer = source + (
+            '\n\ndef _atomic_write(run_dir: Path, text: str) -> None:\n'
+            '    staged = run_dir / "progress.md.tmp"\n'
+            '    staged.write_text(text, encoding="utf-8")\n'
+            '    staged.replace(run_dir / "progress.md")\n'
+            '    (run_dir / "progress.md").chmod(0o644)\n'
+        )
+        self.assertEqual(write_capable_calls(writer, "validate_run"), [])
+        self.assertNotEqual(write_capable_calls(writer, "_atomic_write"), [])
+        for reading in ('(run_dir / "progress.md").open().close()',
+                        '(run_dir / "progress.md").open(encoding="utf-8").close()'):
+            with self.subTest(statement=reading):
+                mutant = with_statement_in(source, "validate_run", reading)
+                self.assertEqual(write_capable_calls(mutant, "validate_run"), [])
 
     def test_a_trailing_blank_line_at_end_of_tracker_is_rejected(self):
         """The same asymmetry at the other end of the file.
@@ -438,15 +581,31 @@ class ForeignSchemaStopTests(unittest.TestCase):
         thing under test: a validator that writes raises PermissionError here,
         whatever bytes it intended to write. It also pins the real case —
         a tracker on a read-only checkout must still be *readable*.
+
+        The DIRECTORY is read-only too, not just the file, because ``0o444`` on
+        ``progress.md`` alone stops only the naive writer. An atomic writer —
+        stage a sibling temp file, then rename it over the target — never opens
+        ``progress.md`` for writing at all, and a rename obeys the permissions
+        of the containing directory, not of the file being replaced. ``0o555``
+        on the run directory denies both the create and the rename; the
+        ``assert_untouched`` then catches the staged file a writer that got
+        half-way would leave lying beside the tracker.
         """
         run_dir = make_run(self)
         progress = run_dir / "progress.md"
+        # LIFO: the file is re-permissioned first, then the directory, then
+        # `make_run`'s rmtree — which needs the directory writable again.
+        self.addCleanup(run_dir.chmod, 0o755)
         self.addCleanup(progress.chmod, 0o644)
         progress.chmod(0o444)
-        if os.access(progress, os.W_OK):  # running as root: chmod proves nothing
+        run_dir.chmod(0o555)
+        # Running as root, or on a filesystem that ignores the mode: chmod
+        # proves nothing, and a green assertion here would be a false one.
+        if os.access(progress, os.W_OK) or os.access(run_dir, os.W_OK):
             self.skipTest("cannot drop write permission for this user")
         tracker = pas.validate_run(run_dir)
         self.assertEqual(tracker["run"]["schema"], pas.SCHEMA)
+        self.assert_untouched(run_dir, ["progress.md"])
 
 
 if __name__ == "__main__":

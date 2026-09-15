@@ -274,7 +274,7 @@ def _diagnostic(run_dir: Path, detail: str) -> str:
     )
 
 
-def validate_run(run_dir: str) -> dict:
+def validate_run(run_dir: Path) -> dict:
     """Read and validate a run without mutating anything on disk.
 
     Every rejection path leaves the directory exactly as it was found. That is
@@ -285,8 +285,14 @@ def validate_run(run_dir: str) -> dict:
     That case is the dangerous one, because it is what a future version of this
     same skill would write: accepting it on the grounds that the prefix matches
     is how a newer run's state gets mangled by an older controller.
+
+    ``run_dir`` is a ``Path``, and that is the whole of it. This annotation
+    said ``str`` while the first statement of the body rebound the name to a
+    ``Path``, so the signature described a type no caller passed and the body
+    immediately discarded. Coercing here would also have hidden a caller that
+    had lost track of what it was holding; ``superb:pipeline`` types the same
+    entry point the same way.
     """
-    run_dir = Path(run_dir)
     progress = run_dir / "progress.md"
     if not progress.is_file():
         raise ForeignSchemaError(_diagnostic(run_dir, "missing progress.md"))

@@ -552,10 +552,21 @@ def _validate_intent_conflicts(tracker: dict) -> None:
 
     The ranking rule in ``_validate_questions`` is not this rule. It orders the
     conflict-derived questions that happen to exist; it cannot notice that none
-    do. Here the set is POPULATED instead: the conflict-derived questions are
-    exactly the flagged conflicts, paired in order — and because the ranking
-    rule has already sorted ``intent-conflict`` ahead of ``synthesis``, the
-    ``n``-th flagged conflict is the question in slot ``n``.
+    do. Here the set is POPULATED instead.
+
+    CORRESPONDENCE, not cardinality. An ``intent-conflict`` question's ``ID`` IS
+    the id of the conflict it puts to the human, and the two SETS — the ids
+    flagged on the brief, the ids claimed by the conflict-derived questions —
+    must be equal. Counting them was the hole: a brief flagging ``C-001,C-002``
+    with two questions that both elaborate ``C-001`` balances exactly, and
+    ``C-002`` is never asked. A matching total is not an answered conflict, and
+    that shape is the original failure wearing a total that adds up — a flagged
+    conflict the run settles by silence, which is a requirement invented.
+
+    Naming the conflict costs ``## Questions`` nothing it was using. A question
+    id is a free token there; no validator ties it to the ``Axis`` column of
+    ``## Quorum`` or to anything else, so the id is available to carry the one
+    correspondence the gate depends on.
 
     Timing is the whole of the gate. Stage 02 synthesises and stage 03 asks, so
     a conflict flagged while stage 03 is still open is simply one not yet
@@ -576,16 +587,26 @@ def _validate_intent_conflicts(tracker: dict) -> None:
     conflicts = _csv(rows[3]["conflicts"])
     if _stage_state(tracker, "03") != "complete":
         return
-    claims = [row for row in tracker["questions"] if row["origin"] == "intent-conflict"]
-    if len(claims) < len(conflicts):
+    claims = [row["id"] for row in tracker["questions"]
+              if row["origin"] == "intent-conflict"]
+    #: Both directions are stated over the ids themselves. ``_conflict_ids`` has
+    #: already refused a conflict flagged twice and ``_validate_questions`` a
+    #: duplicated question id, so these two lists carry no repeats and membership
+    #: is set equality — ordered here only so the diagnostic names the offending
+    #: ids in the order the tracker records them, which is the order the operator
+    #: reads them in.
+    unasked = [conflict for conflict in conflicts if conflict not in claims]
+    if unasked:
         raise TrackerValidationError(
-            f"intent conflict {conflicts[len(claims)]!r} was flagged and never "
-            "asked; stage 03 closes only once every unresolved conflict holds one "
-            "of its question slots")
-    if len(claims) > len(conflicts):
+            f"intent conflict(s) {', '.join(unasked)} flagged and never asked; "
+            "stage 03 closes only once every unresolved conflict is claimed by "
+            "the question whose ID names it")
+    unflagged = [claim for claim in claims if claim not in conflicts]
+    if unflagged:
         raise TrackerValidationError(
-            "a stage-03 question claims an intent conflict the brief never "
-            "flagged; a conflict the brief did not record is one no reading raised")
+            f"stage-03 question(s) {', '.join(unflagged)} claim an intent "
+            "conflict the brief never flagged; a conflict the brief did not "
+            "record is one no reading raised")
 
 
 def _validate_escalations(tracker: dict) -> None:

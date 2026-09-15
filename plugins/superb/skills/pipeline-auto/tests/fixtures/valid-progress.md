@@ -46,7 +46,7 @@
 ## Questions
 | ID | Origin | Slot | State | Decision |
 | --- | --- | --- | --- | --- |
-| axis-1 | intent-conflict | 1 | answered | H-1 |
+| C-001 | intent-conflict | 1 | answered | H-1 |
 | axis-2 | synthesis | 2 | answered | H-2 |
 
 ## Quorum

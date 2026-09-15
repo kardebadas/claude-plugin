@@ -1004,8 +1004,8 @@ class IntentSectionTests(unittest.TestCase):
         text = swap(INTENT_BRIEF, "| brief | brief | frozen | reconciled | "
                                   "scratch/intent-brief.md | C-001,C-002 |")
         text = with_questions([
-            "| axis-1 | intent-conflict | 1 | answered | H-1 |",
-            "| axis-2 | intent-conflict | 2 | answered | H-2 |",
+            "| C-001 | intent-conflict | 1 | answered | H-1 |",
+            "| C-002 | intent-conflict | 2 | answered | H-2 |",
             "| axis-3 | synthesis | 3 | asked | - |",
         ], text)
         tracker = pas.parse_tracker(text)
@@ -1067,7 +1067,14 @@ def with_questions(rows: list[str], text: str | None = None) -> str:
     be rejected for spacing rather than for the rule under test.
     """
     text = valid_text() if text is None else text
-    start = text.index("| axis-1 |")
+    #: Anchored on the SECTION, not on a row id. The first question row's id is
+    #: now ``C-001`` — the id of the conflict it claims — and the brief's
+    #: Conflicts cell renders as ``| C-001 |`` several lines earlier, so a
+    #: search for the id alone would splice the replacement rows into
+    #: ``## Intent``. The separator row is the last line the section header
+    #: owns; the body begins on the line after it.
+    head = text.index("## Questions")
+    start = text.index("\n", text.index("| --- |", head)) + 1
     end = text.index("\n\n## Quorum")
     if not rows:
         return text[:start] + text[end + 1:]
@@ -1087,7 +1094,7 @@ class QuestionSectionTests(unittest.TestCase):
         the fourth slot: stage 02 would then be silently limited to three and
         the fourth-ranked open decision never reaches the user at all."""
         text = with_questions([
-            "| axis-1 | intent-conflict | 1 | answered | H-1 |",
+            "| C-001 | intent-conflict | 1 | answered | H-1 |",
             "| axis-2 | synthesis | 2 | answered | H-2 |",
             "| axis-3 | synthesis | 3 | asked | - |",
             "| axis-4 | synthesis | 4 | asked | - |",
@@ -1102,7 +1109,7 @@ class QuestionSectionTests(unittest.TestCase):
         gate physically cannot have asked, and its ``answered`` state would
         then attribute an answer to a human who was never shown it."""
         text = with_questions([
-            "| axis-1 | intent-conflict | 1 | answered | H-1 |",
+            "| C-001 | intent-conflict | 1 | answered | H-1 |",
             "| axis-2 | synthesis | 2 | answered | H-2 |",
             "| axis-3 | synthesis | 3 | asked | - |",
             "| axis-4 | synthesis | 4 | asked | - |",
@@ -1115,7 +1122,7 @@ class QuestionSectionTests(unittest.TestCase):
         """Catches a length check standing in for an identity check: two rows
         on one axis spend two of the four slots on the same decision, and the
         answer recorded second silently overwrites the first."""
-        text = swap(QUESTION_2, "| axis-1 | synthesis | 2 | answered | H-2 |")
+        text = swap(QUESTION_2, "| C-001 | synthesis | 2 | answered | H-2 |")
         with self.assertRaises(pas.TrackerValidationError):
             pas.parse_tracker(text)
 
@@ -1146,10 +1153,10 @@ class QuestionSectionTests(unittest.TestCase):
         entirely by enough of them — leaving the run to resolve the conflict
         itself, which is the one thing stage 01 forbids.
         """
-        text = swap("| axis-1 | intent-conflict | 1 | answered | H-1 |\n"
+        text = swap("| C-001 | intent-conflict | 1 | answered | H-1 |\n"
                     "| axis-2 | synthesis | 2 | answered | H-2 |",
-                    "| axis-1 | synthesis | 1 | answered | H-1 |\n"
-                    "| axis-2 | intent-conflict | 2 | answered | H-2 |")
+                    "| axis-2 | synthesis | 1 | answered | H-2 |\n"
+                    "| C-001 | intent-conflict | 2 | answered | H-1 |")
         with self.assertRaises(pas.TrackerValidationError):
             pas.parse_tracker(text)
 
@@ -1166,8 +1173,8 @@ class QuestionSectionTests(unittest.TestCase):
         non-``-`` decision: a ``Q-`` id here records three agreeing machines as
         the unimpeachable requirement every later contradiction is measured
         against, which is precisely the authority the gate exists to withhold."""
-        text = swap("| axis-1 | intent-conflict | 1 | answered | H-1 |",
-                    "| axis-1 | intent-conflict | 1 | answered | Q-3f2a1b0c9d8e |")
+        text = swap("| C-001 | intent-conflict | 1 | answered | H-1 |",
+                    "| C-001 | intent-conflict | 1 | answered | Q-3f2a1b0c9d8e |")
         with self.assertRaises(pas.TrackerValidationError):
             pas.parse_tracker(text)
 
@@ -1199,6 +1206,12 @@ class IntentConflictsReachTheGateTests(unittest.TestCase):
     orders the conflict-derived questions that happen to exist — relative order
     among whatever rows are present — and an empty set is trivially ordered.
     This is the rule that populates the set.
+
+    It populates it by CORRESPONDENCE: an ``intent-conflict`` question's ``ID``
+    is the id of the conflict it puts to the human, and the flagged set and the
+    claimed set must be equal. Counting the two instead left the fault standing
+    in a shape that balances — two conflicts, two questions, both about the
+    first — so the cases below are written against the counts agreeing.
     """
 
     def test_flagged_conflicts_with_only_synthesised_questions_are_rejected(self):
@@ -1244,11 +1257,12 @@ class IntentConflictsReachTheGateTests(unittest.TestCase):
         slots on a conflict no reading raised, displacing a synthesised question
         that was ranked into the gate on its merits."""
         text = with_questions([
-            "| axis-1 | intent-conflict | 1 | answered | H-1 |",
-            "| axis-2 | intent-conflict | 2 | answered | H-2 |",
+            "| C-001 | intent-conflict | 1 | answered | H-1 |",
+            "| C-002 | intent-conflict | 2 | answered | H-2 |",
         ])
-        with self.assertRaises(pas.TrackerValidationError):
+        with self.assertRaises(pas.TrackerValidationError) as caught:
             pas.parse_tracker(text)
+        self.assertIn("C-002", str(caught.exception))
 
     def test_a_conflict_is_simply_unasked_while_stage_03_is_still_open(self):
         """The positive control that keeps the rule a gate rule rather than an
@@ -1287,8 +1301,8 @@ class IntentConflictsReachTheGateTests(unittest.TestCase):
                                   "scratch/intent-brief.md | C-001,C-002 |")
         text = with_questions([
             "| axis-3 | synthesis | 1 | answered | H-3 |",
-            "| axis-1 | intent-conflict | 2 | answered | H-1 |",
-            "| axis-2 | intent-conflict | 3 | answered | H-2 |",
+            "| C-001 | intent-conflict | 2 | answered | H-1 |",
+            "| C-002 | intent-conflict | 3 | answered | H-2 |",
         ], text)
         with self.assertRaises(pas.TrackerValidationError):
             pas.parse_tracker(text)
@@ -1304,6 +1318,79 @@ class IntentConflictsReachTheGateTests(unittest.TestCase):
         text = with_questions(["| axis-2 | synthesis | 1 | answered | H-2 |"], text)
         tracker = pas.parse_tracker(text)
         self.assertEqual(tracker["intent"], [])
+
+    def test_a_question_on_an_unrelated_axis_claims_no_conflict(self):
+        """The reviewer's first probe against the counting rule. The brief flags
+        ``C-001,C-042``; the two ``intent-conflict`` questions are ``axis-1`` and
+        ``axis-9``, and neither is connected to either conflict.
+
+        Catches judging the claim by CARDINALITY: two rows, two conflicts, the
+        totals agree and the tracker is accepted — with ``C-042`` flagged, never
+        asked and sealed into a frozen brief, which is the original fault intact
+        under a total that adds up.
+        """
+        text = swap(INTENT_BRIEF, "| brief | brief | frozen | reconciled | "
+                                  "scratch/intent-brief.md | C-001,C-042 |")
+        text = with_questions([
+            "| axis-1 | intent-conflict | 1 | answered | H-1 |",
+            "| axis-9 | intent-conflict | 2 | answered | H-2 |",
+        ], text)
+        with self.assertRaises(pas.TrackerValidationError) as caught:
+            pas.parse_tracker(text)
+        self.assertIn("C-042", str(caught.exception))
+
+    def test_two_questions_elaborating_one_conflict_do_not_cover_the_second(self):
+        """The reviewer's second probe, and the sharper one: both conflicts are
+        real and both questions are real, but both questions elaborate ``C-001``
+        and ``C-002`` reaches nobody.
+
+        The count is exactly balanced — two flagged, two claimed — so only a
+        correspondence rule can see it. This is the case that dies if the rule
+        is ever restated as ``len(claims) == len(conflicts)``.
+        """
+        text = swap(INTENT_BRIEF, "| brief | brief | frozen | reconciled | "
+                                  "scratch/intent-brief.md | C-001,C-002 |")
+        text = with_questions([
+            "| C-001 | intent-conflict | 1 | answered | H-1 |",
+            "| axis-1 | intent-conflict | 2 | answered | H-2 |",
+        ], text)
+        with self.assertRaises(pas.TrackerValidationError) as caught:
+            pas.parse_tracker(text)
+        self.assertIn("C-002", str(caught.exception))
+
+    def test_a_question_naming_some_other_conflict_does_not_claim_this_one(self):
+        """A conflict-shaped id is not the right conflict-shaped id. The brief
+        flags ``C-001`` and the single ``intent-conflict`` question is ``C-002``.
+
+        Catches a rule that checks only the SHAPE of the claiming id — that it
+        looks like ``C-<n>`` — rather than which conflict it names. The count
+        balances again, and the one disagreement between two readings of the
+        user's own prompt is answered by a question about something else.
+        """
+        text = with_questions(["| C-002 | intent-conflict | 1 | answered | H-1 |"])
+        with self.assertRaises(pas.TrackerValidationError) as caught:
+            pas.parse_tracker(text)
+        self.assertIn("C-001", str(caught.exception))
+
+    def test_each_conflict_claimed_by_the_question_that_names_it_is_accepted(self):
+        """The positive control for correspondence, deliberately NOT in flagging
+        order: ``C-001,C-002`` claimed by questions ``C-002`` then ``C-001``.
+
+        The rule compares sets. Catches over-tightening it into a positional
+        pairing — ``the n-th conflict is the question in slot n`` — which would
+        refuse a legal tracker for ranking two conflicts in the order the
+        synthesiser scored them rather than the order the brief listed them.
+        """
+        text = swap(INTENT_BRIEF, "| brief | brief | frozen | reconciled | "
+                                  "scratch/intent-brief.md | C-001,C-002 |")
+        text = with_questions([
+            "| C-002 | intent-conflict | 1 | answered | H-1 |",
+            "| C-001 | intent-conflict | 2 | answered | H-2 |",
+            "| axis-3 | synthesis | 3 | asked | - |",
+        ], text)
+        tracker = pas.parse_tracker(text)
+        self.assertEqual([row["id"] for row in tracker["questions"]],
+                         ["C-002", "C-001", "axis-3"])
 
 
 def with_escalations(rows: list[str]) -> str:

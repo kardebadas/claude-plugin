@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import os
 import re
 import shutil
@@ -608,10 +609,6 @@ class ForeignSchemaStopTests(unittest.TestCase):
         self.assert_untouched(run_dir, ["progress.md"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 def with_stages(states: list[str], actions: list[str] | None = None) -> str:
     """The valid fixture with its twelve stage rows replaced wholesale.
 
@@ -710,6 +707,29 @@ class StageSectionTests(unittest.TestCase):
         with self.assertRaises(pas.TrackerValidationError):
             pas.parse_tracker(with_stages(states, actions))
 
+    def test_no_active_stage_with_work_still_pending_is_rejected(self):
+        """The validator and the dispatcher must not hold different opinions
+        about the same tracker. All-pending is monotone and carries at most one
+        active, so every other check waves it through — and then
+        ``derive_next_action`` has no row to read an action from and no grounds
+        to report the run complete, leaving a tracker that passes
+        ``validate_run`` with no derivable next action. Catches omitting the
+        guard and leaving that disagreement in place; the shape is illegal
+        because a stage closes only as its successor opens, in one transition."""
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(with_stages(["pending"] * 12))
+
+    def test_a_half_finished_run_with_nothing_active_is_rejected(self):
+        """The same rule where it is easy to get wrong: stages 01-08 complete,
+        09-12 pending, nothing active. Catches a guard written as 'reject
+        all-pending', which reads the one obvious instance of the shape instead
+        of the shape, and passes the tracker a run stranded mid-flight leaves
+        behind. Only the terminal table — all twelve ``complete`` — may have no
+        active stage."""
+        states = ["complete"] * 8 + ["pending"] * 4
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(with_stages(states))
+
     def test_an_unknown_stage_state_is_rejected(self):
         """Catches letting an out-of-enum state reach the ordering comparison,
         where it surfaces as a bare ``ValueError`` from the sort key rather
@@ -756,13 +776,74 @@ class NextActionTests(unittest.TestCase):
         tracker["escalations"] = []
         self.assertEqual(pas.derive_next_action(tracker), "complete")
 
-    def test_a_run_with_no_active_stage_and_work_left_is_not_reported_complete(self):
-        """Catches the unguarded ``return "complete"`` fallback. A tracker whose
-        stages are all pending has done nothing at all, and reporting it
-        complete ends the run at stage 00 with every artifact unwritten — the
-        same silent-fork failure ``## Stage`` exists to prevent, arriving from
-        the other end."""
-        tracker = pas.parse_tracker(with_stages(["pending"] * 12))
+    def test_a_hand_mutated_tracker_with_no_active_stage_still_refuses_to_report_complete(self):
+        """The dispatcher's defensive backstop, pinned on the one path that can
+        still reach it. ``_validate_stages`` refuses this shape, so no parsed
+        tracker arrives here holding it — but ``derive_next_action`` takes a
+        plain ``dict`` and callers edit trackers in place between parsing and
+        dispatching, exactly as this test does. Catches deleting the raise as
+        'unreachable': an edited tracker would then be reported ``complete``,
+        ending the run at stage 09 with stages 10-12 unwritten."""
+        tracker = pas.parse_tracker(valid_text())
         tracker["escalations"] = []
+        for row in tracker["stages"]:
+            if row["stage_state"] == "active":
+                row["stage_state"] = "pending"
+                row["next_action"] = "-"
         with self.assertRaises(pas.TrackerValidationError):
             pas.derive_next_action(tracker)
+
+
+class SuiteIsWhollyCollectedTests(unittest.TestCase):
+    """``if __name__ == "__main__": unittest.main()`` must be the LAST statement.
+
+    The mistake this guards against was made in this very file: fourteen new
+    tests were appended *after* the main block. Python executes a module top to
+    bottom, so a direct ``python3 test_pipeline_auto_state.py`` reached
+    ``unittest.main()`` before those classes existed and collected only the 35
+    tests defined above it — printing ``Ran 35 tests ... OK``, a green run that
+    silently omitted the entire commit under test. Discovery imports the module
+    without executing ``__main__`` and so found all 49, which is exactly why the
+    hole survived: CI was green, and only someone running the file directly got
+    the false all-clear — with no signal that anything was missing.
+    """
+
+    def module_source(self) -> str:
+        return Path(__file__).resolve().read_text(encoding="utf-8")
+
+    def test_nothing_is_defined_after_the_main_block(self):
+        """Catches re-introducing the fault by appending below the main block.
+        Asserts the structural fact rather than a symptom: the guard holds for a
+        helper, a constant or a whole ``TestCase``, and it holds whether or not
+        anyone happens to run the file directly afterwards."""
+        body = ast.parse(self.module_source()).body
+        guards = [index for index, node in enumerate(body)
+                  if isinstance(node, ast.If) and "__main__" in ast.dump(node.test)]
+        self.assertEqual(len(guards), 1, "expected exactly one __main__ guard")
+        trailing = [type(node).__name__ for node in body[guards[0] + 1:]]
+        self.assertEqual(
+            trailing, [],
+            "definitions follow the __main__ guard; a direct run of this file "
+            f"will silently skip them: {trailing}")
+
+    def test_a_direct_run_collects_the_same_tests_as_discovery(self):
+        """The symptom itself, asserted as a count. Loads a second, complete
+        copy of this file and compares its test count against what the loader
+        can see in the module object this process is actually executing. Under
+        the fault the running module is still mid-body — the classes below the
+        guard do not exist yet — and the two counts diverge."""
+        spec = importlib.util.spec_from_file_location(
+            "_pipeline_auto_state_suite_probe", Path(__file__).resolve())
+        probe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe)
+        loader = unittest.TestLoader()
+        running = loader.loadTestsFromModule(sys.modules[__name__]).countTestCases()
+        complete = loader.loadTestsFromModule(probe).countTestCases()
+        self.assertEqual(
+            running, complete,
+            f"this process collects {running} tests but the file defines "
+            f"{complete}: part of the suite is not being run")
+
+
+if __name__ == "__main__":
+    unittest.main()

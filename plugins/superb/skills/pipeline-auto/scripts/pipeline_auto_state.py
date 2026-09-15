@@ -271,6 +271,19 @@ def _validate_stages(tracker: dict) -> None:
         raise TrackerValidationError(
             "stage states must run complete*, then at most one active, then pending*"
         )
+    #: A stage table with nothing active and work still pending is monotone, so
+    #: every check above waves it through — and then ``derive_next_action`` has
+    #: no row to read an action from and no grounds to report the run complete.
+    #: The tracker must not be able to hold a shape the controller cannot act
+    #: on, so the shape is refused here rather than diagnosed one layer later:
+    #: a transition is the unit at which state is legal, and every specified
+    #: writer closes one stage and opens the next in a single ``mutate``, so no
+    #: legal run ever passes through this window. The one table with nothing
+    #: active is the terminal one, in which all twelve rows read ``complete``.
+    if "active" not in states and states.count("complete") != len(STAGES):
+        raise TrackerValidationError(
+            "no stage is active and stages remain pending: a stage closes only as "
+            "its successor opens, in the same transition")
     for row in stages:
         if row["stage_state"] == "active" and row["next_action"] == "-":
             raise TrackerValidationError("the active stage must name its next action")
@@ -303,6 +316,13 @@ def derive_next_action(tracker: dict) -> str:
     active stage and work still pending is not finished, and returning
     ``complete`` for it would end the run with its artifacts unwritten — the
     silent fork ``## Stage`` exists to prevent, arriving from the other end.
+
+    ``_validate_stages`` now refuses that shape outright, so a tracker obtained
+    through ``parse_tracker`` can no longer reach the raise below. It stays as a
+    defensive backstop for the one remaining way in: this function takes a plain
+    ``dict``, and callers mutate trackers in place between parsing and
+    dispatching. A dict edited past the validator is still refused rather than
+    silently reported complete.
     """
     if any(row["state"] in ("queued", "asked") for row in tracker["escalations"]):
         return "await-escalation-batch"

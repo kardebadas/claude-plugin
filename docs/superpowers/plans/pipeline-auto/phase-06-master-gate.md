@@ -1257,9 +1257,14 @@ def open_master_gate(run_dir: str, *, reviewers: dict) -> dict:
         master["base"] = tracker["run"]["base_commit"]
         master["head"] = _last_verified_head(tracker)
         master["assignments"] = "master-A,master-B"
-        stage = _stage_row(tracker, "11")
-        stage["stage_state"] = "active"
-        stage["next_action"] = "await-master-reports"
+        ten = _stage_row(tracker, "10")
+        if ten["stage_state"] != "active":
+            raise GateError("stage 10 is not active; the master gate opens at its close")
+        ten["stage_state"] = "complete"
+        ten["next_action"] = "-"
+        eleven = _stage_row(tracker, "11")
+        eleven["stage_state"] = "active"
+        eleven["next_action"] = "await-master-reports"
         return tracker
 
     tracker = locked_tracker_update(str(directory), transition_id="open-master-gate",
@@ -1280,6 +1285,22 @@ def open_master_gate(run_dir: str, *, reviewers: dict) -> dict:
     publish_immutable(str(gate_dir / "assignments.json"), _dumps(sealed))
     return sealed
 ```
+
+**Why stage 10 closes in this same mutate.** Opening stage 11 without closing stage 10
+would leave a window in which no stage is active and stages 11-12 are still pending — a
+tracker P02's `derive_next_action` cannot act on, because there is no active row to read a
+next action from and the run is plainly not complete. P06 already found this exact fault in
+the gate fix loop and wrote the rule out: *a transition is the unit at which state is legal,
+so any change needing two writes to stay legal is one write.* Closing 10 and opening 11 are
+two halves of one legal state change, so they are one `locked_tracker_update`, and an
+interruption lands either before or after it rather than inside it.
+
+**The same holds for stages 08, 09 and 10.** Each of them closes as the next one opens, in a
+single `mutate`: the writer that finishes a stage sets that row to `complete` with
+`next_action` `-` and sets its successor to `active` with the successor's first action, in
+one locked transition. No specified writer ever leaves the stage table with nothing active
+while work remains — stage 12's close is the sole exception, and it is the terminal state in
+which all twelve rows read `complete`.
 
 - [ ] **Step 4: Run tests to verify they pass**
 

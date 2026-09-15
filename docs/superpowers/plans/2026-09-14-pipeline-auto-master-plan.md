@@ -193,6 +193,28 @@ A structure validator, `tests/test_skill_structure.py`, asserting: frontmatter p
 
 ---
 
+## What `ALLOWED_IMPORTS` actually gates
+
+The allowlist has moved in both directions and the rule that decides it is
+**capability, not convenience.**
+
+`tempfile` was added in Task 9 and removed in its fix round once `os.open` with
+`O_CREAT|O_EXCL` proved to give identical exclusivity — it carried real
+capability (file creation, and a silent 0600 mode that was narrowing the
+tracker's permissions on every write) and bought nothing that could not be had
+without it.
+
+`copy` was added in Task 10 and kept, even though a reviewer proved a hand-rolled
+two-level copy passes every test. It opens nothing, execs nothing and reaches no
+filesystem, so it widens no capability; and the hand-rolled form would encode the
+tracker's shape a second time beside `_SECTIONS`, where the two can drift.
+
+So the question to ask of a proposed member is not "could this be avoided?" —
+almost always it could — but **"does this let the module do something it
+previously could not?"** If yes, justify the capability or find another way. If
+no, the cost is a name in a list and the benefit is usually a rule stated once
+instead of twice.
+
 ## Cross-phase clarifications
 
 Resolved after the phase plans were written, where two phases needed the same

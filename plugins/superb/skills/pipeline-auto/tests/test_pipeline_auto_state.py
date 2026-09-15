@@ -4515,5 +4515,6 @@ class LockedUpdateTests(unittest.TestCase):
         self.assertEqual(settled["run"]["agent_dispatch_count"], "49")
         self.assertEqual(settled["run"]["revision"], "13")
 
+
 if __name__ == "__main__":
     unittest.main()

@@ -976,6 +976,26 @@ git commit -m "feat(pipeline-auto): inline SDD task-brief and review-package scr
 
 ### Task 4: `prompts/brain.md` — the quorum dispatch template
 
+> **ACCEPTANCE CRITERION, from the P03 Task 3 review.** Every `root` this
+> template interpolates — each `READING_ASSIGNMENT.read` line and
+> `DECISIONS_EFFECTIVE` — must be **repo-root-relative**. `effective_rung`
+> resolves a citation against the recorded `## Run` repo root and refuses one
+> that escapes it. Hand a brain the bare filename `decisions-effective.md` and
+> its citation resolves to `<repo_root>/decisions-effective.md`, which does not
+> exist — while the file actually sits at
+> `docs/superpowers/runs/<run-id>/decisions-effective.md`.
+>
+> The failure is **silent**: a citation that does not resolve DEMOTES, it does
+> not raise. Every decision and spec citation in the run falls to
+> `engineering-judgement` (0.55), every cluster lands below the 0.85 floor, and
+> the run escalates every question it is ever asked while looking like a
+> correctly cautious quorum. Worse, `specified` requires one of
+> `{spec, intent-brief, decision}`, so the decision route to the top rung is
+> *dead* until this holds. Check it by reading a rendered prompt, not the
+> template.
+
+
+
 **Files:**
 - Create: `plugins/superb/skills/pipeline-auto/prompts/brain.md`
 - Test: `plugins/superb/skills/pipeline-auto/tests/test_skill_structure.py`
@@ -1051,6 +1071,11 @@ Subagent (pipeline-auto-brain):
     biases each of you toward a *source*, never toward an answer. You may read
     outside your assignment when a specific question demands it — say so in your
     evidence — but an answer that never touched your assignment is a weak one.
+
+    Every path you cite in `evidence` must be written **relative to the
+    repository root**, and must stay inside it. That is the one root your
+    citations are resolved against.
+
 
     ## Decisions already made
 

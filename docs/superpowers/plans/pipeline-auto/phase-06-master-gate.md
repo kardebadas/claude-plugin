@@ -546,6 +546,21 @@ def suite_results(run_dir, *, third="", fourth="", order=None):
 ```
 
 ---
+> **From the P03 Task 3 review.** `effective_rung` validates the recorded
+> `repo_root` **before** it reads any evidence, so on a checkout that has moved
+> it raises `QuorumError` for *every* response — including a `speculation` with
+> no evidence at all. That is deliberate (a wrong root demotes everything
+> silently, which is worse), but it means a run whose root has moved can price
+> nothing: the gate sees a stop, not a low rung. Do not treat that exception as
+> a quorum outcome.
+>
+> Related, and binding: `effective_rung`'s signature stays at **two** arguments.
+> The test pinning "the root is recorded, never derived" distinguishes a
+> `__file__`-derived root but could NOT distinguish a `run_dir`-derived one,
+> because `run_dir.parents[3] == repo_root` in the production layout. Passing
+> `run_dir` in would make that derivation constructible and silently blunt the
+> only guard against this phase's invisible failure.
+
 ## Tasks
 
 ### Task 1: The phase-set freeze

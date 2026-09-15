@@ -59,7 +59,7 @@ Paths are taken verbatim from the master plan's *P01 produces — consumed by P0
 | `tests/pressure/RED-baseline.md` | The one committed curated record: two tables, one row per scenario, carrying the verbatim rationalization and the fail-predicate outcome. | yes |
 | `tests/check_baseline_evidence.py` | **The mechanical separation.** Validates a records tree: class label must match directory, all ten scenarios must have a valid `ACTUAL_AGENT` record, raw bodies must be substantive, oracle vocabulary and placeholders rejected. | yes |
 | `tests/test_baseline_evidence.py` | Unit tests for the validator, against trees built in `tmp_path`. | yes |
-| `tests/test_pressure_stimuli.py` | Proves every scenario has a file, that the set is exactly the declared one, that no stimulus leaks oracle vocabulary or a skill reference, and that the `.gitignore` really covers `oracles.md` and `records/`. | yes |
+| `tests/test_pressure_stimuli.py` | Proves every scenario has a file, that the set is exactly the declared one, that no stimulus leaks oracle vocabulary or a skill reference, and that the `.gitignore` really covers `records/`. | yes |
 
 **Why `oracles.md` and `records/` are ignored in place.** The master plan puts both inside `tests/pressure/`, and also requires `git status --short` to print nothing at stage 12. Untracked files print. The committed `.gitignore` in `tests/pressure/` resolves both, and is the same self-ignoring pattern the master plan already uses for `scripts/sdd-workspace`'s `scratch/`.
 
@@ -535,6 +535,15 @@ git commit -m "test(pipeline-auto): add facts-only P01 pressure stimuli"
 Expected: the `git diff --name-only` command prints nothing.
 
 ---
+
+
+> **Correction (review of Task 1, commit `08e8640`).** This test pins `records/`
+> ONLY. It must not pin `oracles.md`. The oracle is ignored during P01 and
+> published by Task 11 once every RED record is captured — a test asserting the
+> oracle stays ignored would fail the exact commit the design requires. Task 11
+> enforces the ordering instead, and its guard uses `git check-ignore --no-index`
+> because git does not apply ignore rules to tracked files, which made the
+> dangerous state undetectable in the guard's first version.
 
 ## Task 2: The evidence-class validator
 

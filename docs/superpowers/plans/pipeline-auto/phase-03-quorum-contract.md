@@ -2521,6 +2521,33 @@ git commit -m "feat(pipeline-auto): record every brain response immutably and al
 
 ### Task 10: Classifying an interrupted quorum
 
+> **From the Task 8 review — `stale-context` is load-bearing, and the reason is
+> sharper than "the context may change".** `decisions-effective.md` is **one
+> run-global mutable file**, rewritten by every `open_quorum`, while each
+> `open.json` binds a `payload_digest` over its content *at its own open time*.
+> So a later raise invalidates an earlier in-flight quorum's digest, and the
+> earlier quorum's brains are still reading the file the later raise rewrote.
+> Measured:
+>
+> ```
+> q1 payload_digest at open      : cce8cfb8...
+> q1 recomputed immediately      : cce8cfb8...   match
+> [a decision lands; q2 is raised]
+> q1 recomputed after q2         : db2ddeb2...   MATCH: False
+> q1's brain-a is still told to read docs/superpowers/runs/<id>/decisions-effective.md
+> ```
+>
+> **The lock does not prevent this and cannot.** Task 8's commit message claimed
+> it did; that claim is wrong and is corrected in the code. Serialised raises
+> produce it just as thoroughly, because the brains read the file *outside* any
+> lock this module holds.
+>
+> So `stale-context` is not a rare interruption state — it is the **ordinary**
+> state of any quorum that was in flight when another was raised. Classify it
+> from the digest that was recorded against the projection as it stands now, and
+> do not assume a mismatch means a crash.
+
+
 **Files:**
 - Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
 - Test: `plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py`

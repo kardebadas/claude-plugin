@@ -45,8 +45,35 @@ ORACLE_TOKENS = (
 )
 #: An unfilled marker means the field was never observed.
 PLACEHOLDERS = ("TBD", "TODO", "<fill", "XXX")
+#: An unfilled angle-bracket slot copied straight out of RECORD-TEMPLATE.md.
+#: Every slot in that template has this shape -- ``<`` followed immediately by
+#: a non-space character and closed by ``>`` on the same line: ``<STIMULUS_ID>``,
+#: ``<sha256 of the exact prompt-borne stimulus file, 64 hex chars>``,
+#: ``<YYYY-MM-DDTHH:MM:SSZ>``, ``<plain|suffix>``. None of them contains the
+#: literal ``<fill``, so before this rule existed a record copied from the
+#: template with every slot left unfilled validated clean and counted as a real
+#: ACTUAL_AGENT baseline -- evidence that only looks like evidence.
+UNFILLED_SLOT = re.compile(r"<[^\s>][^>\n]*>")
 MIN_RAW_CHARS = 200
 FILENAME = re.compile(r"^p01-(S(?:0[1-9]|10))-baseline-(\d{2})\.md$")
+
+
+def _header_region(text: str) -> str:
+    """The part of a record its author writes: everything before the transcript.
+
+    The ``## Raw response`` body is deliberately exempt from the unfilled-slot
+    rule. That body is a verbatim agent transcript, and an agent may legitimately
+    emit angle brackets -- quoted XML or HTML, generics, a shell redirection, an
+    ``<unknown>`` marker of its own. Rejecting those would force the recorder to
+    edit a published transcript, which is the one thing a raw record may never
+    do, so the rule is confined to the header/metadata region instead.
+
+    An unfilled *body* is still caught, by a different rule: the template's body
+    slot is far shorter than MIN_RAW_CHARS, so the substantive-body floor
+    rejects it. A record missing the marker entirely is already an error, and
+    falls back to scanning the whole text.
+    """
+    return text.split("## Raw response", 1)[0]
 
 
 def _field(text: str, name: str) -> str | None:
@@ -95,6 +122,12 @@ def check_file(path: Path, expected_class: str) -> list[str]:
     for token in PLACEHOLDERS:
         if token in text:
             errors.append(f"{path}: placeholder {token!r} present")
+    seen_slots: set[str] = set()
+    for slot in UNFILLED_SLOT.findall(_header_region(text)):
+        if slot in seen_slots:
+            continue
+        seen_slots.add(slot)
+        errors.append(f"{path}: unfilled template slot {slot!r} in the record header")
 
     return errors
 

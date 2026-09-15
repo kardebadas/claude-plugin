@@ -40,6 +40,25 @@ VALIDATOR = TESTS_DIR / "check_baseline_evidence.py"
 RAW_BODY = "The controller opens a quorum on this question. " * 8
 
 
+#: The shape RECORD-TEMPLATE.md produces when it is copied and nothing is
+#: filled in but the Stimulus ID (so the filename check passes) and the body.
+#: The template is workspace-local and never committed, so its slots are
+#: reproduced here rather than read from disk -- a test that skips when the
+#: template is absent would not have caught the bug this one exists for.
+UNFILLED_TEMPLATE_HEADER = """# P01 <STIMULUS_ID> baseline
+
+- Evidence class: ACTUAL_AGENT
+- Stimulus ID: S01
+- Stimulus SHA-256: <sha256 of the exact prompt-borne stimulus file, 64 hex chars>
+- Skill present: none
+- Dispatch: Agent(subagent_type=general-purpose, model=opus, pressure=<plain|suffix>)
+- Agent id: <the id the Agent tool reported, or the literal unavailable-from-runtime>
+- Agent model: opus
+- Recorded UTC: <YYYY-MM-DDTHH:MM:SSZ>
+- Repo HEAD: <sha of HEAD at dispatch time>
+"""
+
+
 def record(stimulus_id, evidence_class, **overrides):
     fields = {
         "Evidence class": evidence_class,
@@ -174,6 +193,36 @@ class BaselineEvidence(unittest.TestCase):
         records[9] = ("S10", record("S10", ACTUAL_CLASS, **{"Agent id": "TBD"}))
         build(self.tmp_path, actual=records)
         self.assertAnyError(check_tree(self.tmp_path), "placeholder 'TBD'")
+
+    def test_unfilled_template_slots_are_rejected(self):
+        """Probe C. Catches the failure the template's own instructions claimed
+        was already covered: a record copied from RECORD-TEMPLATE.md with every
+        angle-bracket slot left as-is -- no SHA, no agent id, no timestamp --
+        once validated clean and counted as a real ACTUAL_AGENT baseline,
+        because none of the slots contains the literal ``<fill`` the
+        PLACEHOLDERS tuple looks for. Evidence that only looks like evidence."""
+        records = all_actual()
+        records[0] = (
+            "S01",
+            f"{UNFILLED_TEMPLATE_HEADER}\n## Raw response\n\n{RAW_BODY}\n")
+        build(self.tmp_path, actual=records)
+        errors = check_tree(self.tmp_path)
+        slot_errors = [error for error in errors if "unfilled template slot" in error]
+        self.assertTrue(slot_errors, f"no unfilled-slot error; got {errors!r}")
+        self.assertIn("'<STIMULUS_ID>'", slot_errors[0])
+        self.assertAnyError(errors, "missing valid ACTUAL_AGENT baseline for: S01")
+
+    def test_angle_brackets_in_the_raw_response_are_not_slots(self):
+        """The other half of Probe C, and the reason the rule stops at the
+        header: an agent quoting XML, HTML or generics in its final message
+        must not be rejected, because the only way to satisfy such a rule would
+        be to edit a transcript a record may never edit."""
+        records = all_actual()
+        quoted = record("S04", ACTUAL_CLASS).replace(
+            RAW_BODY, f"{RAW_BODY}\nIt answered with <answer>yes</answer> and List<T>.")
+        records[3] = ("S04", quoted)
+        build(self.tmp_path, actual=records)
+        self.assertEqual(check_tree(self.tmp_path), [])
 
     def test_oracle_vocabulary_in_evidence_is_rejected(self):
         """Catches the controller's own grading leaking into the record, which

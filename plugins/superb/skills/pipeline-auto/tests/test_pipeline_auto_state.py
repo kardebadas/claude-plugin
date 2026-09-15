@@ -4535,6 +4535,14 @@ class LockedUpdateTests(unittest.TestCase):
         self.assertEqual(settled["run"]["revision"], "13")
 
 
+#: A repository root that is absolute, plausible, and nobody's home directory.
+#: It is COMMITTED — it reaches ``NEW_RUN`` and, spelled the same way, the
+#: fixture — so it may not be the checkout this file happens to sit in: a real
+#: one bakes one machine's account name into every case that cites it. Cases
+#: that need the root to exist on disk build one under ``tempfile`` instead and
+#: pass it explicitly.
+EXAMPLE_REPO_ROOT = "/srv/checkouts/claude-plugin"
+
 #: The arguments a run is born with, in one place so a case that varies one of
 #: them varies exactly one of them. Every value here is real: the base commit is
 #: this repository's own, and the branch is the shape a run actually targets.
@@ -4542,6 +4550,7 @@ NEW_RUN = {
     "run_id": "2026-09-14-example",
     "base_commit": "c8bddd610119f52b54bf077d284c7f5d8362ae77",
     "target_branch": "feat/example",
+    "repo_root": EXAMPLE_REPO_ROOT,
     "worker_limit": 6,
 }
 
@@ -4588,6 +4597,34 @@ class InitializeRunTests(unittest.TestCase):
             (run_dir / "progress.md").exists(),
             "a refused initialization still left a tracker on disk")
         return caught.exception
+
+    def test_a_repo_root_that_is_not_an_absolute_path_is_refused(self):
+        """The root is recorded here and checked nowhere else at birth.
+
+        A relative root joined to a citation path resolves against whatever
+        directory the controller happens to be standing in — which is not a
+        place, it is a coincidence. The spellings below are the ones a caller
+        reaches for: the sentinel other cells use for absence, a bare name, a
+        relative path, and a ``~`` no one expands.
+        """
+        for value in ("", "-", "repo", "relative/path", "./repo", "../repo",
+                      "~/repo", "/two words/repo"):
+            with self.subTest(repo_root=value):
+                self.assertIn("repo_root", str(
+                    self.refusal(pas.TrackerValidationError, repo_root=value)))
+
+    def test_a_repo_root_that_is_not_a_string_is_refused_by_type(self):
+        """``Path('/srv/repo')`` is the argument a caller is most likely to
+        hold, and the interface says ``str``. It must be refused rather than
+        stringified: the grammar check indexes the value, so a ``Path`` reaching
+        it raises ``TypeError`` — outside this module's exception family — and
+        a coercion here would contradict the annotation the way the ``Path``
+        sweep above exists to prevent.
+        """
+        for value in (Path("/srv/checkouts/claude-plugin"), 4, None, b"/srv"):
+            with self.subTest(repo_root=value):
+                self.assertIn("repo_root", str(
+                    self.refusal(pas.TrackerValidationError, repo_root=value)))
 
     def test_a_new_run_opens_stage_01_and_leaves_the_other_eleven_pending(self):
         """Twelve pending stages is the shape that reported an untouched run as
@@ -5077,6 +5114,10 @@ class PublishImmutableTests(unittest.TestCase):
 TEMPLATE_RUN_ID = "2026-09-14-example"
 TEMPLATE_BASE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
 TEMPLATE_TARGET_BRANCH = "feat/example"
+#: Absolute, because that is what the field means, and synthetic, because the
+#: expanded template is compared byte for byte against a real run and this
+#: constant would otherwise have to be one machine's checkout path.
+TEMPLATE_REPO_ROOT = "/srv/checkouts/example"
 TEMPLATE_WORKER_LIMIT = 4
 
 
@@ -5103,6 +5144,7 @@ def filled_progress_template() -> str:
     text = progress_template()
     text = swap("<base_commit>", TEMPLATE_BASE_COMMIT, text)
     text = swap("<target_branch>", TEMPLATE_TARGET_BRANCH, text)
+    text = swap("<repo_root>", TEMPLATE_REPO_ROOT, text)
     text = swap("<worker_limit>", str(TEMPLATE_WORKER_LIMIT), text)
     #: Last, and deliberately so: the run id also appears inside the three
     #: artifact paths, and expanding it first would leave nothing for the
@@ -5149,7 +5191,7 @@ class ProgressTemplateTests(unittest.TestCase):
 
         Committing a real run's `progress.md` here would still round-trip and
         still validate — and would hand every later run another run's id, base
-        commit and artifact paths. The four caller-supplied fields must be
+        commit and artifact paths. The five caller-supplied fields must be
         unfilled, and nothing else may be: a placeholder left in `revision` or
         `schema` is a cell no caller knows to fill.
         """
@@ -5162,7 +5204,8 @@ class ProgressTemplateTests(unittest.TestCase):
         self.assertEqual(
             [key for key, value in run.items()
              if value.startswith("<") and value.endswith(">")],
-            ["run_id", "base_commit", "target_branch", "worker_limit"])
+            ["run_id", "base_commit", "target_branch", "repo_root",
+             "worker_limit"])
         self.assertEqual(run["schema"], pas.SCHEMA)
         #: The run id is interpolated into three artifact paths as well as its
         #: own cell, so an expansion that filled the cell and left the paths
@@ -5184,6 +5227,7 @@ class ProgressTemplateTests(unittest.TestCase):
         pas.initialize_run(run_dir, run_id=TEMPLATE_RUN_ID,
                            base_commit=TEMPLATE_BASE_COMMIT,
                            target_branch=TEMPLATE_TARGET_BRANCH,
+                           repo_root=TEMPLATE_REPO_ROOT,
                            worker_limit=TEMPLATE_WORKER_LIMIT)
         self.assertEqual(filled_progress_template(),
                          (run_dir / "progress.md").read_text(encoding="utf-8"))
@@ -6070,6 +6114,21 @@ class RunSectionValidatorTests(unittest.TestCase):
                 self.refused(swap("| run_id | 2026-09-14-pipeline-auto |",
                                   f"| run_id | {value} |"), "run_id")
 
+    def test_a_repo_root_that_is_not_an_absolute_path_is_refused(self):
+        """``initialize_run`` checks the ARGUMENT, once, at birth. Nothing
+        checked the CELL, and the cell is what citation resolution is handed on
+        every later read. A transition that made it relative, or a hand-edit
+        that replaced it with the absence sentinel, resolves no citation at
+        all — so every ``specified`` and ``code-evidenced`` answer demotes to
+        ``engineering-judgement``, everything lands below the adoption floor,
+        and the run escalates every question while looking cautious.
+        """
+        for value in ("-", "repo", "relative/path", "./repo", "~/repo",
+                      "/two words/repo"):
+            with self.subTest(repo_root=value):
+                self.refused(swap(f"| repo_root | {EXAMPLE_REPO_ROOT} |",
+                                  f"| repo_root | {value} |"), "repo_root")
+
     def test_the_validator_is_wired_into_the_one_entry_point(self):
         """Pinned the way the other eleven are pinned. A validator that exists
         and is never called is the shape this file has shipped before: every
@@ -6094,6 +6153,214 @@ class RunSectionValidatorTests(unittest.TestCase):
                 run_dir, transition_id="capacity-1",
                 mutate=setting_run_field("worker_limit", "0"))
         self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+#: Where a run directory really sits: ``docs/superpowers/runs/<run-id>/`` under
+#: the repository root. Four levels down, which is the whole trap — a root
+#: derived from depth is ``parents[3]`` for a run in this layout and
+#: ``parents[0]`` for one somebody put beside the repository root, and BOTH
+#: spellings are a guess about a fact the tracker already records.
+PRODUCTION_RUN_LAYOUT = ("docs", "superpowers", "runs")
+
+#: A cited file, its one line, and the claim a brain would make about it.
+CITED_PATH = "db/engine.py"
+CITED_TEXT = "class PostgresEngine:\n"
+CITATION = f"{CITED_PATH}:1"
+CLAIM = "PostgresEngine"
+
+
+def resolves_citation(root: str, citation: str, claim: str) -> bool:
+    """Resolve a ``path:line`` citation against a repository root.
+
+    Resolution belongs to P03 Task 3 and lives HERE, in the test file, because
+    ``effective_rung`` does not exist yet. It is spelled the way the phase plan
+    spells it — join the root, read the file, look at that line — for one
+    reason: the thing under test is the ROOT, and a resolver that differed from
+    the real one would prove nothing about the root it was handed.
+    """
+    path, _, line = citation.rpartition(":")
+    try:
+        lines = (Path(root) / path).read_text(encoding="utf-8").splitlines()
+    except (OSError, ValueError):
+        return False
+    index = int(line) - 1
+    return 0 <= index < len(lines) and claim in lines[index]
+
+
+def repo_with_a_run(case: unittest.TestCase, *,
+                    layout: tuple[str, ...] = PRODUCTION_RUN_LAYOUT,
+                    ) -> tuple[Path, Path]:
+    """A real repository holding a real cited file, with a real run inside it.
+
+    The run is placed at its production depth by default, so a case that
+    derived the root from directory arithmetic would be deriving it from the
+    same shape a real run has. ``layout`` exists so one case can put a second
+    run at a different depth and show that no single index is right for both.
+    """
+    root = Path(tempfile.mkdtemp(prefix="pipeline-auto-repo-"))
+    case.addCleanup(shutil.rmtree, root, ignore_errors=True)
+    (root / ".git").mkdir()
+    cited = root / CITED_PATH
+    cited.parent.mkdir(parents=True)
+    cited.write_text(CITED_TEXT, encoding="utf-8")
+    run_dir = root.joinpath(*layout, NEW_RUN["run_id"])
+    run_dir.parent.mkdir(parents=True)
+    pas.initialize_run(run_dir, **{**NEW_RUN, "repo_root": str(root)})
+    return root, run_dir
+
+
+class RepoRootIsRecordedNeverDerivedTests(unittest.TestCase):
+    """The root every citation is resolved against — recorded, never computed.
+
+    This is the invisible failure. P03 demotes a brain that claims ``specified``
+    or ``code-evidenced`` but cites a ``file:line`` that does not resolve. Hand
+    that resolution a wrong root and NOTHING resolves: every grounded answer
+    falls to ``engineering-judgement`` at 0.55, every cluster lands below the
+    0.85 adoption floor, and the run escalates every question it is ever asked
+    while looking like a correctly cautious quorum. No error, no exception, no
+    red test. The skill appears to work and is useless.
+
+    The obvious wrong root is directory arithmetic, and the arithmetic looks
+    reasonable right up to the moment it is written down: a run lives at
+    ``docs/superpowers/runs/<run-id>/``, so the root is ``parents[3]`` — until a
+    run sits somewhere else, when it is ``parents[0]``, or ``parents[1]``, and
+    there is no index that is right for both. The tracker records the answer.
+
+    **What P02 owes and what P03 Task 3 still owes.** P02 owes the root: an
+    explicit ``initialize_run`` argument, a ``## Run`` cell, a validator, and
+    ``repo_root(tracker)`` reading it back with no computation in its body.
+    That half is pinned here, end to end, against a real repository and a real
+    file. P03 Task 3 owes the other half — ``effective_rung(response,
+    repo_root)``: parsing a response's evidence, resolving each citation
+    against the root it is GIVEN, and demoting to ``engineering-judgement``
+    when one does not resolve. ``resolves_citation`` above stands in for the
+    resolving step only, so that this file can prove the root is right; it is
+    not the demotion rule, and P03 must not treat it as already written.
+    """
+
+    def computed_body(self, source: str) -> list[str]:
+        """``repo_root``'s own statements, its docstring excluded.
+
+        The prose in that docstring is obliged to name the derivation it
+        refuses, so a guard reading the whole subtree would be satisfied by a
+        function that simply stayed quiet about its own reasoning.
+        """
+        body = function_node(source, "repo_root").body
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            body = body[1:]
+        return [ast.unparse(statement) for statement in body]
+
+    def test_a_root_derived_from_run_dir_depth_resolves_no_citation_and_would_demote_every_grounded_answer(self):
+        """THE CASE BETWEEN THIS DESIGN AND A SILENT TOTAL FAILURE.
+
+        A real repository, a real file, a real run at its real depth. The
+        recorded root resolves the citation; the roots directory arithmetic
+        would have produced do not. Stated in both directions on purpose — a
+        positive assertion alone passes against a resolver that says yes to
+        everything, and a negative alone passes against one that says no.
+        """
+        root, run_dir = repo_with_a_run(self)
+        recorded = pas.repo_root(pas.validate_run(run_dir))
+        self.assertTrue(
+            resolves_citation(recorded, CITATION, CLAIM),
+            "the RECORDED root does not resolve a citation to a file that is "
+            "really there: every grounded answer in this run would demote to "
+            "engineering-judgement and the run would escalate everything")
+        for depth in range(3):
+            with self.subTest(parents=depth):
+                self.assertFalse(
+                    resolves_citation(str(run_dir.parents[depth]), CITATION, CLAIM),
+                    f"run_dir.parents[{depth}] resolved the citation, so this "
+                    "case can no longer tell a recorded root from a derived one")
+        #: ``parents[3]`` IS this layout's root, which is exactly why depth is
+        #: not an answer: the same arithmetic against a run kept somewhere else
+        #: resolves nothing, and neither run can tell which kind it is.
+        self.assertEqual(Path(recorded).resolve(), run_dir.parents[3].resolve())
+        _, shallow_run = repo_with_a_run(self, layout=("runs",))
+        self.assertTrue(
+            resolves_citation(pas.repo_root(pas.validate_run(shallow_run)),
+                              CITATION, CLAIM),
+            "a run kept outside docs/superpowers/runs/ recorded a root that "
+            "resolves nothing")
+        self.assertFalse(
+            resolves_citation(str(shallow_run.parents[3]), CITATION, CLAIM),
+            "parents[3] resolved for a run at a different depth too, so this "
+            "case would pass against a module that derived the root")
+
+    def test_the_recorded_root_is_the_one_the_caller_named_even_when_no_ancestor_matches(self):
+        """The same claim with the filesystem taken out of it.
+
+        The run directory here has no ancestor equal to the recorded root, so
+        no ``parents[N]`` — for any N — could produce this cell. A derivation
+        that happened to be right for the production layout is wrong here, and
+        wrong by inspection rather than by whether a file could be read.
+        """
+        root = Path(tempfile.mkdtemp(prefix="pipeline-auto-elsewhere-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        run_dir, tracker = new_run(self, repo_root=str(root))
+        self.assertEqual(pas.repo_root(tracker), str(root))
+        self.assertNotIn(str(root), [str(parent) for parent in run_dir.parents])
+
+    def test_the_accessor_reads_the_recorded_field_and_computes_nothing(self):
+        """The property this file can state even though resolution is P03's.
+
+        Not "the accessor returns something plausible" — that passes against a
+        body that walks for ``.git`` and gets lucky in a checkout. The body is
+        ONE statement, and it is a read of the cell. Anything else in it is a
+        computation, and a computation is the defect.
+        """
+        self.assertEqual(
+            self.computed_body(module_source()),
+            ["return tracker['run']['repo_root']"],
+            "repo_root does something other than read the recorded cell; a "
+            "root it computes is a guess about where a run directory sits")
+
+    def test_the_guard_names_an_accessor_that_computed_a_root(self):
+        """A test of the test. The clean result above is a statement about the
+        module only if the guard would have spoken up, so the derivation is
+        spliced into the real function and must be named.
+        """
+        source = module_source()
+        mutant = with_statement_in(
+            source, "repo_root",
+            "return str(Path(tracker['run']['decisions']).parents[3])")
+        self.assertNotEqual(mutant, source)
+        self.assertEqual(self.computed_body(mutant)[0],
+                         "return str(Path(tracker['run']['decisions']).parents[3])")
+        self.assertEqual(self.computed_body(source),
+                         ["return tracker['run']['repo_root']"])
+
+    def test_the_root_survives_an_ordinary_transition_and_still_resolves(self):
+        """Recorded at init means recorded for the life of the run.
+
+        A transition rewrites ``revision`` and ``last_transition`` and renders
+        the whole table back; a root that were re-derived on write would drift
+        the first time anything at all happened, long after the run started.
+        """
+        root, run_dir = repo_with_a_run(self)
+        settled = pas.locked_tracker_update(run_dir, transition_id="dispatch-1",
+                                            mutate=bump_dispatches)
+        self.assertEqual(pas.repo_root(settled), str(root))
+        self.assertTrue(resolves_citation(pas.repo_root(settled), CITATION, CLAIM))
+
+    def test_a_transition_cannot_repoint_the_recorded_root(self):
+        """Re-pointing it mid-run is the same defect with a later timestamp.
+
+        Every citation resolved before the change and every one resolved after
+        would be judged against different repositories, and the quorum rows
+        recording those judgements say nothing about which. It is guarded the
+        way ``run_id`` and ``base_commit`` are guarded — the write is refused
+        and the tracker on disk is left byte-identical.
+        """
+        run_dir = make_run(self)
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.locked_tracker_update(
+                run_dir, transition_id="repoint-1",
+                mutate=setting_run_field("repo_root", "/srv/checkouts/elsewhere"))
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
 
 if __name__ == "__main__":
     unittest.main()

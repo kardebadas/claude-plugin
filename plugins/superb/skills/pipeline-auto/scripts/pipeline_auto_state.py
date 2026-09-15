@@ -92,8 +92,13 @@ class PlanMetadataError(TrackerError):
     """
 
 
+#: ``repo_root`` sits with the four identity keys rather than with the
+#: counters because it is the same kind of fact: what this run is anchored to.
+#: It is RECORDED at init from an explicit argument and never derived — see
+#: ``repo_root`` below, which is the only sanctioned way to read it back.
 _RUN_KEYS = (
-    "run_id", "schema", "base_commit", "target_branch", "worker_limit",
+    "run_id", "schema", "base_commit", "target_branch", "repo_root",
+    "worker_limit",
     "agent_dispatch_count", "spec", "master_plan", "phase_plans", "decisions",
     "findings", "completeness_proposals", "revision", "last_transition",
 )
@@ -200,6 +205,17 @@ _ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 #: wide — an axis name, a path fragment, a version — and deliberately excludes
 #: the space, which is what separates a token from a sentence.
 _TOKEN = _CharClass(_ALNUM, _ALNUM + "._/@:+-")
+
+#: An absolute path, in the characters a pipe-delimited cell can carry back out
+#: unchanged. ``_TOKEN`` is the wrong grammar here in one direction — its first
+#: character must be alphanumeric, and the whole point of this one is that the
+#: first character is ``/`` — and the right grammar in the other: a cell's
+#: contents are stripped on the way in, so a root with a space at either end
+#: parses back as different bytes, and a ``|`` anywhere in it parses back as a
+#: different number of columns. A repository whose path contains a space is
+#: therefore refused at ``initialize_run``, loudly and before the run starts,
+#: rather than recorded into a cell that cannot hold it.
+_ABS_PATH = _CharClass("/", _ALNUM + "._/@:+-")
 
 
 def _field(column: str) -> str:
@@ -334,7 +350,7 @@ def _is_count(value: str) -> bool:
 
 
 def _validate_run(tracker: dict) -> None:
-    """``## Run`` as a state the run can be in, not merely as fourteen cells.
+    """``## Run`` as a state the run can be in, not merely as fifteen cells.
 
     Every other section gained a semantic validator; this one did not, and the
     gap had a shape. ``base_commit``, ``target_branch`` and ``worker_limit``
@@ -353,6 +369,21 @@ def _validate_run(tracker: dict) -> None:
     is what ``_sections`` judges; the FIELD was never compared to anything, so a
     tracker could carry the v1 marker and call itself v2 in its own table. There
     is no migration in either direction, so the two disagreeing is a stop.
+
+    ``repo_root`` is the cell with the quietest failure in the whole table. It
+    is what a ``file:line`` citation is resolved against, and a root that is
+    relative, blank, or the absence sentinel resolves NOTHING — so every brain
+    claiming ``specified`` or ``code-evidenced`` is demoted for citing evidence
+    that "does not exist", every cluster falls below the adoption floor, and the
+    run escalates every question it is ever asked while looking like a correctly
+    cautious quorum. There is no exception and no failing test to find it by, so
+    the check belongs here, on every read, rather than only at birth.
+
+    It is checked as a STRING, never against the filesystem. A tracker read from
+    a checkout that has since moved, or on another machine, must still parse: a
+    validator that called ``exists()`` would turn a relocated clone into a
+    foreign-schema-shaped stop, and "this path is not where it was" is a fact
+    for the code resolving a citation to report, not for the parser to guess at.
     """
     run = tracker["run"]
     if run["schema"] != SCHEMA:
@@ -375,6 +406,12 @@ def _validate_run(tracker: dict) -> None:
         raise TrackerValidationError(
             "target_branch may not be main or master: pipeline-auto leaves a "
             "clean committed feature branch and merges or pushes nothing")
+    if not _ABS_PATH.fullmatch(run["repo_root"]):
+        raise TrackerValidationError(
+            f"repo_root {run['repo_root']!r} is not an absolute path: it is "
+            "recorded at init and is what every file:line citation in this run "
+            "is resolved against, so a relative or missing one resolves no "
+            "evidence at all and silently demotes every grounded answer")
     #: ``initialize_run`` refuses a ``bool`` BY TYPE and then writes
     #: ``str(worker_limit)``. So the only spelling that can reach a tracker from
     #: anywhere else is the string ``'True'``, which no python-type check would
@@ -1805,6 +1842,31 @@ def derive_next_action(tracker: dict) -> str:
         "action to derive and is not complete")
 
 
+def repo_root(tracker: dict) -> str:
+    """The repository this run was started against, as recorded at init.
+
+    One statement, and it has to stay one statement. The alternative — deriving
+    the root from where the run directory sits — is the single most dangerous
+    line this schema could grow, because it fails invisibly: a run lives at
+    ``docs/superpowers/runs/<run-id>/``, so directory arithmetic says
+    ``parents[3]``, and a run kept anywhere else says something different, and
+    NEITHER is a fact. A wrong root resolves no citation, so every brain that
+    claimed ``specified`` or ``code-evidenced`` is demoted to
+    ``engineering-judgement``, so every cluster lands below the adoption floor,
+    so the run escalates every question it is ever asked — while looking like a
+    correctly cautious quorum. No error, no exception, nothing goes red. The
+    skill would appear to work and be useless.
+
+    So the root is an ARGUMENT at ``initialize_run``, recorded once, validated
+    on every read, and read back here verbatim. The function shares its name
+    with the field it reads and with that argument, deliberately: all three are
+    the interface the master plan pins, they live in three different namespaces,
+    and a reader who follows the name from a caller to the cell finds no
+    translation step to get wrong.
+    """
+    return tracker["run"]["repo_root"]
+
+
 def _row(values: tuple[str, ...]) -> str:
     return "| " + " | ".join(values) + " |"
 
@@ -2203,7 +2265,13 @@ def _replace_tracker(run_dir, text: str, transition_id: str) -> None:
 #: commit or retarget its branch is one whose entire history can be reattributed
 #: by a single mutation, and every artifact already written would still look
 #: consistent with the new identity.
-_IDENTITY_KEYS = ("run_id", "schema", "base_commit", "target_branch")
+#: ``repo_root`` is one of these because "recorded at init" is a claim about
+#: the whole run, not about its first revision. A transition that re-pointed it
+#: would judge the citations resolved before it and the citations resolved after
+#: it against two different repositories, and the quorum rows recording those
+#: judgements say nothing about which root each was decided under.
+_IDENTITY_KEYS = ("run_id", "schema", "base_commit", "target_branch",
+                  "repo_root")
 
 #: Every top-level key a tracker dict carries. ``mutate`` is free to rebuild the
 #: dict rather than edit the one it was handed, and a rebuild that drops a
@@ -2477,7 +2545,8 @@ def publish_immutable(path: Path, content: str) -> str:
 
 
 def initialize_run(run_dir: Path, *, run_id: str, base_commit: str,
-                   target_branch: str, worker_limit: int) -> dict:
+                   target_branch: str, repo_root: str,
+                   worker_limit: int) -> dict:
     """Create the first tracker for a run, or refuse and change nothing.
 
     This is the one write that does not go through ``locked_tracker_update``,
@@ -2499,6 +2568,16 @@ def initialize_run(run_dir: Path, *, run_id: str, base_commit: str,
     The returned tracker is read back THROUGH the parser rather than being the
     dict that was rendered, so a caller only ever acts on state that survived a
     round trip.
+
+    ``repo_root`` is REQUIRED and explicit, and this is the one place in the
+    run where it is decided. It is not defaulted, not inferred from ``run_dir``,
+    and not looked for by walking upward for a ``.git``: the caller knows which
+    repository it is starting a run in, and every other way of finding out is a
+    guess that fails silently later. Inside this body the parameter shadows the
+    module-level ``repo_root`` accessor of the same name, which is harmless and
+    deliberate — this function WRITES the cell and never reads one back, and
+    keeping the three spellings identical is what makes the argument, the field
+    and the accessor obviously the same fact.
     """
     if not _RUN_ID.fullmatch(run_id):
         raise TrackerValidationError(
@@ -2519,6 +2598,22 @@ def initialize_run(run_dir: Path, *, run_id: str, base_commit: str,
         raise TrackerValidationError(
             "pipeline-auto never targets main or master: success leaves a "
             "clean committed feature branch, and nothing is merged or pushed")
+    #: The type is checked FIRST and separately, the way ``worker_limit``'s is.
+    #: A ``Path`` is the argument a caller is likeliest to be holding, and the
+    #: grammar below indexes its argument — so a ``Path`` reaching it raises
+    #: ``TypeError``, outside this module's exception family, from a function
+    #: whose whole contract is that a bad argument is a read-only stop.
+    #: Coercing it instead would be the same lie the ``Path`` annotations were
+    #: swept for: the interface says ``str`` and the caller spells ``str(...)``.
+    if not isinstance(repo_root, str) or not _ABS_PATH.fullmatch(repo_root):
+        raise TrackerValidationError(
+            f"repo_root {repo_root!r} is not an absolute path string: it is "
+            "recorded once, here, and is what every file:line citation this "
+            "run makes is resolved against. A relative root resolves against "
+            "whatever directory a controller happens to be standing in, which "
+            "is a coincidence rather than a place, and a root that resolves "
+            "nothing demotes every grounded answer below the adoption floor "
+            "without raising anything")
     #: ``int(worker_limit)`` would be the shorter spelling and is the wrong
     #: one twice over: it raises ``ValueError`` on a string, which escapes this
     #: module's exception family, and it truncates a float into a limit the
@@ -2544,6 +2639,10 @@ def initialize_run(run_dir: Path, *, run_id: str, base_commit: str,
             "schema": SCHEMA,
             "base_commit": base_commit,
             "target_branch": target_branch,
+            #: The argument, verbatim. Not ``run_dir.parents[N]``, not a walk
+            #: for ``.git``, not ``os.getcwd()`` — the caller was asked for
+            #: this precisely so that nothing here has to guess at it.
+            "repo_root": repo_root,
             "worker_limit": str(worker_limit),
             "agent_dispatch_count": "0",
             #: Absent, never predicted. Stages 05, 06 and 07 write these three.

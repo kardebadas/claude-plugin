@@ -8,6 +8,7 @@
 | schema | pipeline-auto/v1 |
 | base_commit | <base_commit> |
 | target_branch | <target_branch> |
+| repo_root | <repo_root> |
 | worker_limit | <worker_limit> |
 | agent_dispatch_count | 0 |
 | spec | - |

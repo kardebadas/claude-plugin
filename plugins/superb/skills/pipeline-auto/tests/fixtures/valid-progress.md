@@ -8,6 +8,7 @@
 | schema | pipeline-auto/v1 |
 | base_commit | c8bddd610119f52b54bf077d284c7f5d8362ae77 |
 | target_branch | feat/pipeline-auto |
+| repo_root | /srv/checkouts/claude-plugin |
 | worker_limit | 6 |
 | agent_dispatch_count | 48 |
 | spec | docs/superpowers/specs/2026-09-14-pipeline-auto-design.md |

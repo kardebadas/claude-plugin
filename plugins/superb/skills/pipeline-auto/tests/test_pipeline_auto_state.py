@@ -6362,5 +6362,451 @@ class RepoRootIsRecordedNeverDerivedTests(unittest.TestCase):
         self.assertEqual((run_dir / "progress.md").read_bytes(), before)
 
 
+def fixture_columns() -> dict[str, tuple[str, ...]]:
+    """``{markdown heading: ordered dict keys}``, read out of the committed
+    fixture's own header rows with nothing from the module.
+
+    Keyed by HEADING rather than by tracker key, because the two are not one
+    rename apart — ``## Stage`` is ``stages`` — and inventing the pairing here
+    would test the invention. The pairing comes from ``pas._SECTIONS`` at the
+    call sites; the COLUMNS, which are what a stale tuple gets wrong, come from
+    the fixture. A tracker key that drifted would take ``parse_tracker`` down on
+    the fixture long before it reached here.
+
+    ``SECTION_HEADERS`` above is built FROM ``pas._SECTIONS``, which makes it
+    the right tool for addressing a cell and the wrong one for judging the
+    public column grammar: a stale tuple inside the module would be compared
+    with itself and agree. The phase plans name the committed fixture as the
+    authority on the column contract in as many words, so the expectation here
+    is read from its bytes and the header-to-key mapping is spelled out again
+    rather than imported.
+    """
+    columns: dict[str, tuple[str, ...]] = {}
+    heading: str | None = None
+    for line in valid_text().splitlines():
+        if line.startswith("## "):
+            heading = line
+        elif heading is not None and heading not in columns and line.startswith("|"):
+            columns[heading] = tuple(
+                cell.strip().lower().replace(" ", "_").replace("-", "_")
+                for cell in line[1:-1].split("|"))
+    #: ``## Run`` is a two-column key/value table, not a row table. Its "columns"
+    #: are the literal words ``Field`` and ``Value``, which are not a grammar any
+    #: caller appends against.
+    del columns["## Run"]
+    return columns
+
+
+class SectionColumnGrammarTests(unittest.TestCase):
+    """``SECTIONS`` and ``section_columns`` are the one place a section's shape
+    is written down.
+
+    The master plan gives P02 every section's column grammar, *including*
+    sections whose rows later phases write, and tells P03 through P06 to build
+    their rows against ``section_columns`` rather than a local tuple. The reason
+    is a defect this build has already paid for three times: a column tuple
+    copied into a caller and then one column short of the real thing. A copy
+    that is merely stale does not raise — it writes a row of the wrong width, or
+    the right width with a cell shifted, and the tracker goes on parsing.
+
+    So these cases measure the accessor against the committed fixture, never
+    against ``pas._SECTIONS``, which is the thing that would be stale.
+    """
+
+    def test_sections_maps_every_row_section_to_the_fixtures_own_columns(self):
+        expected = fixture_columns()
+        self.assertEqual(
+            {key: expected[heading] for heading, key, _ in pas._SECTIONS[1:]},
+            dict(pas.SECTIONS))
+        self.assertEqual(len(pas.SECTIONS), len(expected))
+
+    def test_section_columns_answers_with_what_sections_holds(self):
+        for name, columns in pas.SECTIONS.items():
+            with self.subTest(section=name):
+                self.assertEqual(pas.section_columns(name), columns)
+
+    def test_every_fixture_row_carries_exactly_those_keys_in_that_order(self):
+        """The accessor and the parser have to agree, or a row built against
+        ``section_columns`` renders a cell under the wrong header."""
+        tracker = pas.parse_tracker(valid_text())
+        for name in pas.SECTIONS:
+            for index, row in enumerate(tracker[name]):
+                with self.subTest(section=name, row=index):
+                    self.assertEqual(tuple(row), pas.section_columns(name))
+
+    def test_an_unknown_section_name_raises_rather_than_answering_empty(self):
+        """An empty tuple is the dangerous answer: a caller zipping values
+        against it builds an empty row and appends it without complaint."""
+        with self.assertRaises(pas.TrackerValidationError) as caught:
+            pas.section_columns("quorums")
+        self.assertIn("quorums", str(caught.exception))
+
+    def test_the_run_section_is_refused_by_name_rather_than_absent_silently(self):
+        """``## Run`` is a key/value table. A caller that asks it for columns has
+        made a category mistake and is told which one, not handed a KeyError
+        from outside this module's exception family."""
+        with self.assertRaises(pas.TrackerValidationError) as caught:
+            pas.section_columns("run")
+        self.assertIn("run", str(caught.exception))
+
+    def test_the_column_grammar_is_frozen_at_the_language_level(self):
+        """Five phases read this mapping. One of them editing it re-shapes
+        another phase's validation with nothing raised anywhere."""
+        with self.assertRaises(TypeError):
+            pas.SECTIONS["quorum"] = ()
+        with self.assertRaises(TypeError):
+            del pas.SECTIONS["quorum"]
+        self.assertIsInstance(pas.SECTIONS, types.MappingProxyType)
+
+    def test_no_module_attribute_is_a_live_handle_on_the_column_grammar(self):
+        """A ``mappingproxy`` is a read-only VIEW, not a copy: a proxy over a
+        named module-level dict is editable by anything that can reach the name,
+        and the freeze above would be cosmetic. Same lesson as ``RUNGS``."""
+        for name, value in sorted(vars(pas).items()):
+            if not isinstance(value, dict) or set(pas.SECTIONS) - set(value):
+                continue
+            with self.subTest(attribute=name):
+                original = value["quorum"]
+                value["quorum"] = ()
+                try:
+                    self.assertNotEqual(
+                        pas.SECTIONS["quorum"], (),
+                        f"pipeline_auto_state.{name} is a live handle on "
+                        "SECTIONS' own storage; the freeze is cosmetic")
+                finally:
+                    value["quorum"] = original
+
+
+NEW_ESCALATION = {
+    "id": "E-3", "qid": "-", "blast": "task", "state": "queued",
+    "batch": "-", "resolution": "-",
+}
+
+
+class AppendRowTests(unittest.TestCase):
+    """``append_row`` is the only sanctioned way a later phase adds a row.
+
+    It exists to refuse the row a hand-built dict produces when its author
+    worked from a copy of the column list: the right number of keys, one of them
+    named something the section has never had. That row is the dangerous one —
+    ``render_tracker`` reads cells by name, so a mistyped key surfaces as a
+    ``KeyError`` from deep inside the renderer if it surfaces at all, and the
+    missing column is reported instead of the invented one.
+
+    It mutates a tracker dict and writes nothing. ``locked_tracker_update``
+    stays the sole writer of ``progress.md``; this is what a ``mutate`` callable
+    uses inside it.
+    """
+
+    def tracker(self) -> dict:
+        return pas.parse_tracker(valid_text())
+
+    def test_a_row_appended_to_a_section_survives_a_full_round_trip(self):
+        """The positive control every refusal below is measured against."""
+        tracker = self.tracker()
+        before = len(tracker["escalations"])
+        pas.append_row(tracker, "escalations", dict(NEW_ESCALATION))
+        settled = pas.parse_tracker(pas.render_tracker(tracker))
+        self.assertEqual(len(settled["escalations"]), before + 1)
+        self.assertEqual(settled["escalations"][-1], NEW_ESCALATION)
+
+    def test_the_tracker_handed_in_is_the_tracker_returned(self):
+        """``mutate`` has to return what it edited, so ``append_row`` composes
+        as one: ``mutate=lambda t: append_row(t, ...)``."""
+        tracker = self.tracker()
+        self.assertIs(
+            pas.append_row(tracker, "escalations", dict(NEW_ESCALATION)), tracker)
+
+    def test_a_key_of_the_right_arity_but_the_wrong_name_is_refused(self):
+        """The whole reason this function exists.
+
+        Six keys where six are wanted, one of them spelled for a column the
+        section does not have. Counting would accept it; so would ``zip``. The
+        invented name has to be named back, because "a row is wrong" sends its
+        author to re-read all six.
+        """
+        for section, row, wrong, right in (
+            ("escalations", dict(NEW_ESCALATION), "blasts", "blast"),
+            ("quorum", dict(self.tracker()["quorum"][0]), "rungs", "rung"),
+        ):
+            with self.subTest(section=section, wrong=wrong):
+                row[wrong] = row.pop(right)
+                self.assertEqual(len(row), len(pas.section_columns(section)))
+                tracker = self.tracker()
+                before = list(tracker[section])
+                with self.assertRaises(pas.TrackerValidationError) as caught:
+                    pas.append_row(tracker, section, row)
+                message = str(caught.exception)
+                self.assertIn(wrong, message)
+                self.assertIn(right, message)
+                self.assertEqual(tracker[section], before,
+                                 "a refused row still reached the section")
+
+    def test_a_missing_column_is_named(self):
+        row = dict(NEW_ESCALATION)
+        del row["resolution"]
+        tracker = self.tracker()
+        with self.assertRaises(pas.TrackerValidationError) as caught:
+            pas.append_row(tracker, "escalations", row)
+        self.assertIn("resolution", str(caught.exception))
+
+    def test_an_extra_column_is_named(self):
+        row = dict(NEW_ESCALATION)
+        row["severity"] = "critical"
+        tracker = self.tracker()
+        with self.assertRaises(pas.TrackerValidationError) as caught:
+            pas.append_row(tracker, "escalations", row)
+        self.assertIn("severity", str(caught.exception))
+
+    def test_an_unknown_section_is_refused_by_name(self):
+        tracker = self.tracker()
+        with self.assertRaises(pas.TrackerValidationError) as caught:
+            pas.append_row(tracker, "escalationz", dict(NEW_ESCALATION))
+        self.assertIn("escalationz", str(caught.exception))
+
+    def test_the_run_section_cannot_be_appended_to(self):
+        tracker = self.tracker()
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.append_row(tracker, "run", dict(NEW_ESCALATION))
+        self.assertEqual(tracker["run"], self.tracker()["run"])
+
+    def test_every_section_accepts_a_row_built_from_its_own_columns(self):
+        """Generic over all ten row sections, so a section added to the grammar
+        without a place to append to it fails here rather than in the phase that
+        first tries."""
+        for name in pas.SECTIONS:
+            with self.subTest(section=name):
+                tracker = self.tracker()
+                row = {column: "-" for column in pas.section_columns(name)}
+                pas.append_row(tracker, name, row)
+                self.assertEqual(tracker[name][-1], row)
+
+    def test_the_stored_row_is_keyed_in_the_sections_own_column_order(self):
+        """So ``tuple(row)`` reads the same for an appended row as for a parsed
+        one — the invariant ``SectionColumnGrammarTests`` asserts of the fixture.
+
+        Handed a row in a different order, and the cells asserted as well as
+        the keys: reordering by ``zip`` over the row's VALUES produces exactly
+        the right key order with every cell under the wrong one.
+        """
+        tracker = self.tracker()
+        shuffled = dict(reversed(list(NEW_ESCALATION.items())))
+        pas.append_row(tracker, "escalations", shuffled)
+        stored = tracker["escalations"][-1]
+        self.assertEqual(tuple(stored), pas.section_columns("escalations"))
+        self.assertEqual(stored, NEW_ESCALATION)
+
+    def test_append_row_touches_no_file(self):
+        """``locked_tracker_update`` is the sole writer of ``progress.md``. A
+        row appender that wrote would be a second one."""
+        self.assertEqual(write_capable_calls(module_source(), "append_row"), [])
+
+
+#: One synthetic ``/proc/self/mountinfo``. Four mounts, chosen for what each
+#: proves: a root to fall back to, a deeper mount that must win over it, a mount
+#: point carrying an octal-escaped space, and an unlisted type.
+MOUNTINFO = (
+    "23 28 0:21 / / rw,relatime shared:1 - ext4 /dev/root rw\n"
+    "31 23 0:29 / /srv rw,relatime - nfs4 fileserver:/export rw\n"
+    "35 23 0:30 / /srv/local\\040copy rw,relatime - xfs /dev/sdb1 rw\n"
+    "37 23 0:31 / /mnt/experimental rw,relatime - bcachefs /dev/sdc1 rw\n"
+)
+
+
+class FilesystemClassificationTests(unittest.TestCase):
+    """The classifier behind the spec's read-only stop.
+
+    The lock is POSIX advisory locking and the tracker write is a
+    same-directory ``os.replace``. Both are filesystem semantics, and several
+    network filesystems honour neither. Starting a run on one does not fail: it
+    succeeds while the sole-writer guarantee and the three write outcomes are
+    quietly false. So an unsupported or unclassifiable filesystem is a stop
+    before the run starts, not a warning during it — there is no human mid-run
+    to authorise proceeding, which is why `superb:pipeline`'s acknowledgement
+    plumbing has no counterpart here.
+
+    **What these cases cover and what they cannot.** The classification logic is
+    exercised against constructed ``mountinfo`` text and constructed type names,
+    which is portable and is where the decisions actually live. What runs only
+    on this machine is the probe itself: the Linux branch is executed for real
+    exactly once below, and asserted only to return one of the three
+    classifications. The macOS and Windows branches are reached here by naming
+    the platform, never by running on it.
+    """
+
+    def test_a_known_local_type_is_supported(self):
+        for fs_type in ("ext4", "xfs", "btrfs", "zfs", "apfs", "tmpfs", "overlay"):
+            with self.subTest(fs_type=fs_type):
+                self.assertEqual(pas._classify_fs_type(fs_type),
+                                 pas.FILESYSTEM_SUPPORTED)
+
+    def test_a_known_network_type_is_unsupported_and_says_so_distinctly(self):
+        for fs_type in ("nfs", "nfs4", "cifs", "smbfs", "9p", "fuse.sshfs",
+                        "ceph", "glusterfs", "lustre"):
+            with self.subTest(fs_type=fs_type):
+                self.assertEqual(pas._classify_fs_type(fs_type),
+                                 pas.FILESYSTEM_UNSUPPORTED)
+
+    def test_a_type_in_neither_list_is_unknown_rather_than_assumed_local(self):
+        """The dangerous default is "probably fine". A type nobody has judged
+        is one nobody has judged."""
+        for fs_type in ("bcachefs", "exfat", "probe-failed", ""):
+            with self.subTest(fs_type=fs_type):
+                self.assertEqual(pas._classify_fs_type(fs_type),
+                                 pas.FILESYSTEM_UNKNOWN)
+
+    def test_the_three_classifications_are_distinct(self):
+        self.assertEqual(len(set(pas.FILESYSTEM_CLASSES)), 3)
+        self.assertEqual(
+            set(pas.FILESYSTEM_CLASSES),
+            {pas.FILESYSTEM_SUPPORTED, pas.FILESYSTEM_UNSUPPORTED,
+             pas.FILESYSTEM_UNKNOWN})
+
+    def test_a_type_name_is_matched_case_insensitively(self):
+        self.assertEqual(pas._classify_fs_type("NFS4"), pas.FILESYSTEM_UNSUPPORTED)
+        self.assertEqual(pas._classify_fs_type("EXT4"), pas.FILESYSTEM_SUPPORTED)
+
+    def test_the_deepest_mount_containing_the_path_wins(self):
+        """A run directory under ``/srv/...`` is on ``nfs4`` even though ``/``
+        is ``ext4``. Taking the first match, or the root, reports the safe answer
+        for the unsafe mount."""
+        self.assertEqual(
+            pas._mountinfo_fs_type(MOUNTINFO, Path("/srv/checkouts/repo/run")),
+            "nfs4")
+        self.assertEqual(
+            pas._mountinfo_fs_type(MOUNTINFO, Path("/var/tmp/run")), "ext4")
+
+    def test_a_mount_point_is_read_through_its_octal_escapes(self):
+        """``mountinfo`` writes a space as ``\\040``. Compared raw, the deeper
+        mount never matches and the run is judged against ``/``."""
+        self.assertEqual(
+            pas._mountinfo_fs_type(MOUNTINFO, Path("/srv/local copy/run")), "xfs")
+
+    def test_a_path_on_no_listed_mount_is_a_probe_failure(self):
+        with self.assertRaises(pas.FilesystemSuitabilityError):
+            pas._mountinfo_fs_type("garbage\n", Path("/srv/run"))
+
+    def test_an_unparsable_mountinfo_line_is_skipped_not_believed(self):
+        self.assertEqual(
+            pas._mountinfo_fs_type("not a mount line\n" + MOUNTINFO, Path("/x")),
+            "ext4")
+
+    def test_a_platform_with_no_probe_classifies_as_unknown(self):
+        """macOS needs ``subprocess`` plus ``plistlib`` and Windows needs
+        ``ctypes`` to answer this question; none of the three is in
+        ``ALLOWED_IMPORTS`` and each is a real capability widening. Unprobed is
+        therefore genuinely unknown, and unknown is the stop."""
+        for system in ("darwin", "windows", "sunos"):
+            with self.subTest(system=system):
+                with mock.patch.object(pas, "_system_name", lambda: system):
+                    self.assertEqual(pas.classify_filesystem(Path(__file__)),
+                                     pas.FILESYSTEM_UNKNOWN)
+
+    def test_classifying_a_real_path_answers_with_one_of_the_three(self):
+        """The only case that touches this machine's actual filesystem, and it
+        asserts nothing about which one this machine has."""
+        self.assertIn(pas.classify_filesystem(Path(__file__).parent),
+                      pas.FILESYSTEM_CLASSES)
+
+    def test_a_path_that_does_not_exist_yet_is_classified_by_its_nearest_parent(self):
+        """A run directory is classified BEFORE it is created, so the answer has
+        to come from the deepest ancestor that does exist."""
+        root = Path(tempfile.mkdtemp(prefix="pipeline-auto-fs-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        self.assertEqual(pas.classify_filesystem(root / "run" / "deeper"),
+                         pas.classify_filesystem(root))
+
+    def test_a_failed_probe_is_unknown_rather_than_assumed_supported(self):
+        """"The probe broke" is not evidence about the filesystem.
+
+        Read as "carry on", it is worse than having no check at all: the run
+        starts on whatever it started on, and the classification cell says the
+        mount was examined and approved.
+        """
+        for failure in (pas.FilesystemSuitabilityError("no mount entry"),
+                        OSError("/proc/self/mountinfo is not readable")):
+            with self.subTest(failure=type(failure).__name__):
+                with mock.patch.object(pas, "_system_name", lambda: "linux"), \
+                        mock.patch.object(pas, "_mountinfo_fs_type",
+                                          side_effect=failure):
+                    self.assertEqual(pas.classify_filesystem(Path(__file__)),
+                                     pas.FILESYSTEM_UNKNOWN)
+
+    def test_classify_filesystem_touches_no_file(self):
+        self.assertEqual(write_capable_calls(module_source(), "classify_filesystem"), [])
+
+    def test_the_suitability_stop_is_its_own_error_in_the_one_family(self):
+        """It is not a write failure. A caller that retried it — which is the
+        right response to ``TrackerWriteError`` — would retry forever."""
+        self.assertTrue(issubclass(pas.FilesystemSuitabilityError, pas.TrackerError))
+        self.assertFalse(issubclass(pas.FilesystemSuitabilityError,
+                                    pas.TrackerWriteError))
+        self.assertFalse(issubclass(pas.FilesystemSuitabilityError,
+                                    pas.UpdateOutcomeUncertain))
+
+
+class FilesystemStopBeforeTheRunStartsTests(unittest.TestCase):
+    """Where the spec puts the stop: before a run starts.
+
+    ``initialize_run`` is the one function that brings a run into existence, so
+    it is the one place a refusal costs nothing and prevents everything. A check
+    at the first transition instead would leave a tracker on disk for a run that
+    was never allowed to begin, and a controller resuming it would read a valid
+    tracker and carry on.
+    """
+
+    def refused(self, classification: str):
+        run_dir = unborn_run(self)
+        with mock.patch.object(pas, "classify_filesystem",
+                               lambda path: classification):
+            with self.assertRaises(pas.FilesystemSuitabilityError) as caught:
+                pas.initialize_run(run_dir, **NEW_RUN)
+        self.assertFalse((run_dir / "progress.md").exists(),
+                         "a refused initialization still left a tracker on disk")
+        self.assertFalse(run_dir.exists(),
+                         "a refused initialization still created the run directory")
+        return caught.exception
+
+    def test_an_unsupported_filesystem_stops_the_run_before_it_starts(self):
+        self.assertIn("unsupported", str(self.refused(pas.FILESYSTEM_UNSUPPORTED)))
+
+    def test_an_unclassified_filesystem_stops_the_run_before_it_starts(self):
+        """The spec makes this a halt rather than a warning, and explicitly not
+        a quorum call: three brains know no more about the filesystem than the
+        classifier does."""
+        self.assertIn("unknown", str(self.refused(pas.FILESYSTEM_UNKNOWN)))
+
+    def test_the_stop_fires_through_the_real_classifier_not_only_a_stub(self):
+        """Wiring, end to end: name a platform this module cannot probe and the
+        run must refuse to start, with nothing stubbed between them."""
+        run_dir = unborn_run(self)
+        with mock.patch.object(pas, "_system_name", lambda: "darwin"):
+            with self.assertRaises(pas.FilesystemSuitabilityError):
+                pas.initialize_run(run_dir, **NEW_RUN)
+        self.assertFalse(run_dir.exists())
+
+    def test_a_supported_filesystem_starts_the_run(self):
+        """The positive control. Without it both cases above would pass against
+        an ``initialize_run`` that refused everything."""
+        run_dir, tracker = new_run(self)
+        self.assertTrue((run_dir / "progress.md").exists())
+        self.assertEqual(tracker["run"]["revision"], "0")
+
+    def test_the_run_directory_is_classified_rather_than_the_repository(self):
+        """The tracker, the lock and the atomic replace all live in the run
+        directory. A repository on a local disk with its run directory on a
+        network mount is the exact arrangement this must catch."""
+        seen = []
+        run_dir = unborn_run(self)
+
+        def record(path):
+            seen.append(Path(path))
+            return pas.FILESYSTEM_SUPPORTED
+
+        with mock.patch.object(pas, "classify_filesystem", record):
+            pas.initialize_run(run_dir, **NEW_RUN)
+        self.assertEqual(seen, [run_dir])
+
+
 if __name__ == "__main__":
     unittest.main()

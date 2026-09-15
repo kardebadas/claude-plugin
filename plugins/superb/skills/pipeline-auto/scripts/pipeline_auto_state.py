@@ -92,6 +92,16 @@ class PlanMetadataError(TrackerError):
     """
 
 
+class FilesystemSuitabilityError(TrackerError):
+    """The run's filesystem is known unsupported, or cannot be classified.
+
+    A read-only stop, and deliberately NOT a ``TrackerWriteError``: that family
+    means "nothing happened, a retry is safe", and retrying an NFS mount
+    produces the same answer forever. Nothing about this is transient — the
+    answer changes when the run moves, not when it is tried again.
+    """
+
+
 #: ``repo_root`` sits with the four identity keys rather than with the
 #: counters because it is the same kind of fact: what this run is anchored to.
 #: It is RECORDED at init from an explicit argument and never derived — see
@@ -221,6 +231,84 @@ _ABS_PATH = _CharClass("/", _ALNUM + "._/@:+-")
 def _field(column: str) -> str:
     """Map a column header to its dict key: 'Re-review' -> 're_review'."""
     return column.lower().replace(" ", "_").replace("-", "_")
+
+
+#: The public column grammar: section name -> the ordered keys one row carries.
+#:
+#: P02 owns every section's columns, INCLUDING the sections whose rows P03 to
+#: P06 write. The alternative is each of those phases re-declaring the shape
+#: beside its own writer, where a copy drifts from the validator silently: the
+#: tracker still parses, the cell is simply under the wrong header. This build
+#: has already paid for that defect three times over, each time as a pattern
+#: written one column short of the committed fixture.
+#:
+#: The values are DICT KEYS, not display headers, and the two are one rename
+#: apart (``Re-review`` -> ``re_review``). A caller gets the names it will
+#: actually write and read back — ``append_row`` takes these, ``parse_tracker``
+#: produces these — so there is no translation step between the accessor and the
+#: row for a caller to get wrong. The display headers stay private because
+#: rendering is the only thing that needs them, and rendering is P02's.
+#:
+#: Frozen for the same reason ``RUNGS`` is, and over a dict nothing else holds:
+#: a ``mappingproxy`` is a read-only VIEW rather than a copy, so a proxy over a
+#: named module-level dict is editable by everything that can reach the name.
+#: Five phases read this mapping; one of them editing it would re-shape another
+#: phase's validation with nothing raised anywhere.
+SECTIONS = MappingProxyType({
+    key: tuple(_field(column) for column in header)
+    for _, key, header in _SECTIONS[1:]
+})
+
+
+def section_columns(name: str) -> tuple[str, ...]:
+    """The ordered dict keys of one section's rows.
+
+    An unknown name RAISES. Answering with an empty tuple would be the quiet
+    disaster: a caller zipping its values against one builds an empty row and
+    appends it, and nothing downstream can tell that row from a section that
+    genuinely has no columns.
+    """
+    if name == _SECTIONS[0][1]:
+        raise TrackerValidationError(
+            "the run section is a key/value table, not a row table: it has no "
+            "column grammar to build a row against, and its fields are "
+            "_RUN_KEYS")
+    if name not in SECTIONS:
+        raise TrackerValidationError(
+            f"unknown tracker section {name!r}; the sections are "
+            f"{', '.join(SECTIONS)}")
+    return SECTIONS[name]
+
+
+def append_row(tracker: dict, section: str, row: dict) -> dict:
+    """Append one row to one section, built against that section's columns.
+
+    The row is judged by NAME against the whole column set — every unknown key
+    and every missing one is named back in the same message. Counting is not
+    enough and is the specific failure this exists to refuse: a row copied from
+    a stale column list has exactly the right number of keys and one of them
+    spelled for a column the section has never had. ``zip`` would accept it,
+    ``len`` would accept it, and ``render_tracker`` would then report the column
+    that went missing rather than the one that was invented.
+
+    The stored row is keyed in the section's own column order, so an appended
+    row and a parsed one read identically.
+
+    It mutates the tracker dict and returns it — ``mutate`` has to return what
+    it edited — and it writes nothing. ``locked_tracker_update`` remains the
+    sole writer of ``progress.md``; this is what a ``mutate`` callable uses
+    inside one.
+    """
+    columns = section_columns(section)
+    unknown = sorted(set(row) - set(columns))
+    missing = sorted(set(columns) - set(row))
+    if unknown or missing:
+        raise TrackerValidationError(
+            f"a {section!r} row does not match the section's columns: "
+            f"unknown {unknown}, missing {missing}. Build it against "
+            f"section_columns({section!r}), which is {list(columns)}")
+    tracker[section].append({column: row[column] for column in columns})
+    return tracker
 
 
 def _csv(value: str) -> tuple[str, ...]:
@@ -2544,6 +2632,172 @@ def publish_immutable(path: Path, content: str) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+# ---------------------------------------------------------------------------
+# Filesystem suitability
+# ---------------------------------------------------------------------------
+# Everything this module promises about writing rests on two filesystem
+# semantics: POSIX advisory locking, which is what makes
+# ``locked_tracker_update`` the sole writer, and a same-directory
+# ``os.replace``, which is what makes a tracker update atomic. Several network
+# filesystems honour neither, and honour neither QUIETLY — the lock is taken,
+# the replace returns, and two controllers proceed believing they are alone.
+#
+# So the classification is a precondition of starting a run rather than a
+# warning during one. `superb:pipeline` can ask a human to acknowledge an
+# unknown mount; this skill runs unattended by definition, so there is nobody
+# to ask and ``_filesystem_ack`` has no counterpart here.
+
+#: The classifications, named so no caller has to retype a literal — the same
+#: drift argument as ``SECTIONS``.
+FILESYSTEM_SUPPORTED = "supported-local"
+FILESYSTEM_UNSUPPORTED = "unsupported"
+FILESYSTEM_UNKNOWN = "unknown"
+FILESYSTEM_CLASSES = (FILESYSTEM_SUPPORTED, FILESYSTEM_UNSUPPORTED,
+                      FILESYSTEM_UNKNOWN)
+
+#: Local filesystems with working advisory locks and same-directory atomic
+#: renames. Copied deliberately from `superb:pipeline`'s list rather than
+#: re-derived: it is the same question about the same kernels.
+_SUPPORTED_LOCAL_FILESYSTEMS = frozenset({
+    "apfs", "btrfs", "ext2", "ext3", "ext4", "hfs", "hfsplus", "overlay",
+    "tmpfs", "ufs", "xfs", "zfs",
+})
+#: Network and distributed filesystems, which the spec places outside the
+#: guarantee outright.
+_UNSUPPORTED_FILESYSTEMS = frozenset({
+    "9p", "afs", "ceph", "cifs", "fuse.sshfs", "glusterfs", "lustre", "nfs",
+    "nfs4", "remote", "smb", "smbfs",
+})
+
+
+def _system_name() -> str:
+    """What this interpreter calls its platform, casefolded.
+
+    A function rather than a module constant, and the one seam the platform
+    dispatch below turns on — the same shape as ``select_lock_impl``'s
+    arguments, and for the same reason: it is what lets a case exercise the
+    macOS and Windows branches without a second machine.
+
+    ``os.name`` is checked first because ``os.uname`` does not exist on
+    Windows. Neither call needs an import this module does not already have,
+    which is why ``platform`` is not in ``ALLOWED_IMPORTS``: it would buy a
+    tidier spelling of a fact ``os`` already states.
+    """
+    if os.name == "nt":
+        return "windows"
+    return os.uname().sysname.casefold()
+
+
+def _unescape_mount_point(value: str) -> str:
+    """``mountinfo`` escapes space, tab, newline and backslash as ``\\0NN``.
+
+    Hand-decoded rather than handed to ``re.sub`` — every grammar in this module
+    states itself, and a three-digit octal escape is not a thing a regex engine
+    says better. Compared raw instead, a mount point containing a space never
+    matches the path under it and the run is judged against ``/``, which is the
+    wrong answer in the safe direction exactly when it is not.
+    """
+    decoded = []
+    index = 0
+    while index < len(value):
+        octal = value[index + 1:index + 4]
+        if (value[index] == "\\" and len(octal) == 3
+                and all(digit in "01234567" for digit in octal)):
+            decoded.append(chr(int(octal, 8)))
+            index += 4
+        else:
+            decoded.append(value[index])
+            index += 1
+    return "".join(decoded)
+
+
+def _mountinfo_fs_type(mountinfo: str, resolved: Path) -> str:
+    """The filesystem type of the DEEPEST mount containing ``resolved``.
+
+    Deepest, not first and not the root: a repository on a local disk with its
+    run directory on a network mount underneath is the arrangement this exists
+    to catch, and both the first match and the root report ``ext4`` for it.
+
+    A line this cannot read is skipped rather than believed. Raises when no
+    line contains the path at all — the caller turns that into "unknown", which
+    is the stop; there is no reading of an unanswerable probe that is safe to
+    treat as an answer.
+    """
+    matches = []
+    for line in mountinfo.splitlines():
+        fields = line.split()
+        try:
+            separator = fields.index("-")
+            mount_point = Path(_unescape_mount_point(fields[4]))
+            fs_type = fields[separator + 1].casefold()
+        except (ValueError, IndexError):
+            continue
+        if resolved == mount_point or mount_point in resolved.parents:
+            matches.append((len(mount_point.parts), fs_type))
+    if not matches:
+        raise FilesystemSuitabilityError(
+            f"no mount entry contains {resolved}")
+    return max(matches)[1]
+
+
+def _classify_fs_type(fs_type: str) -> str:
+    """One filesystem type name to one classification.
+
+    Unsupported is tested BEFORE supported, so a name that somehow reached both
+    lists halts rather than proceeds. A name in neither is ``unknown`` — never
+    "probably local", which is the default that makes the whole check
+    decorative.
+    """
+    normalized = fs_type.casefold()
+    if normalized in _UNSUPPORTED_FILESYSTEMS:
+        return FILESYSTEM_UNSUPPORTED
+    if normalized in _SUPPORTED_LOCAL_FILESYSTEMS:
+        return FILESYSTEM_SUPPORTED
+    return FILESYSTEM_UNKNOWN
+
+
+def _existing_path(path: Path) -> Path:
+    """The deepest ancestor of ``path`` that exists.
+
+    A run directory is classified before it is created, so the thing to ask the
+    kernel about is the nearest parent that is actually there.
+    """
+    candidate = path.resolve(strict=False)
+    while not candidate.exists() and candidate != candidate.parent:
+        candidate = candidate.parent
+    if not candidate.exists():
+        raise FilesystemSuitabilityError(
+            f"cannot identify an existing filesystem anchor for {path}")
+    return candidate
+
+
+def classify_filesystem(path: Path) -> str:
+    """One of ``FILESYSTEM_CLASSES`` for the mount ``path`` lives on. Reads only.
+
+    Linux answers from ``/proc/self/mountinfo``. Every other platform answers
+    ``unknown``, and that is a statement about this module rather than about
+    those platforms: macOS needs ``subprocess`` plus ``plistlib`` to reach
+    ``diskutil`` and Windows needs ``ctypes``, and all three are capability
+    widenings — the ability to execute another program, and the ability to call
+    arbitrary native code — in a module whose import allowlist is a capability
+    boundary. Unprobed is genuinely unknown, and unknown is a stop, so the
+    consequence is stated rather than hidden: this halts a run started on
+    macOS or Windows. Widening the allowlist to fix that is a decision for a
+    human, not a convenience for this function.
+    """
+    if _system_name() != "linux":
+        return FILESYSTEM_UNKNOWN
+    try:
+        resolved = _existing_path(path)
+        mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
+        fs_type = _mountinfo_fs_type(mountinfo, resolved)
+    except (OSError, UnicodeError, FilesystemSuitabilityError):
+        #: A probe that failed is not evidence of a good filesystem. It takes
+        #: the same exit an unlisted type does, and the run stops.
+        return FILESYSTEM_UNKNOWN
+    return _classify_fs_type(fs_type)
+
+
 def initialize_run(run_dir: Path, *, run_id: str, base_commit: str,
                    target_branch: str, repo_root: str,
                    worker_limit: int) -> dict:
@@ -2696,6 +2950,29 @@ def initialize_run(run_dir: Path, *, run_id: str, base_commit: str,
     #: and is not — the dict is the INPUT to the render, and it is the render
     #: that has to survive.
     parse_tracker(canonical)
+    #: The spec's stop, at the only place it can be a stop: BEFORE the run
+    #: starts. It is the RUN DIRECTORY that is classified, not the repository —
+    #: the tracker, the lock file and the atomic replace all live here, and a
+    #: local checkout with its run directory on a network mount is the exact
+    #: arrangement that passes a repository-level check and breaks every write
+    #: guarantee anyway.
+    #:
+    #: Checking at the first transition instead would be worse than not
+    #: checking: the tracker would already be on disk, and a controller
+    #: resuming it reads a perfectly valid run and carries on.
+    #:
+    #: Not a quorum call either. Three brains know no more about this mount
+    #: than the classifier does, and asking them produces three confident
+    #: guesses about a fact.
+    classification = classify_filesystem(run_dir)
+    if classification != FILESYSTEM_SUPPORTED:
+        raise FilesystemSuitabilityError(
+            f"the filesystem at {run_dir} classifies as {classification!r}: "
+            "this run cannot start there. The sole-writer guarantee is POSIX "
+            "advisory locking and the tracker update is a same-directory "
+            "os.replace; a filesystem that honours neither breaks both "
+            "silently rather than loudly. Start the run on local storage. "
+            "Nothing was written")
     _link_publish(
         run_dir / "progress.md", canonical.encode("utf-8"), "initial tracker",
         "Resume the existing run rather than initializing over it.")

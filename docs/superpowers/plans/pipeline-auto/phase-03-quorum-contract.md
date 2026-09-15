@@ -202,7 +202,8 @@ def payload_digest(qid: str, *, run_dir: str) -> str: ...            # (P03) ONE
 def project_decisions(decisions: dict) -> str: ...                   # (master plan)
 def open_quorum(run_dir: str, *, question_record: str) -> dict: ...  # (master plan)
 def record_brain_response(run_dir: str, *, qid: str, owner: str,
-                          payload: dict) -> str: ...                 # (master plan)
+                          payload: object) -> str: ...              # (master plan; `payload`
+    #  WIDENED from `dict` deliberately -- see below. Returns a DIGEST, not a path.)
 def finalize_quorum(run_dir: str, *, qid: str) -> dict: ...          # (master plan)
 def check_contradiction(decisions: dict, candidate: dict) -> str | None: ...  # (master plan)
 def decision_depth(decisions: dict, consistent_with: list) -> int: ...# (master plan)
@@ -4095,6 +4096,15 @@ guessed at in code beyond the minimum noted; each needs a ruling.
     problem set will silently miss this case. Today nothing reads `problems`
     except a shape check; `group_responses`, `classify_quorum` and
     `finalize_quorum` must keep it that way.
+
+11. **`record_brain_response`'s `payload` is `object`, not the pinned `dict`.**
+    A deliberate, recorded departure. The function must accept **any JSON
+    value**, because `validate_brain_response` returns `response-not-an-object`
+    for a non-object and the totality sweep depends on that path being
+    reachable. Typing it `dict` would make the module's own validator
+    unreachable for the case it exists to name, and would push a `TypeError`
+    outside `TrackerError` onto the one argument a brain controls entirely.
+    The master plan's block still says `dict`; this line is the reconciliation.
 
 Items 1, 2 and 8 are closed by coordinator ruling. Items 3–7 and 9 remain
 reported; none blocks execution of this phase.

@@ -14,6 +14,24 @@
 
 **Phase:** P04 — task-lifecycle. **Review class:** `required`. **Depends on:** P02. **Independent of:** P03.
 
+## Gap left open by P02 Task 11 (commit `4d91366`)
+
+**`## Run` has no semantic validator.** Every other section gained one in Tasks
+3-7, but `base_commit`, `target_branch` and `worker_limit` are checked in exactly
+one place — `initialize_run` — and never again. So a later `mutate` can write
+nonsense into `worker_limit` and nothing objects; only `_IDENTITY_KEYS` would
+notice a change, and only to the keys it guards.
+
+That matters here because this phase reads `worker_limit` to decide capacity, and
+the drift budget lives in `## Run` too. A run that quietly rewrites its own
+`worker_limit` reserves the wrong number of brain slots; one that rewrites its
+budget counters buys itself authority it was never granted — the same class of
+self-interested move the one-way ratchet exists to forbid, taking a route the
+schema does not watch.
+
+Add `_validate_run` alongside the existing validators, and pin it the way the
+others are pinned: a mutant that removes the call must die.
+
 ## Global Constraints
 
 - `plugins/superb/skills/pipeline/` is **not modified**. Not one line. Verify with `git diff --name-only` before every commit.

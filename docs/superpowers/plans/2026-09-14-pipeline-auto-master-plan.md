@@ -31,6 +31,7 @@
 - No push, no publish, no PR, no merge into `main`/`master`.
 - **Agent-supplied JSON is never tested for membership with a bare `in` against a set.** `x in frozenset(...)` hashes `x`, and a JSON value may legally be a list or an object — both unhashable, and the resulting `TypeError` is outside `TrackerError`, so it escapes every handler a controller has written and kills the run on an agent's typo. Use `_member(value, allowed)`. Every call site must be pinned: reverting it to a bare `in` must fail the suite. Found in `effective_rung` by review, then in three more places where the source was already correct and nothing would have noticed it changing.
 - **A test claiming totality derives its case list from the function's call tree**, not from what the author remembers reading. Vary every field with both an unhashable value and a wrong-typed scalar.
+- **`is_file()` never means "there is nothing here".** It is false for a directory, a dangling symlink, a symlink loop and a FIFO — all of which exist and cannot be read. Folding them into "absent" is fail-open. Ask existence of the name (`os.path.lexists`) and readability of the target (`read_text` only for a regular file, which also stops a FIFO blocking under a lock). Found twice in consecutive tasks, both times only by mutation.
 
 ---
 

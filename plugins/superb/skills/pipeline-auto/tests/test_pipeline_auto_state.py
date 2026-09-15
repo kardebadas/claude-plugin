@@ -11606,5 +11606,798 @@ class BuildPayload(unittest.TestCase):
                          pas._canonical({"a": 2, "b": 1}))
 
 
+BUDGET_RUN_ID = NEW_RUN["run_id"]
+
+#: A qid is twelve lowercase hex characters and a quorum decision id is `Q-`
+#: plus that qid, so the ids these helpers mint are the ids the real grammar
+#: accepts. A fixture that used `ado0`/`esc1` would be rejected by
+#: `_id_provenance` long before any budget rule was reached, and every
+#: rejection case below would pass for that reason instead of its own.
+def budget_qid(prefix: str, index: int) -> str:
+    qid = f"{prefix}{index:011d}"
+    assert len(qid) == 12 and all(character in "0123456789abcdef" for character in qid), qid
+    return qid
+
+
+def seed_final(run_dir, qid, *, status, phase, decision_id=None, override=None):
+    """One finalised quorum on disk, in the shape `finalize_quorum` will write.
+
+    `winner` is carried because a real final record holds the computed outcome
+    and not only the three cells the budget reads: a validator that rejected
+    unknown keys here would reject every real record, so the fixture keeps one.
+
+    `override` is a mapping rather than `**kwargs` so that a case can vary the
+    record's own `qid` — the one field whose name collides with the directory
+    this is filed under, and the field the copied-directory stop is about.
+    """
+    directory = Path(run_dir) / "quorum" / qid
+    directory.mkdir(parents=True, exist_ok=True)
+    record = {"qid": qid, "status": status, "phase": phase,
+              "decision_id": decision_id,
+              "winner": {"rung": "code-evidenced", "answer_key": "postgres"}}
+    record.update(override or {})
+    (directory / "final.json").write_text(
+        json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return record
+
+
+def seed_adoptions(run_dir, phase, count, *, prefix="a", first=0):
+    """`count` adopted quorums in `phase`, returning their decision ids."""
+    ids = []
+    for index in range(first, first + count):
+        qid = budget_qid(prefix, index)
+        ids.append("Q-" + qid)
+        seed_final(run_dir, qid, status="adopted", phase=phase,
+                   decision_id=ids[-1])
+    return sorted(ids)
+
+
+def budget_grant(did="H-900", *, axis="drift-budget-p04", scope="P04",
+                 run_id=None, revision="0", through="6", granted=(),
+                 action="quorum.extend-budget", provenance="human",
+                 supersedes=None, status="Adopted"):
+    """One `decisions.md` budget-extension record, in the phase's grammar.
+
+    Every field the spec requires of a grant is spelled out and each is
+    overridable on its own, so a rejection case varies exactly one of them and
+    the record is otherwise one `parse_decisions` accepts.
+    """
+    lines = [
+        f"\n## {did} — More quorum adoptions in {scope}\n",
+        f"- **Question:** May the run adopt past its per-phase drift budget in {scope}?",
+        f"- **Axis:** {axis}",
+        f"- **Answer:** {through} adoptions in {scope} — the remaining tasks all turn on one unanswered choice.",
+        f"- **Decision action:** {action}",
+        f"- **Provenance:** {provenance}",
+        "- **Depth:** 0",
+        f"- **Authorized run:** {BUDGET_RUN_ID if run_id is None else run_id}",
+        f"- **Source revision:** {revision}",
+        f"- **Authorized through:** {through}",
+        f"- **Granted against:** {', '.join(granted)}",
+        f"- **Scope:** {scope}",
+    ]
+    if supersedes is not None:
+        lines.append(f"- **Supersedes:** {supersedes}")
+    lines.append(f"- **Status:** {status}\n")
+    return "\n".join(lines)
+
+
+class QuorumEventsTests(unittest.TestCase):
+    """Every finalised quorum, read from the files rather than from a counter.
+
+    A counter kept beside the records it counts is the thing an autonomous
+    controller is most motivated to be wrong about in its own favour, and it can
+    be edited without touching a single record. These are derived.
+    """
+
+    def setUp(self):
+        self.root, self.run_dir = repo_with_a_run(self)
+
+    def test_a_run_that_has_opened_no_quorum_has_no_events(self):
+        self.assertFalse((self.run_dir / "quorum").exists())
+        self.assertEqual(pas.quorum_events(str(self.run_dir)), [])
+
+    def test_events_are_ordered_by_qid_and_carry_rejections_too(self):
+        """Rejections are events. A run with several `rejected-contradicts-*`
+        events is one whose brains keep pulling away from what the user asked
+        for, and that count is the earliest drift warning available — so they
+        are recorded even though they charge nothing."""
+        seed_final(self.run_dir, budget_qid("e", 0), status="escalated", phase="P04")
+        seed_final(self.run_dir, budget_qid("a", 0), status="adopted", phase="P04",
+                   decision_id="Q-" + budget_qid("a", 0))
+        seed_final(self.run_dir, budget_qid("d", 0), phase="P05",
+                   status="rejected-contradicts-human")
+        events = pas.quorum_events(str(self.run_dir))
+        self.assertEqual([event["qid"] for event in events],
+                         [budget_qid("a", 0), budget_qid("d", 0), budget_qid("e", 0)])
+        self.assertEqual([event["status"] for event in events],
+                         ["adopted", "rejected-contradicts-human", "escalated"])
+        self.assertEqual([event["phase"] for event in events], ["P04", "P05", "P04"])
+        self.assertEqual([event["decision_id"] for event in events],
+                         ["Q-" + budget_qid("a", 0), None, None])
+
+    def test_a_quorum_still_in_flight_is_skipped_rather_than_refused(self):
+        """The positive control for the read loop: a qid directory with no
+        `final.json` is a dispatched, undecided quorum, which is a legal state
+        and not a broken record. A reader that raised on it would stop every run
+        between dispatch and finalisation."""
+        (self.run_dir / "quorum" / budget_qid("b", 0) / "responses").mkdir(parents=True)
+        seed_final(self.run_dir, budget_qid("a", 0), status="escalated", phase="P04")
+        self.assertEqual([event["qid"] for event in pas.quorum_events(str(self.run_dir))],
+                         [budget_qid("a", 0)])
+
+    def test_a_final_record_that_is_a_directory_is_a_stop_not_a_skip(self):
+        """The other shape the glob can yield. A `final.json` that is a
+        directory is corruption, and skipping it would drop a finalised quorum
+        out of the run's own count of itself without a word — which is the one
+        thing deriving the count from the files was meant to make impossible."""
+        (self.run_dir / "quorum" / budget_qid("a", 0) / "final.json").mkdir(parents=True)
+        with self.assertRaises(pas.QuorumError):
+            pas.quorum_events(str(self.run_dir))
+
+    def test_a_final_record_filed_under_another_qid_is_refused(self):
+        seed_final(self.run_dir, budget_qid("a", 0), status="escalated", phase="P04",
+                   override={"qid": budget_qid("a", 1)})
+        with self.assertRaises(pas.TrackerError) as raised:
+            pas.quorum_events(str(self.run_dir))
+        self.assertIn("another question's identity", str(raised.exception))
+
+    def test_an_adopted_event_must_name_the_decision_record_it_wrote(self):
+        """Without this an adoption with no id is charged to the budget and
+        missing from the adopted list a human signs against — the anti-reflex
+        mechanism reporting a set the run does not hold. Paired with the
+        escalation, which legitimately names none."""
+        seed_final(self.run_dir, budget_qid("e", 0), status="escalated", phase="P04")
+        self.assertEqual(len(pas.quorum_events(str(self.run_dir))), 1)
+        seed_final(self.run_dir, budget_qid("a", 0), status="adopted", phase="P04")
+        with self.assertRaises(pas.TrackerError) as raised:
+            pas.quorum_events(str(self.run_dir))
+        self.assertIn("decision_id", str(raised.exception))
+
+    def test_two_quorums_may_not_claim_one_decision_record(self):
+        seed_final(self.run_dir, budget_qid("a", 0), status="adopted", phase="P04",
+                   decision_id="Q-" + budget_qid("a", 0))
+        seed_final(self.run_dir, budget_qid("a", 1), status="adopted", phase="P04",
+                   decision_id="Q-" + budget_qid("a", 0))
+        with self.assertRaises(pas.TrackerError) as raised:
+            pas.quorum_events(str(self.run_dir))
+        self.assertIn("charge the budget twice", str(raised.exception))
+
+
+class QuorumBudgetTests(unittest.TestCase):
+    """Only adoptions are charged, and both ceilings bind.
+
+    The hazard this class is written against is a budget that is checked but
+    never decremented, or decremented but never checked: each half passes every
+    test that exercises only the other. So the counting cases assert the budget
+    before and after the same fixture crosses the ceiling.
+    """
+
+    def setUp(self):
+        self.root, self.run_dir = repo_with_a_run(self)
+        self.tracker = pas.validate_run(self.run_dir)
+
+    def decisions(self, text):
+        (self.run_dir / "decisions.md").write_text(text, encoding="utf-8")
+
+    def budget(self, phase="P04"):
+        return pas.quorum_budget(str(self.run_dir), phase=phase)
+
+    def pins(self):
+        return json.loads((self.run_dir / "quorum" / "extensions.json")
+                          .read_text(encoding="utf-8"))
+
+    def on_a_fresh_run(self, record=None, *, adoptions=1, phase="P04"):
+        """One grant judged on a run where NOTHING has been pinned yet.
+
+        A pinned grant is never re-derived, which is the whole design — and it
+        means a case that varies the RECORD has to meet the record, not a pin
+        left over from a previous assertion in the same directory.
+        """
+        _root, run_dir = repo_with_a_run(self)
+        ids = seed_adoptions(run_dir, phase, adoptions)
+        if record is None:
+            record = budget_grant(granted=ids)
+        (run_dir / "decisions.md").write_text(DECISION_HUMAN + record,
+                                              encoding="utf-8")
+        return pas.quorum_budget(str(run_dir), phase=phase)
+
+    def test_the_fixture_run_is_the_one_the_grants_below_name(self):
+        """Asserted rather than assumed. Every `Authorized run` and every
+        `Source revision` case below is measured against these two cells, so a
+        fixture whose run id or revision drifted would make the rejection cases
+        pass for a reason that has nothing to do with the rule under test."""
+        self.assertEqual(self.tracker["run"]["run_id"], BUDGET_RUN_ID)
+        self.assertEqual(self.tracker["run"]["revision"], "0")
+        self.assertEqual(self.budget()["run_id"], BUDGET_RUN_ID)
+
+    def test_escalations_and_rejections_never_consume_the_budget_but_adoptions_do(self):
+        """THE NAMED FAULT, and both halves of it in one fixture.
+
+        A counter incremented on every finalisation burns the budget on the run
+        asking for help, which teaches the controller to stop asking — the exact
+        opposite of the design's intent. A budget that is never decremented
+        passes any test that only seeds escalations; one that is never checked
+        passes any test that only seeds adoptions. So the same directory is
+        measured twice, once with only free events in it and once after the
+        adoptions have crossed the ceiling.
+        """
+        for index in range(3):
+            seed_final(self.run_dir, budget_qid("e", index), status="escalated", phase="P04")
+        for index in range(2):
+            seed_final(self.run_dir, budget_qid("d", index), phase="P04",
+                       status="rejected-contradicts-quorum")
+        free = self.budget()
+        self.assertEqual(free["phase_adoptions"], 0)
+        self.assertEqual(free["phase_remaining"], 3)
+        self.assertEqual(free["run_adoptions"], 0)
+        self.assertTrue(free["may_raise"])
+        self.assertIsNone(free["reason"])
+        self.assertEqual(len(pas.quorum_events(str(self.run_dir))), 5,
+                         "the five free events exist; they are simply not charged")
+
+        ids = seed_adoptions(self.run_dir, "P04", 3)
+        spent = self.budget()
+        self.assertEqual(spent["phase_adoptions"], 3)
+        self.assertEqual(spent["phase_ceiling"], 3)
+        self.assertEqual(spent["phase_remaining"], 0)
+        self.assertEqual(spent["adopted"], ids)
+        self.assertFalse(spent["may_raise"])
+        self.assertEqual(spent["reason"], "phase-budget-exhausted")
+
+    def test_two_adoptions_leave_the_phase_open(self):
+        """The positive control the exhaustion case needs: an implementation
+        that refused at any adoption at all would satisfy every stop above."""
+        seed_adoptions(self.run_dir, "P04", 2)
+        self.assertEqual(self.budget()["phase_remaining"], 1)
+        self.assertTrue(self.budget()["may_raise"])
+
+    def test_one_phase_is_charged_and_the_others_are_not(self):
+        seed_adoptions(self.run_dir, "P04", 3)
+        self.assertFalse(self.budget("P04")["may_raise"])
+        self.assertTrue(self.budget("P05")["may_raise"])
+        self.assertEqual(self.budget("P05")["phase_adoptions"], 0)
+        self.assertEqual(self.budget("P05")["run_adoptions"], 3)
+
+    def test_the_run_ceiling_binds_where_the_phase_still_has_room(self):
+        """The second ceiling, and the reason there are two. The per-phase
+        ceiling stops one phase spending the whole run's authority; the run
+        ceiling stops the phases between them doing it three at a time. Stated
+        at nine and at ten on one fixture, so a run ceiling that is never
+        consulted fails and one that is off by one fails too."""
+        for index, phase in enumerate(("P01", "P02", "P03")):
+            seed_adoptions(self.run_dir, phase, 3, prefix="abcdef"[index])
+        seed_adoptions(self.run_dir, "P04", 1, prefix="a", first=100)
+        nine = self.budget("P04")
+        self.assertEqual((nine["run_adoptions"], nine["run_ceiling"]), (10, 10))
+        self.assertEqual(nine["phase_remaining"], 2, "P04 itself still has room")
+        self.assertFalse(nine["may_raise"])
+        self.assertEqual(nine["reason"], "run-budget-exhausted")
+        (self.run_dir / "quorum" / budget_qid("a", 100) / "final.json").unlink()
+        room = self.budget("P04")
+        self.assertEqual(room["run_adoptions"], 9)
+        self.assertTrue(room["may_raise"])
+        self.assertIsNone(room["reason"])
+
+    def test_a_matching_extension_raises_both_ceilings_and_is_pinned(self):
+        ids = seed_adoptions(self.run_dir, "P04", 3)
+        self.decisions(DECISION_HUMAN + budget_grant(granted=ids))
+        budget = self.budget()
+        self.assertTrue(budget["may_raise"])
+        self.assertEqual(budget["phase_ceiling"], 6)
+        self.assertEqual(budget["phase_remaining"], 3)
+        self.assertEqual(budget["run_ceiling"], pas.BUDGET_PER_RUN + 3,
+                         "the run ceiling rises by exactly the extra authority "
+                         "the grant confers, so the extra phase adoptions do "
+                         "not have to be taken out of another phase's share")
+        self.assertEqual([grant["decision_id"] for grant in budget["extensions"]],
+                         ["H-900"])
+        self.assertEqual(self.pins(),
+                         [{"decision_id": "H-900", "phase": "P04",
+                           "authorized_through": 6, "granted_against": ids}])
+
+    def test_the_pin_is_written_once_and_not_rewritten_on_every_check(self):
+        """`quorum_budget` is checked before every dispatch, so an
+        unconditional write would rewrite this file on every question the run
+        ever raises. Asserted against the write CALL rather than against a
+        timestamp: two writes of identical bytes inside one filesystem tick are
+        indistinguishable by mtime, and that is the case this is about."""
+        ids = seed_adoptions(self.run_dir, "P04", 3)
+        self.decisions(DECISION_HUMAN + budget_grant(granted=ids))
+        self.budget()
+        self.assertTrue((self.run_dir / "quorum" / "extensions.json").is_file())
+        with mock.patch.object(Path, "write_text",
+                               side_effect=AssertionError("the pin was rewritten")):
+            self.assertEqual(self.budget()["phase_ceiling"], 6)
+
+    def test_the_pin_is_rewritten_when_a_second_grant_joins_it(self):
+        """The positive control the case above needs: a writer that never wrote
+        after the first grant would satisfy it and lose every later grant."""
+        ids = seed_adoptions(self.run_dir, "P04", 3)
+        self.decisions(DECISION_HUMAN + budget_grant(granted=ids))
+        self.budget()
+        self.decisions(DECISION_HUMAN + budget_grant(granted=ids)
+                       + budget_grant("H-901", axis="drift-budget-p05",
+                                      scope="P05", granted=ids))
+        self.assertEqual([grant["decision_id"]
+                          for grant in self.budget()["extensions"]],
+                         ["H-900", "H-901"])
+        self.assertEqual([grant["decision_id"] for grant in self.pins()],
+                         ["H-900", "H-901"])
+
+    def test_a_pinned_grant_is_never_rechecked_against_an_adopted_set_that_moved(self):
+        """THE WHOLE POINT OF PINNING. `Granted against` names the adopted set
+        the human was shown, and that set grows the moment the grant is used —
+        so a reader that re-derived the grant on every check would reject, on
+        the very next question, the grant the run is at that moment relying on.
+        """
+        ids = seed_adoptions(self.run_dir, "P04", 3)
+        self.decisions(DECISION_HUMAN + budget_grant(granted=ids))
+        self.assertEqual(self.budget()["phase_ceiling"], 6)
+        later = seed_adoptions(self.run_dir, "P04", 1, prefix="b")
+        after = self.budget()
+        self.assertEqual(after["phase_adoptions"], 4)
+        self.assertEqual(after["phase_ceiling"], 6)
+        self.assertTrue(after["may_raise"])
+        self.assertEqual(after["adopted"], sorted(ids + later))
+        self.assertEqual(self.pins()[0]["granted_against"], ids,
+                         "the pin still records the set the human actually saw")
+
+    def test_a_pinned_grant_survives_the_record_behind_it_being_superseded(self):
+        """An axis holds at most one Adopted decision, so the only way to write
+        a second grant on one axis is to supersede the first. A reader that kept
+        only the live Adopted grants would then see one grant where two were
+        signed: it would silently drop a ceiling the run had already spent
+        against, and it would let a third grant be written as a second."""
+        ids = seed_adoptions(self.run_dir, "P04", 3)
+        self.decisions(DECISION_HUMAN + budget_grant(granted=ids))
+        self.assertEqual(len(self.budget()["extensions"]), 1)
+        self.decisions(
+            DECISION_HUMAN
+            + budget_grant(granted=ids, status="Superseded")
+            + budget_grant("H-901", through="9", granted=ids, supersedes="H-900"))
+        grants = self.budget()["extensions"]
+        self.assertEqual([grant["decision_id"] for grant in grants], ["H-900", "H-901"])
+        self.assertEqual(self.budget()["phase_ceiling"], 9)
+        self.assertEqual(len(self.pins()), 2)
+
+    def test_a_grant_whose_granted_against_does_not_match_is_rejected(self):
+        """Without this the anti-reflex mechanism is just a comment: a human who
+        typed "continue" would be recorded as having reviewed decisions they
+        were never shown. Paired with the matching list, which must be accepted
+        — a check that refused every grant would satisfy this stop and make the
+        extension unwritable."""
+        ids = seed_adoptions(self.run_dir, "P04", 2)
+        self.decisions(DECISION_HUMAN + budget_grant(granted=("H-777",)))
+        with self.assertRaises(pas.TrackerValidationError) as raised:
+            self.budget()
+        self.assertIn("Granted against", str(raised.exception))
+        self.decisions(DECISION_HUMAN + budget_grant(granted=ids))
+        self.assertEqual(self.budget()["phase_ceiling"], 6)
+
+    def test_a_grant_naming_only_some_of_the_adopted_decisions_is_rejected(self):
+        """The subset case, which an implementation testing "every id shown is
+        really adopted" would let through — and which is precisely a human shown
+        a truncated list."""
+        ids = seed_adoptions(self.run_dir, "P04", 3)
+        self.decisions(DECISION_HUMAN + budget_grant(granted=ids[:2]))
+        with self.assertRaises(pas.TrackerValidationError):
+            self.budget()
+
+    def test_a_grant_for_another_run_is_rejected(self):
+        ids = seed_adoptions(self.run_dir, "P04", 3)
+        self.decisions(DECISION_HUMAN + budget_grant(run_id="some-other-run",
+                                                     granted=ids))
+        with self.assertRaises(pas.TrackerValidationError) as raised:
+            self.budget()
+        self.assertIn("Authorized run", str(raised.exception))
+
+    def test_an_unlimited_ceiling_is_rejected_and_a_finite_one_is_not(self):
+        ids = seed_adoptions(self.run_dir, "P04", 3)
+        self.decisions(DECISION_HUMAN + budget_grant(through="unlimited",
+                                                     granted=ids))
+        with self.assertRaises(pas.TrackerValidationError) as raised:
+            self.budget()
+        self.assertIn("Authorized through", str(raised.exception))
+        self.decisions(DECISION_HUMAN + budget_grant(through="4", granted=ids))
+        self.assertEqual(self.budget()["phase_ceiling"], 4)
+
+    def test_a_ceiling_that_grants_nothing_is_rejected(self):
+        """`Authorized through: 3` against a standing ceiling of 3 consumes one
+        of the run's two extensions and changes nothing — a human is out of
+        grants and no further adoption was ever bought."""
+        ids = seed_adoptions(self.run_dir, "P04", 3)
+        self.decisions(DECISION_HUMAN + budget_grant(through="3", granted=ids))
+        with self.assertRaises(pas.TrackerValidationError) as raised:
+            self.budget()
+        self.assertIn("does not exceed", str(raised.exception))
+
+    def test_a_source_revision_ahead_of_the_run_is_rejected(self):
+        """`Source revision` is BOUNDED, not equated. The pipeline contract this
+        borrows compares it with `==` because the grant is consumed at the one
+        transition it authorizes; here it is pinned and read before every
+        dispatch, and the tracker's revision advances every time anything is
+        written — so equality would brick the run on the ordinary flow the grant
+        exists to unblock. What it still catches is authority dated forward."""
+        self.assertEqual(self.tracker["run"]["revision"], "0")
+        ids = seed_adoptions(self.run_dir, "P04", 3)
+        self.decisions(DECISION_HUMAN + budget_grant(revision="1", granted=ids))
+        with self.assertRaises(pas.TrackerValidationError) as raised:
+            self.budget()
+        self.assertIn("Source revision", str(raised.exception))
+        self.decisions(DECISION_HUMAN + budget_grant(revision="0", granted=ids))
+        self.assertEqual(self.budget()["phase_ceiling"], 6)
+
+    def test_every_required_grant_field_is_required(self):
+        """Derived from the module's own `_GRANT_FIELDS` plus the scope it
+        reads, not from a list typed here: a field added to the discipline
+        without a stop is a grant that is generic in one more way."""
+        required = tuple(pas._GRANT_FIELDS) + ("scope",)
+        self.assertEqual(
+            sorted(required),
+            ["authorized_run", "authorized_through", "granted_against",
+             "scope", "source_revision"])
+        labels = {"authorized_run": "Authorized run",
+                  "source_revision": "Source revision",
+                  "authorized_through": "Authorized through",
+                  "granted_against": "Granted against", "scope": "Scope"}
+        #: EACH FIELD ON ITS OWN RUN, and the reason is the rule under test in
+        #: the pinning cases: once a grant is pinned the record behind it is no
+        #: longer consulted, so a loop that reused one run would check the
+        #: baseline, pin it, and then find every mutilated record accepted from
+        #: the pin. The first draft of this case did exactly that and passed.
+        baseline = self.on_a_fresh_run()
+        self.assertEqual(baseline["phase_ceiling"], 6,
+                         "the unmodified record must be ACCEPTED, or every "
+                         "removal below fails for a reason of its own")
+        for field in required:
+            with self.subTest(field=field):
+                record = budget_grant(granted=("Q-" + budget_qid("a", 0),))
+                line = [row for row in record.splitlines()
+                        if row.startswith(f"- **{labels[field]}:**")]
+                self.assertEqual(len(line), 1, f"fixture states {field} once")
+                with self.assertRaises(pas.TrackerValidationError):
+                    self.on_a_fresh_run(record.replace(line[0] + "\n", ""))
+
+    def test_a_grant_that_names_no_decision_at_all_is_rejected(self):
+        """`Granted against` present but EMPTY is the bare "continue" the
+        anti-reflex mechanism exists to refuse: a human who has been shown
+        nothing has reviewed nothing. Refused by the same presence rule that
+        refuses the field being absent, and stated separately because a blank
+        value is the spelling a template produces and an absent line is not."""
+        with self.assertRaises(pas.TrackerValidationError) as raised:
+            self.on_a_fresh_run(budget_grant(granted=()))
+        self.assertIn("granted_against", str(raised.exception))
+
+    def test_a_third_extension_is_refused_and_two_are_accepted(self):
+        """Two extensions per run, then the budget is terminal. Paired in one
+        case because a cap that refused the second would satisfy the stop and
+        halve the authority the design grants."""
+        ids = seed_adoptions(self.run_dir, "P04", 3)
+        two = (DECISION_HUMAN
+               + budget_grant("H-900", axis="drift-budget-p04", scope="P04",
+                              granted=ids)
+               + budget_grant("H-901", axis="drift-budget-p05", scope="P05",
+                              granted=ids))
+        self.decisions(two)
+        budget = self.budget()
+        self.assertEqual([grant["decision_id"] for grant in budget["extensions"]],
+                         ["H-900", "H-901"])
+        self.assertEqual(budget["run_ceiling"], pas.BUDGET_PER_RUN + 6)
+        self.assertEqual(len(self.pins()), 2)
+        self.decisions(two + budget_grant("H-902", axis="drift-budget-p06",
+                                          scope="P06", granted=ids))
+        with self.assertRaises(pas.TrackerValidationError) as raised:
+            self.budget()
+        self.assertIn(str(pas.MAX_EXTENSIONS), str(raised.exception))
+        self.assertEqual(len(self.pins()), 2,
+                         "a grant past the cap is never written down as one the "
+                         "run holds")
+
+    def test_an_extension_can_never_be_granted_by_quorum(self):
+        """Closed at the record, which is why the id and the provenance are both
+        moved: `parse_decisions` refuses `quorum.extend-budget` on any
+        quorum-provenance decision, so the grant never reaches the budget at
+        all. Pinned here so the budget cannot come to rely on a check that is
+        one edit away from being somewhere else."""
+        self.decisions(DECISION_HUMAN + budget_grant(
+            "Q-900000000000", provenance="quorum", granted=("H-001",)))
+        with self.assertRaises(pas.TrackerValidationError) as raised:
+            self.budget()
+        self.assertIn("a budget a quorum can extend is not a budget",
+                      str(raised.exception))
+
+    def test_a_dispatch_budget_grant_does_not_refill_the_drift_budget(self):
+        """TWO BUDGETS, TWO AUTHORITIES. The drift budget caps decision
+        authority and the dispatch budget caps run cost; a grant against either
+        refilling the other is the whole reason the two actions are separate
+        words. `DECISION_BUDGET_GRANT` is a real, adopted, human
+        `dispatch.extend-budget` record, and it must move nothing here."""
+        self.assertIn("dispatch.extend-budget", DECISION_BUDGET_GRANT)
+        seed_adoptions(self.run_dir, "P04", 3)
+        self.decisions(DECISION_HUMAN + DECISION_BUDGET_GRANT)
+        budget = self.budget()
+        self.assertEqual(budget["extensions"], [])
+        self.assertEqual(budget["phase_ceiling"], pas.BUDGET_PER_PHASE)
+        self.assertEqual(budget["run_ceiling"], pas.BUDGET_PER_RUN)
+        self.assertFalse(budget["may_raise"])
+        self.assertFalse((self.run_dir / "quorum" / "extensions.json").exists())
+
+    def test_an_open_grant_confers_nothing_before_it_is_signed(self):
+        self.decisions(DECISION_HUMAN + budget_grant(
+            through="6", action="none", status="Open"
+        ).replace(
+            "- **Answer:** 6 adoptions in P04 — the remaining tasks all turn on one unanswered choice.",
+            "- **Answer:** pending user response"))
+        self.assertEqual(self.budget()["phase_ceiling"], pas.BUDGET_PER_PHASE)
+        self.assertEqual(self.budget()["extensions"], [])
+
+    def test_a_superseded_grant_that_was_never_pinned_confers_nothing(self):
+        """The other side of the pinning rule, and the half that has to be
+        exercised on a run where nothing was pinned first.
+
+        The retired grant here is otherwise PERFECT — its `Granted against` is
+        the real adopted set, its run and revision are this run's — so a reader
+        that honoured it would raise the ceiling with no other check objecting.
+        That is deliberate: a fixture whose superseded grant was also malformed
+        would be rejected for the malformation and prove nothing about status.
+        """
+        ids = seed_adoptions(self.run_dir, "P04", 3)
+        self.decisions(
+            DECISION_HUMAN
+            + budget_grant(granted=ids, status="Superseded")
+            + "\n## H-901 — The drift budget for P04, settled\n\n"
+              "- **Question:** May the run adopt past its per-phase drift budget in P04?\n"
+              "- **Axis:** drift-budget-p04\n"
+              "- **Answer:** no further adoptions — the remaining tasks turn on one choice a human will make.\n"
+              "- **Decision action:** none\n"
+              "- **Provenance:** human\n"
+              "- **Depth:** 0\n"
+              "- **Supersedes:** H-900\n"
+              "- **Scope:** P04\n"
+              "- **Status:** Adopted\n")
+        budget = self.budget()
+        self.assertEqual(budget["extensions"], [])
+        self.assertEqual(budget["phase_ceiling"], pas.BUDGET_PER_PHASE)
+        self.assertFalse(budget["may_raise"])
+        self.assertFalse((self.run_dir / "quorum" / "extensions.json").exists())
+
+
+class QuorumBudgetMalformedInputTests(unittest.TestCase):
+    """Nothing outside `TrackerError` leaves the budget, on any file content.
+
+    `final.json` and `extensions.json` are written by agents and read by this
+    module, so every value in them may legally be a list or an object. A
+    `TypeError` from an unhashable value, a `KeyError` from a missing one or a
+    `JSONDecodeError` from a truncated file is outside the exception family
+    every controller handler is written against: the run dies on a typo instead
+    of stopping read-only with the record named.
+    """
+
+    def setUp(self):
+        self.root, self.run_dir = repo_with_a_run(self)
+
+    def read_fields(self, name: str) -> set:
+        """Every literal key `name` reads, taken from the CALL TREE.
+
+        Derived rather than remembered, because the totality claim below is
+        about what the function reads and a list typed by hand is about what
+        somebody remembered it read. Both `record.get("x")` and `entry["x"]`
+        count.
+        """
+        found = set()
+        for node in ast.walk(function_node(module_source(), name)):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "get" and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)):
+                found.add(node.args[0].value)
+            elif (isinstance(node, ast.Subscript)
+                  and isinstance(node.slice, ast.Constant)
+                  and isinstance(node.slice.value, str)):
+                found.add(node.slice.value)
+        return found
+
+    def only_a_tracker_error(self, what: str) -> bool:
+        """Either a usable budget or a stop inside the family — never an escape.
+
+        Returns whether it stopped, because that is the difference between this
+        claim and a rejection claim: a sweep over values that are not all
+        invalid can only assert the escape, and a case whose corpus IS all
+        invalid must assert the rejection instead or it passes against an
+        implementation that accepts everything.
+        """
+        try:
+            pas.quorum_budget(str(self.run_dir), phase="P04")
+        except pas.TrackerError:
+            return True
+        except Exception as escaped:          # noqa: BLE001 - that is the claim
+            raise AssertionError(
+                f"{type(escaped).__name__}({escaped}) escaped quorum_budget on "
+                f"{what}; nothing outside TrackerError may leave this module"
+            ) from escaped
+        return False
+
+    def test_every_field_the_final_record_is_read_for_survives_any_json_value(self):
+        """Rule 10: the case list is the call tree's, and the covering is
+        asserted rather than described. Each field is varied with an unhashable
+        value AND a wrong-typed scalar, because a bare `in` only raises on the
+        first and a missing type check only shows on the second."""
+        fields = self.read_fields("_final_event")
+        self.assertEqual(fields, {"qid", "status", "phase", "decision_id"},
+                         "a field was added to _final_event's reads without a "
+                         "case here; the totality claim is now false")
+        hostile = (["adopted"], {"status": "adopted"}, 7, True, None, "", "  ")
+        for field in sorted(fields):
+            for value in hostile:
+                with self.subTest(field=field, value=repr(value)):
+                    seed_final(self.run_dir, budget_qid("a", 0), status="adopted",
+                               phase="P04",
+                               decision_id="Q-" + budget_qid("a", 0),
+                               override={field: value})
+                    self.assertTrue(
+                        self.only_a_tracker_error(f"final.json {field}={value!r}"),
+                        f"{field}={value!r} is not a legal value of that field "
+                        "on an adopted record and must be refused, not merely "
+                        "survived")
+
+    def test_every_field_a_pinned_grant_is_read_for_survives_any_json_value(self):
+        fields = self.read_fields("_pinned_grant")
+        self.assertEqual(
+            fields,
+            {"decision_id", "phase", "authorized_through", "granted_against"},
+            "a field was added to _pinned_grant's reads without a case here")
+        pins = self.run_dir / "quorum" / "extensions.json"
+        pins.parent.mkdir(parents=True, exist_ok=True)
+        hostile = (["H-900"], {"a": 1}, 7, True, None, "", "0.85")
+        for field in sorted(fields):
+            for value in hostile:
+                with self.subTest(field=field, value=repr(value)):
+                    entry = {"decision_id": "H-900", "phase": "P04",
+                             "authorized_through": 6, "granted_against": []}
+                    entry[field] = value
+                    pins.write_text(json.dumps([entry]), encoding="utf-8")
+                    self.only_a_tracker_error(f"extensions.json {field}={value!r}")
+
+    def test_a_status_that_is_not_a_string_is_a_violation_and_not_a_typeerror(self):
+        """RULE 9, pinned at the one site where it bites. `_member` accepts
+        exactly what a bare `in` accepted and returns `False` instead of raising
+        on the rest — and the membership test is deliberately NOT behind a
+        `_text` guard, because a guard in front of it would make the test
+        unreachable for exactly the values that need it and this pin would then
+        pass against a bare `in`."""
+        with self.assertRaises(TypeError):
+            ["adopted"] in pas._FINAL_STATUSES        # noqa: B015 - the mutant
+        self.assertFalse(pas._member(["adopted"], pas._FINAL_STATUSES))
+        seed_final(self.run_dir, budget_qid("a", 0), status=["adopted"], phase="P04")
+        with self.assertRaises(pas.QuorumSchemaInvalid) as raised:
+            pas.quorum_events(str(self.run_dir))
+        self.assertIn("final status", str(raised.exception))
+
+    def test_a_truncated_or_unparseable_record_is_refused(self):
+        """REFUSED, not merely "does not escape". A case that asserted only the
+        escape claim would be satisfied by an implementation that accepted every
+        one of these, and `only_a_tracker_error` below is exactly that shape —
+        it is the right claim for a totality sweep over values that are not all
+        invalid, and the wrong one here, where every member is."""
+        directory = self.run_dir / "quorum" / budget_qid("a", 0)
+        directory.mkdir(parents=True)
+        for text in ("", "{", "{\"qid\": ", "[" * 400, "not json at all",
+                     "\"just a string\"", "[]", "null", "17"):
+            with self.subTest(text=text[:20]):
+                (directory / "final.json").write_text(text, encoding="utf-8")
+                with self.assertRaises(pas.TrackerError):
+                    pas.quorum_budget(str(self.run_dir), phase="P04")
+
+    def test_a_pin_file_that_is_not_a_list_of_grants_is_refused(self):
+        pins = self.run_dir / "quorum" / "extensions.json"
+        pins.parent.mkdir(parents=True, exist_ok=True)
+        for text in ("{}", "[3]", "[[]]", "null", "[{}]",
+                     json.dumps([{"decision_id": "H-900", "phase": "P04",
+                                  "authorized_through": 6, "granted_against": [],
+                                  "extra": 1}]),
+                     json.dumps([{"decision_id": "Q-abc123def456", "phase": "P04",
+                                  "authorized_through": 6, "granted_against": []}]),
+                     json.dumps([{"decision_id": "H-900", "phase": "P04",
+                                  "authorized_through": 3, "granted_against": []}]),
+                     json.dumps([{"decision_id": "H-900", "phase": "P04",
+                                  "authorized_through": 6, "granted_against": []}] * 2)):
+            with self.subTest(text=text[:40]):
+                pins.write_text(text, encoding="utf-8")
+                with self.assertRaises(pas.TrackerError):
+                    pas.quorum_budget(str(self.run_dir), phase="P04")
+
+    def test_a_pin_the_module_itself_wrote_is_accepted(self):
+        """The positive control the eight rejections above need: a validator
+        that refused every pin would satisfy all of them and lose the ceiling on
+        the second budget check of every extended run."""
+        ids = seed_adoptions(self.run_dir, "P04", 3)
+        (self.run_dir / "decisions.md").write_text(
+            DECISION_HUMAN + budget_grant(granted=ids), encoding="utf-8")
+        first = pas.quorum_budget(str(self.run_dir), phase="P04")
+        second = pas.quorum_budget(str(self.run_dir), phase="P04")
+        self.assertEqual(first["extensions"], second["extensions"])
+        self.assertEqual(second["phase_ceiling"], 6)
+
+    def test_a_run_dir_and_a_phase_are_refused_rather_than_coerced(self):
+        for run_dir in (None, 5, object()):
+            with self.subTest(run_dir=repr(run_dir)):
+                with self.assertRaises(pas.QuorumError):
+                    pas.quorum_budget(run_dir, phase="P04")
+        for phase in (None, 5, "", "   ", ["P04"]):
+            with self.subTest(phase=repr(phase)):
+                with self.assertRaises(pas.QuorumError):
+                    pas.quorum_budget(str(self.run_dir), phase=phase)
+
+
+class JsonEntersWrappedTests(unittest.TestCase):
+    """`json` is the twelfth import, and the wrapper is the condition it entered on.
+
+    `json.loads` raises `JSONDecodeError`, which is a `ValueError` and so
+    outside `TrackerError`: unwrapped, a malformed agent-authored file escapes
+    every `except TrackerError` a controller has written and kills the run on
+    input rather than stopping it read-only.
+    """
+
+    def test_the_module_imports_twelve_and_json_is_the_twelfth(self):
+        imported = set()
+        for node in ast.walk(ast.parse(module_source())):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imported.add((node.module or "").split(".")[0])
+        self.assertIn("json", imported)
+        self.assertEqual(imported - ALLOWED_IMPORTS, set())
+        self.assertEqual(len(imported), 12)
+
+    def test_every_json_parse_in_the_module_goes_through_the_wrapper(self):
+        """A second `json.loads` added later would be a second door out of the
+        exception family, and it would be found by whoever the run died on."""
+        source = module_source()
+        callers = []
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            for inner in ast.walk(node):
+                if (isinstance(inner, ast.Call)
+                        and isinstance(inner.func, ast.Attribute)
+                        and inner.func.attr in ("load", "loads")
+                        and isinstance(inner.func.value, ast.Name)
+                        and inner.func.value.id == "json"):
+                    callers.append(node.name)
+        self.assertEqual(callers, ["_loads"])
+
+    def test_a_parse_failure_is_a_tracker_error_and_never_a_value_error(self):
+        for text in ("", "{", "[1,]", "nope", "[" * 400, 7, ["{}"]):
+            with self.subTest(text=repr(text)[:24]):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas._loads(text, "a probe")
+        self.assertEqual(pas._loads('{"a": [1, null]}', "a probe"),
+                         {"a": [1, None]})
+
+    def test_recursion_is_wrapped_too_because_it_is_not_a_value_error(self):
+        """The escape a `except ValueError` alone would leave open: `json`
+        parses nesting recursively, so an agent-authored file with a few
+        thousand open brackets raises `RecursionError`, which is not a
+        `ValueError` and would escape the family."""
+        deep = "[" * 100000 + "]" * 100000
+        with self.assertRaises(RecursionError):
+            json.loads(deep)
+        with self.assertRaises(pas.QuorumSchemaInvalid):
+            pas._loads(deep, "a probe")
+
+    def test_the_five_final_statuses_meet_p02s_outcome_grammar_except_one(self):
+        """A SEAM PINNED RATHER THAN DISCOVERED. P02's `_QuorumOutcome` admits
+        `adopted`, `escalated` and `rejected-<reason>`; P03's contract names a
+        fifth status, `question-not-decidable`, which is none of those. So the
+        task that writes a `## Quorum` row owes a mapping for that one status,
+        and this case is where that debt is visible. It fails the day either
+        side changes, which is the point — the alternative is a run that
+        finalises correctly and then cannot record what it decided."""
+        writable = {status for status in pas._FINAL_STATUSES
+                    if pas._QUORUM_OUTCOME.fullmatch(status)}
+        self.assertEqual(pas._FINAL_STATUSES - writable, {"question-not-decidable"})
+        self.assertEqual(len(pas._FINAL_STATUSES), 5)
+
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,31 @@ from __future__ import annotations
 import copy
 import errno
 import hashlib
+#: ADMITTED BY QUORUM, and the twelfth member of a boundary that stood at
+#: eleven. The rule the allowlist states is CAPABILITY, NOT CONVENIENCE --
+#: "does this let the module do something it previously could not?" -- and for
+#: ``json`` the answer is no: it opens nothing, execs nothing and reaches no
+#: filesystem. It is the ``copy`` case, kept despite a hand-rolled version
+#: passing every test, not the ``subprocess`` case.
+#:
+#: WHAT IT IS FOR, and what it is NOT. Markdown keeps every durable form it
+#: already had -- the tracker, ``decisions.md``, the findings ledger, worker
+#: results and the question record. ``json`` is for the agent-authored values
+#: that are TYPED AND NESTED: brain responses, the finalised quorum records,
+#: and the pinned grants beside them. The alternative was to convert those into
+#: this module's section grammar, and run against a real response that grammar
+#: corrupts and rejects it -- ``_csv`` splits a quote containing a comma into
+#: two values, ``line`` as an int distinct from a bool and ``blocker`` as null
+#: distinct from the empty string cannot be expressed at all -- so the
+#: replacement would be a new nested, typed, escaping serialization format,
+#: which is the hand-rolled option in markdown clothing.
+#:
+#: AND IT MUST BE WRAPPED. ``json.loads`` raises ``JSONDecodeError``, which is a
+#: ``ValueError`` and so outside ``TrackerError``: unwrapped it escapes every
+#: handler a controller has written. ``_loads`` is the only spelling in this
+#: module and a parse failure is a ``TrackerError`` like every other
+#: malformed-input path here.
+import json
 import os
 import time
 from contextlib import contextmanager
@@ -5838,3 +5863,530 @@ def build_payload(qid: str, brain_index: int, *, run_dir: str) -> dict:
                  for source in assignment["read"]],
     }
     return payload
+
+
+# --- the drift budget ------------------------------------------------------
+
+#: The audit trail and the two quorum files this section reads and writes.
+#: ``decisions.md`` is markdown and stays markdown -- it is durable state a
+#: human edits. ``final.json`` and ``extensions.json`` are JSON because the
+#: phase layout says so and because what they hold is typed and nested: a
+#: finalised outcome carries a winner object, and a pinned grant carries a
+#: LIST of decision ids that would have to be re-escaped to survive ``_csv``.
+_DECISIONS_FILE = "decisions.md"
+_FINAL_FILE = "final.json"
+_EXTENSIONS_FILE = "extensions.json"
+
+#: Every status a finalised quorum may carry, and the whole of them. Four of
+#: the five are also writable into a ``## Quorum`` row's ``Outcome`` cell;
+#: ``question-not-decidable`` is NOT -- P02's ``_QuorumOutcome`` admits
+#: ``adopted``, ``escalated`` and ``rejected-<reason>`` and nothing else. That
+#: disagreement is real, it belongs to whichever task writes the row, and it is
+#: pinned in the suite rather than left to be discovered there, so neither side
+#: can drift without the seam going red.
+_FINAL_STATUSES = frozenset({
+    "adopted", "escalated", "rejected-contradicts-human",
+    "rejected-contradicts-quorum", "question-not-decidable",
+})
+
+#: THE ONE STATUS THAT CHARGES THE BUDGET. Escalations never count -- an
+#: escalation is the run asking for help, and charging for it teaches the
+#: controller to stop asking, which is the exact opposite of the design's
+#: intent. Rejections do not count either: a rejected quorum adopted nothing,
+#: so there is no decision authority to have spent. Named once, so a counter
+#: incremented on finalisation rather than on adoption has no spelling here.
+_CHARGED_STATUS = "adopted"
+
+#: The action that extends THE DRIFT BUDGET, and only it.
+#: ``dispatch.extend-budget`` is the other member of ``_EXTENSION_ACTIONS`` and
+#: it is deliberately absent: two budgets mean two authorities, the drift budget
+#: caps decision authority and the dispatch budget caps run cost, and a grant
+#: against either refilling the other is the one thing the two-action split
+#: exists to prevent. This is the mirror image of the mistake Task 5 found --
+#: there a check that named only the quorum action was too NARROW, because it
+#: was asking "is this record a grant?"; here the same name is the whole
+#: question, because this one asks "does this grant refill THIS budget?".
+_DRIFT_EXTENSION_ACTION = "quorum.extend-budget"
+
+#: The four fields the spec requires of a budget grant, verbatim.
+_GRANT_FIELDS = ("authorized_run", "source_revision", "authorized_through",
+                 "granted_against")
+
+#: What a PINNED grant carries, and the whole of it. A pin is re-read on every
+#: budget check and never re-derived, so it is validated as strictly as the
+#: record it came from: a hand-edited ``extensions.json`` is otherwise the one
+#: route by which a run grants itself authority nobody signed.
+_PINNED_GRANT_KEYS = ("decision_id", "phase", "authorized_through",
+                      "granted_against")
+
+
+def _loads(text, what: str):
+    """``json.loads``, with every escape re-raised inside ``TrackerError``.
+
+    ``JSONDecodeError`` is a ``ValueError`` and ``ValueError`` is outside this
+    module's exception family, so an unwrapped parse escapes every ``except
+    TrackerError`` a controller has written and kills the run on a malformed
+    file -- which is input, not a bug. ``RecursionError`` is here for the same
+    reason and is not theoretical: ``json`` parses nesting recursively, so a few
+    thousand open brackets in an agent-authored file raise it, and it is not a
+    ``ValueError``. ``TypeError`` covers a caller that hands this bytes.
+
+    This wrapper is the whole of the condition on which ``json`` entered
+    ``ALLOWED_IMPORTS``.
+    """
+    try:
+        return json.loads(text)
+    except (ValueError, TypeError, RecursionError) as exc:
+        raise QuorumSchemaInvalid(
+            f"{what} is not readable JSON ({type(exc).__name__}: {exc}); a "
+            "malformed record is input and stops the run inside this module's "
+            "exception family, never outside it") from exc
+
+
+def _read_json(path: Path, what: str):
+    """One JSON file from the run, read and parsed, or a stop that names it."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise QuorumError(
+            f"unreadable {what} at {str(path)!r}: {exc}") from exc
+    return _loads(text, what)
+
+
+def _dumps(value) -> str:
+    """The one spelling this module writes JSON in: sorted, indented, newline.
+
+    Sorted keys so a file rewritten from equal content is byte-identical, which
+    is what lets the pin writer below skip a write instead of churning the
+    directory on every budget check.
+    """
+    try:
+        return json.dumps(value, indent=2, sort_keys=True) + "\n"
+    except (TypeError, ValueError) as exc:
+        raise QuorumError(
+            f"a record carries {type(exc).__name__}-unserializable content and "
+            "cannot be written") from exc
+
+
+def _final_event(path: Path, qid: str) -> dict:
+    """One ``final.json``, validated down to the three fields the budget reads.
+
+    THE QID IS RE-DERIVED FROM THE DIRECTORY AND COMPARED, for the reason
+    ``_question_record`` compares it: a record is addressed by the directory it
+    sits in, and a directory can be copied, renamed or half-restored. A final
+    record filed under another question's qid would be counted against that
+    question's budget and cited in that question's audit trail.
+
+    ``status`` is tested with ``_member`` and NOT behind a ``_text`` guard, and
+    the order is the point. ``status`` arrives from a JSON file an agent wrote,
+    so it may legally be a list or an object; ``["adopted"] in _FINAL_STATUSES``
+    raises ``TypeError``, which is outside ``TrackerError``. A ``_text`` check
+    in front of it would make the membership test unreachable for exactly the
+    values that need it, and the pin below would pass against a bare ``in``.
+
+    An ``adopted`` event MUST name its decision record. The alternative -- drop
+    an adoption with no id out of the adopted list while still charging it to
+    the budget -- puts an adoption in the count that is missing from the list a
+    human is shown and signs against, which is the anti-reflex mechanism
+    reporting a set the run does not actually hold.
+    """
+    record = _read_json(path, f"the final record for {qid}")
+    if not isinstance(record, dict):
+        raise QuorumSchemaInvalid(
+            f"the final record for {qid} is a "
+            f"{type(record).__name__}, not an object; a finalised quorum is a "
+            "record with a status in it and a bare value classifies nothing")
+    stated = record.get("qid")
+    if not _text(stated) or stated.strip() != qid:
+        raise QuorumSchemaInvalid(
+            f"the final record filed under {qid} states qid {stated!r}; a "
+            "record answering under another question's identity is counted "
+            "against that question's budget and cited in its audit trail")
+    status = record.get("status")
+    if not _member(status, _FINAL_STATUSES):
+        raise QuorumSchemaInvalid(
+            f"{qid}: final status {status!r} is not one of "
+            f"{sorted(_FINAL_STATUSES)}; an unrecognised status is neither an "
+            "adoption nor an escalation, so the budget cannot say whether it "
+            "was charged")
+    phase = record.get("phase")
+    if not _text(phase) or not _TOKEN.fullmatch(phase.strip()):
+        raise QuorumSchemaInvalid(
+            f"{qid}: final phase {phase!r} is not one token; the per-phase "
+            "budget groups by it, and an event that groups with nothing is an "
+            "adoption charged to no phase at all")
+    decision_id = record.get("decision_id")
+    named = _text(decision_id) and _id_provenance(decision_id.strip()) is not None
+    if status == _CHARGED_STATUS and not named:
+        raise QuorumSchemaInvalid(
+            f"{qid}: an adopted quorum states decision_id {decision_id!r}, "
+            "which is not a decision id; the adopted list a human is shown "
+            "before granting an extension is built from these, so an adoption "
+            "missing from it is one they were never shown")
+    if decision_id is not None and not named:
+        raise QuorumSchemaInvalid(
+            f"{qid}: decision_id {decision_id!r} is neither null nor a decision "
+            "id (H-<n> or Q-<qid>); a record naming an id the audit trail "
+            "cannot hold is a citation nothing can resolve")
+    return {
+        "qid": qid,
+        "status": status,
+        "phase": phase.strip(),
+        "decision_id": decision_id.strip() if named else None,
+    }
+
+
+def quorum_events(run_dir: str) -> list[dict]:
+    """Every FINALISED quorum in this run, ordered by qid.
+
+    Derived from the ``final.json`` files rather than from a separate log, so
+    there is one place a record can exist and no way for a counter to disagree
+    with the evidence. A counter is the thing an autonomous controller is most
+    motivated to be wrong about in its own favour, and a counter kept beside the
+    files it counts can be edited without touching any of them.
+
+    Rejections are events too: a run with several ``rejected-contradicts-*``
+    events is a run whose brains keep pulling away from what the user asked for,
+    and that count is the earliest drift warning available. They do not charge
+    the budget -- a rejected quorum adopted nothing -- but they are recorded.
+
+    A qid directory with no ``final.json`` is in flight, not broken, and is
+    skipped. Every other read failure raises.
+    """
+    root = _run_path(run_dir) / _QUORUM_DIRNAME
+    if not root.is_dir():
+        #: A run that has never opened a quorum has no budget spent, which is
+        #: not the same as a run whose records are unreadable. Only the absence
+        #: of the whole tree is treated as "nothing yet".
+        return []
+    events = []
+    seen: dict = {}
+    for final in sorted(root.glob("*/" + _FINAL_FILE)):
+        #: NOT GUARDED BY ``is_file``. A qid directory with no ``final.json``
+        #: is in flight and this glob never yields it, so the only thing such a
+        #: guard could skip is a ``final.json`` that is a DIRECTORY -- which is
+        #: corruption, not an undecided quorum, and is a stop rather than a
+        #: record silently missing from the run's own count of itself.
+        event = _final_event(final, final.parent.name)
+        did = event["decision_id"]
+        if did is not None:
+            if did in seen:
+                raise QuorumSchemaInvalid(
+                    f"{event['qid']} and {seen[did]} both record decision "
+                    f"{did}; one adoption writes one decision record, and two "
+                    "quorums claiming it charge the budget twice for one grant "
+                    "of authority")
+            seen[did] = event["qid"]
+        events.append(event)
+    return events
+
+
+def _pinned_grant(entry, where: str) -> dict:
+    """One entry of ``extensions.json``, validated as strictly as its record.
+
+    A PIN IS NEVER RE-DERIVED, which is the whole of why it is re-validated:
+    once a grant is pinned this function's output is the authority, and a
+    hand-edited or half-written ``extensions.json`` is otherwise the one route
+    by which a run hands itself a ceiling nobody signed.
+
+    Human ids only. A pinned ``Q-`` grant is a quorum that extended its own
+    budget, which is the move ``parse_decisions`` refuses at the record and
+    which must not become reachable by writing the pin directly.
+    """
+    if not isinstance(entry, dict):
+        raise QuorumSchemaInvalid(
+            f"{where} is a {type(entry).__name__}, not a grant object")
+    missing = [key for key in _PINNED_GRANT_KEYS if key not in entry]
+    if missing:
+        raise QuorumSchemaInvalid(
+            f"{where} is missing {missing}; a pin the run reads instead of the "
+            "record has to carry everything the record was checked for")
+    extra = sorted(set(entry) - set(_PINNED_GRANT_KEYS))
+    if extra:
+        raise QuorumSchemaInvalid(
+            f"{where} carries unknown keys {extra}; a pin is written by this "
+            "module and a field it does not write is a field somebody added")
+    did = entry["decision_id"]
+    if not _text(did) or _id_provenance(did.strip()) != "human":
+        raise QuorumSchemaInvalid(
+            f"{where}: decision_id {did!r} is not a human decision id; a budget "
+            "a quorum can extend is not a budget")
+    phase = entry["phase"]
+    if not _text(phase) or not _TOKEN.fullmatch(phase.strip()):
+        raise QuorumSchemaInvalid(
+            f"{where}: phase {phase!r} is not one token; a grant scoped to "
+            "nothing raises no phase ceiling and is authority spent on nothing")
+    through = entry["authorized_through"]
+    if isinstance(through, bool) or not isinstance(through, int):
+        raise QuorumSchemaInvalid(
+            f"{where}: authorized_through {through!r} is not a whole number; a "
+            "ceiling that is not finite is the 'unlimited' grant the spec "
+            "refuses, wearing another type")
+    if through <= BUDGET_PER_PHASE:
+        raise QuorumSchemaInvalid(
+            f"{where}: authorized_through {through} does not exceed the "
+            "standing per-phase ceiling; a grant that grants nothing still "
+            "consumes one of the run's two extensions")
+    shown = entry["granted_against"]
+    if not isinstance(shown, list):
+        raise QuorumSchemaInvalid(
+            f"{where}: granted_against is a {type(shown).__name__}, not a list "
+            "of the decision ids the human was shown")
+    ids = []
+    for item in shown:
+        if not _text(item) or _id_provenance(item.strip()) is None:
+            raise QuorumSchemaInvalid(
+                f"{where}: granted_against holds {item!r}, which is not a "
+                "decision id; the anti-reflex mechanism is the list of records "
+                "the human is on record as having seen")
+        ids.append(item.strip())
+    return {"decision_id": did.strip(), "phase": phase.strip(),
+            "authorized_through": through, "granted_against": ids}
+
+
+def _live_grant(did: str, record: dict, *, run_id: str, revision: int,
+                adopted_ids: list) -> dict:
+    """One ``quorum.extend-budget`` record, checked once before it is pinned.
+
+    ``Granted against`` IS THE ANTI-REFLEX MECHANISM and is why this is checked
+    against the run's own evidence rather than merely parsed: the human is on
+    record as having seen the specific decisions they are waving through, so a
+    bare "continue" cannot become an extension. Compared as SORTED SETS rather
+    than verbatim order -- the order of a set of ids carries no information, a
+    human retyping them in another order is not a reflex, and duplicates are
+    refused by ``_decision_anchors`` before the comparison.
+
+    ``Source revision`` IS BOUNDED, NOT EQUATED, and that is a deliberate
+    departure from the pipeline contract this borrows. There the field is
+    compared with ``==`` against the current revision, because the grant is
+    consumed at the single transition it authorizes. Here it is pinned and then
+    read on every budget check, and the tracker's revision advances every time
+    anything is written -- appending the escalation row that carried the
+    question to the human is enough -- so equality would brick the run on the
+    ordinary flow it exists to unblock. What it still catches is the grant
+    citing a revision this run has never reached, which is authority dated into
+    the future.
+    """
+    for field in _GRANT_FIELDS:
+        if not record.get(field, "").strip():
+            raise TrackerValidationError(
+                f"{did}: {_DRIFT_EXTENSION_ACTION} requires {field}; the field "
+                "discipline is what makes a grant specific, and a grant missing "
+                "one of them is a generic authority")
+    scope = record.get("scope", "").strip()
+    if not _TOKEN.fullmatch(scope):
+        raise TrackerValidationError(
+            f"{did}: Scope {scope!r} is not a phase token; a grant names the "
+            "phase whose ceiling it raises, and one scoped to nothing raises no "
+            "ceiling while still consuming an extension")
+    if record["authorized_run"].strip() != run_id:
+        raise TrackerValidationError(
+            f"{did}: Authorized run is {record['authorized_run'].strip()!r} and "
+            f"this run is {run_id!r}; a grant signed for another run is "
+            "authority borrowed from a conversation this run's human never had")
+    source_revision = record["source_revision"].strip()
+    if not _is_count(source_revision):
+        raise TrackerValidationError(
+            f"{did}: Source revision {source_revision!r} is not a tracker "
+            "revision in ASCII digits")
+    if int(source_revision) > revision:
+        raise TrackerValidationError(
+            f"{did}: Source revision {source_revision} is ahead of this run's "
+            f"revision {revision}; a grant cannot have been written against a "
+            "state the run has never been in")
+    through_raw = record["authorized_through"].strip()
+    if not _is_count(through_raw):
+        raise TrackerValidationError(
+            f"{did}: Authorized through {through_raw!r} is not a finite ceiling "
+            "in ASCII digits; 'unlimited' is the one answer this field may "
+            "never carry, because a budget that refills on request is a speed "
+            "bump")
+    through = int(through_raw)
+    if through <= BUDGET_PER_PHASE:
+        raise TrackerValidationError(
+            f"{did}: Authorized through {through} does not exceed the standing "
+            f"per-phase ceiling of {BUDGET_PER_PHASE}; a grant that grants "
+            "nothing still consumes one of the run's two extensions")
+    shown = sorted(_decision_anchors(record["granted_against"], did))
+    if shown != sorted(adopted_ids):
+        raise TrackerValidationError(
+            f"{did}: Granted against names {shown} and this run has adopted "
+            f"{sorted(adopted_ids)}; the grant records which decisions the human "
+            "was shown before waving them through, so a list that is not the "
+            "adopted set is a human on record as having reviewed something else")
+    return {"decision_id": did, "phase": scope, "authorized_through": through,
+            "granted_against": shown}
+
+
+def _pin_extensions(path: Path, grants: list) -> None:
+    """Write the pins, and only when they would change.
+
+    ``quorum_budget`` is checked before every dispatch, so an unconditional
+    write would rewrite this file on every question the run ever raises. The
+    content is canonically ordered, so "would change" is a byte comparison.
+    """
+    if not grants:
+        return
+    content = _dumps(grants)
+    if path.is_file():
+        try:
+            if path.read_text(encoding="utf-8") == content:
+                return
+        except (OSError, UnicodeError):
+            #: Unreadable is not equal. The write below replaces it and
+            #: surfaces the real failure if the directory itself is the problem.
+            pass
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise TrackerWriteError(
+            f"cannot pin budget extensions to {str(path)!r}: {exc}; an unpinned "
+            "grant is re-checked against a moving adopted set and stops the run "
+            "the first time it moves") from exc
+
+
+def _budget_extensions(run_dir: Path, adopted_ids: list, run_id: str,
+                       revision: int) -> list:
+    """Every grant this run holds: the pinned ones, plus any newly signed.
+
+    A GRANT IS CHECKED ONCE AND THEN PINNED. ``Granted against`` names the
+    adopted set the human was shown, and that set grows the moment the grant is
+    used -- so re-checking it on the next budget check would reject the grant
+    the run is at that moment relying on. The pin is read first and its entries
+    are never re-derived.
+
+    PINNED GRANTS COUNT EVEN WHEN THE RECORD BEHIND THEM IS NO LONGER ADOPTED,
+    and that is not a detail. An axis holds at most one Adopted decision, so the
+    way to write a second grant on one axis is to supersede the first -- and a
+    reader that kept only the live Adopted grants would then see one grant where
+    two were signed, silently drop a ceiling the run had already spent against,
+    and let a third grant be written as a second. The pin exists precisely so a
+    later adoption cannot retire a grant the run has already relied on.
+    """
+    pins_path = run_dir / _QUORUM_DIRNAME / _EXTENSIONS_FILE
+    grants: dict = {}
+    if pins_path.is_file():
+        pinned = _read_json(pins_path, "the pinned budget extensions")
+        if not isinstance(pinned, list):
+            raise QuorumSchemaInvalid(
+                f"{_EXTENSIONS_FILE} holds a {type(pinned).__name__}, not a "
+                "list of grants")
+        for index, entry in enumerate(pinned):
+            grant = _pinned_grant(entry, f"{_EXTENSIONS_FILE}[{index}]")
+            if grant["decision_id"] in grants:
+                raise QuorumSchemaInvalid(
+                    f"{_EXTENSIONS_FILE} pins {grant['decision_id']} twice; one "
+                    "grant pinned twice counts as two against a cap of "
+                    f"{MAX_EXTENSIONS}, or as one ceiling stated two ways")
+            grants[grant["decision_id"]] = grant
+    decisions_path = run_dir / _DECISIONS_FILE
+    if decisions_path.is_file():
+        try:
+            text = decisions_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise TrackerValidationError(
+                f"unreadable {_DECISIONS_FILE}: {exc}; the audit trail is what "
+                "a grant is read from and a run cannot proceed without it"
+            ) from exc
+        decisions = parse_decisions(text)
+        for did in sorted(decisions["decisions"]):
+            record = decisions["decisions"][did]
+            if (record["action"] != _DRIFT_EXTENSION_ACTION
+                    or record["status"] != "Adopted"):
+                continue
+            if did in grants:
+                #: Already pinned. Never re-derived and never re-checked
+                #: against an adopted set that has moved since it was signed.
+                continue
+            grants[did] = _live_grant(did, record, run_id=run_id,
+                                      revision=revision,
+                                      adopted_ids=adopted_ids)
+    ordered = [grants[did] for did in sorted(grants)]
+    if len(ordered) > MAX_EXTENSIONS:
+        raise TrackerValidationError(
+            f"{len(ordered)} drift-budget extensions have been granted "
+            f"({sorted(grants)}) and the cap is {MAX_EXTENSIONS}; the budget is "
+            "now terminal. Three grants with no change to the underlying "
+            "problem is not a budget problem -- it means stage 02 selected the "
+            "wrong questions, and the repair is a new run with better ones")
+    #: Pinned only after the cap is judged, so a grant past the cap is never
+    #: written down as one the run holds.
+    _pin_extensions(pins_path, ordered)
+    return ordered
+
+
+def quorum_budget(run_dir: str, *, phase: str) -> dict:
+    """Remaining machine decision authority, checked BEFORE dispatch.
+
+    ONLY ADOPTIONS ARE CHARGED. Escalations never count -- an escalation is the
+    run asking for help, and charging for it teaches the controller to stop
+    asking, which is the exact opposite of the design's intent. Rejections do
+    not count either: a rejected quorum adopted nothing.
+
+    The budget caps DECISION AUTHORITY and not run cost; ``agent_dispatch_count``
+    is a separate counter and this function never reads it.
+
+    Two ceilings, and both bind. The per-phase ceiling stops one phase spending
+    the whole run's authority on its own questions; the run ceiling stops the
+    phases between them doing it a slice at a time. A human grant raises the
+    named phase's ceiling and raises the run's by exactly the extra authority it
+    confers -- summed over the phases granted, never taken as a maximum, because
+    two grants each conferring three more adoptions confer six, and a run
+    ceiling that rose by three would leave the second grant half unusable while
+    reporting that it had been honoured.
+    """
+    if not _text(phase):
+        raise QuorumError(
+            f"phase {phase!r} is not a phase; a budget with no phase to charge "
+            "against is a ceiling nothing is measured on")
+    phase = phase.strip()
+    path = _run_path(run_dir)
+    #: THE RUN ID IS READ FROM THE TRACKER, which is the one place it is
+    #: recorded and validated. A grant names the run it was signed for, and a
+    #: run id taken from anywhere else -- a sidecar file, the directory name --
+    #: is a second spelling that can disagree with the one the schema guards.
+    run = validate_run(path)["run"]
+    events = quorum_events(run_dir)
+    adopted = [event for event in events
+               if event["status"] == _CHARGED_STATUS]
+    adopted_ids = sorted(event["decision_id"] for event in adopted)
+    grants = _budget_extensions(path, adopted_ids, run["run_id"],
+                                int(run["revision"]))
+
+    #: One ceiling per phase granted, so two grants naming the same phase raise
+    #: it once rather than compounding.
+    ceilings: dict = {}
+    for grant in grants:
+        standing = BUDGET_PER_PHASE
+        if grant["phase"] in ceilings:
+            standing = ceilings[grant["phase"]]
+        ceilings[grant["phase"]] = max(standing, grant["authorized_through"])
+    phase_ceiling = BUDGET_PER_PHASE
+    run_ceiling = BUDGET_PER_RUN
+    for scope in sorted(ceilings):
+        run_ceiling += ceilings[scope] - BUDGET_PER_PHASE
+        if scope == phase:
+            phase_ceiling = ceilings[scope]
+
+    phase_adoptions = sum(1 for event in adopted if event["phase"] == phase)
+    run_adoptions = len(adopted)
+    reason = None
+    if phase_adoptions >= phase_ceiling:
+        reason = "phase-budget-exhausted"
+    elif run_adoptions >= run_ceiling:
+        reason = "run-budget-exhausted"
+    return {
+        "run_id": run["run_id"],
+        "phase": phase,
+        "phase_adoptions": phase_adoptions,
+        "phase_ceiling": phase_ceiling,
+        "phase_remaining": max(0, phase_ceiling - phase_adoptions),
+        "run_adoptions": run_adoptions,
+        "run_ceiling": run_ceiling,
+        "run_remaining": max(0, run_ceiling - run_adoptions),
+        "extensions": grants,
+        "adopted": adopted_ids,
+        "may_raise": reason is None,
+        "reason": reason,
+    }

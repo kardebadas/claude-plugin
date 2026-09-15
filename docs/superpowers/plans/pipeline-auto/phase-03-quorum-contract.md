@@ -88,6 +88,31 @@ P03 creates **no** prose, **no** agent file, **no** prompt template. `prompts/br
 
 ---
 
+## Carried forward from P02 Task 5 (commit `687bacc`)
+
+Three things P02 settled that this phase must not re-decide or contradict.
+
+**Build `RUNGS` over `RUNG_NAMES`; do not redefine it.** P02 owns the five rung
+names and asserts membership directly — there is no `.get(..., default)` and no
+fallback anywhere in the module, because `RUNGS.get(rung_id, 0.55)` silently
+converts every malformed response into an engineering-judgement vote, and 0.55 is
+a legal value arriving through an illegal door. A second definition here would
+let the two drift apart, which is the same hole with an extra step.
+
+**The question `ID` column now carries three roles** — intent-conflict id (Task 4
+made the claim referential), axis token, and quorum axis namespace. Confirm that
+is what `derive_qid` hashes before writing it. If the qid should hash something
+narrower, say so rather than hashing a column whose meaning depends on which
+validator is reading it.
+
+**`new` is a by-construction hole in the contradiction check**, and the schema
+cannot close it. A free-token axis clears the check by being unrecognisable — the
+same fail-open shape `_BLAST_RADII` is closed against. P02 set the fixture's
+adopted-row axis to the literal `new` because it is legal under both the
+referential and free-token readings. If this phase's contradiction detection
+depends on the axis being resolvable, reject `new` explicitly rather than assume
+a namespace it will not get.
+
 ## Interfaces
 
 ### Consumes from P02 — assumed to exist and work

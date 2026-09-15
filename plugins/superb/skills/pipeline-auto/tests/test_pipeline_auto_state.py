@@ -4711,6 +4711,35 @@ class InitializeRunTests(unittest.TestCase):
             with self.subTest(worker_limit=limit):
                 self.refusal(pas.TrackerValidationError, worker_limit=limit)
 
+    def test_a_boolean_worker_limit_is_rejected_like_any_other_non_integer(self):
+        """``bool`` subclasses ``int``, so ``isinstance(x, int)`` alone admits
+        ``True`` — and ``True >= 1`` holds, so the cell is written as the
+        string ``'True'``. ``## Run`` has no semantic validator: this argument
+        is checked here and nowhere else, so that string is never caught again
+        by whatever reads ``worker_limit`` to decide how many brain slots to
+        reserve, and the guard's own message calls ``True`` a positive integer.
+
+        ``False`` is pinned deliberately rather than left to ``< 1``. It is
+        refused today for the wrong reason — by the comparison, not by the
+        type — and a rule that only one of the two values obeys is one rewrite
+        of the bound away from not holding at all.
+
+        The diagnostic must be the one every other non-integer gets, so the
+        message is compared against the string case rather than merely searched
+        for a phrase: a bespoke sentence for booleans would tell a caller this
+        is a special case when it is the ordinary one.
+        """
+        ordinary = str(self.refusal(pas.TrackerValidationError,
+                                    worker_limit="6"))
+        for limit in (True, False):
+            with self.subTest(worker_limit=limit):
+                message = str(self.refusal(pas.TrackerValidationError,
+                                           worker_limit=limit))
+                head, found, tail = message.partition(repr(limit))
+                self.assertEqual(head, "worker_limit ")
+                self.assertTrue(found, message)
+                self.assertEqual(tail, ordinary.partition(repr("6"))[2])
+
     def test_a_worker_limit_below_four_is_legal_and_serialises(self):
         """``worker_limit >= 4`` is required for CONCURRENCY, not for legality:
         below it tasks serialise so the three brain slots stay free. Refusing it
@@ -4811,6 +4840,67 @@ class InitializeRunTests(unittest.TestCase):
                                   mutate=bump_dispatches)
         self.assertEqual(sorted(path.name for path in run_dir.iterdir()),
                          sorted(["progress.md", pas.LOCK_FILENAME]))
+
+
+class AnnotatedPathIsNotCoercedTests(unittest.TestCase):
+    """An annotation in this module tells the truth about what it accepts.
+
+    Three tasks in a row landed the same shape: a parameter annotated ``Path``
+    whose body passes it back through ``Path()``. In ``validate_run`` and in
+    ``initialize_run`` the rebinding was a defect as well as a contradiction.
+    In ``publish_immutable`` it was idempotent and harmless — and still a lie,
+    because a reader who trusts the signature is told the argument must already
+    be a ``Path`` while the body says it need not be. A third instance in three
+    tasks is a pattern, so it is swept rather than patched one site at a time.
+
+    Deliberately unannotated parameters are untouched by this.
+    ``_exclusive_lock`` and ``_replace_tracker`` both take ``run_dir`` with no
+    annotation and normalise it on purpose: they promise nothing, so they
+    contradict nothing.
+    """
+
+    def coerced_path_parameters(self, source: str) -> list[str]:
+        """``function:parameter`` for every ``Path``-annotated parameter that
+        its own function passes back through ``Path()``."""
+        found = []
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            spec = node.args
+            annotated = {
+                arg.arg
+                for arg in spec.posonlyargs + spec.args + spec.kwonlyargs
+                if arg.annotation is not None
+                and "Path" in ast.unparse(arg.annotation)}
+            for inner in ast.walk(node):
+                if (isinstance(inner, ast.Call)
+                        and isinstance(inner.func, ast.Name)
+                        and inner.func.id == "Path"
+                        and inner.args
+                        and isinstance(inner.args[0], ast.Name)
+                        and inner.args[0].id in annotated):
+                    found.append(f"{node.name}:{inner.args[0].id}")
+        return sorted(found)
+
+    def test_no_path_annotated_parameter_is_coerced_in_its_own_body(self):
+        self.assertEqual(
+            self.coerced_path_parameters(module_source()), [],
+            "a parameter annotated Path is passed back through Path() in its "
+            "own body; drop the coercion, or widen the annotation to whatever "
+            "the function really accepts")
+
+    def test_the_sweep_names_a_reintroduced_coercion(self):
+        """A test of the test. The clean result above is a statement about the
+        module only if the detector would have said so; so the pattern is
+        spliced back into a real signature and must be named.
+        """
+        source = module_source()
+        mutant = with_statement_in(source, "publish_immutable",
+                                   "path = Path(path)")
+        self.assertNotEqual(mutant, source)
+        self.assertEqual(self.coerced_path_parameters(mutant),
+                         ["publish_immutable:path"])
+        self.assertEqual(self.coerced_path_parameters(source), [])
 
 
 class PublishImmutableTests(unittest.TestCase):

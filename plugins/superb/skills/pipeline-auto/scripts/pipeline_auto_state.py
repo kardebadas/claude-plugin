@@ -2367,7 +2367,7 @@ def publish_immutable(path: Path, content: str) -> str:
     """
     data = content.encode("utf-8")
     _link_publish(
-        Path(path), data, "immutable artifact",
+        path, data, "immutable artifact",
         "Publish the second result under its own identity; which of the two "
         "is the real one is a reconciliation, never an overwrite.")
     return hashlib.sha256(data).hexdigest()
@@ -2420,7 +2420,17 @@ def initialize_run(run_dir: Path, *, run_id: str, base_commit: str,
     #: one twice over: it raises ``ValueError`` on a string, which escapes this
     #: module's exception family, and it truncates a float into a limit the
     #: caller never asked for, in a cell nothing downstream re-derives.
-    if not isinstance(worker_limit, int) or worker_limit < 1:
+    #:
+    #: ``bool`` is excluded FIRST, and by type rather than by arithmetic,
+    #: because it is a subclass of ``int``: a bare ``isinstance`` admits
+    #: ``True``, ``True >= 1`` holds, and the cell is written as the string
+    #: ``'True'``. ``## Run`` has no semantic validator — ``worker_limit`` is
+    #: checked here and nowhere else — so that string is never caught again by
+    #: anything that reads it to decide how many brain slots to reserve.
+    #: ``False`` is already refused by ``< 1``, but only incidentally; naming
+    #: both here makes the rule the type, so neither depends on the comparison.
+    if (isinstance(worker_limit, bool)
+            or not isinstance(worker_limit, int) or worker_limit < 1):
         raise TrackerValidationError(
             f"worker_limit {worker_limit!r} is not a positive integer; a run "
             "with no workers dispatches nothing and reports itself healthy")

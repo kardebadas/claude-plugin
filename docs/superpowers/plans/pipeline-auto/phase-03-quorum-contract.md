@@ -2093,6 +2093,21 @@ git commit -m "feat(pipeline-auto): charge only adoptions and pin human budget e
 
 ### Task 8: Opening a quorum — the budget trips before dispatch
 
+> **From Task 7 (`c3ddd45`) — the pin is written outside the lock.**
+> `quorum_budget(run_dir, *, phase)` writes the extension pin and does **not**
+> take the tracker lock, while `locked_tracker_update` is this module's sole
+> writer discipline everywhere else. Task 7 flagged it rather than fixing it,
+> because nothing was concurrent yet.
+>
+> **This task is where it stops being theoretical**: the budget is checked
+> before dispatch, and `worker_limit >= 4` means two workers can raise a
+> question at the same moment. Two concurrent checks can each read the same
+> remaining budget and each conclude they may dispatch — the classic
+> check-then-act — spending a budget the run does not have and quietly
+> exceeding the cap that exists to bound decision authority. If you conclude it
+> is still safe, say precisely why, with the interleaving that cannot happen.
+
+
 **Files:**
 - Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
 - Test: `plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py`
@@ -3162,6 +3177,23 @@ git commit -m "feat(pipeline-auto): adopt only on a strictly higher cluster rung
 ---
 
 ### Task 12: The rejection gates and P03's own tracker rows
+
+> **From Task 7 (`c3ddd45`) — a status with nowhere to be written.**
+> `finalize_quorum().status` is one of five: `adopted`, `escalated`,
+> `rejected-contradicts-human`, `rejected-contradicts-quorum`,
+> `question-not-decidable`. P02's `_QuorumOutcome` admits only
+> `adopted`/`escalated`/`rejected-*` — **`question-not-decidable` cannot be
+> written into a `## Quorum` row at all.** Task 7 pinned it as a seam test; this
+> task owns the resolution.
+>
+> Decide deliberately, and do not silently coerce it to `escalated`: a question
+> the quorum found undecidable and a question it escalated are different facts,
+> and the terminal report keys off which. Either widen P02's outcome
+> vocabulary — it is P02's column, so state it there rather than locally — or
+> rename the status. **What is not acceptable is a row writer that drops the
+> distinction**, because the row is the audit trail and the run would then be
+> unable to say why the question was never answered.
+
 
 **Files:**
 - Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`

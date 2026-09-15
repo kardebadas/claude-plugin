@@ -2662,6 +2662,24 @@ git commit -m "feat(pipeline-auto): classify every quorum interruption point fro
 
 ### Task 11: Clustering, rung strictness, and adoption
 
+> **From Task 8 (`c4a827c`) — C1, BINDING: the cap can only be enforced where the
+> charge happens, and that is here.** `open_quorum` **charges nothing**. It is an
+> admission check, so two questions raised against one remaining adoption both
+> pass *even perfectly serialised* — the first spent nothing. Task 8 put its whole
+> body under the tracker lock, and the lock does not close this and cannot.
+>
+> **`finalize_quorum` must re-check the budget inside its own
+> `locked_tracker_update`**, at the moment it charges the adoption. Checking only
+> at raise time means the drift budget bounds how many questions may be *asked*,
+> not how many decisions a machine may *make* — which is the opposite of what it
+> is for.
+>
+> Task 8 considered and refused an in-flight reservation: it still would not
+> protect the cap, and one crashed quorum would leave its phase escalating every
+> question forever — standing rule 8's failure shape reached from another
+> direction.
+
+
 > **From Task 5 (`52497d0`) — the adoption path's obligations, now enforced.**
 > `check_contradiction` refuses the reserved axis literal, so the `new` → qid
 > mint recorded above must happen **before** the contradiction check, not after.
@@ -3551,6 +3569,19 @@ git commit -m "feat(pipeline-auto): reject quorum answers that overrule a human,
 ---
 
 ### Task 13: Consuming a re-open's raised bar
+
+> **From Task 8 (`c4a827c`) — C2: an `escalated` `final.json` is TERMINAL, so a
+> question the budget refused can never be re-asked.** Two paths need an explicit
+> door and Task 8 deliberately did not open either, because falling through is
+> fail-open: the **post-extension re-raise** (a human grants headroom, and the
+> question that tripped the budget must become askable again) and this task's own
+> **re-open at a raised bar**, which carries `challenge`.
+>
+> Build the door explicitly and say what distinguishes a legitimate re-ask from a
+> question being asked twice to get a different answer. A re-open that simply
+> re-runs the same qid against the same context is how a run launders a refusal
+> into an adoption.
+
 
 > **From the Task 6 review (F1) — `challenge` is the field you fill, and it
 > reaches all three brains as free text.** `_shared_payload` emits `challenge`

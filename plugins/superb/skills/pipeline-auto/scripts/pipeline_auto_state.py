@@ -3780,8 +3780,20 @@ _EXTENSION_ACTIONS = frozenset({"quorum.extend-budget", "dispatch.extend-budget"
 #: it is what the user actually said, and the record must be able to hold it.
 #: Refusing it would make the one answer a generic-approval rule exists to
 #: protect unwritable.
+#: ``go`` IS NOT A MEMBER EITHER, for a different reason: it is a language, and
+#: this rule is applied to the derived ``answer_key`` as well as to the whole
+#: answer. "go" answering "which language backs the worker pool?" is a real
+#: choice, and refusing it would make a legal adopted answer unrecordable.
+#:
+#: ``yes`` stays, and the asymmetry with ``no`` and ``go`` is principled rather
+#: than a judgement call. The spec's admissibility criterion 4 is the options
+#: test: blank the title, keep the options, and a reader must still be able to
+#: tell what is being decided. ``go`` / ``rust`` passes it. ``yes`` / ``no``
+#: fails it outright, so a question whose options are yes and no is inadmissible
+#: before it is ever asked -- meaning ``yes`` can only ever arrive here as the
+#: rubber stamp, never as an answer key some admissible question produced.
 _GENERIC_ANSWERS = frozenset({
-    "", "approved", "yes", "continue", "proceed", "go", "ok", "okay",
+    "", "approved", "yes", "continue", "proceed", "ok", "okay",
     "agreed", "sounds good", "lgtm", "sure", "do it", "pending user response",
 })
 

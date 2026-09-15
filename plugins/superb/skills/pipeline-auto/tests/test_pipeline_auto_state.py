@@ -8753,11 +8753,36 @@ class ParseDecisionsTests(DecisionContractCase):
                          answer, DECISION_HUMAN))
                 self.assertEqual(parsed["decisions"]["H-001"]["status"], "Adopted")
         #: The affirmative rubber stamps stay refused, so this is not a hole.
-        for stamp in ("yes", "ok", "sure", "do it", "go", "agreed"):
+        for stamp in ("yes", "ok", "sure", "do it", "agreed"):
             with self.subTest(stamp=stamp):
                 self.refused(swap("postgres — Use the existing PostgreSQL "
                                   "instance.", stamp, DECISION_HUMAN),
                              because="generic approval")
+
+    def test_go_is_a_language_and_not_a_rubber_stamp(self):
+        """``go`` is refused for the same shape as ``no`` and a different reason.
+
+        The generic-approval rule is applied to the derived ``answer_key`` as
+        well as to the whole answer, which is what closed the hole where
+        ``yes — because we already run it`` read as reasoned while keying on
+        ``yes``. That same reach is what makes ``go`` dangerous: it is a
+        language, so refusing it makes a legal adopted answer unrecordable.
+
+        The asymmetry with ``yes`` is principled, not a judgement call. The
+        spec's admissibility criterion 4 is the options test — blank the title,
+        keep the options, and a reader must still be able to tell what is being
+        decided. ``go`` / ``rust`` passes it; ``yes`` / ``no`` fails it, so a
+        question whose options are yes and no is inadmissible before it is ever
+        asked, and ``yes`` can only ever arrive here as the rubber stamp.
+        """
+        self.assertNotIn("go", pas._GENERIC_ANSWERS)
+        for answer in ("go — it compiles fast and the team knows it",
+                       "go", "Go."):
+            with self.subTest(answer=answer):
+                parsed = pas.parse_decisions(
+                    swap("postgres — Use the existing PostgreSQL instance.",
+                         answer, DECISION_HUMAN))
+                self.assertEqual(parsed["decisions"]["H-001"]["status"], "Adopted")
 
     def test_an_anchor_that_names_no_decision_is_refused(self):
         """``Consistent with`` is read, split and carried into every record, and

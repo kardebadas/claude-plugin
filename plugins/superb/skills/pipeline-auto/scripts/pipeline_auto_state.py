@@ -6136,7 +6136,7 @@ def quorum_events(run_dir: str) -> list[dict]:
     return events
 
 
-def _pinned_grant(entry, where: str) -> dict:
+def _pinned_grant(entry, where: str, *, phases: frozenset) -> dict:
     """One entry of ``extensions.json``, validated as strictly as its record.
 
     A PIN IS NEVER RE-DERIVED, which is the whole of why it is re-validated:
@@ -6167,10 +6167,22 @@ def _pinned_grant(entry, where: str) -> dict:
             f"{where}: decision_id {did!r} is not a human decision id; a budget "
             "a quorum can extend is not a budget")
     phase = entry["phase"]
-    if not _text(phase) or not _TOKEN.fullmatch(phase.strip()):
+    #: HELD TO THE RUN'S PHASE REGISTRY, not merely to the token grammar, for
+    #: the reason ``_live_grant`` is: a pin is never re-derived, so a pin whose
+    #: phase is no phase of this run is a grant that raises NO ceiling and
+    #: still counts against ``MAX_EXTENSIONS`` -- the same defect as the record
+    #: it was written from, reachable by one hand edit of this file.
+    #:
+    #: SCREENED BY ``_member`` AND NOT BEHIND A ``_text`` GUARD, which is rule
+    #: 9 at the site where it bites: this value comes out of JSON, so
+    #: ``["P04"] in phases`` is a ``TypeError`` that escapes the exception
+    #: family, and a guard in front of the membership test would make it
+    #: unreachable for exactly the values that need it.
+    if not _member(phase, phases):
         raise QuorumSchemaInvalid(
-            f"{where}: phase {phase!r} is not one token; a grant scoped to "
-            "nothing raises no phase ceiling and is authority spent on nothing")
+            f"{where}: phase {phase!r} is no phase of this run "
+            f"{sorted(phases)}; a grant scoped to nothing raises no phase "
+            "ceiling and is authority spent on nothing")
     through = entry["authorized_through"]
     #: THE ``bool`` CONJUNCT CANNOT BE PINNED BY A TEST, and saying so is
     #: cheaper than the next reader re-deriving it. ``True`` and ``False`` ARE
@@ -6204,12 +6216,15 @@ def _pinned_grant(entry, where: str) -> dict:
                 "decision id; the anti-reflex mechanism is the list of records "
                 "the human is on record as having seen")
         ids.append(item.strip())
-    return {"decision_id": did.strip(), "phase": phase.strip(),
+    #: ``phase`` is NOT stripped, and that is the membership test's doing: a
+    #: registered phase id carries no surrounding whitespace, so `` P04 `` is
+    #: refused above rather than quietly repaired into a phase nobody wrote.
+    return {"decision_id": did.strip(), "phase": phase,
             "authorized_through": through, "granted_against": ids}
 
 
 def _live_grant(did: str, record: dict, *, run_id: str, revision: int,
-                adopted_ids: list) -> dict:
+                adopted_ids: list, phases: frozenset) -> dict:
     """One ``quorum.extend-budget`` record, checked once before it is pinned.
 
     ``Granted against`` IS THE ANTI-REFLEX MECHANISM and is why this is checked
@@ -6238,11 +6253,29 @@ def _live_grant(did: str, record: dict, *, run_id: str, revision: int,
                 "discipline is what makes a grant specific, and a grant missing "
                 "one of them is a generic authority")
     scope = record.get("scope", "").strip()
-    if not _TOKEN.fullmatch(scope):
+    #: CHECKED AGAINST THE RUN'S PHASES, not against the token grammar, and
+    #: this is the one place in the budget where the registry is available and
+    #: populated. ``_TOKEN`` admits ``p04``, ``T04`` and ``banana``: each is a
+    #: plausible human spelling, each raises NO phase ceiling, and each still
+    #: burns one of the run's two extensions -- authority spent on nothing, by
+    #: a check whose own message already says so.
+    #:
+    #: WHY THE REGISTRY IS POPULATED HERE AND NOT AT THE ``phase`` ARGUMENT.
+    #: ``## Phases`` is empty on a freshly initialised run, which is why
+    #: ``quorum_budget`` holds its argument to the grammar alone. A GRANT is a
+    #: different moment: it exists only after some phase has exhausted its
+    #: three adoptions, so that phase has been executing, and the phase set is
+    #: written by a stage-06 transition and sealed at its close -- every phase
+    #: this module will ever see is registered before the first phase-scoped
+    #: question is raised. The same check is spelled twice already, against
+    #: ``tracker["phases"]`` for a quorum row's phase and against the run's
+    #: tasks, phases and gates for a fix round's scope; this is the third
+    #: reader of the same roster, not a third grammar.
+    if not _member(scope, phases):
         raise TrackerValidationError(
-            f"{did}: Scope {scope!r} is not a phase token; a grant names the "
-            "phase whose ceiling it raises, and one scoped to nothing raises no "
-            "ceiling while still consuming an extension")
+            f"{did}: Scope {scope!r} is no phase of this run {sorted(phases)}; "
+            "a grant names the phase whose ceiling it raises, and one scoped "
+            "to nothing raises no ceiling while still consuming an extension")
     if record["authorized_run"].strip() != run_id:
         raise TrackerValidationError(
             f"{did}: Authorized run is {record['authorized_run'].strip()!r} and "
@@ -6381,7 +6414,7 @@ def _pin_extensions(path: Path, grants: list) -> None:
 
 
 def _budget_extensions(run_dir: Path, adopted_ids: list, run_id: str,
-                       revision: int) -> list:
+                       revision: int, phases: frozenset) -> list:
     """Every grant this run holds: the pinned ones, plus any newly signed.
 
     A GRANT IS CHECKED ONCE AND THEN PINNED. ``Granted against`` names the
@@ -6407,7 +6440,8 @@ def _budget_extensions(run_dir: Path, adopted_ids: list, run_id: str,
                 f"{_EXTENSIONS_FILE} holds a {type(pinned).__name__}, not a "
                 "list of grants")
         for index, entry in enumerate(pinned):
-            grant = _pinned_grant(entry, f"{_EXTENSIONS_FILE}[{index}]")
+            grant = _pinned_grant(entry, f"{_EXTENSIONS_FILE}[{index}]",
+                                  phases=phases)
             if grant["decision_id"] in grants:
                 raise QuorumSchemaInvalid(
                     f"{_EXTENSIONS_FILE} pins {grant['decision_id']} twice; one "
@@ -6435,7 +6469,7 @@ def _budget_extensions(run_dir: Path, adopted_ids: list, run_id: str,
                 continue
             grants[did] = _live_grant(did, record, run_id=run_id,
                                       revision=revision,
-                                      adopted_ids=adopted_ids)
+                                      adopted_ids=adopted_ids, phases=phases)
     ordered = [grants[did] for did in sorted(grants)]
     if len(ordered) > MAX_EXTENSIONS:
         raise TrackerValidationError(
@@ -6469,6 +6503,24 @@ def quorum_budget(run_dir: str, *, phase: str) -> dict:
     two grants each conferring three more adoptions confer six, and a run
     ceiling that rose by three would leave the second grant half unusable while
     reporting that it had been honoured.
+
+    ``run_ceiling`` IS THE RUN'S TOTAL AUTHORITY AND ``run_remaining`` IS THIS
+    PHASE'S SHARE OF WHAT IS LEFT, and the two are deliberately not one
+    subtraction apart. A grant is PHASE-SCOPED: ``Scope`` names the phase whose
+    ceiling it raises, so the headroom it confers is spendable by that phase and
+    by no other. Read as a single fungible pool -- which is what
+    ``run_ceiling - run_adoptions`` says -- a grant scoped ``P04`` let ``P06``
+    decide past ``BUDGET_PER_RUN`` on authority the human never gave it, and the
+    granted phase got none of it. So the run's authority is accounted in two
+    parts: a SHARED pool of ``BUDGET_PER_RUN``, which every phase draws its
+    standing three from, and one PRIVATE pool per granted phase holding exactly
+    the headroom that grant conferred. An adoption past a phase's standing three
+    is drawn from that phase's private pool; every other adoption is drawn from
+    the shared one. ``run_remaining`` is therefore what is left of the shared
+    pool plus what is left of THIS phase's private pool, and it is never more
+    than ``run_ceiling - run_adoptions``: the binding is a tightening, and an
+    ungranted phase sees exactly the run ceiling it would have seen with no
+    grant in the run at all.
     """
     if not _text(phase) or not _TOKEN.fullmatch(phase.strip()):
         #: HELD TO THE SAME GRAMMAR ``_final_event`` HOLDS A RECORD'S PHASE TO,
@@ -6480,12 +6532,18 @@ def quorum_budget(run_dir: str, *, phase: str) -> dict:
         #: means the run keeps deciding past the ceiling a human set.
         #:
         #: What this CANNOT catch is a typo that is itself a legal phase token:
-        #: ``p04`` for ``P04`` still reports zero adoptions, because there is no
-        #: registry of the run's phases to check against -- ``## Phases`` is
-        #: empty for the whole of the run in which questions are raised, so
-        #: checking it would refuse every budget check instead of the wrong
-        #: ones. The residual belongs to the caller: the phase passed here is
-        #: the phase written into the ``final.json`` the adoption files.
+        #: ``p04`` for ``P04`` still reports zero adoptions. It is NOT held to
+        #: ``## Phases`` -- that section is empty on a freshly initialised run,
+        #: and this is the one budget question that must stay answerable before
+        #: a phase has a row, because the count it returns is an equality
+        #: against the ``final.json`` records rather than a tracker lookup.
+        #: A grant's ``Scope`` IS held to that registry, in ``_live_grant``, and
+        #: the two are not the same check: a grant exists only after a phase has
+        #: exhausted three adoptions, so its phase is registered by then, and a
+        #: grant scoped to nothing burns one of only two extensions while this
+        #: argument merely reports a budget the caller asked about. The residual
+        #: belongs to the caller: the phase passed here is the phase written
+        #: into the ``final.json`` the adoption files.
         raise QuorumError(
             f"phase {phase!r} is not a phase token; a budget charged against a "
             "phase no record can name is measured on nothing, and it reports a "
@@ -6496,13 +6554,18 @@ def quorum_budget(run_dir: str, *, phase: str) -> dict:
     #: recorded and validated. A grant names the run it was signed for, and a
     #: run id taken from anywhere else -- a sidecar file, the directory name --
     #: is a second spelling that can disagree with the one the schema guards.
-    run = validate_run(path)["run"]
+    tracker = validate_run(path)
+    run = tracker["run"]
+    #: THE RUN'S REAL PHASE IDS, read from the one section that holds them, so
+    #: a grant's ``Scope`` is checked against the phases this run has rather
+    #: than against a shape that resembles one.
+    phases = frozenset(row["id"] for row in tracker["phases"])
     events = quorum_events(run_dir)
     adopted = [event for event in events
                if event["status"] == _CHARGED_STATUS]
     adopted_ids = sorted(event["decision_id"] for event in adopted)
     grants = _budget_extensions(path, adopted_ids, run["run_id"],
-                                int(run["revision"]))
+                                int(run["revision"]), phases)
 
     #: One ceiling per phase granted, so two grants naming the same phase raise
     #: it once rather than compounding.
@@ -6512,19 +6575,36 @@ def quorum_budget(run_dir: str, *, phase: str) -> dict:
         if grant["phase"] in ceilings:
             standing = ceilings[grant["phase"]]
         ceilings[grant["phase"]] = max(standing, grant["authorized_through"])
-    phase_ceiling = BUDGET_PER_PHASE
-    run_ceiling = BUDGET_PER_RUN
-    for scope in sorted(ceilings):
-        run_ceiling += ceilings[scope] - BUDGET_PER_PHASE
-        if scope == phase:
-            phase_ceiling = ceilings[scope]
 
-    phase_adoptions = sum(1 for event in adopted if event["phase"] == phase)
+    charged: dict = {}
+    for event in adopted:
+        charged[event["phase"]] = charged.get(event["phase"], 0) + 1
+    phase_adoptions = charged.get(phase, 0)
     run_adoptions = len(adopted)
+    phase_ceiling = ceilings.get(phase, BUDGET_PER_PHASE)
+    #: The run's TOTAL authority, summed over the phases granted. Reported as
+    #: it always was: two grants each conferring three confer six.
+    run_ceiling = BUDGET_PER_RUN + sum(ceilings[scope] - BUDGET_PER_PHASE
+                                       for scope in sorted(ceilings))
+
+    #: How much of each private pool has actually been drawn. CAPPED AT THE
+    #: HEADROOM, which is what keeps an over-spent phase honest: a phase with
+    #: five adoptions and no grant has no private pool to have drawn them from,
+    #: so all five are charged to the shared pool rather than two of them
+    #: vanishing out of the run's count of itself.
+    drawn = 0
+    for scope in sorted(ceilings):
+        drawn += min(ceilings[scope] - BUDGET_PER_PHASE,
+                     max(0, charged.get(scope, 0) - BUDGET_PER_PHASE))
+    shared = run_adoptions - drawn
+    own = min(phase_ceiling - BUDGET_PER_PHASE,
+              max(0, phase_adoptions - BUDGET_PER_PHASE))
+    run_remaining = (max(0, BUDGET_PER_RUN - shared)
+                     + (phase_ceiling - BUDGET_PER_PHASE) - own)
     reason = None
     if phase_adoptions >= phase_ceiling:
         reason = "phase-budget-exhausted"
-    elif run_adoptions >= run_ceiling:
+    elif run_remaining <= 0:
         reason = "run-budget-exhausted"
     return {
         "run_id": run["run_id"],
@@ -6534,7 +6614,7 @@ def quorum_budget(run_dir: str, *, phase: str) -> dict:
         "phase_remaining": max(0, phase_ceiling - phase_adoptions),
         "run_adoptions": run_adoptions,
         "run_ceiling": run_ceiling,
-        "run_remaining": max(0, run_ceiling - run_adoptions),
+        "run_remaining": run_remaining,
         "extensions": grants,
         "adopted": adopted_ids,
         "may_raise": reason is None,

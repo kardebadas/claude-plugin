@@ -11678,6 +11678,33 @@ def seed_adoptions(run_dir, phase, count, *, prefix="a", first=0):
     return sorted(ids)
 
 
+#: Every phase id any grant below is scoped to. A grant's `Scope` is checked
+#: against the run's real phase registry, so a fixture that left `## Phases`
+#: empty would make every grant case fail on the scope check and none of them
+#: on its own rule.
+BUDGET_PHASES = ("P04", "P05", "P06")
+
+
+def register_phases(run_dir, *ids):
+    """Put `ids` in `## Phases`, standing in for P06's `create_phase`.
+
+    Written through `parse_tracker`/`render_tracker` rather than through
+    `locked_tracker_update`, and that is not a shortcut: a transition would
+    advance `## Run`'s revision, and every grant fixture below states a
+    `Source revision` measured against it. This builds the STATE a stage-06
+    run is in; it does not perform the transition that gets there.
+    """
+    path = Path(run_dir) / "progress.md"
+    tracker = pas.parse_tracker(path.read_text(encoding="utf-8"))
+    for identifier in ids:
+        pas.append_row(tracker, "phases",
+                       {"id": identifier, "state": "[~]", "verification": "-",
+                        "review_class": "required", "class_source": "plan",
+                        "ratchet": "-", "gate": "-"})
+    path.write_text(pas.render_tracker(tracker), encoding="utf-8")
+    return tracker
+
+
 def budget_grant(did="H-900", *, axis="drift-budget-p04", scope="P04",
                  run_id=None, revision="0", through="6", granted=(),
                  action="quorum.extend-budget", provenance="human",
@@ -11848,6 +11875,7 @@ class QuorumBudgetTests(unittest.TestCase):
 
     def setUp(self):
         self.root, self.run_dir = repo_with_a_run(self)
+        register_phases(self.run_dir, *BUDGET_PHASES)
         self.tracker = pas.validate_run(self.run_dir)
 
     def decisions(self, text):
@@ -11868,6 +11896,7 @@ class QuorumBudgetTests(unittest.TestCase):
         left over from a previous assertion in the same directory.
         """
         _root, run_dir = repo_with_a_run(self)
+        register_phases(run_dir, *BUDGET_PHASES)
         ids = seed_adoptions(run_dir, phase, adoptions)
         if record is None:
             record = budget_grant(granted=ids)
@@ -11968,6 +11997,208 @@ class QuorumBudgetTests(unittest.TestCase):
         self.assertEqual(self.pins(),
                          [{"decision_id": "H-900", "phase": "P04",
                            "authorized_through": 6, "granted_against": ids}])
+
+    def test_a_grants_headroom_is_spendable_only_by_the_phase_it_named(self):
+        """A GRANT IS PHASE-SCOPED, and the run headroom it confers is the
+        granted phase's or it is nobody's.
+
+        The defect this is written against, stated as the run that exhibited
+        it: twelve adoptions run-wide and NONE in `P04`, one grant scoped
+        `P04`. Read as a single fungible pool the run ceiling had risen to 13,
+        so `P06` — a phase the human never named — was told it could raise a
+        thirteenth, and it bought that thirteenth with authority scoped to a
+        phase that had spent nothing. The granted phase meanwhile had
+        `run_remaining` 0: the one phase the grant was for got none of it.
+
+        `run_ceiling` is unchanged by the fix and is asserted so: it is the
+        run's TOTAL authority, and it really did rise by three. What is bound
+        is who may spend it.
+        """
+        ids = []
+        for index, phase in enumerate(("P01", "P02", "P03", "P05")):
+            ids += seed_adoptions(self.run_dir, phase, 3, prefix="abcdef"[index])
+        self.assertEqual(len(ids), 12)
+        self.decisions(DECISION_HUMAN + budget_grant(scope="P04",
+                                                     granted=sorted(ids)))
+
+        ungranted = self.budget("P06")
+        self.assertEqual(ungranted["run_adoptions"], 12)
+        self.assertEqual(ungranted["run_ceiling"], pas.BUDGET_PER_RUN + 3,
+                         "the run's total authority did rise by three")
+        self.assertEqual(ungranted["run_remaining"], 0,
+                         "none of that three is P06's to spend")
+        self.assertFalse(ungranted["may_raise"])
+        self.assertEqual(ungranted["reason"], "run-budget-exhausted")
+
+        granted = self.budget("P04")
+        self.assertEqual(granted["phase_ceiling"], 6)
+        self.assertEqual(granted["phase_remaining"], 6)
+        self.assertEqual(granted["run_remaining"], 3,
+                         "the granted phase gets exactly the three it was given")
+        self.assertTrue(granted["may_raise"])
+        self.assertIsNone(granted["reason"])
+
+    def test_the_granted_phase_may_spend_its_headroom_past_the_run_ceiling(self):
+        """The half the stop above must not take with it. Binding the headroom
+        to one phase is worthless if that phase cannot then spend it: the run
+        below has spent its whole standing ten, and the grant exists precisely
+        so `P04` may still decide three more.
+
+        Driven at three points on one fixture — none of the private pool drawn,
+        two of three drawn, all three drawn — so an implementation that handed
+        the granted phase a single extra adoption, or one that never decremented
+        the private pool, fails.
+        """
+        ids = sorted(seed_adoptions(self.run_dir, "P04", 3, prefix="a")
+                     + seed_adoptions(self.run_dir, "P01", 3, prefix="b")
+                     + seed_adoptions(self.run_dir, "P02", 3, prefix="c")
+                     + seed_adoptions(self.run_dir, "P03", 1, prefix="d"))
+        self.assertEqual(len(ids), pas.BUDGET_PER_RUN)
+        self.decisions(DECISION_HUMAN + budget_grant(scope="P04", granted=ids))
+        full = self.budget("P04")
+        self.assertEqual(full["run_adoptions"], pas.BUDGET_PER_RUN)
+        self.assertEqual(full["run_remaining"], 3)
+        self.assertTrue(full["may_raise"])
+
+        seed_adoptions(self.run_dir, "P04", 2, prefix="a", first=100)
+        part = self.budget("P04")
+        self.assertEqual((part["run_adoptions"], part["phase_adoptions"]), (12, 5))
+        self.assertEqual(part["run_remaining"], 1,
+                         "two of the three private adoptions are drawn")
+        self.assertTrue(part["may_raise"])
+
+        seed_adoptions(self.run_dir, "P04", 1, prefix="a", first=200)
+        spent = self.budget("P04")
+        self.assertEqual(spent["run_remaining"], 0)
+        self.assertFalse(spent["may_raise"])
+        #: And the phase ceiling is what closes it, because six of six is the
+        #: ceiling the human signed rather than a run-wide accident.
+        self.assertEqual(spent["reason"], "phase-budget-exhausted")
+
+    def test_two_grants_confer_six_and_neither_phase_spends_the_others(self):
+        """The summing rule and the scoping rule at once, because each is the
+        way the other is got wrong. Two grants of three confer six of run
+        authority — never three, which would leave the second grant half
+        unusable — and the six is not a pool either phase may draw the whole of.
+        """
+        ids = sorted(seed_adoptions(self.run_dir, "P04", 3, prefix="a")
+                     + seed_adoptions(self.run_dir, "P05", 3, prefix="b")
+                     + seed_adoptions(self.run_dir, "P01", 3, prefix="c")
+                     + seed_adoptions(self.run_dir, "P02", 1, prefix="d"))
+        self.decisions(DECISION_HUMAN
+                       + budget_grant("H-900", axis="drift-budget-p04",
+                                      scope="P04", granted=ids)
+                       + budget_grant("H-901", axis="drift-budget-p05",
+                                      scope="P05", granted=ids))
+        for phase in ("P04", "P05"):
+            with self.subTest(phase=phase):
+                budget = self.budget(phase)
+                self.assertEqual(budget["run_ceiling"], pas.BUDGET_PER_RUN + 6)
+                self.assertEqual(budget["phase_ceiling"], 6)
+                self.assertEqual(budget["run_remaining"], 3,
+                                 "three each, not six to whichever asks first")
+                self.assertTrue(budget["may_raise"])
+        ungranted = self.budget("P06")
+        self.assertEqual(ungranted["run_ceiling"], pas.BUDGET_PER_RUN + 6)
+        self.assertEqual(ungranted["run_remaining"], 0)
+        self.assertFalse(ungranted["may_raise"])
+        self.assertEqual(ungranted["reason"], "run-budget-exhausted")
+
+    def test_an_ungranted_phase_is_unaffected_by_a_grant_it_was_not_given(self):
+        """The other side of the same coin, below the run ceiling rather than
+        at it: a grant elsewhere must not change what an ungranted phase sees.
+        A fix that subtracted the headroom from the shared pool instead of
+        binding it would fail here — `P06` would lose three it never had."""
+        ids = sorted(seed_adoptions(self.run_dir, "P04", 3, prefix="a")
+                     + seed_adoptions(self.run_dir, "P01", 3, prefix="b"))
+        self.decisions(DECISION_HUMAN + budget_grant(scope="P04", granted=ids))
+        budget = self.budget("P06")
+        self.assertEqual(budget["phase_ceiling"], pas.BUDGET_PER_PHASE)
+        self.assertEqual(budget["run_remaining"], pas.BUDGET_PER_RUN - 6,
+                         "P06 sees the run ceiling it would have seen with no "
+                         "grant in the run at all")
+        self.assertTrue(budget["may_raise"])
+
+    def test_a_phase_that_overspent_its_grant_charges_the_overspend_to_the_run(self):
+        """A private pool holds exactly the headroom the grant conferred, and
+        not one adoption more.
+
+        `quorum_budget` is a READER: the records on disk are the authority, and
+        a phase with more adoptions than its ceiling is the state a controller
+        that decided without checking leaves behind. Those extra adoptions have
+        to be charged to the shared pool, because no grant paid for them — and
+        an implementation that subtracted the whole excess from the run count
+        instead of the granted headroom would make the overspend BUY the rest
+        of the run two more decisions, which is the original defect wearing a
+        second face.
+
+        `P04` is granted six and has eight. Three of the eight are its standing
+        share, three are the grant, and the last two are paid for by nobody: the
+        shared pool is ten of ten, and `P06` is closed.
+        """
+        ids = sorted(seed_adoptions(self.run_dir, "P04", 8, prefix="a")
+                     + seed_adoptions(self.run_dir, "P01", 3, prefix="b")
+                     + seed_adoptions(self.run_dir, "P02", 2, prefix="c"))
+        self.assertEqual(len(ids), 13)
+        self.decisions(DECISION_HUMAN + budget_grant(scope="P04", granted=ids))
+        budget = self.budget("P06")
+        self.assertEqual(budget["run_adoptions"], 13)
+        self.assertEqual(budget["run_ceiling"], pas.BUDGET_PER_RUN + 3)
+        self.assertEqual(budget["run_remaining"], 0,
+                         "the two P04 overspent are charged to the shared pool, "
+                         "not to a private pool that never held them")
+        self.assertFalse(budget["may_raise"])
+        self.assertEqual(budget["reason"], "run-budget-exhausted")
+
+    def test_a_grant_scoped_to_no_phase_of_this_run_is_refused(self):
+        """F3. `_TOKEN` admits `p04`, `T04` and `banana`, and each of them is a
+        grant that raises NO phase ceiling, silently adds run headroom and still
+        burns one of only two extensions — authority spent on nothing, by a
+        check whose own message already said a grant names the phase whose
+        ceiling it raises.
+
+        `P07` is the case the grammar can never catch: it is phase-shaped and
+        correctly spelled, and it is still no phase of this run.
+        """
+        ids = ("Q-" + budget_qid("a", 0),)
+        #: No `0.85` here, though it is `_TOKEN`-legal: `budget_grant` writes
+        #: the scope into the record's Question and Answer text, where an
+        #: unrelated screen refuses a bare rung value — and this case would
+        #: then pass on that screen rather than on the one it names.
+        for scope in ("p04", "T04", "banana", "P07", "P04/sub", "P4"):
+            with self.subTest(scope=scope):
+                with self.assertRaises(pas.TrackerValidationError) as raised:
+                    self.on_a_fresh_run(budget_grant(scope=scope, granted=ids))
+                self.assertIn("Scope", str(raised.exception))
+                self.assertIn("no phase of this run", str(raised.exception))
+
+    def test_a_grant_scoped_to_any_phase_of_this_run_is_honoured(self):
+        """The positive control the stop above needs, and it is two claims: a
+        check narrowed until every spelling above was refused would refuse every
+        grant and make the extension unwritable, and a check that only ever
+        accepted the phase being charged would make a grant for a phase the run
+        has not reached yet unwritable too.
+
+        So `P05` is signed while `P04` is the phase being charged: the grant is
+        honoured — pinned, counted against the cap, and raising the run's total
+        authority — and it raises `P05`'s ceiling and not `P04`'s.
+        """
+        ids = seed_adoptions(self.run_dir, "P04", 3)
+        self.decisions(DECISION_HUMAN + budget_grant(
+            "H-901", axis="drift-budget-p05", scope="P05", granted=ids))
+        charged = self.budget("P04")
+        self.assertEqual([grant["decision_id"]
+                          for grant in charged["extensions"]], ["H-901"])
+        self.assertEqual(self.pins()[0]["phase"], "P05")
+        self.assertEqual(charged["run_ceiling"], pas.BUDGET_PER_RUN + 3)
+        self.assertEqual(charged["phase_ceiling"], pas.BUDGET_PER_PHASE,
+                         "a grant for P05 raises nothing for P04")
+        self.assertFalse(charged["may_raise"])
+        self.assertEqual(charged["reason"], "phase-budget-exhausted")
+        raised = self.budget("P05")
+        self.assertEqual(raised["phase_ceiling"], 6)
+        self.assertEqual(raised["phase_remaining"], 6)
+        self.assertTrue(raised["may_raise"])
 
     def test_the_pin_is_written_once_and_not_rewritten_on_every_check(self):
         """`quorum_budget` is checked before every dispatch, so an
@@ -12442,6 +12673,7 @@ class QuorumBudgetMalformedInputTests(unittest.TestCase):
 
     def setUp(self):
         self.root, self.run_dir = repo_with_a_run(self)
+        register_phases(self.run_dir, *BUDGET_PHASES)
 
     def only_a_tracker_error(self, what: str) -> bool:
         """Either a usable budget or a stop inside the family — never an escape.
@@ -12499,9 +12731,15 @@ class QuorumBudgetMalformedInputTests(unittest.TestCase):
 
         That costs the corpus its "any JSON value" shape, because three of the
         original values are legal SOMEWHERE: `7` is a lawful ceiling,
-        `["H-900"]` a lawful `granted_against`, `"0.85"` a lawful phase token.
-        Each is kept, in the fields where it is illegal, so the type coverage
-        survives the change and only the claim gets stronger.
+        `["H-900"]` a lawful `granted_against`, `"0.85"` a lawful decision
+        anchor. Each is kept, in the fields where it is illegal, so the type
+        coverage survives the change and only the claim gets stronger.
+
+        `phase` carries three spellings that are `_TOKEN`-legal and are no
+        phase of this run — `p04`, `P04/sub`, `0.85`. Reverting the registry
+        check to `_TOKEN.fullmatch` must fail here: a pin is never re-derived,
+        so a pin whose phase names nothing is a grant that raises no ceiling
+        and still counts against `MAX_EXTENSIONS`.
         """
         fields = read_fields("_pinned_grant")
         self.assertEqual(
@@ -12516,7 +12754,8 @@ class QuorumBudgetMalformedInputTests(unittest.TestCase):
         #: Illegal in this field only, and each is legal in exactly one other.
         each = {
             "decision_id": (["H-900"], 7, "0.85", "Q-abc123def456", "H-01x"),
-            "phase": (["H-900"], 7, "not a phase!!", "P04 P05"),
+            "phase": (["H-900"], 7, "not a phase!!", "P04 P05", "p04",
+                      "P04/sub", "0.85", "P07"),
             "authorized_through": (["H-900"], "0.85", "6", 6.5, 3),
             "granted_against": (7, "0.85", ["not an id"], [None], [["H-900"]]),
         }
@@ -12540,12 +12779,16 @@ class QuorumBudgetMalformedInputTests(unittest.TestCase):
         """The positive control the sweep above needs, and it is not the same as
         the round-trip control further down: these are values a hand-edited pin
         could carry which ARE legal, and a validator narrowed until every case
-        above passed would refuse them and lose the ceiling."""
+        above passed would refuse them and lose the ceiling.
+
+        Both name a phase of this run other than the one being charged, which
+        is the shape the registry check must keep accepting: a grant scoped
+        `P05` is a real grant, and it simply raises no ceiling for `P04`."""
         pins = self.run_dir / "quorum" / "extensions.json"
         pins.parent.mkdir(parents=True, exist_ok=True)
-        legal = ({"decision_id": "H-900", "phase": "0.85",
+        legal = ({"decision_id": "H-900", "phase": "P05",
                   "authorized_through": 7, "granted_against": ["H-900"]},
-                 {"decision_id": "H-1", "phase": "P04/sub",
+                 {"decision_id": "H-1", "phase": "P06",
                   "authorized_through": 4, "granted_against": ["Q-abc123def456"]})
         for entry in legal:
             with self.subTest(entry=entry["decision_id"]):
@@ -12672,12 +12915,19 @@ class QuorumBudgetMalformedInputTests(unittest.TestCase):
     def test_a_legal_phase_token_is_still_accepted_whatever_it_names(self):
         """The half the stop above must not take with it, and the honest limit
         of the check. `P05` is a phase with no adoptions and a full budget, and
-        so are `p04` and `banana`: this module has no registry of the run's
-        phases to check a token against — `## Phases` is empty for the whole of
-        the run in which questions are raised — so a typo that is ITSELF a legal
-        token still reports a fresh budget. The grammar is the boundary; naming
-        the right phase belongs to the caller, which writes the same string into
-        the `final.json` the adoption files."""
+        so are `p04` and `banana`: the ARGUMENT is held to the grammar and not
+        to `## Phases`, so a typo that is ITSELF a legal token still reports a
+        fresh budget. The grammar is the boundary; naming the right phase
+        belongs to the caller, which writes the same string into the
+        `final.json` the adoption files.
+
+        Asserted on a run whose registry IS populated — this class registers
+        `P04`, `P05` and `P06` — so the case says what it means: `banana` is
+        accepted here because this argument is deliberately not a registry
+        lookup, not because there was no registry to look in. A grant's `Scope`
+        is the check that does look, and it is a different moment: it is signed
+        after a phase has exhausted three adoptions, and it burns one of only
+        two extensions when it names nothing."""
         seed_adoptions(self.run_dir, "P04", 3)
         for phase in ("P05", "p04", "P4", "banana", "P04/sub", "0.85"):
             with self.subTest(phase=repr(phase)):

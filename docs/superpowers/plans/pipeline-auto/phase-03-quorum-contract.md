@@ -155,9 +155,11 @@ class PlanMetadataError(TrackerError): ...
 
 def parse_tracker(text: str) -> dict: ...
 def render_tracker(tracker: dict) -> str: ...
-def validate_run(run_dir: str) -> dict: ...
-def initialize_run(run_dir: str, *, run_id: str, base_commit: str,
-                   target_branch: str, worker_limit: int) -> dict: ...
+def validate_run(run_dir: Path) -> dict: ...          # Path, and never coerced
+def initialize_run(run_dir: Path, *, run_id: str, base_commit: str,
+                   target_branch: str, worker_limit: int,
+                   repo_root: str) -> dict: ...            # repo_root is REQUIRED
+def classify_filesystem(path: str) -> str: ...             # unknown => the run does not start
 def locked_tracker_update(run_dir: str, *, transition_id: str, mutate) -> dict: ...
 def publish_immutable(path: str, content: str) -> str: ...
 def derive_next_action(tracker: dict) -> str: ...
@@ -356,11 +358,12 @@ def new_run(stack):
     run_dir = root / "docs" / "superpowers" / "runs" / RUN_ID
     run_dir.mkdir(parents=True)
     pipeline_auto_state.initialize_run(
-        str(run_dir), run_id=RUN_ID, base_commit=BASE,
+        run_dir, run_id=RUN_ID, base_commit=BASE,
         target_branch="feat/pipeline-auto", worker_limit=4,
+        repo_root=str(root),
     )
     (run_dir / "decisions.md").write_text("<!-- pipeline-auto-decisions/v1 -->\n", encoding="utf-8")
-    recorded = pipeline_auto_state.repo_root(pipeline_auto_state.validate_run(str(run_dir)))
+    recorded = pipeline_auto_state.repo_root(pipeline_auto_state.validate_run(run_dir))
     assert Path(recorded).resolve() == root.resolve(), (
         f"P02 recorded repo_root {recorded!r}; the tests assume {str(root)!r}")
     return root, run_dir
@@ -546,6 +549,13 @@ git commit -m "feat(pipeline-auto): freeze the rung ladder and derive context-fr
 ```
 
 ---
+
+> **Corrected after `497cad8` and `268f712`.** `repo_root` is now a REQUIRED
+> keyword of `initialize_run` and a `## Run` field; `validate_run` takes a `Path`
+> and never coerces it; `section_columns`, `append_row` and `classify_filesystem`
+> now exist. The signatures and the `new_run` helper above were written against
+> a module where none of that was true, and the old call raises `TypeError`.
+> Copy from the corrected forms, not from memory of an earlier task.
 
 ### Task 2: Strict brain-response schema validator
 

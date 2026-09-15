@@ -132,6 +132,26 @@ def write_capable_calls(source: str, name: str) -> list[str]:
     return calls
 
 
+def code_constants(source: str, name: str) -> frozenset[str]:
+    """Every string constant in ONE function's body, its docstring excluded.
+
+    A guard that asserts a name is absent from a function has to look at what
+    the function DOES, not at what it says about itself: the prose explaining
+    why a cell is never read contains that cell's name, so a dump of the whole
+    subtree is satisfied only by a function that stays silent about its own
+    reasoning.
+    """
+    node = function_node(source, name)
+    body = node.body
+    if (body and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)):
+        body = body[1:]
+    return frozenset(
+        child.value for statement in body for child in ast.walk(statement)
+        if isinstance(child, ast.Constant) and isinstance(child.value, str))
+
+
 def with_statement_in(source: str, name: str, statement: str) -> str:
     """The real module source with one statement spliced into ``name``'s body.
 
@@ -1993,6 +2013,24 @@ def with_row(key: str, row_id: str, cells: dict[str, str],
     ``## Tasks``, another in ``## Task Review`` and a third in ``## Fix Rounds``.
     """
     text = valid_text() if text is None else text
+    old, new = rewritten_row(key, row_id, cells, text)
+    return swap(old, new, text)
+
+
+def rewritten_row(key: str, row_id: str, cells: dict[str, str],
+                  text: str) -> tuple[str, str]:
+    """``(the row as it stands, the same row with named cells replaced)``.
+
+    Every check ``with_row`` makes lives here — the column names are real, the
+    row is unique, the row is as wide as the section's header — because the
+    rules of ``## Task Review`` and ``## Fix Rounds`` are about a SEQUENCE of
+    rounds and a sequence cannot be built by replacing one row in place. Handing
+    the caller the rendered row, rather than a whole tracker, is what lets a
+    second and third round be built from the committed fixture's own cells
+    instead of retyped: a hand-typed fourteen-cell literal is one column short
+    the day a column is added, and a pattern that no longer matches is the
+    silent no-op this file's helpers exist to make impossible.
+    """
     fields = row_fields(key)
     unknown = sorted(set(cells) - set(fields))
     if unknown:
@@ -2012,9 +2050,40 @@ def with_row(key: str, row_id: str, cells: dict[str, str],
             f"{heading} row {row_id!r} is {len(values)} cells, not {len(fields)}")
     if text.count(old) != 1:
         raise AssertionError(f"{old!r} is not unique in the tracker")
-    return swap(old, pas._row(tuple(
+    return old, pas._row(tuple(
         cells[name] if name in cells else value
-        for name, value in zip(fields, values))), text)
+        for name, value in zip(fields, values)))
+
+
+#: ``## Task Review`` and ``## Fix Rounds`` are the only sections whose rows are
+#: keyed by a PAIR — ``(Task, Round)`` and ``(Scope, Round)`` — because a task
+#: has N review rounds and a scope has N fix rounds, and ``| P01-T01 | `` opens
+#: two rows of the first section and one of the second. The pair is spelled as
+#: the two cells that open the row, so ``with_row``'s width, uniqueness and
+#: column-name checks apply unchanged.
+def with_review(task: str, round_number: str, cells: dict[str, str],
+                text: str | None = None) -> str:
+    return with_row("task_review", f"{task} | {round_number}", cells, text)
+
+
+def with_fix(scope: str, round_number: str, cells: dict[str, str],
+             text: str | None = None) -> str:
+    return with_row("fix_rounds", f"{scope} | {round_number}", cells, text)
+
+
+def rounds_for(key: str, row_id: str, rows: tuple[dict[str, str], ...],
+               text: str | None = None) -> str:
+    """The fixture with ONE row of ``key`` replaced by a SEQUENCE of rows.
+
+    Each dict is that same committed row with its named cells replaced, so a
+    column added to the section reaches every round at once. This is the only
+    way to state a rule about a sequence — the intensity ratchet, the bound of
+    three, the round that resolved nothing — without a hand-typed row literal.
+    """
+    text = valid_text() if text is None else text
+    old, _ = rewritten_row(key, row_id, {}, text)
+    return swap(old, "\n".join(
+        rewritten_row(key, row_id, cells, text)[1] for cells in rows), text)
 
 
 #: Every lifecycle cell of ``## Tasks``, spelled out rather than imported from
@@ -2046,6 +2115,31 @@ COMPLETED_ARTIFACT_TASK = {
     "integration": "N/A",
     "verification": "scratch/p02-t01-tests.txt",
 }
+
+#: ``P02-T01``'s review round wound forward to the one verdict that lets its
+#: task stand at ``[x]``, and its fix round wound forward to closed. Winding the
+#: TASK row forward is no longer enough on its own: a task may not reach ``[x]``
+#: while the review round that speaks for it is still blocked at two open
+#: findings, or while a fixer is still carrying them. A case that marked the
+#: task complete and stopped there would raise about that bar rather than about
+#: the one cell it changed — a test passing for the wrong reason.
+ACCEPTED_REVIEW = {
+    "state": "accepted", "critical": "0", "important": "0", "minor": "0",
+    "open": "0",
+}
+
+
+def completed_artifact_task(**cells: str) -> str:
+    """The fixture with ``P02-T01`` wound forward to a legally finished task.
+
+    Three rows, not one: the task says the work is done, the review round says
+    a reviewer accepted it at zero open findings, and the fix round says the
+    fixer finished carrying what that review raised.
+    """
+    text = with_row("tasks", "P02-T01", dict(COMPLETED_ARTIFACT_TASK, **cells))
+    text = with_review("P02-T01", "1", ACCEPTED_REVIEW, text)
+    return with_fix("P02-T01", "1", completed_fix(1, "F-001,F-002", "none"), text)
+
 
 RATCHET_RECORD = "accumulated-surface@scratch/p02-ratchet.md"
 
@@ -2172,8 +2266,7 @@ class TaskSectionTests(unittest.TestCase):
         """The positive control for the two cases below: this exact row is
         legal, so their raises are caused by the one cell each changes and not
         by winding P02-T01 forward to ``[x]``."""
-        tracker = pas.parse_tracker(
-            with_row("tasks", "P02-T01", COMPLETED_ARTIFACT_TASK))
+        tracker = pas.parse_tracker(completed_artifact_task())
         done = next(row for row in tracker["tasks"] if row["id"] == "P02-T01")
         self.assertEqual((done["state"], done["integration"]), ("[x]", "N/A"))
 
@@ -2181,14 +2274,12 @@ class TaskSectionTests(unittest.TestCase):
         """An artifact task produces no source range to integrate. Letting it
         record ``held`` would put a task that can never be integrated into the
         set the budget freeze is waiting on."""
-        text = with_row("tasks", "P02-T01",
-                        dict(COMPLETED_ARTIFACT_TASK, integration="held"))
+        text = completed_artifact_task(integration="held")
         with self.assertRaises(pas.TrackerValidationError):
             pas.parse_tracker(text)
 
     def test_a_completed_artifact_task_names_its_artifacts(self):
-        text = with_row("tasks", "P02-T01",
-                        dict(COMPLETED_ARTIFACT_TASK, artifacts="-"))
+        text = completed_artifact_task(artifacts="-")
         with self.assertRaises(pas.TrackerValidationError):
             pas.parse_tracker(text)
 
@@ -2211,8 +2302,7 @@ class TaskSectionTests(unittest.TestCase):
         which is the mutation it exists to catch."""
         for state in ("[X]", "[-]", "[ x]", "x"):
             with self.subTest(state=state):
-                text = with_row("tasks", "P02-T01",
-                                dict(COMPLETED_ARTIFACT_TASK, state=state))
+                text = completed_artifact_task(state=state)
                 with self.assertRaises(pas.TrackerValidationError):
                     pas.parse_tracker(text)
 
@@ -2447,6 +2537,541 @@ class GateSectionTests(unittest.TestCase):
                    if line.startswith("| gate-p02 | "))
         with self.assertRaises(pas.TrackerValidationError):
             pas.parse_tracker(swap(row + "\n", row + "\n" + row + "\n"))
+
+
+#: Every ``## Task Review`` cell a reviewer fills in. A round nobody has started
+#: carries none of them. Spelled out rather than imported from the module's own
+#: constant, so dropping a name there leaves the subtest that catches the drop
+#: standing rather than deleting it along with the rule.
+REVIEW_LIFECYCLE_CELLS = {
+    "package": "scratch/review-package.md",
+    "report": "scratch/review-report.md",
+    "critical": "1",
+    "important": "1",
+    "minor": "0",
+    "open": "2",
+    "evidence": "scratch/review-rerun.txt",
+}
+
+#: A review round that has been assigned and nothing more.
+PENDING_REVIEW = dict({key: "-" for key in REVIEW_LIFECYCLE_CELLS}, state="pending")
+#: A review round in flight: the reviewer holds the package and has returned
+#: nothing yet.
+REVIEWING_REVIEW = dict(PENDING_REVIEW, state="reviewing",
+                        package=REVIEW_LIFECYCLE_CELLS["package"])
+
+FIX_COMMIT = "abcdef0123456789abcdef0123456789abcdef01"
+
+
+def completed_fix(number: int, findings: str, remaining: str) -> dict[str, str]:
+    """One legally completed ``## Fix Rounds`` row, as named cells."""
+    return {
+        "round": str(number),
+        "state": "complete",
+        "fixer": f"fixer-{number}",
+        "findings": findings,
+        "commits": FIX_COMMIT[:-1] + str(number),
+        "verification": f"scratch/fix-r{number}-tests.txt",
+        "re_review": f"scratch/fix-r{number}-review.md",
+        "remaining": remaining,
+    }
+
+
+def fixing_fix(number: int, findings: str) -> dict[str, str]:
+    """One legally in-flight ``## Fix Rounds`` row, as named cells."""
+    return {
+        "round": str(number), "state": "fixing", "fixer": f"fixer-{number}",
+        "findings": findings, "commits": "-", "verification": "-",
+        "re_review": "-", "remaining": "-",
+    }
+
+
+class TaskReviewSectionTests(unittest.TestCase):
+    """``## Task Review`` is what makes "zero open findings" checkable.
+
+    It is a SECTION rather than columns on ``## Tasks`` because a task has N
+    review rounds, not one. Columns would force either a second row per task —
+    breaking the one-row-per-task invariant every task helper assumes — or a
+    comma-packed history cell, which is how the previous pipeline's
+    ``Checkpoints`` column became unparseable.
+
+    Two rules carry most of the weight. ``Open`` must equal the three severity
+    counts summed, so a row cannot record ``Minor 3`` and ``Open 0``: Minor is
+    not a deferral category in this project and the schema is where that stops
+    being a promise. And a task cannot stand at ``[x]`` while its last review
+    round says anything but ``accepted``.
+
+    What is deliberately NOT here is a rule that a ``[x]`` task must HAVE a
+    review round. Requiring one would be this module branching on the review
+    dial by the back door — ``final-only`` buys no per-task reviewer, and a
+    schema that demanded a review row anyway would make the dial unusable. The
+    committed fixture pins that: ``P01-T02`` is ``[x]`` in a ``required`` phase
+    with no review row at all, and it parses.
+    """
+
+    def test_a_tasks_own_implementer_cannot_review_it(self):
+        """Non-implementer review is one of the things the dial may never
+        switch off, because self-review passes anything. ``P02-T01`` is owned by
+        ``impl-2``; naming ``impl-2`` as its reviewer is the whole mistake, and
+        the row is otherwise exactly the committed one."""
+        text = with_review("P02-T01", "1", {"reviewer": "impl-2"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_one_reviewer_per_round(self):
+        """Two reviewers on one row are two verdicts with no way to tell which
+        one the ``State`` cell records."""
+        text = with_review("P02-T01", "1", {"reviewer": "reviewer-2,reviewer-9"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_review_cannot_name_an_unknown_task(self):
+        text = with_review("P02-T01", "1", {"task": "P09-T09"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_an_unknown_review_state_is_rejected(self):
+        """The row is otherwise a legal evaluated review, so nothing downstream
+        can raise on it: only the enum can. Catches replacing the membership
+        assertion with a default, which turns a malformed state into a legal one
+        through an illegal door."""
+        text = with_review("P02-T01", "1", {"state": "judged"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_an_unknown_review_intensity_is_rejected(self):
+        text = with_review("P02-T01", "1", {"intensity": "light"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_review_intensity_never_ratchets_down_across_rounds(self):
+        """``Intensity`` is recorded per ROW so the ratchet is visible in the
+        review history itself and not only in the phase record. That is worth
+        nothing if the history may go back down: a round re-run at ``standard``
+        after an ``adversarial`` round is a run buying its way out of the bar it
+        just raised, which is the same move ``## Phases`` has no spelling for.
+        Both rows here are individually legal; only the sequence is not."""
+        text = with_review("P01-T01", "1", {
+            "intensity": "adversarial",
+            "adversarial": "accumulated-surface",
+            "adversarial_verdict": "fail"})
+        text = with_review("P01-T01", "2", {
+            "intensity": "standard", "adversarial": "-",
+            "adversarial_verdict": "-"}, text)
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_repeated_intensity_is_legal_because_only_the_downward_move_is_not(self):
+        """The positive control the case above needs. Catches an implementation
+        that forbids any CHANGE of intensity rather than the downward one, which
+        would make the ratchet unrecordable in the one direction it exists for.
+        """
+        tracker = pas.parse_tracker(with_review("P01-T01", "1", {
+            "intensity": "adversarial",
+            "adversarial": "accumulated-surface",
+            "adversarial_verdict": "fail"}))
+        self.assertEqual([row["intensity"] for row in tracker["task_review"]],
+                         ["adversarial", "adversarial", "standard"])
+
+    def test_open_is_the_sum_of_the_three_severities(self):
+        """The rule that makes "zero open findings at EVERY severity" a machine
+        check. ``Minor 3`` beside ``Open 2`` is a Minor deferral written down,
+        and this project has no deferral category. The row stays ``blocked``
+        with two open findings, so no other rule can be what raises."""
+        text = with_review("P02-T01", "1", {"minor": "3"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_finding_count_is_ascii_digits(self):
+        """``isdigit`` alone is true of ``'٣'`` and ``int()`` reads it back as
+        3, so a sum check on its own accepts a count that renders into the
+        tracker looking like a number nothing downstream can match. The second
+        case is chosen so the SUM still balances: only the grammar can reject
+        it."""
+        for column, cells in (
+            ("critical", {"critical": "three"}),
+            ("minor", {"minor": "٣", "open": "5"}),
+            ("open", {"open": "٢"}),
+        ):
+            with self.subTest(column=column):
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(with_review("P02-T01", "1", cells))
+
+    def test_an_accepted_review_closes_at_zero_open_findings(self):
+        """``P02-T01``'s round is ``[~]``-scoped, so the completion bar below
+        cannot be what raises here — only the acceptance bar can."""
+        text = with_review("P02-T01", "1", {"state": "accepted"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_blocked_review_must_have_open_findings(self):
+        """The other half. A block at zero open findings is a halt with nothing
+        to fix, and it is how a fix loop comes to run against an empty list."""
+        text = with_review("P02-T01", "1",
+                           {"critical": "0", "important": "0", "open": "0"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_an_evaluated_review_needs_package_report_and_independent_rerun(self):
+        """The three artifacts a verdict rests on, in either direction. The
+        ``Evidence`` cell is the INDEPENDENT re-run and is not a duplicate of
+        the task's own ``Verification``: that cell records the implementer's
+        run, and a reviewer who reads it instead of re-running has reviewed a
+        claim rather than the code."""
+        for column in ("package", "report", "evidence"):
+            with self.subTest(column=column):
+                text = with_review("P02-T01", "1", {column: "-"})
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_a_pending_review_carries_no_verdict_and_no_evidence(self):
+        """One subtest per cell, so dropping a single name from the constant
+        leaves its own case failing rather than being covered by a neighbour."""
+        for column, value in REVIEW_LIFECYCLE_CELLS.items():
+            with self.subTest(column=column):
+                text = with_review("P02-T01", "1",
+                                   dict(PENDING_REVIEW, **{column: value}))
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_a_review_round_may_stand_assigned_and_unstarted(self):
+        """The positive control the case above needs: a round the controller has
+        assigned and no reviewer has opened is a legal state, not an error."""
+        tracker = pas.parse_tracker(with_review("P02-T01", "1", PENDING_REVIEW))
+        self.assertEqual(tracker["task_review"][2]["state"], "pending")
+        self.assertEqual(tracker["task_review"][2]["open"], "-")
+
+    def test_a_review_in_flight_holds_its_package_and_nothing_more(self):
+        for column, value in REVIEW_LIFECYCLE_CELLS.items():
+            if column == "package":
+                continue
+            with self.subTest(column=column):
+                text = with_review("P02-T01", "1",
+                                   dict(REVIEWING_REVIEW, **{column: value}))
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_a_review_in_flight_without_its_package_is_refused(self):
+        """A reviewer who was never handed a package is a dispatch that was lost
+        — and the positive control for the case above is the same row WITH it,
+        which must parse."""
+        self.assertEqual(
+            pas.parse_tracker(
+                with_review("P02-T01", "1", REVIEWING_REVIEW)
+            )["task_review"][2]["state"], "reviewing")
+        text = with_review("P02-T01", "1", dict(REVIEWING_REVIEW, package="-"))
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_an_adversarial_round_names_the_trigger_that_fired(self):
+        """Both directions. An ``adversarial`` round with no trigger is a raised
+        bar with nothing behind it, the same emptiness a bare ``Ratchet`` cell
+        is; a ``standard`` round naming one is a trigger that fired and changed
+        nothing."""
+        for cells in ({"intensity": "adversarial"},
+                      {"adversarial": "large-surface"}):
+            with self.subTest(cells=cells):
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(with_review("P02-T01", "1", cells))
+
+    def test_an_adversarial_verdict_is_pass_or_fail(self):
+        text = with_review("P01-T01", "2", {"adversarial_verdict": "ok"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_round_that_ran_no_adversarial_pass_records_no_verdict(self):
+        text = with_review("P02-T01", "1", {"adversarial_verdict": "pass"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_an_accepted_review_cannot_stand_on_a_failed_adversarial_pass(self):
+        """An acceptance recorded beside a failed adversarial pass is the
+        ratchet fired and then ignored."""
+        text = with_review("P01-T01", "2", {"adversarial_verdict": "fail"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_review_rounds_are_numbered_one_through_n_per_task(self):
+        """Duplicates are the same fault as a gap: two rows numbered 1 are two
+        verdicts for one round, and the run obeys whichever it read first."""
+        for label, text in (
+            ("gap", with_review("P02-T01", "1", {"round": "3"})),
+            ("zero", with_review("P02-T01", "1", {"round": "0"})),
+            ("not a number", with_review("P02-T01", "1", {"round": "one"})),
+            ("duplicate", rounds_for("task_review", "P02-T01 | 1", ({}, {}))),
+        ):
+            with self.subTest(label=label):
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_a_superseded_review_round_cannot_be_left_in_flight(self):
+        """Round 1 abandoned mid-review while round 2 returned a verdict is a
+        reviewer still holding a package nobody will read back."""
+        text = with_review("P01-T01", "1", REVIEWING_REVIEW)
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_task_cannot_reach_complete_unless_its_last_round_is_accepted(self):
+        """THE rule this section exists for. ``P01-T01`` is ``[x]``; winding its
+        last review round back to anything but ``accepted`` must refuse the
+        tracker, whatever the phase's review class says.
+
+        Note what is NOT asserted: that round 1 also reads ``Open 0``. It does
+        not — it records the single Important finding that round actually found,
+        and the fix round below resolved it. ``Open`` is the count that round
+        returned, not a cell later rounds rewrite, so the bar is stated over the
+        round that stands as the task's verdict."""
+        for cells in (
+            {"state": "blocked", "important": "1", "open": "1"},
+            dict(REVIEWING_REVIEW, adversarial_verdict="-"),
+            dict(PENDING_REVIEW, adversarial="-", adversarial_verdict="-"),
+        ):
+            with self.subTest(state=cells["state"]):
+                text = with_review("P01-T01", "2", cells)
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_a_completed_task_with_no_review_round_is_legal(self):
+        """The dial decides WHETHER a reviewer runs; this module never reads it.
+        A rule that every ``[x]`` task carry a review row would be this
+        validator branching on ``Review Class`` by the back door, and would make
+        ``final-only`` unusable. ``P01-T02`` is that case, committed."""
+        tracker = pas.parse_tracker(valid_text())
+        reviewed = {row["task"] for row in tracker["task_review"]}
+        complete = {row["id"] for row in tracker["tasks"] if row["state"] == "[x]"}
+        self.assertEqual(sorted(complete - reviewed), ["P01-T02"])
+
+    def test_no_review_validator_reads_the_review_class_dial(self):
+        """The dial decides whether a reviewer runs, never what bar it applies.
+        A validator that relaxed under ``final-only`` would defeat the design it
+        is there to hold, so the cells that spell the dial are asserted absent
+        from both subtrees outright.
+
+        Asserted over the CODE's own string constants, with the docstring
+        dropped first. Dumping the whole subtree would match the prose that
+        explains why the dial is not read — the guard would then be satisfied
+        only by a function that never explains itself, and broken by one that
+        does."""
+        source = module_source()
+        for name in ("_validate_task_review", "_validate_fix_rounds"):
+            for cell in ("review_class", "class_source", "final-only"):
+                with self.subTest(function=name, cell=cell):
+                    self.assertNotIn(cell, code_constants(source, name))
+        #: ``_validate_fix_rounds`` resolves a Scope against ``## Phases`` and so
+        #: names that section; ``_validate_task_review`` has no business there at
+        #: all, and not naming it is the stronger claim of the two.
+        self.assertNotIn("phases", code_constants(source, "_validate_task_review"))
+
+
+class FixRoundSectionTests(unittest.TestCase):
+    """``## Fix Rounds`` bounds the loop and records that it actually closed.
+
+    Three rounds, and a fourth halts to escalation rather than looping. A round
+    that resolves none of the findings it was handed halts immediately without
+    consuming the remainder, and so does one whose fixes re-raise something an
+    earlier round had already resolved — both are a loop that will not converge,
+    and spending the remaining rounds on it only delays the escalation.
+
+    The loop closes on ``Remaining`` reading ``none``, which is the literal
+    spelling of zero open findings at every severity. ``-`` and ``none`` are
+    different facts here, as everywhere in this schema: ``-`` is "not written
+    down", ``none`` is "written down, and it is empty".
+    """
+
+    def test_the_loop_closes_only_on_a_round_with_zero_remaining_findings(self):
+        """A final round that still lists findings is a fix loop that stopped
+        early, and the task above it is already ``[x]``."""
+        text = with_fix("P01-T01", "1", {"remaining": "F-003"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_round_with_a_remainder_is_legal_when_a_later_round_carries_it(self):
+        """The positive control. Round 1 resolves one of the two findings it was
+        handed and passes the other on; round 2 closes at zero."""
+        text = rounds_for("fix_rounds", "P01-T01 | 1", (
+            completed_fix(1, "F-003,F-004", "F-003"),
+            completed_fix(2, "F-003", "none")))
+        tracker = pas.parse_tracker(text)
+        self.assertEqual(len(tracker["fix_rounds"]), 3)
+        self.assertEqual(tracker["fix_rounds"][1]["remaining"], "none")
+
+    def test_the_fix_loop_is_bounded_at_three_rounds(self):
+        """Every round here makes progress and re-raises nothing, so no other
+        rule can be what refuses the fourth: only the bound can. A loop that has
+        spent three rounds without closing is not converging, and the spec's
+        answer is escalation, not a fourth attempt."""
+        text = rounds_for("fix_rounds", "P01-T01 | 1", (
+            completed_fix(1, "F-001,F-002,F-003,F-004", "F-002,F-003,F-004"),
+            completed_fix(2, "F-002,F-003,F-004", "F-003,F-004"),
+            completed_fix(3, "F-003,F-004", "F-004"),
+            completed_fix(4, "F-004", "none")))
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_three_rounds_are_legal_because_the_bound_is_three_not_two(self):
+        text = rounds_for("fix_rounds", "P01-T01 | 1", (
+            completed_fix(1, "F-001,F-002,F-003", "F-002,F-003"),
+            completed_fix(2, "F-002,F-003", "F-003"),
+            completed_fix(3, "F-003", "none")))
+        self.assertEqual(len(pas.parse_tracker(text)["fix_rounds"]), 4)
+
+    def test_a_round_that_resolved_nothing_cannot_be_followed_by_another(self):
+        """Round 1 was handed F-003 and gave back F-003. Spending round 2 on the
+        identical list is the loop that does not converge, and it halts here
+        rather than consuming the remainder of its budget first."""
+        text = rounds_for("fix_rounds", "P01-T01 | 1", (
+            completed_fix(1, "F-003", "F-003"),
+            completed_fix(2, "F-003", "none")))
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_later_round_cannot_re_raise_a_finding_an_earlier_round_resolved(self):
+        """Oscillation: round 1 resolved F-004 and round 2 is carrying it again.
+        Round 1 made progress and round 2 closes at zero, so every other rule
+        here is satisfied — only the re-raise is the fault."""
+        text = rounds_for("fix_rounds", "P01-T01 | 1", (
+            completed_fix(1, "F-003,F-004", "F-003"),
+            completed_fix(2, "F-003,F-004", "none")))
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_only_the_last_round_of_a_scope_may_be_unfinished(self):
+        """Two active rounds are two fixers editing one scope with no order
+        between them; a finished round after an unfinished one is a round that
+        was skipped. Both are the same fault and it is stated once. ``P02-T01``
+        is ``[~]``, so the completion bar below cannot be what raises."""
+        for label, second in (("two active", fixing_fix(2, "F-009")),
+                              ("skipped", completed_fix(2, "F-009", "none"))):
+            with self.subTest(label=label):
+                text = rounds_for("fix_rounds", "P02-T01 | 1",
+                                  ({}, dict(second, scope="P02-T01")))
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_a_scope_cannot_be_complete_with_an_unfinished_fix_round(self):
+        """Scoped to a task and to a phase, because ``## Fix Rounds`` is scoped
+        to either. A scope marked done while a fixer is still working is the
+        same missing bar as an unaccepted review round under a ``[x]`` task."""
+        with self.subTest(scope="task"):
+            text = with_fix("P01-T01", "1", {
+                "state": "fixing", "commits": "-", "verification": "-",
+                "re_review": "-", "remaining": "-"})
+            with self.assertRaises(pas.TrackerValidationError):
+                pas.parse_tracker(text)
+        with self.subTest(scope="phase"):
+            text = rounds_for("fix_rounds", "P02-T01 | 1", (
+                {}, dict(fixing_fix(1, "F-007"), scope="P01")))
+            with self.assertRaises(pas.TrackerValidationError):
+                pas.parse_tracker(text)
+
+    def test_a_round_cannot_name_an_unknown_scope(self):
+        text = with_fix("P02-T01", "1", {"scope": "P09-T09"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_fix_round_may_be_scoped_to_a_phase_or_a_gate(self):
+        """The positive control: a fix round is scoped to a task, a phase OR a
+        gate, which is why there is no ``## Remediation`` section."""
+        for scope in ("P02", "gate-p02"):
+            with self.subTest(scope=scope):
+                tracker = pas.parse_tracker(
+                    with_fix("P02-T01", "1", {"scope": scope}))
+                self.assertEqual(tracker["fix_rounds"][1]["scope"], scope)
+
+    def test_an_unknown_fix_round_state_is_rejected(self):
+        """Stated on a row that is otherwise a legal completed round of a ``[~]``
+        scope, so nothing downstream can raise on it: only the enum can."""
+        text = with_fix("P02-T01", "1",
+                        dict(completed_fix(1, "F-001,F-002", "none"),
+                             state="done"))
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_rounds_are_numbered_one_through_n_per_scope(self):
+        for label, cells in (("gap", {"round": "3"}),
+                             ("zero", {"round": "0"}),
+                             ("not a number", {"round": "one"})):
+            with self.subTest(label=label):
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(with_fix("P02-T01", "1", cells))
+
+    def test_one_fixer_per_round_carrying_all_of_its_findings(self):
+        """Two fixers on one round are two edits to one scope with no order
+        between them, and the second silently overwrites the first."""
+        text = with_fix("P02-T01", "1", {"fixer": "fixer-1,fixer-9"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_started_round_names_the_findings_it_is_carrying(self):
+        text = with_fix("P02-T01", "1", {"findings": "-"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_fixing_round_has_produced_nothing_yet(self):
+        """Including ``Remaining``: only a completed round records an outcome,
+        because an outcome on a round still running is a result reported before
+        the work it reports on finished."""
+        for column, value in (("commits", FIX_COMMIT),
+                              ("verification", "scratch/x-tests.txt"),
+                              ("re_review", "scratch/x-review.md"),
+                              ("remaining", "none")):
+            with self.subTest(column=column):
+                text = with_fix("P02-T01", "1", {column: value})
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_a_pending_round_carries_no_lifecycle_state(self):
+        pending = {"state": "pending", "fixer": "-", "findings": "-",
+                   "commits": "-", "verification": "-", "re_review": "-",
+                   "remaining": "-"}
+        self.assertEqual(
+            pas.parse_tracker(with_fix("P02-T01", "1", pending)
+                              )["fix_rounds"][1]["state"], "pending")
+        for column, value in (("fixer", "fixer-1"), ("findings", "F-001"),
+                              ("commits", FIX_COMMIT),
+                              ("verification", "scratch/x-tests.txt"),
+                              ("re_review", "scratch/x-review.md"),
+                              ("remaining", "none")):
+            with self.subTest(column=column):
+                text = with_fix("P02-T01", "1", dict(pending, **{column: value}))
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_a_re_reviewing_round_carries_its_commits_and_verification(self):
+        """The state between the fix and its verdict: the work landed and was
+        re-run, and the re-review has not reported back. The positive control
+        comes first so the rejections below cannot be passing on a row that was
+        never legal to begin with."""
+        base = {"state": "re_reviewing", "commits": FIX_COMMIT,
+                "verification": "scratch/x-tests.txt"}
+        self.assertEqual(
+            pas.parse_tracker(with_fix("P02-T01", "1", base)
+                              )["fix_rounds"][1]["state"], "re_reviewing")
+        for column, value in (("commits", "-"), ("verification", "-"),
+                              ("re_review", "scratch/x-review.md"),
+                              ("remaining", "none")):
+            with self.subTest(column=column):
+                text = with_fix("P02-T01", "1", dict(base, **{column: value}))
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_a_completed_round_records_its_full_lifecycle(self):
+        for column in ("fixer", "findings", "commits", "verification",
+                       "re_review", "remaining"):
+            with self.subTest(column=column):
+                text = with_fix("P01-T01", "1", {column: "-"})
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_a_fix_commit_is_a_commit_sha(self):
+        """A fix round's commits are the far end of the same range proof the
+        task rows carry, and a symbolic end resolves somewhere else tomorrow."""
+        for value in ("HEAD~1", "feat/pipeline-auto",
+                      "ABCDEF0123456789ABCDEF0123456789ABCDEF01"):
+            with self.subTest(value=value):
+                text = with_fix("P01-T01", "1", {"commits": value})
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
 
 
 class SuiteIsWhollyCollectedTests(unittest.TestCase):

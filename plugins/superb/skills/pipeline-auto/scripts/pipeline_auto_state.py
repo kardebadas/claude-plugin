@@ -1214,6 +1214,386 @@ def _validate_gates(tracker: dict) -> None:
                 "no basis, in whichever direction it went")
 
 
+#: The review-intensity dial as it is recorded PER ROUND, lowest first. It is a
+#: column of ``## Task Review`` and not only of ``## Phases`` because a task has
+#: N review rounds and the ratchet fires BETWEEN two of them: recorded on the
+#: phase alone, "this task was re-reviewed harder after round 1" is a fact with
+#: nowhere to be written down. The tuple's ORDER is load-bearing — it is the
+#: comparison below that makes the per-task ratchet one-way, for the same reason
+#: ``## Phases`` has no spelling for a downward reclassification.
+_REVIEW_INTENSITIES = ("standard", "adversarial")
+#: Assigned, in flight, judged-and-failing, judged-and-passing.
+_REVIEW_STATES = ("pending", "reviewing", "blocked", "accepted")
+#: A review round that has been judged, either way. Both outcomes rest on the
+#: same three artifacts, so both demand them, exactly as ``_GATE_EVALUATED``
+#: does: a block with no report is a halt nobody can answer, and an acceptance
+#: with no independent re-run is a verdict with no basis.
+_REVIEW_EVALUATED = ("blocked", "accepted")
+#: The three artifacts a verdict rests on. ``Evidence`` is the INDEPENDENT
+#: re-run and is not a duplicate of the task's own ``Verification``: that cell
+#: records the implementer's run, and a reviewer who reads it instead of
+#: re-running has reviewed a claim rather than the code.
+_REVIEW_EVIDENCE = ("package", "report", "evidence")
+#: Every cell a reviewer fills in. A round nobody has opened carries none.
+_REVIEW_LIFECYCLE = (
+    "package", "report", "critical", "important", "minor", "open", "evidence",
+)
+#: The three severities, and the whole of them. ``Open`` must equal their sum,
+#: which is what turns "zero open findings at EVERY severity" into a machine
+#: check rather than a promise: a row carrying ``Minor 3`` beside ``Open 0`` is
+#: a Minor deferral written down, and this project has no deferral category.
+_SEVERITIES = ("critical", "important", "minor")
+#: The adversarial pass either held or it did not. There is no third word,
+#: because a third word is where "it mostly held" would go.
+_ADVERSARIAL_VERDICTS = ("pass", "fail")
+
+#: ASCII digits and nothing else. ``_Numbered`` with an empty prefix is exactly
+#: that grammar, and reusing it is deliberate: ``str.isdigit`` alone is true of
+#: ``'٣'`` and ``int()`` reads that back as 3, so a count checked by the sum
+#: alone can render into the tracker looking like a number no downstream reader
+#: can match. ``_Numbered`` carries the ``isascii`` conjunct that narrows it to
+#: the ten characters intended.
+_COUNT = _Numbered("")
+
+
+def _validate_task_review(tracker: dict) -> None:
+    """A task's review history, and the bar a task cannot reach ``[x]`` without.
+
+    A reviewer returns three things: a verdict on spec, a verdict on quality,
+    and verification evidence from an INDEPENDENT re-run. In this schema the
+    first two are the severity counts — a review that found nothing wrong found
+    nothing at either — and the third is the ``Evidence`` cell. A task may not
+    stand at ``[x]`` while the review round that speaks for it says anything but
+    ``accepted``, and ``accepted`` is pinned to ``Open 0``.
+
+    ``Open`` is the count the round returned, not a cell later rounds rewrite.
+    The committed fixture shows why that matters: ``P01-T01`` round 1 records
+    the single Important finding it actually found and keeps recording it after
+    the fix round resolved it, because the history of a review is not improved
+    by editing it. The bar is therefore stated over the round that STANDS as the
+    task's verdict, and every earlier round must have been evaluated rather than
+    abandoned.
+
+    Two things this deliberately does not do. It never reads ``Review Class``:
+    the dial decides whether a reviewer runs, never what bar the reviewer
+    applies, and a validator that relaxed under ``final-only`` would defeat the
+    design it is here to hold. And it never requires a ``[x]`` task to HAVE a
+    review row — that would be the same branch taken by the back door, since
+    ``final-only`` buys no per-task reviewer at all. Whether a reviewer was owed
+    is P06's contract; that a recorded one closed is this module's.
+    """
+    tasks = {row["id"]: row for row in tracker["tasks"]}
+    by_task: dict[str, list[dict]] = {}
+    for review in tracker["task_review"]:
+        if review["task"] not in tasks:
+            raise TrackerValidationError(
+                f"review round {review['round']!r} names task "
+                f"{review['task']!r}, which is not a task of this run; a verdict "
+                "against nothing blocks nothing")
+        by_task.setdefault(review["task"], []).append(review)
+        if not _COUNT.fullmatch(review["round"]):
+            raise TrackerValidationError(
+                f"review round {review['round']!r} of task {review['task']!r} is "
+                "not a round number")
+        if not _TOKEN.fullmatch(review["reviewer"]):
+            raise TrackerValidationError(
+                f"review round {review['round']!r} of task {review['task']!r} "
+                f"names {review['reviewer']!r} as its reviewer; ONE reviewer per "
+                "round, because two reviewers on one row are two verdicts with "
+                "no way to tell which one the State cell records")
+        if review["reviewer"] == tasks[review["task"]]["owner"]:
+            raise TrackerValidationError(
+                f"task {review['task']!r} is reviewed by {review['reviewer']!r}, "
+                "which is its own implementer; a task's implementer never "
+                "reviews it, because self-review passes anything — and that is "
+                "one of the things the review dial may never switch off")
+        if review["intensity"] not in _REVIEW_INTENSITIES:
+            raise TrackerValidationError(
+                f"review intensity {review['intensity']!r} is outside "
+                f"{_REVIEW_INTENSITIES!r}")
+        if review["state"] not in _REVIEW_STATES:
+            raise TrackerValidationError(
+                f"unknown review state {review['state']!r}")
+        adversarial = review["intensity"] == "adversarial"
+        if adversarial != _TOKEN.fullmatch(review["adversarial"]):
+            raise TrackerValidationError(
+                f"review round {review['round']!r} of task {review['task']!r} "
+                "must name the trigger that fired when, and only when, its "
+                "intensity is adversarial; an adversarial round with no trigger "
+                "is a raised bar with nothing behind it, and a standard round "
+                "naming one is a trigger that fired and changed nothing")
+        if review["state"] == "pending":
+            if any(review[key] != "-" for key in _REVIEW_LIFECYCLE):
+                raise TrackerValidationError(
+                    f"review round {review['round']!r} of task "
+                    f"{review['task']!r} is assigned and carries a verdict or "
+                    "evidence; a round nobody has opened has neither")
+        elif review["state"] == "reviewing":
+            if review["package"] == "-":
+                raise TrackerValidationError(
+                    f"review round {review['round']!r} of task "
+                    f"{review['task']!r} is in flight with no package; a "
+                    "reviewer who was never handed one is a dispatch that was "
+                    "lost")
+            if any(review[key] != "-"
+                   for key in _REVIEW_LIFECYCLE if key != "package"):
+                raise TrackerValidationError(
+                    f"review round {review['round']!r} of task "
+                    f"{review['task']!r} is in flight and already reports a "
+                    "result; a row that is both running and judged is one an "
+                    "interrupted controller cannot classify")
+        elif review["state"] in _REVIEW_EVALUATED:
+            if any(review[key] == "-" for key in _REVIEW_EVIDENCE):
+                raise TrackerValidationError(
+                    f"review round {review['round']!r} of task "
+                    f"{review['task']!r} returns a verdict without its package, "
+                    "its report or its independent re-run evidence; all three "
+                    "are owed in either direction, and the dial never switches "
+                    "the re-run off")
+            for key in (*_SEVERITIES, "open"):
+                if not _COUNT.fullmatch(review[key]):
+                    raise TrackerValidationError(
+                        f"review round {review['round']!r} of task "
+                        f"{review['task']!r} records {review[key]!r} as its "
+                        f"{key} count; a finding count is ASCII digits, and a "
+                        "number spelled otherwise renders back as one nothing "
+                        "downstream can match")
+            if int(review["open"]) != sum(int(review[key]) for key in _SEVERITIES):
+                raise TrackerValidationError(
+                    f"review round {review['round']!r} of task "
+                    f"{review['task']!r} reports {review['open']!r} open against "
+                    f"{tuple(review[key] for key in _SEVERITIES)!r} found; Open "
+                    "is the three severities summed, because the bar is zero "
+                    "open findings at EVERY severity and Minor is not a "
+                    "deferral category")
+            if (review["state"] == "accepted") != (int(review["open"]) == 0):
+                raise TrackerValidationError(
+                    f"review round {review['round']!r} of task "
+                    f"{review['task']!r} is {review['state']!r} at "
+                    f"{review['open']!r} open findings; a review closes when and "
+                    "only when nothing is left open, and a block at zero is a "
+                    "halt with nothing to fix")
+        if review["state"] in _REVIEW_EVALUATED and adversarial:
+            if review["adversarial_verdict"] not in _ADVERSARIAL_VERDICTS:
+                raise TrackerValidationError(
+                    f"adversarial verdict {review['adversarial_verdict']!r} is "
+                    f"outside {_ADVERSARIAL_VERDICTS!r}; the pass either held or "
+                    "it did not")
+            if (review["state"] == "accepted"
+                    and review["adversarial_verdict"] == "fail"):
+                raise TrackerValidationError(
+                    f"review round {review['round']!r} of task "
+                    f"{review['task']!r} is accepted beside a failed adversarial "
+                    "pass; that is the ratchet fired and then ignored")
+        elif review["adversarial_verdict"] != "-":
+            raise TrackerValidationError(
+                f"review round {review['round']!r} of task {review['task']!r} "
+                "records an adversarial verdict without having run, or having "
+                "finished, an adversarial pass")
+    for task_id, rounds in by_task.items():
+        numbers = sorted(int(review["round"]) for review in rounds)
+        if numbers != list(range(1, len(numbers) + 1)):
+            raise TrackerValidationError(
+                f"review rounds for task {task_id!r} are numbered {numbers!r}; "
+                "they run 1..n with no gap and no repeat, and two rows sharing a "
+                "number are two verdicts for one round with nothing to say which "
+                "the run should obey")
+        ordered = sorted(rounds, key=lambda review: int(review["round"]))
+        for earlier, later in zip(ordered, ordered[1:]):
+            if (_REVIEW_INTENSITIES.index(later["intensity"])
+                    < _REVIEW_INTENSITIES.index(earlier["intensity"])):
+                raise TrackerValidationError(
+                    f"task {task_id!r} drops from {earlier['intensity']!r} to "
+                    f"{later['intensity']!r} between rounds "
+                    f"{earlier['round']} and {later['round']}; review intensity "
+                    "ratchets UPWARD ONLY, and a re-review at a lower bar than "
+                    "the one just applied is a run buying its way out of the bar "
+                    "it raised")
+            if earlier["state"] not in _REVIEW_EVALUATED:
+                raise TrackerValidationError(
+                    f"task {task_id!r} opened review round {later['round']} "
+                    f"while round {earlier['round']} is still "
+                    f"{earlier['state']!r}; a superseded round left in flight is "
+                    "a reviewer holding a package nobody will read back")
+        if tasks[task_id]["state"] == "[x]" and ordered[-1]["state"] != "accepted":
+            raise TrackerValidationError(
+                f"task {task_id!r} is complete while its last review round is "
+                f"{ordered[-1]['state']!r}; a task may not reach '[x]' until the "
+                "round that speaks for it is accepted at zero open findings, and "
+                "no review class relaxes that")
+
+
+#: Pending, being fixed, being re-reviewed, closed.
+_FIX_ROUND_STATES = ("pending", "fixing", "re_reviewing", "complete")
+#: Everything a fix round accumulates. A round nobody has opened carries none of
+#: it; a completed one carries all of it.
+_FIX_ROUND_LIFECYCLE = (
+    "fixer", "findings", "commits", "verification", "re_review", "remaining",
+)
+#: What a round PRODUCES, as opposed to what it was handed. A round still fixing
+#: has produced none of it, ``Remaining`` included: an outcome recorded against
+#: work that has not finished is a result reported before the thing it reports
+#: on happened.
+_FIX_ROUND_PRODUCED = ("commits", "verification", "re_review", "remaining")
+#: Three rounds, and a fourth halts to escalation rather than looping. A loop
+#: that has spent three rounds without closing is not converging, and the answer
+#: to that is a human, not another attempt.
+_FIX_ROUND_LIMIT = 3
+#: "Written down, and it is empty" — as distinct from ``-``, which is "not
+#: written down". The fix loop closes on this word and on nothing else.
+_NO_FINDINGS = "none"
+
+
+def _unresolved(value: str) -> frozenset[str]:
+    """The findings a completed round did NOT resolve. ``none`` is empty."""
+    return frozenset() if value == _NO_FINDINGS else frozenset(_csv(value))
+
+
+def _validate_fix_rounds(tracker: dict) -> None:
+    """The fix loop: bounded at three, and closed only at zero.
+
+    A fix round is scoped to a task, a phase or a gate — which is the reason
+    there is no ``## Remediation`` section — and it carries its outcome
+    directly. The loop closes on a round whose ``Remaining`` reads ``none``,
+    which is the literal spelling of zero open findings at every severity.
+
+    Three rounds is the bound, and the two ways a loop fails early are refused
+    before the bound is even reached. A round that gives back every finding it
+    was handed resolved nothing, and spending the next round on the identical
+    list only delays the escalation. A round that re-raises a finding an earlier
+    round resolved is oscillating, and the next round will undo it again. Both
+    halt here rather than consuming the remainder.
+
+    Note the order of the sequence rules below: a predecessor is required to be
+    COMPLETE before its ``Remaining`` is read at all. Read off a round still
+    fixing, that cell says ``-``, and ``-`` would measure as "nothing left",
+    which is the exact opposite of what an unfinished round means.
+
+    Nothing here reads ``Review Class`` either. The dial buys review; it never
+    buys a shorter fix loop or a softer record of one.
+    """
+    scopes = {row["id"] for section in ("tasks", "phases", "gates")
+              for row in tracker[section]}
+    #: Tasks and phases both spell completion ``[x]``; a gate spells its own
+    #: acceptance differently and is judged by ``_validate_gates``.
+    finished = {row["id"] for section in ("tasks", "phases")
+                for row in tracker[section] if row["state"] == "[x]"}
+    by_scope: dict[str, list[dict]] = {}
+    for fix in tracker["fix_rounds"]:
+        if fix["scope"] not in scopes:
+            raise TrackerValidationError(
+                f"fix round {fix['round']!r} names scope {fix['scope']!r}, which "
+                "is no task, phase or gate of this run")
+        by_scope.setdefault(fix["scope"], []).append(fix)
+        if not _COUNT.fullmatch(fix["round"]):
+            raise TrackerValidationError(
+                f"fix round {fix['round']!r} of {fix['scope']!r} is not a round "
+                "number")
+        if fix["state"] not in _FIX_ROUND_STATES:
+            raise TrackerValidationError(
+                f"unknown fix round state {fix['state']!r}")
+        for commit in _csv(fix["commits"]):
+            if not _COMMIT.fullmatch(commit):
+                raise TrackerValidationError(
+                    f"fix round {fix['round']!r} of {fix['scope']!r} records "
+                    f"{commit!r} as a commit; a fix is the far end of the same "
+                    "range proof the task rows carry, and a symbolic end "
+                    "resolves somewhere else tomorrow")
+        if fix["state"] == "pending":
+            if any(fix[key] != "-" for key in _FIX_ROUND_LIFECYCLE):
+                raise TrackerValidationError(
+                    f"pending fix round {fix['round']!r} of {fix['scope']!r} "
+                    "carries lifecycle state; a round nobody has opened has no "
+                    "fixer, no findings and no result")
+            continue
+        if not _TOKEN.fullmatch(fix["fixer"]):
+            raise TrackerValidationError(
+                f"fix round {fix['round']!r} of {fix['scope']!r} names "
+                f"{fix['fixer']!r} as its fixer; ONE fixer per round, carrying "
+                "all of its findings, because two fixers on one round are two "
+                "edits to one scope with no order between them and the second "
+                "silently overwrites the first")
+        if fix["findings"] == "-":
+            raise TrackerValidationError(
+                f"fix round {fix['round']!r} of {fix['scope']!r} names no "
+                "findings; a round that is not carrying anything is a fixer "
+                "dispatched against an empty list")
+        if fix["state"] == "fixing":
+            if any(fix[key] != "-" for key in _FIX_ROUND_PRODUCED):
+                raise TrackerValidationError(
+                    f"fix round {fix['round']!r} of {fix['scope']!r} is still "
+                    "fixing and already reports commits, verification, a "
+                    "re-review or an outcome; only a completed round records "
+                    "what it produced")
+        elif fix["state"] == "re_reviewing":
+            if any(fix[key] == "-" for key in ("commits", "verification")):
+                raise TrackerValidationError(
+                    f"fix round {fix['round']!r} of {fix['scope']!r} is in "
+                    "re-review without its commits and its verification "
+                    "evidence; there is nothing for a re-reviewer to read")
+            if any(fix[key] != "-" for key in ("re_review", "remaining")):
+                raise TrackerValidationError(
+                    f"fix round {fix['round']!r} of {fix['scope']!r} is in "
+                    "re-review and already records its verdict")
+        elif any(fix[key] == "-" for key in _FIX_ROUND_LIFECYCLE):
+            raise TrackerValidationError(
+                f"completed fix round {fix['round']!r} of {fix['scope']!r} is "
+                "missing part of its lifecycle; a closed round records who "
+                "fixed what, the commits, the verification, the re-review and "
+                "what it left open")
+    for scope, rounds in by_scope.items():
+        numbers = sorted(int(fix["round"]) for fix in rounds)
+        if numbers != list(range(1, len(numbers) + 1)):
+            raise TrackerValidationError(
+                f"fix rounds for {scope!r} are numbered {numbers!r}; they run "
+                "1..n with no gap and no repeat")
+        if len(rounds) > _FIX_ROUND_LIMIT:
+            raise TrackerValidationError(
+                f"{scope!r} records {len(rounds)} fix rounds; the loop is "
+                f"bounded at {_FIX_ROUND_LIMIT}, and a round beyond it halts to "
+                "escalation rather than looping again")
+        ordered = sorted(rounds, key=lambda fix: int(fix["round"]))
+        resolved: frozenset[str] = frozenset()
+        for earlier, later in zip(ordered, ordered[1:]):
+            if earlier["state"] != "complete":
+                raise TrackerValidationError(
+                    f"{scope!r} opened fix round {later['round']} while round "
+                    f"{earlier['round']} is still {earlier['state']!r}; two "
+                    "active rounds are two fixers editing one scope with no "
+                    "order between them, and a finished round after an "
+                    "unfinished one is a round that was skipped")
+            just_resolved = frozenset(_csv(earlier["findings"])) - _unresolved(
+                earlier["remaining"])
+            if not just_resolved:
+                raise TrackerValidationError(
+                    f"fix round {earlier['round']} of {scope!r} gave back every "
+                    f"finding it was handed and round {later['round']} follows "
+                    "it; a round that resolves none of its targeted findings "
+                    "halts to escalation immediately, without consuming the "
+                    "remainder of the loop")
+            resolved |= just_resolved
+            re_raised = sorted(frozenset(_csv(later["findings"])) & resolved)
+            if re_raised:
+                raise TrackerValidationError(
+                    f"fix round {later['round']} of {scope!r} carries "
+                    f"{re_raised!r}, which an earlier round had already "
+                    "resolved; fixes that oscillate halt immediately, because "
+                    "the next round will undo them again")
+        last = ordered[-1]
+        if last["state"] == "complete" and _unresolved(last["remaining"]):
+            raise TrackerValidationError(
+                f"the fix loop for {scope!r} ends at round {last['round']} still "
+                f"holding {last['remaining']!r}; it closes only on a round that "
+                f"returns {_NO_FINDINGS!r} — zero open findings at every "
+                "severity — and a remainder left standing is a loop that stopped "
+                "early")
+        if scope in finished and last["state"] != "complete":
+            raise TrackerValidationError(
+                f"{scope!r} is marked complete while its fix round "
+                f"{last['round']} is still {last['state']!r}; work is not "
+                "finished while a fixer is still carrying findings against it")
+
+
 def _validate_tracker_semantics(tracker: dict) -> None:
     """Every per-section semantic rule, run as the last step of a parse.
 
@@ -1253,6 +1633,17 @@ def _validate_tracker_semantics(tracker: dict) -> None:
     #: make forward, from a phase to its gate.
     _validate_tasks(tracker)
     _validate_gates(tracker)
+    #: After ``_validate_tasks``, which is what proves ``## Tasks`` holds one
+    #: row per id: ``_validate_task_review`` resolves every ``Task`` cell into
+    #: that roster and reads the owner out of it to refuse a self-review, and a
+    #: roster with two rows for one task would hand it whichever owner the scan
+    #: reached first.
+    _validate_task_review(tracker)
+    #: Last, because a fix round is scoped to a task, a phase OR a gate and it
+    #: resolves its ``Scope`` against all three rosters at once. It also reads
+    #: the ``[x]`` of a task or phase, which the two validators above have just
+    #: proven to be a state in the enum.
+    _validate_fix_rounds(tracker)
 
 
 def derive_next_action(tracker: dict) -> str:

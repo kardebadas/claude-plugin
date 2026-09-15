@@ -1243,10 +1243,14 @@ def _validate_tracker_semantics(tracker: dict) -> None:
     #: not one to look a reference up in.
     _validate_quorum(tracker)
     _validate_escalations(tracker)
-    #: Last, and in this order. ``_validate_tasks`` resolves every cited
-    #: ``Decisions`` id against the three sections that record decisions, so it
-    #: follows all of them; ``_validate_gates`` closes the one reference
-    #: ``_validate_phases`` had to make forward, from a phase to its gate.
+    #: Last, and in this order. ``_validate_tasks`` checks a cited ``Decisions``
+    #: id against its GRAMMAR only -- ``H-<n>`` or ``Q-<qid>``. It does NOT
+    #: resolve the id to a decision: resolution is against ``decisions.md``,
+    #: which this module never opens, and an in-tracker referential rule would
+    #: reject ids that are valid but recorded elsewhere. The consumer that reads
+    #: ``decisions.md`` owns existence; this module owns shape.
+    #: ``_validate_gates`` closes the one reference ``_validate_phases`` had to
+    #: make forward, from a phase to its gate.
     _validate_tasks(tracker)
     _validate_gates(tracker)
 

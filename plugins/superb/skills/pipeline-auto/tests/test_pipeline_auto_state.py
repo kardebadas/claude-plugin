@@ -13011,5 +13011,522 @@ class JsonEntersWrappedTests(unittest.TestCase):
         self.assertEqual(pas._FINAL_STATUSES - writable, {"question-not-decidable"})
         self.assertEqual(len(pas._FINAL_STATUSES), 5)
 
+
+# --- opening a quorum ------------------------------------------------------
+
+#: A JSON value that is legal JSON and not the shape the reader expects, plus
+#: two that are not JSON at all. Used against every JSON file `open_quorum`
+#: reads, because each of them is agent-authored or hand-editable.
+HOSTILE_JSON = ("", "{", "nope", "[]", "null", "7", '"in_flight"',
+                '{"qid": []}', '{"status": {}}', "[" * 400)
+
+
+class OpenQuorum(unittest.TestCase):
+    """Phase 1 of the three-phase record: persist, THEN dispatch.
+
+    Two rules meet here and both are easy to get backwards. The budget trips at
+    RAISE time, ahead of the first byte written, so a question that could never
+    have been adopted never reaches three brains; and a re-raise of a settled
+    qid dispatches nothing, which is the compaction-replay guard.
+    """
+
+    def setUp(self):
+        self.root, self.run_dir = repo_with_a_run(self)
+        self.record_path = self.run_dir / "question-T04.md"
+        self.record_path.write_text(question_text(), encoding="utf-8")
+        self.qid = pas.derive_qid(QUESTION["question"], QUESTION["axis"])
+        self.assertEqual(self.qid, QID,
+                         "these cases key every path off the fixture's qid")
+        self.directory = self.run_dir / "quorum" / self.qid
+
+    def open(self, run_dir=None, record=None, **kwargs):
+        return pas.open_quorum(str(self.run_dir if run_dir is None else run_dir),
+                               question_record=str(self.record_path if record is None
+                                                   else record),
+                               **kwargs)
+
+    def names(self, directory=None):
+        directory = self.directory if directory is None else directory
+        return sorted(path.name for path in directory.iterdir())
+
+    def test_the_open_record_is_published_before_any_response_exists(self):
+        """The whole of phase 1, stated as the directory it leaves behind.
+
+        `open.json` lands before any brain is dispatched, so an interruption a
+        moment later is still classifiable from disk alone; the empty
+        `responses/` is the assertion that no answer exists yet.
+        """
+        opened = self.open()
+        self.assertEqual(opened["status"], "in_flight")
+        self.assertEqual(opened["qid"], self.qid)
+        record = json.loads((self.directory / "open.json").read_text(encoding="utf-8"))
+        self.assertEqual(record, opened)
+        self.assertEqual(record["owners"], QUESTION["owners"])
+        self.assertEqual(record["axis"], QUESTION["axis"])
+        self.assertEqual(record["phase"], QUESTION["phase"])
+        self.assertEqual(record["payload_digest"],
+                         pas.payload_digest(self.qid, run_dir=str(self.run_dir)))
+        self.assertTrue(record["question_digest"])
+        self.assertTrue(record["context_digest"])
+        self.assertEqual(list((self.directory / "responses").iterdir()), [])
+        self.assertEqual(self.names(), sorted(
+            ["open.json", "question.md", "responses"]
+            + [f"payload-{owner}.json" for owner in QUESTION["owners"]]))
+
+    def test_each_brains_payload_is_the_bytes_that_brains_index_builds(self):
+        """The per-brain files are what `build_payload` produces at that index,
+        not three copies of one payload — the recovery path re-sends brain n
+        from `(payload_digest, n)` and compares the answer against it."""
+        self.open()
+        for index, owner in enumerate(QUESTION["owners"]):
+            with self.subTest(owner=owner):
+                self.assertEqual(
+                    json.loads((self.directory / f"payload-{owner}.json")
+                               .read_text(encoding="utf-8")),
+                    pas.build_payload(self.qid, index, run_dir=str(self.run_dir)))
+
+    def test_it_writes_the_decisions_projection_for_the_brains(self):
+        projection = self.run_dir / "decisions-effective.md"
+        self.assertFalse(projection.exists(),
+                         "the fixture must not already hold the projection, or "
+                         "this case passes without open_quorum writing it")
+        self.open()
+        self.assertTrue(projection.exists())
+
+    def test_the_question_digest_is_the_bytes_the_brains_were_sent(self):
+        """Not the squashed form `derive_qid` hashes. Identity must survive a
+        reflowed line, which is why the qid squashes; this digest answers a
+        different question — were all three asked THESE bytes — and a digest
+        over the squashed form attests to a string no brain ever saw."""
+        question = QUESTION["question"]
+        self.assertNotEqual(question, pas._squash(question),
+                            "the fixture's question must differ from its "
+                            "squashed form or the two digests coincide")
+        opened = self.open()
+        self.assertEqual(opened["question_digest"],
+                         hashlib.sha256(question.encode("utf-8")).hexdigest())
+        for payload in (pas.build_payload(self.qid, index, run_dir=str(self.run_dir))
+                        for index in range(3)):
+            self.assertEqual(payload["question"], question)
+
+    def test_the_context_digest_binds_the_audit_trail_not_the_projection(self):
+        """`payload_digest` already binds what the brains saw. This binds what
+        the run had decided when they saw it, and the two differ whenever a
+        decision lands that the projection withholds."""
+        (self.run_dir / "decisions.md").write_text(DECISION_HUMAN, encoding="utf-8")
+        opened = self.open()
+        projection = (self.run_dir / "decisions-effective.md").read_text(encoding="utf-8")
+        self.assertNotEqual(projection, DECISION_HUMAN,
+                            "the projection must not be a copy of the audit "
+                            "trail, or this case cannot tell them apart")
+        self.assertEqual(opened["context_digest"],
+                         hashlib.sha256(DECISION_HUMAN.encode("utf-8")).hexdigest())
+        self.assertNotEqual(opened["context_digest"],
+                            hashlib.sha256(projection.encode("utf-8")).hexdigest())
+
+    def test_an_inadmissible_question_is_discarded_without_dispatch(self):
+        self.record_path.write_text(question_text(drop=("blocks",)), encoding="utf-8")
+        with self.assertRaises(pas.QuorumError):
+            self.open()
+        self.assertFalse(self.directory.exists())
+        self.assertEqual(list((self.run_dir / "quorum").glob("*")
+                              if (self.run_dir / "quorum").is_dir() else []), [])
+
+    # --- the budget trips BEFORE dispatch ---------------------------------
+
+    def test_the_budget_trips_before_dispatch_not_after_adoption(self):
+        """THE NAMED FAULT, asserted as an ABSENCE.
+
+        With the check at adoption time the fourth question in a phase still
+        reaches three brains — every other budget test passes, and three
+        dispatches are spent on a question that could never have been adopted.
+        So this asserts what is NOT on disk: no payload, no question record, no
+        projection, no responses directory. The only file the trip writes is the
+        terminal record itself.
+        """
+        seed_adoptions(self.run_dir, "P04", pas.BUDGET_PER_PHASE)
+        opened = self.open()
+        self.assertEqual(opened["status"], "escalated")
+        self.assertEqual(opened["reason"], "phase-budget-exhausted")
+        self.assertFalse(opened["dispatched"])
+        self.assertEqual(self.names(), ["final.json"])
+        self.assertEqual(list(self.run_dir.rglob("payload-*.json")), [])
+        self.assertFalse((self.run_dir / "decisions-effective.md").exists())
+        self.assertFalse((self.directory / "responses").exists())
+        self.assertEqual(
+            json.loads((self.directory / "final.json").read_text(encoding="utf-8")),
+            opened)
+
+    def test_the_same_question_one_adoption_short_of_the_ceiling_dispatches(self):
+        """The positive control the case above needs. Without it an
+        `open_quorum` that escalated everything would pass that test."""
+        seed_adoptions(self.run_dir, "P04", pas.BUDGET_PER_PHASE - 1)
+        opened = self.open()
+        self.assertEqual(opened["status"], "in_flight")
+        self.assertIn("open.json", self.names())
+        self.assertEqual(len(list(self.directory.glob("payload-*.json"))), 3)
+
+    def test_the_run_ceiling_trips_the_dispatch_the_same_way_the_phase_does(self):
+        """The other ceiling, and the phase deliberately left with headroom so
+        the stop can only have come from the run's total."""
+        for prefix, phase, count in (("a", "P04", 2), ("b", "P05", 3),
+                                     ("c", "P06", 3), ("d", "P07", 2)):
+            seed_adoptions(self.run_dir, phase, count, prefix=prefix)
+        budget = pas.quorum_budget(str(self.run_dir), phase="P04")
+        self.assertEqual(budget["run_adoptions"], pas.BUDGET_PER_RUN)
+        self.assertLess(budget["phase_adoptions"], budget["phase_ceiling"],
+                        "the phase must still have headroom or this case "
+                        "cannot tell the two ceilings apart")
+        opened = self.open()
+        self.assertEqual(opened["status"], "escalated")
+        self.assertEqual(opened["reason"], "run-budget-exhausted")
+        self.assertEqual(self.names(), ["final.json"])
+
+    def test_the_escalation_carries_the_question_and_never_the_raiser(self):
+        """It is what a human is handed when the run may no longer decide. The
+        question travels; the raiser's identity, candidates and recommendation
+        do not — they frame an answer, and that is why they reach neither a
+        brain nor the human this record is addressed to."""
+        seed_adoptions(self.run_dir, "P04", pas.BUDGET_PER_PHASE)
+        opened = self.open()
+        self.assertEqual(opened["question"], QUESTION["question"])
+        self.assertEqual(opened["blocks"], QUESTION["blocks"])
+        self.assertIsNone(opened["decision_id"])
+        rendered = json.dumps(opened).casefold()
+        for secret in ("worker-7", "because we already run it", "recommendation"):
+            self.assertIn(secret.casefold(), question_text().casefold(),
+                          "the fixture does not carry what this claims is dropped")
+            self.assertNotIn(secret.casefold(), rendered)
+
+    def test_the_trip_writes_a_record_the_budget_itself_can_read_back(self):
+        """An escalation is an event in the run's own count of itself, and it
+        must not charge. A record `quorum_events` refused would stop every later
+        budget check on the run's own write."""
+        seed_adoptions(self.run_dir, "P04", pas.BUDGET_PER_PHASE)
+        self.open()
+        events = pas.quorum_events(str(self.run_dir))
+        self.assertIn({"qid": self.qid, "status": "escalated", "phase": "P04",
+                       "decision_id": None}, events)
+        self.assertEqual(pas.quorum_budget(str(self.run_dir), phase="P04")
+                         ["phase_adoptions"], pas.BUDGET_PER_PHASE)
+
+    def test_a_question_naming_no_phase_stops_and_does_not_escalate(self):
+        """The failure a `try/except` around the budget would convert into an
+        escalation. A record with no phase cannot be budgeted at all; treating
+        that as "the budget said no" writes a terminal record for a question
+        whose phase nobody knows."""
+        self.record_path.write_text(question_text(drop=("phase",)), encoding="utf-8")
+        with self.assertRaises(pas.QuorumError):
+            self.open()
+        self.assertFalse(self.directory.exists())
+
+    # --- a re-raise dispatches nothing ------------------------------------
+
+    def test_a_re_raise_of_a_settled_question_dispatches_nothing(self):
+        """THE COMPACTION-REPLAY BUG. Nothing cheaper catches it: after a
+        compaction the controller has forgotten it asked, the worker publishes
+        byte-identical text, and a second quorum on a settled question is how a
+        run quietly changes its own mind."""
+        first = self.open()
+        winner = {"rung": "code-evidenced", "answer_key": "postgres",
+                  "answer": "Use the existing PostgreSQL instance."}
+        seed_final(self.run_dir, self.qid, status="adopted", phase="P04",
+                   decision_id=f"Q-{self.qid}", override={"winner": winner})
+        before = {path: path.read_bytes() for path in sorted(self.directory.rglob("*"))
+                  if path.is_file()}
+        second = self.open()
+        self.assertEqual({path: path.read_bytes()
+                          for path in sorted(self.directory.rglob("*"))
+                          if path.is_file()}, before)
+        self.assertEqual(second["status"], "adopted")
+        self.assertTrue(second["replay"])
+        self.assertEqual(second["winner"], winner)
+        self.assertEqual(first["qid"], second["qid"])
+
+    def test_a_second_raise_while_still_in_flight_re_dispatches_nothing(self):
+        """The controller owes responses, not a second dispatch — and the guard
+        cannot be left to `publish_immutable` being inert, because a re-raise
+        that fell through would re-enter the budget."""
+        first = self.open()
+        before = {path: path.read_bytes() for path in sorted(self.directory.rglob("*"))
+                  if path.is_file()}
+        second = self.open()
+        self.assertEqual({path: path.read_bytes()
+                          for path in sorted(self.directory.rglob("*"))
+                          if path.is_file()}, before)
+        self.assertTrue(second["replay"])
+        self.assertEqual(second["status"], "in_flight")
+        self.assertEqual(second["payload_digest"], first["payload_digest"])
+
+    def test_a_re_raise_keeps_its_qid_when_decisions_have_moved_on(self):
+        """`derive_qid` takes no context, deliberately: a qid that moved when
+        anything else was decided would make every re-raise a new question and
+        the run would re-litigate itself after every compaction."""
+        first = self.open()
+        (self.run_dir / "decisions.md").write_text(DECISION_HUMAN, encoding="utf-8")
+        self.assertEqual(pas.derive_qid(QUESTION["question"], QUESTION["axis"]),
+                         self.qid)
+        second = self.open()
+        self.assertEqual(second["qid"], first["qid"])
+        self.assertTrue(second["replay"])
+        self.assertEqual(second["context_digest"], first["context_digest"])
+
+    def test_a_re_entry_after_a_crash_republishes_the_same_payload_bytes(self):
+        """The interruption the three-phase record exists for: payloads
+        written, `open.json` not. `build_payload` is pure, so the republish is
+        inert and the recovery is a second call rather than a repair."""
+        self.open()
+        payloads = {path: path.read_bytes()
+                    for path in sorted(self.directory.glob("payload-*.json"))}
+        (self.directory / "open.json").unlink()
+        reopened = self.open()
+        self.assertEqual(reopened["status"], "in_flight")
+        self.assertEqual({path: path.read_bytes()
+                          for path in sorted(self.directory.glob("payload-*.json"))},
+                         payloads)
+
+    # --- an owner is a path component -------------------------------------
+
+    def test_an_owner_carrying_a_separator_writes_no_payload_anywhere(self):
+        """`Owners` is agent-authored free text — `_csv` splits on commas and
+        refuses nothing else — and it becomes a FILE NAME. The owners here are
+        chosen to kill different mutants: `brain/../../../evil` and `brain/a`
+        are both legal under `_TOKEN`, so an owner check written against the
+        module's general token grammar still lets them through, while
+        `../../../evil` kills a check deleted altogether. Each lands its payload
+        somewhere other than the question's own directory — asserted of the
+        fixture rather than assumed of it, because `payload-` in front of a
+        single `..` neutralises the climb and such an owner would prove
+        nothing.
+        """
+        for owner in ("brain/../../../evil", "../../../evil", "brain/a"):
+            with self.subTest(owner=owner):
+                landing = Path(os.path.normpath(
+                    os.path.join(str(self.directory), f"payload-{owner}.json")))
+                self.assertNotEqual(
+                    landing.parent, self.directory,
+                    f"payload-{owner}.json lands inside the question's own "
+                    "directory after all, so this owner demonstrates nothing")
+                self.record_path.write_text(
+                    question_text(owners=f"{owner}, brain-b, brain-c"),
+                    encoding="utf-8")
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    self.open()
+                self.assertEqual(list(self.run_dir.rglob("payload-*.json")), [])
+                self.assertFalse(landing.exists())
+                self.assertFalse(self.directory.exists())
+
+    def test_the_ordinary_owner_spellings_are_still_accepted(self):
+        """The half a blanket rule breaks. Paired with the case above so a
+        stricter bar cannot be bought by refusing everything."""
+        self.record_path.write_text(
+            question_text(owners="brain_a.1, brain-b, BRAIN3"), encoding="utf-8")
+        opened = self.open()
+        self.assertEqual(opened["owners"], ["brain_a.1", "brain-b", "BRAIN3"])
+        self.assertEqual(sorted(path.name for path in
+                                self.directory.glob("payload-*.json")),
+                         ["payload-BRAIN3.json", "payload-brain-b.json",
+                          "payload-brain_a.1.json"])
+
+    # --- records read back off disk ---------------------------------------
+
+    def test_an_unhashable_status_in_the_open_record_stops_inside_the_family(self):
+        """Rule 9, at this task's own call site. `open.json` is JSON on disk in
+        a directory a human may have edited or restored, so `status` may legally
+        be a list — and `["in_flight"] in frozenset(...)` raises `TypeError`,
+        outside `TrackerError`, escaping every handler a controller has written.
+
+        The record carries NO `qid` on purpose: the membership test runs first,
+        so this reaches `_member` and would reach a bare `in` too. A check
+        placed after the qid comparison would never be handed an unhashable
+        value and the pin would be unobservable.
+        """
+        self.directory.mkdir(parents=True)
+        (self.directory / "open.json").write_text(
+            json.dumps({"status": ["in_flight"]}), encoding="utf-8")
+        with self.assertRaises(pas.QuorumSchemaInvalid) as caught:
+            self.open()
+        self.assertIn("open status", str(caught.exception))
+
+    def test_an_open_record_filed_under_another_questions_qid_is_refused(self):
+        """A quorum directory can be copied, renamed or half-restored. A record
+        in flight under another question's identity would match responses,
+        digests and a decision to a question nobody asked."""
+        self.directory.mkdir(parents=True)
+        (self.directory / "open.json").write_text(
+            json.dumps({"qid": "a" * 12, "status": "in_flight"}), encoding="utf-8")
+        with self.assertRaises(pas.QuorumSchemaInvalid):
+            self.open()
+
+    def test_a_settled_record_filed_under_another_questions_qid_is_refused(self):
+        seed_final(self.run_dir, self.qid, status="adopted", phase="P04",
+                   decision_id=f"Q-{self.qid}",
+                   override={"qid": "b" * 12})
+        with self.assertRaises(pas.QuorumSchemaInvalid):
+            self.open()
+
+    # --- the run lock -----------------------------------------------------
+
+    def test_the_whole_body_runs_under_the_run_lock(self):
+        """`worker_limit >= 4`, so two workers can raise at the same moment.
+        Held in a SECOND OS PROCESS, because a `flock` belongs to the open file
+        description rather than to the process and a forked holder would be
+        sharing this interpreter's own lock.
+
+        Nothing is written when the lock is refused, which is the second half:
+        the lock is taken ahead of the first byte, not around the last one.
+        """
+        start_holder(self, self.run_dir)
+        started = time.monotonic()
+        with self.assertRaises(pas.LockBusyError):
+            self.open(timeout_s=0.25)
+        self.assertLess(time.monotonic() - started, CONTENDED_UPDATE_BOUND_S)
+        self.assertFalse(self.directory.exists())
+        self.assertFalse((self.run_dir / "decisions-effective.md").exists())
+
+    def test_the_two_statuses_it_writes_are_the_ones_the_rest_of_the_module_reads(self):
+        """A seam pinned rather than discovered. `open.json`'s state is the word
+        P02's `## Quorum` row carries, and the trip's status is one
+        `_final_event` and P02's outcome grammar both accept."""
+        self.assertIn(pas._IN_FLIGHT, pas._QUORUM_STATES)
+        self.assertIn(pas._ESCALATED, pas._FINAL_STATUSES)
+        self.assertTrue(pas._QUORUM_OUTCOME.fullmatch(pas._ESCALATED))
+        self.assertEqual(pas._OPEN_STATES, frozenset({pas._IN_FLIGHT}))
+
+    def test_a_foreign_run_stops_before_a_lock_file_is_created_in_it(self):
+        """`locked_tracker_update`'s discipline, one function over: a foreign,
+        missing or malformed run is a read-only stop, and it must stop WITHOUT
+        this call first creating a lock file inside a directory that belongs to
+        somebody else's tool. Validating under the lock instead still stops —
+        `quorum_budget` revalidates — so only the artefact left behind tells the
+        two apart."""
+        lock = self.run_dir / pas.LOCK_FILENAME
+        self.assertFalse(lock.exists(),
+                         "initialize_run must not have left a lock file, or "
+                         "this case cannot attribute one to open_quorum")
+        (self.run_dir / "progress.md").write_text(
+            "<!-- pipeline-run/v2 -->\n# Someone else's tracker\n", encoding="utf-8")
+        with self.assertRaises(pas.TrackerError):
+            self.open()
+        self.assertFalse(lock.exists())
+        self.assertFalse(self.directory.exists())
+
+    def test_an_unreadable_audit_trail_is_never_read_as_an_empty_one(self):
+        """The third state `_decisions_text` keeps apart. A run that has decided
+        nothing and a run whose decisions file cannot be read look identical to
+        a reader that folds them together — and the second would have its
+        grants derived from nothing and its context digest taken over nothing,
+        while dispatching three brains as though all were well."""
+        (self.run_dir / "decisions.md").write_bytes(b"## H-001\n\xff\xfe not utf-8\n")
+        with self.assertRaises(pas.TrackerValidationError):
+            self.open()
+        self.assertFalse(self.directory.exists())
+        self.assertFalse((self.run_dir / "decisions-effective.md").exists())
+
+    def test_a_re_entry_that_would_send_different_bytes_is_refused(self):
+        """What `publish_immutable` buys over a plain write, and the reason
+        `open.json` carries a payload digest at all: a re-dispatch must be able
+        to PROVE it is sending the same bytes. Here the question record is
+        edited under a live quorum — same question, same axis, so the same qid —
+        and the rebuilt payload differs. Written with `write_text` the new bytes
+        would silently replace the ones a brain already received while
+        `open.json` still named the old digest.
+        """
+        self.open()
+        payloads = {path: path.read_bytes()
+                    for path in sorted(self.directory.glob("payload-*.json"))}
+        roots = dict(QUESTION_FIELDS)["Reading roots"]
+        self.assertIn("tests=tests", roots)
+        edited = question_text(reading_roots=roots.replace("tests=tests",
+                                                           "tests=tests/unit"))
+        self.record_path.write_text(edited, encoding="utf-8")
+        (self.directory / "question.md").write_text(edited, encoding="utf-8")
+        self.assertEqual(pas.derive_qid(QUESTION["question"], QUESTION["axis"]),
+                         self.qid, "the edit must not move the qid, or the "
+                         "re-entry lands in a different directory entirely")
+        rebuilt = pas.build_payload(self.qid, 0, run_dir=str(self.run_dir))
+        self.assertNotEqual(
+            pas._dumps(rebuilt).encode("utf-8"),
+            payloads[self.directory / "payload-brain-a.json"],
+            "the edit does not change what brain 0 would be sent, so this case "
+            "proves nothing about a differing re-publish")
+        (self.directory / "open.json").unlink()
+        with self.assertRaises(pas.TrackerWriteError):
+            self.open()
+        self.assertEqual({path: path.read_bytes()
+                          for path in sorted(self.directory.glob("payload-*.json"))},
+                         payloads)
+
+    # --- totality ---------------------------------------------------------
+
+    def test_nothing_outside_the_tracker_error_family_escapes_any_read(self):
+        """Every input `open_quorum` reads, enumerated from the CALL TREE.
+
+        Walked from the function body rather than from memory: `_run_path`
+        reads `run_dir`; `_record_path` and `read_text` read `question_record`;
+        `validate_run` reads `progress.md`; `parse_question` reads the record's
+        text; `_final_event`/`_read_json` read `<qid>/final.json`;
+        `_opened_record` reads `<qid>/open.json`; `quorum_budget` reads
+        `progress.md`, every `*/final.json`, `quorum/extensions.json` and
+        `decisions.md`; `_decisions_text` reads `decisions.md` again.
+
+        Each is varied with both an unhashable value and a wrong-typed scalar
+        where it is an argument, and with malformed JSON where it is a file.
+        The outcomes are COLLECTED AND ASSERTED — a sweep that discarded them
+        would assert only that nothing escaped, which is satisfied by an
+        implementation that accepts everything.
+        """
+        accepted = {}
+
+        def sweep(label, case, call):
+            try:
+                result = call()
+            except pas.TrackerError:
+                return
+            except Exception as escaped:  # noqa: BLE001 - the thing under test
+                raise AssertionError(
+                    f"{type(escaped).__name__}({escaped}) escaped open_quorum "
+                    f"for {label} {case!r}; nothing outside TrackerError may "
+                    "leave this module") from escaped
+            #: THE RETURN VALUE IS KEPT AND ASSERTED BELOW. A sweep that
+            #: discarded it would assert only "nothing escaped TrackerError",
+            #: which an implementation that accepted every one of these inputs
+            #: satisfies completely.
+            self.assertIn(result["status"], ("in_flight", "escalated"))
+            accepted.setdefault(label, set()).add(case)
+
+        for value in HOSTILE_VALUES:
+            sweep("run_dir", value, lambda value=value: pas.open_quorum(
+                value, question_record=str(self.record_path)))
+            sweep("question_record", value, lambda value=value: pas.open_quorum(
+                str(self.run_dir), question_record=value))
+        for name in ("progress.md", "decisions.md", "quorum/extensions.json",
+                     f"quorum/{self.qid}/final.json",
+                     f"quorum/{self.qid}/open.json"):
+            for text in HOSTILE_JSON:
+                def call(name=name, text=text):
+                    _root, run_dir = repo_with_a_run(self)
+                    record = run_dir / "question-T04.md"
+                    record.write_text(question_text(), encoding="utf-8")
+                    target = run_dir / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(text, encoding="utf-8")
+                    return pas.open_quorum(str(run_dir),
+                                           question_record=str(record))
+                sweep(name, text, call)
+
+        #: EXACTLY what may still open, stated per input rather than as "none
+        #: of it". `decisions.md` is MARKDOWN, so every one of these is a file
+        #: with no decision sections in it — a run that has decided nothing,
+        #: which opens normally and must: a reader that stopped on it would
+        #: refuse every run whose audit trail holds a comment. An empty grant
+        #: list is likewise a run holding no extensions. Everything else is a
+        #: file the reader cannot classify, and a stop.
+        self.assertEqual(accepted, {
+            "decisions.md": set(HOSTILE_JSON),
+            "quorum/extensions.json": {"[]"},
+        })
+
+
 if __name__ == "__main__":
     unittest.main()

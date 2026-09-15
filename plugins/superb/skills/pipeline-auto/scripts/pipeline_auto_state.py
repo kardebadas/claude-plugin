@@ -6413,6 +6413,37 @@ def _pin_extensions(path: Path, grants: list) -> None:
                 pass
 
 
+def _decisions_text(run_dir: Path) -> str:
+    """``decisions.md`` as text, or ``""`` where the run has decided nothing.
+
+    ONE DOOR ONTO THE AUDIT TRAIL, for the reason ``_loads`` is the one door
+    onto ``json``. Three callers read this file for three different reasons --
+    the budget reads it for grants, the projection reads it for what a brain
+    may see, and ``open_quorum`` digests it as the context a quorum was opened
+    against -- and a second reader that spelled "there is no file yet"
+    differently would let those three disagree about whether the run has
+    decided anything.
+
+    A MISSING FILE AND AN EMPTY ONE ARE ONE STATE and that is deliberate: a run
+    that has decided nothing has decided nothing, whichever way its directory
+    records it. ``parse_decisions("")`` returns the empty audit trail, so the
+    caller needs no second branch. An UNREADABLE file is a third state and is
+    never folded into the first: a decisions file that exists and cannot be
+    read is a run whose grants and whose context digest would both be computed
+    from nothing while looking like a run that had simply not decided yet.
+    """
+    path = run_dir / _DECISIONS_FILE
+    if not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise TrackerValidationError(
+            f"unreadable {_DECISIONS_FILE}: {exc}; the audit trail is what "
+            "a grant is read from and a run cannot proceed without it"
+        ) from exc
+
+
 def _budget_extensions(run_dir: Path, adopted_ids: list, run_id: str,
                        revision: int, phases: frozenset) -> list:
     """Every grant this run holds: the pinned ones, plus any newly signed.
@@ -6448,28 +6479,19 @@ def _budget_extensions(run_dir: Path, adopted_ids: list, run_id: str,
                     "grant pinned twice counts as two against a cap of "
                     f"{MAX_EXTENSIONS}, or as one ceiling stated two ways")
             grants[grant["decision_id"]] = grant
-    decisions_path = run_dir / _DECISIONS_FILE
-    if decisions_path.is_file():
-        try:
-            text = decisions_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as exc:
-            raise TrackerValidationError(
-                f"unreadable {_DECISIONS_FILE}: {exc}; the audit trail is what "
-                "a grant is read from and a run cannot proceed without it"
-            ) from exc
-        decisions = parse_decisions(text)
-        for did in sorted(decisions["decisions"]):
-            record = decisions["decisions"][did]
-            if (record["action"] != _DRIFT_EXTENSION_ACTION
-                    or record["status"] != "Adopted"):
-                continue
-            if did in grants:
-                #: Already pinned. Never re-derived and never re-checked
-                #: against an adopted set that has moved since it was signed.
-                continue
-            grants[did] = _live_grant(did, record, run_id=run_id,
-                                      revision=revision,
-                                      adopted_ids=adopted_ids, phases=phases)
+    decisions = parse_decisions(_decisions_text(run_dir))
+    for did in sorted(decisions["decisions"]):
+        record = decisions["decisions"][did]
+        if (record["action"] != _DRIFT_EXTENSION_ACTION
+                or record["status"] != "Adopted"):
+            continue
+        if did in grants:
+            #: Already pinned. Never re-derived and never re-checked
+            #: against an adopted set that has moved since it was signed.
+            continue
+        grants[did] = _live_grant(did, record, run_id=run_id,
+                                  revision=revision,
+                                  adopted_ids=adopted_ids, phases=phases)
     ordered = [grants[did] for did in sorted(grants)]
     if len(ordered) > MAX_EXTENSIONS:
         raise TrackerValidationError(
@@ -6620,3 +6642,357 @@ def quorum_budget(run_dir: str, *, phase: str) -> dict:
         "may_raise": reason is None,
         "reason": reason,
     }
+
+
+# --- opening a quorum ------------------------------------------------------
+#
+# Phase 1 of the three-phase record, and the one place two rules meet that are
+# each easy to get backwards.
+#
+# THE BUDGET TRIPS AT RAISE TIME, BEFORE DISPATCH. The natural place to check
+# it is where the counter moves -- at adoption -- and a check written there
+# passes every budget test in this suite while three brains are dispatched at a
+# question that could never have been adopted. The triggering question is never
+# sent, so the check is here, ahead of the first byte written into the qid's
+# directory.
+#
+# A RE-RAISE OF A SETTLED QID DISPATCHES NOTHING. This is the compaction-replay
+# guard: after a compaction the controller has forgotten that it asked, the
+# worker re-publishes byte-identical question text, ``derive_qid`` returns the
+# same identity on purpose, and a second quorum on a settled question is how a
+# run quietly changes its own mind.
+
+#: Phase 1's record and the directory phase 2 fills. ``open.json`` is published
+#: BEFORE any brain is dispatched, so an interruption a moment after dispatch
+#: is still classifiable from disk alone, and a re-dispatch can prove it is
+#: sending the same bytes.
+_OPEN_FILE = "open.json"
+_RESPONSES_DIRNAME = "responses"
+_PAYLOAD_PREFIX = "payload-"
+
+#: The state an opened quorum is in, spelled as P02 spells it in
+#: ``_QUORUM_STATES`` -- the row this record will become carries the same word,
+#: and the suite pins the two together so neither can drift alone.
+_IN_FLIGHT = "in_flight"
+
+#: Every status an ``open.json`` may carry, which is one. It exists as a set
+#: because the membership test it feeds is over a value read back off disk.
+_OPEN_STATES = frozenset({_IN_FLIGHT})
+
+#: The terminal status a budget trip writes. Named rather than typed at the
+#: literal so it is checked against ``_FINAL_STATUSES`` in one place.
+_ESCALATED = "escalated"
+
+#: An owner id, held to what may safely become a PATH COMPONENT.
+#:
+#: The payload a brain receives is written to ``payload-<owner>.json`` inside
+#: the qid's directory, and an owner is agent-authored free text: ``parse_question``
+#: builds the list with ``_csv``, which splits on commas and strips, and
+#: refuses nothing else. ``check_admissible`` counts them and requires them
+#: distinct, which is a question about the quorum and not about the filesystem.
+#: So ``Owners: ../../../../etc/brain-a, brain-b, brain-c`` names a path
+#: OUTSIDE the run directory, and ``brain/a`` names a subdirectory of the qid's
+#: own -- the first writes a payload where no audit trail will ever find it,
+#: and the second makes the payload's own name disagree with the owner
+#: ``open.json`` records. Neither raises; both look like a quorum that opened.
+#:
+#: Same grammar as ``_RUN_ID`` and for the same reason rather than by
+#: coincidence: both become a path component, so both must exclude the
+#: separator and must not begin with a dot.
+_OWNER = _CharClass(_ALNUM, _ALNUM + "._-")
+
+
+def _record_path(question_record) -> Path:
+    """``question_record`` as a ``Path``, with anything else refused.
+
+    ``_run_path``'s argument, one function over. ``Path(5)`` raises
+    ``TypeError``, outside ``TrackerError``, and the record path is the one
+    argument a controller assembles from whatever the raising worker published.
+    """
+    if not isinstance(question_record, (str, Path)):
+        raise QuorumError(
+            f"question_record is {type(question_record).__name__}, not a path; "
+            "coercing it would open a quorum on a file named by a repr")
+    return Path(question_record)
+
+
+def _write_run_file(path: Path, content: str, what: str) -> None:
+    """Write a REGENERATED file inside the run, inside the exception family.
+
+    ``publish_immutable`` is for everything written once -- the question
+    record, each payload, ``open.json``, ``final.json``. This is for the one
+    file here that is not: ``decisions-effective.md`` is a projection of an
+    append-only source and is rewritten whenever that source moves. Its content
+    at dispatch time is bound by ``payload_digest``, which is what makes a
+    later rewrite detectable rather than silent.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise TrackerWriteError(
+            f"cannot write {what} at {str(path)!r}: {exc}") from exc
+
+
+def _opened_record(path: Path, qid: str) -> dict:
+    """One ``open.json``, validated the way ``_final_event`` validates its own.
+
+    ``status`` is tested with ``_member`` and it is tested FIRST, ahead of the
+    qid comparison, which is the ordering rather than an accident. The record
+    is a JSON file on disk in a directory a human may have edited or restored
+    from a backup, so ``status`` may legally be a list or an object, and
+    ``["in_flight"] in frozenset(...)`` raises ``TypeError`` -- outside
+    ``TrackerError``, so it escapes every handler a controller has written.
+    Behind any check on another field that happens to raise first, a bare
+    ``in`` written here would pass the suite.
+
+    THE QID IS RE-DERIVED FROM THE DIRECTORY AND COMPARED, for the reason
+    ``_final_event`` and ``_question_record`` compare it: a quorum directory
+    can be copied, renamed or half-restored, and an open record filed under
+    another question's qid would have this call report a quorum in flight for a
+    question nobody asked -- and dispatch nothing, forever.
+    """
+    record = _read_json(path, f"the open record for {qid}")
+    if not isinstance(record, dict):
+        raise QuorumSchemaInvalid(
+            f"the open record for {qid} is a {type(record).__name__}, not an "
+            "object; a quorum in flight is a record with owners and digests in "
+            "it, and a bare value classifies nothing")
+    status = record.get("status")
+    if not _member(status, _OPEN_STATES):
+        raise QuorumSchemaInvalid(
+            f"{qid}: open status {status!r} is not {sorted(_OPEN_STATES)}; an "
+            "unrecognised status is neither a quorum in flight nor a finalised "
+            "one, and the controller cannot say whether it owes a dispatch")
+    stated = record.get("qid")
+    if not _text(stated) or stated.strip() != qid:
+        raise QuorumSchemaInvalid(
+            f"the open record filed under {qid} states qid {stated!r}; a record "
+            "in flight under another question's identity matches responses, "
+            "digests and a decision to a question nobody asked")
+    return record
+
+
+def _budget_escalation(qid: str, record: dict, budget: dict) -> dict:
+    """The terminal record a budget trip writes, and the whole of it.
+
+    NO ``context_digest`` AND NO PAYLOAD DIGEST, because nothing was
+    dispatched: there is no context any brain saw and no bytes any brain
+    received, and a digest recorded here would be a claim about a dispatch that
+    never happened. What it carries instead is the question itself and the two
+    counts, because this record is what a human is handed when they are asked
+    to decide the question the run may no longer decide for itself.
+
+    The raiser's identity, their candidate answers and their recommendation are
+    absent, and their absence is the same whitelist ``_record_projection``
+    states: they are recorded in the question record for audit and they frame
+    an answer, so they reach neither a brain nor the human this escalation is
+    addressed to.
+    """
+    return {
+        "qid": qid,
+        "status": _ESCALATED,
+        "reason": budget["reason"],
+        "phase": record["phase"],
+        "axis": record["axis"],
+        "question": record["question"],
+        "blocks": list(record["blocks"]),
+        "owners": list(record["owners"]),
+        "decision_id": None,
+        "winner": None,
+        "dispatched": False,
+        "phase_adoptions": budget["phase_adoptions"],
+        "phase_ceiling": budget["phase_ceiling"],
+        "run_adoptions": budget["run_adoptions"],
+        "run_ceiling": budget["run_ceiling"],
+        "adopted": list(budget["adopted"]),
+    }
+
+
+def _open_under_lock(run_dir: Path, qid: str, record: dict, text: str) -> dict:
+    """``open_quorum``'s body, with the run lock already held.
+
+    Split out so the lock is one statement in the caller and so that what runs
+    inside it is a single expression to read: settle, budget, dispatch. Every
+    read and every write below happens under that lock -- see ``open_quorum``
+    for why a check-then-act here is not a check-then-act anybody can interleave.
+    """
+    directory = run_dir / _QUORUM_DIRNAME / qid
+    final_path = directory / _FINAL_FILE
+    if final_path.exists():
+        #: THE COMPACTION-REPLAY GUARD. One outcome per qid per run: the
+        #: outcome is returned and NOTHING is written, because a second quorum
+        #: on a question this run has already settled is the run re-asking
+        #: until it likes the answer.
+        #:
+        #: Validated through ``_final_event`` rather than trusted, so a record
+        #: restored under the wrong qid is a stop rather than an answer handed
+        #: back for a question nobody asked. The full record is returned rather
+        #: than the four cells the budget projects, because the caller needs
+        #: the winner it is being told not to re-litigate.
+        _final_event(final_path, qid)
+        settled = _read_json(final_path, f"the final record for {qid}")
+        return dict(settled, replay=True, qid=qid)
+    open_path = directory / _OPEN_FILE
+    if open_path.exists():
+        #: Already dispatched and not yet finalised. The controller owes
+        #: responses, not a second dispatch -- and re-publishing the payloads
+        #: would be inert anyway, which is exactly why the guard cannot be left
+        #: to ``publish_immutable``: a re-raise must not re-enter the budget.
+        return dict(_opened_record(open_path, qid), replay=True, qid=qid)
+
+    #: THE BUDGET TRIPS HERE, AHEAD OF THE FIRST BYTE. Nothing above this line
+    #: has written anything, and a trip writes exactly one file -- so a
+    #: question the run had no authority to ask leaves a terminal record and no
+    #: question record, no projection, no responses directory and no payload.
+    budget = quorum_budget(run_dir, phase=record["phase"])
+    if not budget["may_raise"]:
+        escalation = _budget_escalation(qid, record, budget)
+        publish_immutable(final_path, _dumps(escalation))
+        return escalation
+
+    #: The record is published VERBATIM, not re-rendered from the parse.
+    #: ``_question_record`` re-parses this file on every payload build and
+    #: re-derives the qid from what it finds, so the bytes here and the bytes
+    #: the raiser published have to be the same bytes; a round trip through the
+    #: parser would make the record agree with this module's renderer instead.
+    publish_immutable(directory / _QUESTION_FILE, text)
+
+    #: The projection is regenerated from the audit trail as it stands NOW, and
+    #: its content is bound into ``payload_digest`` below. Written before the
+    #: payloads because the digest reads it, and read once so that the digest
+    #: and ``context_digest`` cannot describe two different moments.
+    decisions_text = _decisions_text(run_dir)
+    _write_run_file(run_dir / _PROJECTION_FILE,
+                    project_decisions(parse_decisions(decisions_text)),
+                    "the decisions projection")
+    try:
+        (directory / _RESPONSES_DIRNAME).mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise TrackerWriteError(
+            f"cannot create the responses directory for {qid}: {exc}; a "
+            "response with nowhere to land is a brain's answer lost between "
+            "the dispatch and the record of it") from exc
+
+    #: One payload per owner, at the owner's own index, published once. A
+    #: re-entry after a crash rebuilds byte-identical payloads -- that is what
+    #: ``build_payload``'s purity buys -- so the republish is inert, and a
+    #: payload that came back DIFFERENT is refused rather than overwritten.
+    for index, owner in enumerate(record["owners"]):
+        publish_immutable(directory / f"{_PAYLOAD_PREFIX}{owner}.json",
+                          _dumps(build_payload(qid, index, run_dir=run_dir)))
+
+    opened = {
+        "qid": qid,
+        "status": _IN_FLIGHT,
+        "axis": record["axis"],
+        "phase": record["phase"],
+        "owners": list(record["owners"]),
+        "blocks": list(record["blocks"]),
+        "options_supplied": record["options_supplied"],
+        #: THE QUESTION AS SENT, verbatim and unsquashed. ``derive_qid``
+        #: squashes because identity must survive a reflowed line; this digest
+        #: answers a different question -- were all three brains asked THESE
+        #: bytes -- and a digest over the squashed form attests to a string no
+        #: brain was ever shown.
+        "question_digest": _digest(record["question"]),
+        #: ONE digest over the shared payload and the projection. The three
+        #: brains differ only by a constant rule applied to the index, so
+        #: ``(payload_digest, n)`` reproduces brain n's bytes exactly, which is
+        #: what a re-dispatch needs.
+        "payload_digest": payload_digest(qid, run_dir=run_dir),
+        #: The AUTHORITY the projection was derived from, not the projection.
+        #: ``payload_digest`` already binds what the brains saw; this binds what
+        #: the run had decided when they saw it, and the two differ whenever a
+        #: decision lands that the projection withholds -- a superseded record,
+        #: a budget grant -- which is a context change the brains could not see
+        #: and a later contradiction check must.
+        "context_digest": _digest(decisions_text),
+    }
+    publish_immutable(open_path, _dumps(opened))
+    return opened
+
+
+def open_quorum(run_dir: str, *, question_record: str,
+                timeout_s: float = DEFAULT_LOCK_TIMEOUT_S) -> dict:
+    """Phase 1 of the three-phase record: PERSIST, then dispatch.
+
+    ``open.json`` carries the three owner ids, the shared question digest, the
+    per-brain payload digest and the context digest, and it lands BEFORE any
+    brain is dispatched -- so an interruption a moment later is still
+    classifiable from disk alone, and a re-dispatch can prove it is sending the
+    same bytes.
+
+    Returns the open record (``status`` ``in_flight``), the terminal record a
+    budget trip wrote (``escalated``), or the record a settled qid already
+    holds with ``replay`` true.
+
+    THE WHOLE BODY RUNS UNDER THE RUN LOCK, and that is a change of discipline
+    rather than a precaution. ``worker_limit >= 4``, so two workers can raise
+    two questions at the same moment; without the lock, each reads the budget,
+    each regenerates ``decisions-effective.md`` under the other's feet, and each
+    drives ``quorum_budget``'s extension pin -- which is written with no lock of
+    its own. The interleaving that actually corrupts state is the pin: one
+    reader derives a grant against the adopted set it saw, the other derives the
+    same grant against a set one adoption further on, and ``_live_grant``
+    refuses the second as a human on record as having reviewed something else --
+    a hard stop, on a legal run, produced by nothing but timing.
+
+    WHAT THE LOCK DOES NOT BUY is the drift cap, and it is worth being exact
+    about that because the cap is what this check exists to serve. This
+    function SPENDS nothing: the budget is charged by an ADOPTION, which is a
+    ``final.json`` with ``status: adopted``, which ``finalize_quorum`` writes.
+    So two questions raised against one remaining adoption both pass this check
+    even perfectly serialised -- the second reads exactly what the first read,
+    because the first charged nothing. The check here is an ADMISSION check: it
+    stops three brains being dispatched at a question that could never have been
+    adopted. The cap itself can only be enforced at the charge, under the lock
+    ``finalize_quorum`` already takes, and a finalisation that adopts without
+    re-reading the budget there exceeds it however careful this function is.
+
+    A RESERVATION WAS CONSIDERED AND REFUSED. Counting quorums in flight
+    against the ceiling here would make the admission check bind under
+    concurrency, and it would buy a liveness failure worth more than it saves:
+    one crashed quorum leaves an ``open.json`` with no ``final.json``, that
+    phase's reservation never clears, and every later question in the phase
+    escalates -- the run looking correctly cautious while deciding nothing,
+    which is the failure shape the recorded repository root is a standing rule
+    against. The cost of NOT reserving is bounded and visible: at worst three
+    dispatches spent on a question that finalisation then escalates.
+    """
+    run_dir = _run_path(run_dir)
+    #: VALIDATED BEFORE THE LOCK, for ``locked_tracker_update``'s reason: a
+    #: foreign, missing or malformed run is a read-only stop, and it must stop
+    #: without this call first creating a lock file inside a directory that
+    #: belongs to somebody else's tool.
+    validate_run(run_dir)
+    record_file = _record_path(question_record)
+    try:
+        text = record_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise QuorumError(
+            f"no readable question record at {str(record_file)!r}: {exc}; a "
+            "quorum cannot be opened on a question nobody wrote down") from exc
+    record = parse_question(text)
+    problems = check_admissible(record)
+    if problems:
+        #: Refused here rather than at the answers that come back. Three brains
+        #: are dispatched at a question or none are, and an inadmissible
+        #: question answered by three brains is three dispatches, a decision
+        #: record and a run that has decided something it declared itself unable
+        #: to ask.
+        raise QuorumError(
+            f"the question is inadmissible ({problems}); a quorum is never "
+            "opened on a question the run has already established it may not "
+            "ask")
+    for owner in record["owners"]:
+        if not _OWNER.fullmatch(owner):
+            raise QuorumSchemaInvalid(
+                f"owner {owner!r} is not a path component; each brain's payload "
+                f"is published as {_PAYLOAD_PREFIX}<owner>.json inside the "
+                "question's own directory, so an owner carrying a separator or "
+                "a leading dot writes that brain's payload somewhere no audit "
+                "trail will look for it")
+    qid = derive_qid(record["question"], record["axis"])
+    with _exclusive_lock(run_dir, timeout_s=timeout_s):
+        return _open_under_lock(run_dir, qid, record, text)

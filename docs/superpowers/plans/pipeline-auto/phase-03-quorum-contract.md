@@ -261,7 +261,7 @@ A budget extension carries `Decision action: quorum.extend-budget`, `Provenance:
 ## Verification suite for this phase
 
 ```bash
-python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -v
+python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v
 git diff --name-only c8bddd610119f52b54bf077d284c7f5d8362ae77..HEAD -- plugins/superb/skills/pipeline/
 git status --short
 ```
@@ -412,7 +412,7 @@ class DeriveQid(unittest.TestCase):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k "QuorumConstants or DeriveQid" -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k QuorumConstants -k DeriveQid -v`
 Expected: FAIL with `AttributeError: module 'pipeline_auto_state' has no attribute 'RUNGS'`
 
 - [ ] **Step 3: Write the implementation**
@@ -483,7 +483,7 @@ Add `from types import MappingProxyType` and `import hashlib`, `import json`, `i
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k "QuorumConstants or DeriveQid" -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k QuorumConstants -k DeriveQid -v`
 Expected: PASS (6 tests)
 
 - [ ] **Step 5: Commit**
@@ -557,7 +557,7 @@ class ValidateBrainResponse(unittest.TestCase):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k ValidateBrainResponse -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k ValidateBrainResponse -v`
 Expected: FAIL with `AttributeError: module 'pipeline_auto_state' has no attribute 'validate_brain_response'`
 
 - [ ] **Step 3: Write the implementation**
@@ -657,7 +657,7 @@ def validate_brain_response(payload: dict) -> list[str]:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k ValidateBrainResponse -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k ValidateBrainResponse -v`
 Expected: PASS (10 tests)
 
 - [ ] **Step 5: Commit**
@@ -792,7 +792,7 @@ class EffectiveRung(unittest.TestCase):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k EffectiveRung -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k EffectiveRung -v`
 Expected: FAIL with `AttributeError: module 'pipeline_auto_state' has no attribute 'effective_rung'`
 
 - [ ] **Step 3: Write the implementation**
@@ -881,7 +881,7 @@ def effective_rung(response: dict, repo_root: str) -> str:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k EffectiveRung -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k EffectiveRung -v`
 Expected: PASS (13 tests)
 
 - [ ] **Step 5: Commit**
@@ -994,7 +994,7 @@ class FindingsTemplate(unittest.TestCase):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k "ParseDecisions or ProjectDecisions or FindingsTemplate" -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k ParseDecisions -k ProjectDecisions -k FindingsTemplate -v`
 Expected: FAIL with `AttributeError: module 'pipeline_auto_state' has no attribute 'parse_decisions'`
 
 - [ ] **Step 3: Write the implementation**
@@ -1142,7 +1142,7 @@ def project_decisions(decisions: dict) -> str:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k "ParseDecisions or ProjectDecisions or FindingsTemplate" -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k ParseDecisions -k ProjectDecisions -k FindingsTemplate -v`
 Expected: PASS (8 tests)
 
 - [ ] **Step 5: Commit**
@@ -1244,7 +1244,7 @@ class DecisionDepth(unittest.TestCase):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k "CheckContradiction or DecisionDepth" -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k CheckContradiction -k DecisionDepth -v`
 Expected: FAIL with `AttributeError: module 'pipeline_auto_state' has no attribute 'check_contradiction'`
 
 - [ ] **Step 3: Write the implementation**
@@ -1293,7 +1293,7 @@ def decision_depth(decisions: dict, consistent_with: list) -> int:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k "CheckContradiction or DecisionDepth" -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k CheckContradiction -k DecisionDepth -v`
 Expected: PASS (8 tests)
 
 - [ ] **Step 5: Commit**
@@ -1442,7 +1442,7 @@ class BuildPayload(unittest.TestCase):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k "CheckAdmissible or BuildPayload" -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k CheckAdmissible -k BuildPayload -v`
 Expected: FAIL with `AttributeError: module 'pipeline_auto_state' has no attribute 'check_admissible'`
 
 Also write `tests/fixtures/quorum/question-record.json` containing the `QUESTION` dict above, so later tasks and P09 can load the same record from disk.
@@ -1579,7 +1579,7 @@ def build_payload(qid: str, brain_index: int, *, run_dir: str) -> dict:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k "CheckAdmissible or BuildPayload" -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k CheckAdmissible -k BuildPayload -v`
 Expected: PASS (15 tests)
 
 - [ ] **Step 5: Commit**
@@ -1728,7 +1728,7 @@ class QuorumBudget(unittest.TestCase):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k QuorumBudget -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k QuorumBudget -v`
 Expected: FAIL with `AttributeError: module 'pipeline_auto_state' has no attribute 'quorum_budget'`
 
 - [ ] **Step 3: Write the implementation**
@@ -1846,7 +1846,7 @@ def quorum_budget(run_dir: str, *, phase: str) -> dict:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k QuorumBudget -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k QuorumBudget -v`
 Expected: PASS (9 tests)
 
 - [ ] **Step 5: Commit**
@@ -1969,7 +1969,7 @@ def _dumps_for_test(value):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k OpenQuorum -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k OpenQuorum -v`
 Expected: FAIL with `AttributeError: module 'pipeline_auto_state' has no attribute 'open_quorum'`
 
 - [ ] **Step 3: Write the implementation**
@@ -2056,7 +2056,7 @@ def open_quorum(run_dir: str, *, question_record: str) -> dict:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k OpenQuorum -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k OpenQuorum -v`
 Expected: PASS (6 tests)
 
 - [ ] **Step 5: Commit**
@@ -2152,7 +2152,7 @@ class RecordBrainResponse(unittest.TestCase):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k RecordBrainResponse -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k RecordBrainResponse -v`
 Expected: FAIL with `AttributeError: module 'pipeline_auto_state' has no attribute 'record_brain_response'`
 
 - [ ] **Step 3: Write the implementation**
@@ -2209,7 +2209,7 @@ def quorum_needs_redispatch(run_dir: str, *, qid: str) -> list[str]:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k RecordBrainResponse -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k RecordBrainResponse -v`
 Expected: PASS (7 tests)
 
 - [ ] **Step 5: Commit**
@@ -2301,7 +2301,7 @@ class ClassifyQuorum(unittest.TestCase):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k ClassifyQuorum -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k ClassifyQuorum -v`
 Expected: FAIL with `AttributeError: module 'pipeline_auto_state' has no attribute 'classify_quorum'`
 
 - [ ] **Step 3: Write the implementation**
@@ -2350,7 +2350,7 @@ def classify_quorum(run_dir: str, *, qid: str, live_owners: list) -> dict:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k ClassifyQuorum -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k ClassifyQuorum -v`
 Expected: PASS (6 tests)
 
 - [ ] **Step 5: Commit**
@@ -2586,7 +2586,7 @@ class FinalizeAdoption(unittest.TestCase):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k "ClusterRung or GroupResponses or FinalizeAdoption" -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k ClusterRung -k GroupResponses -k FinalizeAdoption -v`
 Expected: FAIL with `AttributeError: module 'pipeline_auto_state' has no attribute 'cluster_rung'`
 
 - [ ] **Step 3: Write the implementation**
@@ -2819,7 +2819,7 @@ def _ensure_decision_recorded(run_dir, result: dict) -> None:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k "ClusterRung or GroupResponses or FinalizeAdoption" -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k ClusterRung -k GroupResponses -k FinalizeAdoption -v`
 Expected: PASS (17 tests)
 
 - [ ] **Step 5: Commit**
@@ -2989,7 +2989,7 @@ class QuorumTrackerRows(unittest.TestCase):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k "FinalizeRejections or QuorumTrackerRows" -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k FinalizeRejections -k QuorumTrackerRows -v`
 Expected: FAIL — `AssertionError: 'adopted' != 'rejected-contradicts-human'` from the Task 11 stub
 
 - [ ] **Step 3: Write the implementation**
@@ -3122,7 +3122,7 @@ def quorum_tracker_rows(run_dir: str) -> list[dict]:
 Run the full phase suite:
 
 ```bash
-python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -v
+python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v
 git diff --name-only c8bddd610119f52b54bf077d284c7f5d8362ae77..HEAD -- plugins/superb/skills/pipeline/
 git status --short
 ```
@@ -3270,7 +3270,7 @@ class ReopenRaisedBar(unittest.TestCase):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -k ReopenRaisedBar -v`
+Run: `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -k ReopenRaisedBar -v`
 Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribute 'derive_reopen_qid'`, and case 1 fails with `'adopted' != 'escalated'` once that is added, which is the gap itself.
 
 - [ ] **Step 3: Write the implementation**
@@ -3430,7 +3430,7 @@ working as intended: a missing column fails at the write, never silently.
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
-python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py -v
+python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v
 git diff --name-only c8bddd610119f52b54bf077d284c7f5d8362ae77..HEAD -- plugins/superb/skills/pipeline/
 git status --short
 ```

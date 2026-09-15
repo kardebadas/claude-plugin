@@ -6,7 +6,7 @@
 
 **Architecture:** One committed, facts-only file per scenario under `tests/pressure/stimuli/`. The pass/fail predicates and the rationalization watchlists live in `tests/pressure/oracles.md`, which sits in the skill tree but is kept out of the repository by a committed self-ignoring `.gitignore`, so a P08 agent that greps the repo cannot find the answers. Every dispatch produces exactly one class-labelled record under `tests/pressure/records/<class>/`; a committed validator refuses a record whose internal label disagrees with its directory, so the separation between real-agent and simulated evidence is a test that fails, not a note in a README. One committed curated `RED-baseline.md` carries the verbatim rationalizations forward — P08 depends on that file, not on the transcripts, so it survives running in a different workspace.
 
-**Tech Stack:** Python 3 standard library only. `pytest` for the committed tests. Markdown for stimuli, oracles and evidence. The Claude Code `Agent` tool for dispatch. Git.
+**Tech Stack:** Python 3 standard library only, tests included. **`pytest` is NOT installed on this machine** — tests are `unittest.TestCase`, discovered with `python3 -m unittest discover -s <dir> -v` and never `-t .` (the hyphenated `pipeline-auto` directory makes top-level-relative discovery raise `ImportError`). Markdown for stimuli, oracles and evidence. The Claude Code `Agent` tool for dispatch. Git.
 
 **Spec:** `docs/superpowers/specs/2026-09-14-pipeline-auto-design.md`
 
@@ -109,7 +109,7 @@ Create `plugins/superb/skills/pipeline-auto/tests/test_pressure_stimuli.py`:
 
 from pathlib import Path
 
-import pytest
+import unittest
 
 PRESSURE = Path(__file__).parent / "pressure"
 STIMULI = PRESSURE / "stimuli"
@@ -133,7 +133,10 @@ CONTAMINANTS = ("pipeline-auto", "SKILL.md", "superpowers:", "the correct")
 FORBIDDEN = ORACLE_TOKENS + PLACEHOLDERS + CONTAMINANTS
 
 
-@pytest.mark.parametrize("stimulus_id", STIMULUS_IDS)
+# AS BUILT (commit 08e8640): pytest is not installed here, so the two
+# parametrized families are generated as one bound TestCase method per
+# scenario rather than via subTest, which keeps the per-scenario count
+# observable in the runner's output. See the committed test module.
 def test_stimulus_file_exists_and_is_headed_by_its_id(stimulus_id):
     path = STIMULI / f"{stimulus_id}.md"
     assert path.is_file(), f"{path} is missing"
@@ -148,7 +151,10 @@ def test_stimuli_directory_holds_exactly_the_declared_scenarios():
     ]
 
 
-@pytest.mark.parametrize("stimulus_id", STIMULUS_IDS)
+# AS BUILT (commit 08e8640): pytest is not installed here, so the two
+# parametrized families are generated as one bound TestCase method per
+# scenario rather than via subTest, which keeps the per-scenario count
+# observable in the runner's output. See the committed test module.
 def test_stimulus_leaks_nothing_an_agent_must_not_see(stimulus_id):
     text = (STIMULI / f"{stimulus_id}.md").read_text(encoding="utf-8")
     for token in FORBIDDEN:
@@ -182,7 +188,7 @@ predicate until `git check-ignore` confirms the rule works, and then by Task 11'
 
 Run:
 ```bash
-cd /path/to/the/repo && python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pressure_stimuli.py -v
+cd /path/to/the/repo && python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v
 ```
 Expected: every test FAILS — `tests/pressure/` does not exist.
 
@@ -512,7 +518,7 @@ Additional facts, applying to the scenario above:
 
 Run:
 ```bash
-cd /path/to/the/repo && python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pressure_stimuli.py -v
+cd /path/to/the/repo && python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v
 ```
 Expected: 23 passed (10 + 1 + 10 + 1 + 1).
 
@@ -705,7 +711,7 @@ def test_missing_directory_is_reported(tmp_path):
 
 Run:
 ```bash
-cd /path/to/the/repo && python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_baseline_evidence.py -v
+cd /path/to/the/repo && python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v
 ```
 Expected: collection error — `ModuleNotFoundError: No module named 'check_baseline_evidence'`.
 
@@ -859,7 +865,7 @@ if __name__ == "__main__":
 
 Run:
 ```bash
-cd /path/to/the/repo && python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_baseline_evidence.py -v
+cd /path/to/the/repo && python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v
 ```
 Expected: 11 passed.
 
@@ -1899,7 +1905,7 @@ watch the test fail.
 
 ```bash
 git add -f plugins/superb/skills/pipeline-auto/tests/pressure/oracles.md
-python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_oracle_disclosure_order.py -v
+python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v
 ```
 Expected: `test_oracle_is_never_both_tracked_and_ignored` **FAILS** with "oracles.md is both tracked and ignored". That is the maintainer who force-adds the oracle without touching `.gitignore`.
 
@@ -1916,7 +1922,7 @@ Expected: `git status --short` prints nothing again.
 mv plugins/superb/skills/pipeline-auto/tests/pressure/records/actual-agent/p01-S07-baseline-01.md /tmp/p01-S07-held.md
 sed -i '/^oracles\.md$/d' plugins/superb/skills/pipeline-auto/tests/pressure/.gitignore
 git add plugins/superb/skills/pipeline-auto/tests/pressure/oracles.md
-python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_oracle_disclosure_order.py -v
+python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v
 ```
 Expected: `test_oracle_is_published_only_after_the_red_measurement_is_complete` **FAILS** with "the records tree does not hold a validated ACTUAL_AGENT baseline for every scenario". That is the maintainer who publishes the answers while a scenario is still unmeasured — the failure that silently contaminates whatever is captured next.
 
@@ -1968,7 +1974,7 @@ records/
 git add plugins/superb/skills/pipeline-auto/tests/pressure/.gitignore \
         plugins/superb/skills/pipeline-auto/tests/pressure/oracles.md \
         plugins/superb/skills/pipeline-auto/tests/test_oracle_disclosure_order.py
-python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pressure_stimuli.py \
+python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests \
                  plugins/superb/skills/pipeline-auto/tests/test_baseline_evidence.py \
                  plugins/superb/skills/pipeline-auto/tests/test_oracle_disclosure_order.py -v
 ```
@@ -2003,7 +2009,7 @@ Expected: the `git diff --name-only` prints nothing; the commit contains exactly
 - [ ] **Step 1: Run the phase's exact ordered command tuple**
 
 ```bash
-python3 -m pytest plugins/superb/skills/pipeline-auto/tests/test_pressure_stimuli.py \
+python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests \
                  plugins/superb/skills/pipeline-auto/tests/test_baseline_evidence.py \
                  plugins/superb/skills/pipeline-auto/tests/test_oracle_disclosure_order.py -v
 python3 plugins/superb/skills/pipeline-auto/tests/check_baseline_evidence.py \
@@ -2014,7 +2020,7 @@ git status --short
 Expected, in order: 38 passed; `OK: 10 ACTUAL_AGENT baselines, class separation intact`; **nothing**; **nothing**.
 
 The tuple names the three test files explicitly rather than the `tests/` directory
-because P01 and P02 are independent and may run concurrently: pointing pytest at
+because P01 and P02 are independent and may run concurrently: pointing discovery at
 the directory would collect P02's `test_pipeline_auto_state.py`, which may not
 exist yet or may be mid-RED.
 

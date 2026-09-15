@@ -102,7 +102,7 @@ git diff --name-only -- plugins/superb/skills/pipeline/
 git status --short
 ```
 
-The third command must print **nothing**. Any output means `skills/pipeline/` was modified and the phase fails. `python3 -m pytest plugins/superb/skills/pipeline-auto/tests/ -v` is the master plan's form and collects the same `unittest.TestCase` classes wherever pytest is installed; `unittest discover` is the form that runs with the standard library alone, which this repository's constraint requires.
+The third command must print **nothing**. Any output means `skills/pipeline/` was modified and the phase fails. `python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests -v` is the master plan's form and collects the same `unittest.TestCase` classes wherever pytest is installed; `unittest discover` is the form that runs with the standard library alone, which this repository's constraint requires.
 
 ---
 

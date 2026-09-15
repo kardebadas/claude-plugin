@@ -127,6 +127,26 @@ quorum becoming a chat channel:
    interface or the spec. The vocabulary is closed because adoption checks it
    against the irreversible-axis list; an unenumerated value would pass that
    check by not matching anything, which fails open.
+**Two different things are called "blast" and they must not share a validator.**
+A reviewer found the closed vocabulary above being applied to an escalation row's
+`Blast` column, where it rejected values a specified writer actually emits
+(`phase-03-quorum-contract.md:3089-3097` joins a quorum payload's axis list, e.g.
+`storage-engine`, `external-service`, or `-` when empty).
+
+- A **question's admissibility blast radius** is the closed vocabulary above:
+  `task | phase | run | contract`. It answers "how far does deciding this
+  reach", and it is closed because adoption checks it against the
+  irreversible-axis list, where an unenumerated value fails open.
+- An **escalation row's `Blast` column** is a free token list of the axes the
+  escalation touches. It is descriptive, carried for the human reading the
+  batch, and nothing branches on it. P02 validates it as tokens only; P06 owns
+  any enumeration it later needs.
+
+Validating the second with the first fails closed — a loud halt on legitimate
+state — which is safer than the reverse but still wrong. Keep the names distinct
+in code (`_BLAST_RADII` for the closed set, `_TOKEN` for the column grammar)
+even though the spec text uses "blast" for both.
+
 4. It passes the options test from `plugins/superb/agents/architecture-discovery.md:54-69`
    — blank the title, keep the options, and a reader can still tell what is being
    decided.

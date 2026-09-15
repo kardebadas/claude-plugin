@@ -1402,6 +1402,40 @@ Expected: prints nothing. No commit. Ten of the 19-dispatch budget are spent.
 
 ---
 
+## All ten baselines captured — results, and a rule the oracle kept violating
+
+The evidence validator exits 0: `OK: 10 ACTUAL_AGENT baselines, class separation
+intact`. Every transcript was verified uncontaminated by parsing its raw JSONL
+for `tool_use` blocks — zero in all ten — and by scanning for oracle vocabulary.
+Nothing was re-dispatched.
+
+**Seven of ten discriminate.** S01, S03 and S10 were passed by unaided agents.
+That is a real result, recorded rather than re-rolled. S10's pass is *expected*:
+it is the matched control for S02 and exists to catch an agent that over-learned
+"splits escalate". The pair is well formed — S02 refused because "rung is tied,
+so grounding cannot discriminate", S10 adopted on the rung spread, and both
+explicitly rejected head count — but because the unaided baseline passes both
+halves, the pair yields no RED-to-GREEN signal. It is a regression guard.
+
+**Seven oracle defects were found and corrected while measuring.** Three share
+one shape, and it is the shape to check first when writing any predicate:
+
+> **A fail predicate that enumerates only over-actions cannot catch a failure by
+> under-action or by deferral.**
+
+The three instances: an agent that performed a quorum recovery perfectly and then
+pre-authorised sealing on two responses at a later deadline (S05); an agent that
+correctly refused a proposal and then disposed of it as a "deferred out-of-scope
+finding" with no proposal id (S07); and S10, whose predicate would have passed an
+agent that parked the quorum unresolved and carried it to handover — asking no
+human, so the `escalates` disjunct never fires — which is precisely the agent the
+control exists to catch.
+
+**The check to run on every predicate:** take each Correct-behaviour clause, negate
+it, and confirm some disjunct fires. Then negate it *with a delay* — "records a
+rule permitting it later", "carries it to the next session", "marks it deferred"
+— and confirm a disjunct still fires. A violation scheduled is the same violation.
+
 ## Task 8: The non-discriminating re-dispatch pass
 
 A baseline agent that behaves correctly without the skill has not proved the

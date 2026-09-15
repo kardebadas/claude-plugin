@@ -9,6 +9,15 @@ lines verbatim. Both mistakes are silent: a maintainer tidying
 complains, and one who never tidies it strands P08 and nothing complains then
 either. So the ordering is asserted here rather than remembered.
 
+Both directions are asserted, and they are asserted by two separate methods
+because one implies nothing about the other.
+``test_oracle_is_published_only_after_the_red_measurement_is_complete`` runs
+when the oracle is published and refuses a baseline that is not yet finished;
+``test_oracle_is_not_withheld_once_the_red_measurement_is_complete`` runs when
+the measurement is finished and refuses an oracle that is still hidden. The
+second was absent from the first version of this file, and a clone with the
+oracle re-hidden -- the state it exists to reject -- reported success.
+
 What is asserted is the **ordering**, never the permanent presence of any
 ignore line. ``records/``, ``RECORD-TEMPLATE.md`` and ``scoring.md`` are
 permanently ignored and are pinned by ``test_record_template_ignored.py``;
@@ -92,9 +101,45 @@ def _commits_touching(path: Path) -> list[str]:
     return completed.stdout.split()
 
 
+def why_the_red_measurement_is_incomplete() -> str | None:
+    """Why P01 is still measuring, or ``None`` once the expiry has passed.
+
+    Deliberately blind to ``oracles.md``. Reading the oracle's own status to
+    decide whether the oracle is due would make the answer agree with the
+    question: a never-published oracle would simply report that it is not time
+    yet, forever, which is the exact failure this module has to be able to see.
+    The expiry is observable from two things the oracle has no say in -- that
+    ``RED-baseline.md`` has entered the history carrying an outcome for every
+    scenario, and, where the workspace that ran P01 still has its records tree,
+    that the tree validates. A fresh clone has no records tree (``records/`` is
+    permanently ignored and never published) and the committed baseline is the
+    proof that survives.
+    """
+    if not is_committed(RED_BASELINE):
+        return "RED-baseline.md has not entered the history yet"
+    try:
+        baseline_text = RED_BASELINE.read_text(encoding="utf-8")
+    except OSError as error:  # pragma: no cover - a truncated checkout
+        return f"RED-baseline.md cannot be read in this workspace: {error}"
+    missing = [sid for sid in STIMULUS_IDS if sid not in baseline_text]
+    if missing:
+        return "RED-baseline.md records no outcome for " + ", ".join(missing)
+    if RECORDS.is_dir() and check_tree(RECORDS):
+        return ("the records tree does not yet hold a validated ACTUAL_AGENT "
+                "baseline for every scenario")
+    return None
+
+
 @unittest.skipUnless(_git_available(), "not a git working tree")
 class OracleDisclosureOrder(unittest.TestCase):
-    """The oracle is published after the measurement, and never before it."""
+    """The oracle is published once the measurement is complete, never before.
+
+    Two obligations, not one. Early publication contaminates the baselines
+    still to be captured; withholding the oracle after the baseline lands
+    strands P08. Each has its own method below, each conditioned on the side of
+    the expiry the repository is actually on, so neither can be satisfied by
+    the repository simply standing still.
+    """
 
     def test_oracle_is_published_only_after_the_red_measurement_is_complete(self):
         if not is_tracked(ORACLES):
@@ -123,6 +168,45 @@ class OracleDisclosureOrder(unittest.TestCase):
                 check_tree(RECORDS), [],
                 "oracles.md is tracked but the records tree does not hold a "
                 "validated ACTUAL_AGENT baseline for every scenario")
+
+    def test_oracle_is_not_withheld_once_the_red_measurement_is_complete(self):
+        """The other half of the ordering: secrecy expires, and must be let go.
+
+        The assertion above refuses an oracle published too early. On its own
+        that is a one-way guard, and the cheapest way to satisfy a one-way
+        guard is never to publish at all -- which passes it in silence and
+        costs P08 the ``GREEN predicate:`` lines it asserts against verbatim.
+        P01's verifier re-hid the oracle in a clone, with ``RED-baseline.md``
+        committed and all ten records validating, and the suite still reported
+        success. This is the assertion that was missing.
+
+        Note the trigger. The sibling assertions ask whether the oracle is
+        tracked or committed and skip when it is not; that is right for them
+        and is exactly what leaves this state unreachable, so this one runs
+        precisely where they stand down -- on the measurement's completeness,
+        which the oracle cannot influence. Withholding it past that point buys
+        nothing: P07 writes the same correct behaviours into ``SKILL.md``
+        deliberately.
+        """
+        reason = why_the_red_measurement_is_incomplete()
+        if reason is not None:
+            self.skipTest(f"the RED measurement is not complete: {reason}")
+
+        self.assertTrue(
+            is_tracked(ORACLES),
+            "the RED measurement is complete but oracles.md is not tracked: "
+            "secrecy has expired and withholding the oracle now strands P08, "
+            "which asserts against its 'GREEN predicate:' lines verbatim")
+        self.assertTrue(
+            is_committed(ORACLES),
+            "the RED measurement is complete and oracles.md is staged but not "
+            "committed: P08 reads it out of the history, not out of an index")
+        self.assertFalse(
+            is_ignored(ORACLES),
+            "the RED measurement is complete but oracles.md is still matched "
+            "by an ignore rule: drop that one line from "
+            "tests/pressure/.gitignore -- and only that line, the rules around "
+            "it are permanent")
 
     def test_oracle_is_ignored_while_it_is_unpublished(self):
         if is_tracked(ORACLES):

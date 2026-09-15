@@ -16,6 +16,22 @@
 
 ---
 
+## Carried forward from P02 Task 7 (commit `b7cfc97`)
+
+**The three-round bound is now enforced at parse time.** A fourth `## Fix Rounds`
+row for one scope does not parse. So this phase must route to escalation
+**before** writing that row — discovering the bound by failing to write is too
+late, and the tracker will refuse the write rather than record the halt.
+
+**`Open` is a round's returned count, not a running total.** A task may be `[x]`
+with an earlier round showing `Open 1`, provided a later round resolved it and
+the highest round is `accepted`. Do not rewrite an earlier round's `Open` to
+zero when a fix lands — that erases the finding's history, which is the record
+stage 11 reads.
+
+**Oscillation is detected only within one scope's own history.** A fix that
+re-breaks a finding resolved in a different scope's round is invisible here.
+
 ## Global Constraints
 
 Copied verbatim from the master plan. Every task's requirements implicitly include this section.

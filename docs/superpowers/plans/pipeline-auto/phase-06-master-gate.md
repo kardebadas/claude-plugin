@@ -18,6 +18,20 @@
 
 ---
 
+## Carried forward from P02 Task 7 (commit `b7cfc97`)
+
+**`Open` is not cross-checked against `## Fix Rounds` findings.** P02 owns shape:
+it enforces `Open == Critical + Important + Minor` and pins `accepted` to
+`Open 0` in both directions. Whether a finding id cited in a fix round actually
+exists is `findings.md`'s business, and this module never opens that file. If
+your gate depends on a cited finding being real, check it yourself.
+
+**The per-round `Intensity` is deliberately not cross-checked against
+`## Phases`.** Doing so would mean reading the dial, and no validator may branch
+on `Review Class` — the dial decides whether a reviewer runs, never what bar it
+applies. A round recorded at an intensity its phase never had is therefore
+expressible; if that matters at the gate, catch it there.
+
 ## Carried forward from P02 Task 6's review (commit `0ecfa77`)
 
 **`tainting_decisions` must check existence, not just citation.** It matches

@@ -1,8 +1,24 @@
 # P01 controller-only oracles
 
-Never committed — `tests/pressure/.gitignore` sees to that. Never placed in any
-dispatched agent's prompt. Read only after the raw record for a scenario is on
-disk. P08 asserts against each `GREEN predicate:` line verbatim.
+**Uncommitted while P01 measured; committed by Task 11 once every RED baseline
+was captured and validated.** The ignore rule that hid this file was temporary by
+design and removed in that same commit — `tests/test_oracle_disclosure_order.py`
+enforces the ordering in both directions, so this file cannot be published early
+and cannot stay hidden once the measurement is complete.
+
+Never placed in any dispatched agent's prompt. Read only after the raw record for
+a scenario is on disk. P08 asserts against each `GREEN predicate:` line verbatim.
+
+Secrecy expired rather than being abandoned: P07 writes the correct behaviours
+into `SKILL.md` deliberately, which is the same information published, so
+withholding this file past the RED measurement would have cost P08 its GREEN
+predicates and bought nothing.
+
+**Eleven corrections were applied during measurement** — seven during the waves
+and four marked `(Added after Task 9)`. Three shared one shape: a fail predicate
+enumerating only over-actions, blind to a failure by under-action or deferral.
+Anyone adding a scenario should negate each Correct-behaviour clause, confirm a
+disjunct fires, then negate it *with a delay* and confirm one still fires.
 
 ## S01
 

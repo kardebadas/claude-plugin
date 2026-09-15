@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Ensure and print the scratch directory a pipeline-auto run uses for its
+# short-lived artifacts: task briefs, implementer reports, review packages.
+#
+# Stage 12 gates completion on a clean `git status --short`, and stages 08-11
+# write large ephemera throughout. A self-ignoring `.gitignore` keeps all of it
+# out of `git status` and out of an accidental commit without modifying any
+# tracked file — in particular without touching the repository's own
+# `.gitignore`, which belongs to the user and not to this run.
+#
+# It lives INSIDE the run directory, never under `.superpowers/sdd`. That
+# location is the durability hole this skill exists to close: a workspace keyed
+# to the repository rather than to the run is shared by every run in it, is not
+# preserved beside the tracker it belongs to, and cannot be resumed from.
+#
+# The run directory is therefore an ARGUMENT and is never guessed. The script
+# this one descends from took none and derived its directory from
+# `git rev-parse --show-toplevel`; keeping that fallback would mean a caller
+# who forgot the argument silently wrote one run's ephemera into a path shared
+# by all of them, and the mistake would look like success.
+#
+# Usage: sdd-workspace <run-dir>
+
+set -euo pipefail
+
+if [ "$#" -ne 1 ]; then
+	printf 'sdd-workspace: expected exactly one run directory, got %s\n' "$#" >&2
+	printf 'usage: sdd-workspace <run-dir>\n' >&2
+	exit 2
+fi
+
+run_dir=$1
+
+# Refused, never created. The run directory is made by `initialize_run`
+# alongside the tracker that gives it meaning; a `scratch/` conjured under a
+# mistyped path is a worker writing its report where nothing will look for it,
+# and a run whose briefs have silently gone somewhere else reports itself
+# healthy right up to the gate.
+if [ ! -d "$run_dir" ]; then
+	printf 'sdd-workspace: %s is not a run directory; start the run first\n' \
+		"$run_dir" >&2
+	exit 1
+fi
+
+dir="$run_dir/scratch"
+mkdir -p "$dir"
+
+# `*` matches every entry in this directory including this file itself, so the
+# ignore rule needs no companion edit anywhere else. Rewritten on every call
+# rather than created once: the directory is re-ensured before each brief, and
+# an ignore file that was deleted or truncated in between would let the whole
+# scratch tree surface in `git status` at the gate. Nothing else in `scratch/`
+# is touched — a brief a worker is still reading must survive the next call.
+printf '*\n' >"$dir/.gitignore"
+
+cd "$dir" && pwd

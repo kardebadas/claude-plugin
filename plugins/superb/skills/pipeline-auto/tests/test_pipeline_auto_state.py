@@ -11,6 +11,7 @@ import multiprocessing
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -22,6 +23,8 @@ from unittest import mock
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 FIXTURES = SKILL_DIR / "tests" / "fixtures"
+TEMPLATES = SKILL_DIR / "templates"
+SCRIPTS = SKILL_DIR / "scripts"
 
 #: The *real* fixtures of the *other* skill, read at their real path rather than
 #: copied here. A copy would drift from the file `superb:pipeline` actually
@@ -5049,6 +5052,417 @@ class PublishImmutableTests(unittest.TestCase):
             os.umask(previous)
         self.assertEqual(path.stat().st_mode & 0o777, 0o644)
         self.assertEqual(pas.TRACKER_MODE & 0o022, 0)
+
+#: The four cells a controller fills in when it copies `templates/progress.md`.
+#: Spelled once, here, because two tests read them: the expansion check below
+#: and the `validate_run` check after it. Every value is one the module's own
+#: argument checks in `initialize_run` accept, so a template that expands into
+#: something those checks reject fails loudly rather than being papered over by
+#: a test that had quietly chosen laxer inputs than the real entry point takes.
+TEMPLATE_RUN_ID = "2026-09-14-example"
+TEMPLATE_BASE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+TEMPLATE_TARGET_BRANCH = "feat/example"
+TEMPLATE_WORKER_LIMIT = 4
+
+
+def progress_template() -> str:
+    return (TEMPLATES / "progress.md").read_text(encoding="utf-8")
+
+
+def decisions_template() -> str:
+    return (TEMPLATES / "decisions.md").read_text(encoding="utf-8")
+
+
+def filled_progress_template() -> str:
+    """`templates/progress.md` with its four placeholders filled in.
+
+    Placeholder EXPANSION, which is what a controller copying the template
+    does; not row surgery, which is what `with_row` and `rewritten_row` exist
+    for and what a bare `str.replace` over a table row must never be. It still
+    goes through `swap`, because the fault both share is the same one: a
+    pattern that is no longer in the file makes `str.replace` a silent no-op,
+    and an expansion test built on one compares the UNEXPANDED template against
+    `initialize_run`'s output, fails, and sends the reader after the wrong bug
+    — or, worse, passes if the template were ever committed pre-expanded.
+    """
+    text = progress_template()
+    text = swap("<base_commit>", TEMPLATE_BASE_COMMIT, text)
+    text = swap("<target_branch>", TEMPLATE_TARGET_BRANCH, text)
+    text = swap("<worker_limit>", str(TEMPLATE_WORKER_LIMIT), text)
+    #: Last, and deliberately so: the run id also appears inside the three
+    #: artifact paths, and expanding it first would leave nothing for the
+    #: `swap` above to find only if one of the others were spelled with it.
+    return swap("<run_id>", TEMPLATE_RUN_ID, text)
+
+
+class ProgressTemplateTests(unittest.TestCase):
+    """`templates/progress.md` is the shape every later phase writes into.
+
+    The named fault is the template drifting from the renderer. A controller
+    that copies a template whose headers no longer match `_SECTIONS` produces a
+    tracker that fails validation on its FIRST read — at which point the run
+    has already started, the failure surfaces as a foreign-schema stop, and the
+    reader goes looking for a bug in whatever wrote the tracker rather than in
+    the file it was copied from. A template that disagrees with the validators
+    is worse than no template at all.
+    """
+
+    def test_the_template_round_trips_through_the_modules_own_parser(self):
+        """parse -> render must return the template byte for byte.
+
+        One assertion, and it subsumes the whole structural contract: marker,
+        title, the single blank line under the title, section identity, section
+        ORDER, every column header, every separator row, cell spacing, the
+        twelve stage rows, the run key order and the terminal newline. A
+        template that merely "looks right" fails here; only the canonical byte
+        sequence passes.
+        """
+        text = progress_template()
+        self.assertEqual(pas.render_tracker(pas.parse_tracker(text)), text)
+
+    def test_the_template_carries_the_placeholders_a_controller_fills_in(self):
+        """It is a TEMPLATE, not a snapshot of somebody's run.
+
+        Committing a real run's `progress.md` here would still round-trip and
+        still validate — and would hand every later run another run's id, base
+        commit and artifact paths. The four caller-supplied fields must be
+        unfilled, and nothing else may be: a placeholder left in `revision` or
+        `schema` is a cell no caller knows to fill.
+        """
+        run = pas.parse_tracker(progress_template())["run"]
+        self.assertEqual(
+            [key for key, value in run.items()
+             if value.startswith("<") and value.endswith(">")],
+            ["run_id", "base_commit", "target_branch", "worker_limit"])
+        self.assertEqual(run["schema"], pas.SCHEMA)
+        #: The run id is interpolated into three artifact paths as well as its
+        #: own cell, so an expansion that filled the cell and left the paths
+        #: would still look filled in. Stated as a count, against the file.
+        self.assertEqual(progress_template().count("<run_id>"), 4)
+
+    def test_the_expanded_template_is_byte_identical_to_initialize_run(self):
+        """The anti-drift check with teeth.
+
+        The other tests in this class prove the template is *a* valid tracker.
+        This one proves it is *the* tracker this module writes for a new run —
+        same defaults, same artifact paths, same starting revision, same first
+        transition. Without it the template can quietly acquire a `revision` of
+        1, a predicted `spec` path, or a stage 01 that is `pending`, and every
+        structural test above still passes while a controller that copied the
+        file starts its run one transition ahead of the record.
+        """
+        run_dir = empty_run(self)
+        pas.initialize_run(run_dir, run_id=TEMPLATE_RUN_ID,
+                           base_commit=TEMPLATE_BASE_COMMIT,
+                           target_branch=TEMPLATE_TARGET_BRANCH,
+                           worker_limit=TEMPLATE_WORKER_LIMIT)
+        self.assertEqual(filled_progress_template(),
+                         (run_dir / "progress.md").read_text(encoding="utf-8"))
+
+    def test_the_expanded_template_validates_and_names_the_first_action(self):
+        """Through the public entry point, and then acted on.
+
+        `validate_run` is the door every consumer uses, and `derive_next_action`
+        is the first question asked through it. A template that parses but
+        leaves no stage active is a tracker a resuming controller cannot act on
+        — twelve pending stages are monotone, so every ordering check waves
+        them through and the run has no next action at all.
+        """
+        run_dir = empty_run(self)
+        (run_dir / "progress.md").write_text(filled_progress_template(),
+                                             encoding="utf-8")
+        tracker = pas.validate_run(run_dir)
+        self.assertEqual(pas.derive_next_action(tracker),
+                         "dispatch-intent-readers")
+
+    def test_the_template_lists_twelve_stages_with_only_the_first_active(self):
+        """Stated as the whole column, not as twelve membership checks.
+
+        `assertIn(f"| {stage} | ", text)` passes on a template carrying twelve
+        rows in the wrong ORDER, twelve `pending` rows, or two `active` ones.
+        The order and the state sequence are the recovery story for stages
+        01-07, whose outputs Git cannot reconstruct.
+        """
+        stages = pas.parse_tracker(progress_template())["stages"]
+        self.assertEqual(tuple(row["stage"] for row in stages), pas.STAGES)
+        self.assertEqual([row["stage_state"] for row in stages],
+                         ["active"] + ["pending"] * (len(pas.STAGES) - 1))
+        self.assertEqual([row["next_action"] for row in stages[1:]],
+                         ["-"] * (len(pas.STAGES) - 1))
+
+    def test_the_template_carries_every_section_and_column_the_module_defines(self):
+        """The drift this task exists to catch, stated against `_SECTIONS`.
+
+        The round-trip test would also fail on a missing section, but it fails
+        with a parse error that names one heading. This one names the whole
+        disagreement — a section dropped, a section added, a column renamed —
+        which is what a reader needs when `_SECTIONS` has just been edited.
+        """
+        lines = progress_template().splitlines()
+        self.assertEqual(lines[0], pas.MARKER)
+        self.assertEqual(lines[1], pas.TITLE)
+        self.assertEqual([line for line in lines if line.startswith("## ")],
+                         [heading for heading, _, _ in pas._SECTIONS])
+        for _, _, header in pas._SECTIONS[1:]:
+            self.assertIn(pas._row(header), lines)
+        self.assertEqual(
+            tuple(pas.parse_tracker(progress_template())["run"]), pas._RUN_KEYS)
+
+    def test_every_table_but_the_stage_table_starts_empty(self):
+        """An empty `## Quorum` is the normal state of a healthy run.
+
+        A template shipping an example row would be copied into every run and
+        then have to be deleted by hand; the row that survives is a decision
+        nobody made, recorded as though somebody had.
+        """
+        tracker = pas.parse_tracker(progress_template())
+        self.assertEqual(
+            {key: tracker[key] for _, key, _ in pas._SECTIONS[2:]},
+            {key: [] for _, key, _ in pas._SECTIONS[2:]})
+
+
+class DecisionsTemplateTests(unittest.TestCase):
+    """`templates/decisions.md` is the run's audit trail, in skeleton.
+
+    It is not parsed by this module — `decisions.md` is named by `## Run` and
+    read by the phase that owns decision resolution. What this module DOES own
+    is the grammar of a decision id and the enum of grounding rungs, and a
+    template spelling either of those in a way the module rejects teaches every
+    later writer to spell it wrong.
+    """
+
+    def test_it_makes_provenance_grounding_and_status_mandatory(self):
+        """Provenance is the entire difference between a decision a machine
+        made and one the user made, and it is what contradiction routing reads
+        to tell them apart. A field the template omits is a field the writer
+        copying it never fills in.
+        """
+        text = decisions_template()
+        for required in ("## Axis Index", "- Question:", "- Answer:", "- Axis:",
+                         "- Provenance:", "- Action:", "- Scope:", "- Rung:",
+                         "- Depth:", "- Status:", "Append-only"):
+            with self.subTest(required=required):
+                self.assertIn(required, text)
+
+    def test_it_shows_both_provenance_values(self):
+        text = decisions_template()
+        self.assertIn("- Provenance: human", text)
+        self.assertIn("- Provenance: quorum", text)
+
+    def test_every_decision_id_it_spells_is_one_the_module_accepts(self):
+        """Through `_decision_id`, the module's own grammar, not by eye.
+
+        A template showing `Q-<hash>` or `H-n` teaches the writer a spelling
+        `_validate_tasks` refuses in a task's `Decisions` cell, and the run
+        finds out at the first task that cites a decision. Both namespaces must
+        appear, so a template that satisfied this by spelling no ids at all is
+        refused too.
+        """
+        #: Every delimiter the template actually puts around an id: a
+        #: table pipe, a backtick, a comma, a full stop, a closing
+        #: paren, or whitespace. Anything left is the id itself.
+        ids = re.findall(r"\b[HQ]-[^\s|,.)`]+", decisions_template())
+        self.assertTrue(any(name.startswith("H-") for name in ids), ids)
+        self.assertTrue(any(name.startswith("Q-") for name in ids), ids)
+        for name in ids:
+            with self.subTest(decision_id=name):
+                self.assertTrue(pas._decision_id(name),
+                                f"{name!r} is not a decision id this module accepts")
+
+    def test_it_names_every_legal_action_and_no_foreign_one(self):
+        """The closed vocabulary, asserted in BOTH directions.
+
+        Checking only that the four legal actions appear is satisfied by a
+        template that also lists `remediation.start-round` — the pipeline v2
+        action this skill dropped — and a writer copying it records an action
+        no validator in this run will ever honour. Two budgets mean two
+        authorities, so `quorum.extend-budget` and `dispatch.extend-budget` are
+        both named and neither substitutes for the other.
+        """
+        text = decisions_template()
+        for action in ("task.resume", "quorum.adopt", "quorum.extend-budget",
+                       "dispatch.extend-budget", "none"):
+            with self.subTest(action=action):
+                self.assertIn(action, text)
+        for foreign in ("review.resolve-question", "filesystem.authorize",
+                        "remediation.start-round"):
+            with self.subTest(foreign=foreign):
+                self.assertNotIn(foreign, text)
+
+    def test_it_names_the_rung_enum_and_never_a_rung_value(self):
+        """Names, never numbers.
+
+        A brain never types a number, and the adoption floor must not be
+        copyable: a `0.85` written into this template is a second source of
+        truth for a constant P03 owns, sitting in a file a hand edits. The
+        five names are here so an out-of-enum rung is recognisably wrong; the
+        five values are not, so nobody can lower the bar by editing a template.
+        """
+        text = decisions_template()
+        for rung in pas.RUNG_NAMES:
+            with self.subTest(rung=rung):
+                self.assertIn(rung, text)
+        for value in ("0.95", "0.85", "0.70", "0.55", "0.30"):
+            with self.subTest(value=value):
+                self.assertNotIn(value, text)
+
+    def test_it_states_the_one_legal_in_place_mutation(self):
+        """Append-only is the whole reason the file is worth reading later.
+        `Adopted -> Superseded` is the single exception, and a template that
+        says "append-only" without naming it invites a writer to delete.
+        """
+        text = decisions_template()
+        self.assertIn("Adopted", text)
+        self.assertIn("Superseded", text)
+
+
+class SddWorkspaceTests(unittest.TestCase):
+    """`scripts/sdd-workspace` — the self-ignoring `scratch/` inside the run.
+
+    Stage 12 gates completion on a clean `git status --short`, and stages 08-11
+    write task briefs, implementer reports and review packages that must never
+    reach a commit. If `scratch/` is not genuinely invisible to git, the final
+    gate of the whole run fails for a reason that has nothing to do with the
+    work — and the artifacts it holds are exactly the ones a reader needs to
+    diagnose that.
+    """
+
+    def git(self, repo: Path, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", str(repo), *args],
+                              capture_output=True, text=True, check=True)
+
+    def workspace(self, *args: str) -> subprocess.CompletedProcess:
+        """The script, run with the given arguments and NOT checked.
+
+        The cwd is this process's, which is inside a git work tree — that is
+        not incidental. The script this one descends from took no argument and
+        derived its directory from `git rev-parse --show-toplevel`, so a
+        re-point that forgot to delete the fallback would still succeed here
+        and quietly write to `.superpowers/sdd` in whatever repository the
+        controller happened to be standing in.
+        """
+        return subprocess.run([str(SCRIPTS / "sdd-workspace"), *args],
+                              capture_output=True, text=True)
+
+    def seeded_repo(self) -> tuple[Path, Path]:
+        repo = Path(tempfile.mkdtemp(prefix="pipeline-auto-repo-"))
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True,
+                       capture_output=True)
+        run_dir = repo / "docs" / "superpowers" / "runs" / "2026-09-14-example"
+        run_dir.mkdir(parents=True)
+        (run_dir / "progress.md").write_text("tracked\n", encoding="utf-8")
+        self.git(repo, "add", ".")
+        self.git(repo, "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+                 "commit", "-qm", "seed")
+        self.assertEqual(self.git(repo, "status", "--short").stdout, "")
+        return repo, run_dir
+
+    def test_scratch_is_created_inside_the_run_directory_and_ignores_itself(self):
+        repo, run_dir = self.seeded_repo()
+        result = self.workspace(str(run_dir))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        printed = Path(result.stdout.strip())
+        scratch = run_dir / "scratch"
+        self.assertTrue(printed.is_absolute(), result.stdout)
+        self.assertEqual(printed.resolve(), scratch.resolve())
+        self.assertTrue((scratch / ".gitignore").is_file())
+        (scratch / "task-brief-P02-T01.md").write_text("ephemeral\n",
+                                                       encoding="utf-8")
+        (scratch / "review-package.diff").write_text("ephemeral\n",
+                                                     encoding="utf-8")
+        (scratch / "reports").mkdir()
+        (scratch / "reports" / "P02-T01.md").write_text("ephemeral\n",
+                                                        encoding="utf-8")
+        self.assertEqual(self.git(repo, "status", "--short").stdout, "")
+
+    def test_the_ignore_is_scoped_to_scratch_and_hides_nothing_else(self):
+        """A `.gitignore` written one level too high would pass every other
+        case here and silently hide the run's own artifacts — `decisions.md`,
+        `findings.md`, the phase plans — from the gate that is supposed to see
+        them committed. The scope is asserted from the outside: a sibling of
+        `scratch/` must still be reported.
+        """
+        repo, run_dir = self.seeded_repo()
+        self.assertEqual(self.workspace(str(run_dir)).returncode, 0)
+        (run_dir / "findings.md").write_text("durable\n", encoding="utf-8")
+        self.assertIn("findings.md", self.git(repo, "status", "--short").stdout)
+
+    def test_it_is_idempotent_and_keeps_what_is_already_in_scratch(self):
+        """Run once per task brief, so re-running is the normal case. An
+        implementation that clears the directory to guarantee the ignore file
+        destroys a brief a worker is still reading.
+        """
+        repo, run_dir = self.seeded_repo()
+        first = self.workspace(str(run_dir))
+        self.assertEqual(first.returncode, 0, first.stderr)
+        scratch = run_dir / "scratch"
+        (scratch / "task-brief-P02-T01.md").write_text("ephemeral\n",
+                                                       encoding="utf-8")
+        second = self.workspace(str(run_dir))
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(second.stdout, first.stdout)
+        self.assertEqual((scratch / "task-brief-P02-T01.md").read_text(
+            encoding="utf-8"), "ephemeral\n")
+        self.assertEqual(self.git(repo, "status", "--short").stdout, "")
+
+    def test_it_refuses_a_run_directory_that_does_not_exist(self):
+        """Creating it would be the wrong repair: the run directory is made by
+        `initialize_run`, and a `scratch/` under a path that was mistyped is a
+        worker writing its report where nothing will ever look for it.
+        """
+        repo, run_dir = self.seeded_repo()
+        missing = run_dir.parent / "2026-09-14-typo"
+        result = self.workspace(str(missing))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(missing.exists())
+        self.assertIn("sdd-workspace:", result.stderr)
+        self.assertIn(str(missing), result.stderr)
+
+    def test_it_refuses_a_run_directory_that_is_not_a_directory(self):
+        """Refused BY THE SCRIPT, with the script's own diagnostic.
+
+        A non-zero exit is not enough to assert here and asserting only that
+        was the first version of this case: with the guard deleted entirely,
+        `mkdir -p` fails on a path whose parent is a file, `set -e` propagates,
+        and the case passes while testing nothing the script does. What the
+        guard buys is a message naming the run directory the caller got wrong,
+        instead of a raw `mkdir` error about a path the caller never typed.
+        """
+        repo, run_dir = self.seeded_repo()
+        result = self.workspace(str(run_dir / "progress.md"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((run_dir / "progress.md" / "scratch").exists())
+        self.assertIn("sdd-workspace:", result.stderr)
+        self.assertIn(str(run_dir / "progress.md"), result.stderr)
+
+    def test_it_refuses_to_guess_when_given_no_run_directory(self):
+        result = self.workspace()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(result.stderr.strip())
+
+    def test_it_refuses_more_than_one_run_directory(self):
+        """Two run directories is a caller that has lost track of which run it
+        is in, and silently taking the first would put one run's ephemera in
+        the other's directory.
+        """
+        repo, run_dir = self.seeded_repo()
+        result = self.workspace(str(run_dir), str(run_dir))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((run_dir / "scratch").exists())
+
+    def test_the_script_is_executable(self):
+        """Committed mode, not a local chmod: a subagent runs this by path."""
+        self.assertTrue(os.access(SCRIPTS / "sdd-workspace", os.X_OK))
+
+    def test_the_script_names_no_absolute_home_directory(self):
+        """Repository-relative paths only. An absolute home path in a committed
+        script breaks for everyone else and leaks the account name.
+        """
+        text = (SCRIPTS / "sdd-workspace").read_text(encoding="utf-8")
+        self.assertNotIn("/home/", text)
+        self.assertNotIn("/Users/", text)
+
 
 if __name__ == "__main__":
     unittest.main()

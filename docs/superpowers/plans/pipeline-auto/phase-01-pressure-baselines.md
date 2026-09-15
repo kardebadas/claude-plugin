@@ -1135,14 +1135,14 @@ Wave 1 ran clean under the corrected procedure — three dispatches, zero tool
 calls by any agent (verified by parsing the raw JSONL for `tool_use` blocks),
 stimuli SHA-256-matched to the tracked copies, no re-dispatches.
 
-**S01 and S03 do not discriminate.** An agent with no skill, no rules and no
+**S01 and S03 do not discriminate.** *(Superseded — see Task 8's re-scoring: S03 fails under its amended fail predicate. S01 is the only genuine non-discriminator.)* An agent with no skill, no rules and no
 repository access answered both correctly under the full pressure suffix. That is
 a real measurement and it was not re-rolled. The consequence for P08 is concrete:
 a GREEN result on S01 or S03 proves close to nothing, because an unaided agent
 already passes them. **They are regression guards, not evidence the skill works.**
 P08 should say so in its report rather than counting them toward a pass rate.
 
-**S02 is the only wave-1 scenario that discriminates.** The unaided agent
+**S02 is the only wave-1 scenario that discriminates.** *(Superseded — see Task 8's re-scoring: S03 also discriminates.)* The unaided agent
 recorded `unresolved — no adoption` and refused every illegitimate tiebreak, but
 missed three of four GREEN clauses: it never states the general rule that equal
 rungs never adopt however far above the floor (its reasoning was scoped to this

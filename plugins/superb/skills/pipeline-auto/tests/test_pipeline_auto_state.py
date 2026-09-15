@@ -7,6 +7,7 @@ import contextlib
 import errno
 import hashlib
 import importlib.util
+import inspect
 import multiprocessing
 import os
 import re
@@ -127,9 +128,23 @@ WIDE_GAP = "| 12 | pending | - |\n\n\n## Intent\n"
 #: that onto ``progress.md``. This list is a capability boundary: a member kept
 #: for convenience weakens it for everything admitted after. ``re`` is still
 #: absent and stays absent, and so, now, is ``tempfile``.
+#:
+#: ``types`` was added by P03 for ``MappingProxyType`` and is the first member
+#: admitted for a capability this module could NOT otherwise state. The rung
+#: ladder is the controller's own adoption bar, so it has to refuse to be
+#: written to -- and nothing among the ten can make a mapping that does. The
+#: hand-rolled alternative is strictly weaker, not merely longer: a ``dict``
+#: subclass overriding ``__setitem__`` is bypassed by
+#: ``dict.__setitem__(RUNGS, ...)``, so the freeze is advisory, while a
+#: ``mappingproxy`` has no mutation API to bypass. That is the opposite of how
+#: ``re`` and ``tempfile`` left this list -- each of those was removed because
+#: the module could state the same thing at the SAME strictness with no import
+#: at all. ``types`` opens nothing, runs nothing and reaches no filesystem, so
+#: it adds no capability for this list to bound. The phase plan's Tech Stack
+#: names it.
 ALLOWED_IMPORTS = frozenset({
     "__future__", "contextlib", "copy", "errno", "fcntl", "hashlib", "msvcrt",
-    "os", "pathlib", "time",
+    "os", "pathlib", "time", "types",
 })
 
 #: Builtins that open a file or run generated code. Called anywhere in the
@@ -5110,6 +5125,15 @@ class ProgressTemplateTests(unittest.TestCase):
     def test_the_template_round_trips_through_the_modules_own_parser(self):
         """parse -> render must return the template byte for byte.
 
+        Of the EXPANDED template, and it can be nothing else now that ``## Run``
+        has a semantic validator: ``| run_id | <run_id> |`` is a legal table
+        cell and is not a state any run can be in, so a template that still
+        parsed as a tracker would only prove the validator was not looking.
+        Expansion substitutes inside cells and changes no structure, so every
+        byte-level fact this assertion carries -- marker, title, section order,
+        column headers, separator rows, cell spacing, run key order, terminal
+        newline -- is the raw template's, unchanged.
+
         One assertion, and it subsumes the whole structural contract: marker,
         title, the single blank line under the title, section identity, section
         ORDER, every column header, every separator row, cell spacing, the
@@ -5117,7 +5141,7 @@ class ProgressTemplateTests(unittest.TestCase):
         template that merely "looks right" fails here; only the canonical byte
         sequence passes.
         """
-        text = progress_template()
+        text = filled_progress_template()
         self.assertEqual(pas.render_tracker(pas.parse_tracker(text)), text)
 
     def test_the_template_carries_the_placeholders_a_controller_fills_in(self):
@@ -5129,7 +5153,12 @@ class ProgressTemplateTests(unittest.TestCase):
         unfilled, and nothing else may be: a placeholder left in `revision` or
         `schema` is a cell no caller knows to fill.
         """
-        run = pas.parse_tracker(progress_template())["run"]
+        #: Read STRUCTURALLY, not through ``parse_tracker``: this case is about
+        #: which cells are unfilled, and an unfilled cell is exactly what the
+        #: semantic validator refuses. Parsing here would make the case require
+        #: the template to be valid in order to prove it is a template.
+        run = pas._key_values(pas._sections(progress_template())["## Run"],
+                              pas._RUN_KEYS)
         self.assertEqual(
             [key for key, value in run.items()
              if value.startswith("<") and value.endswith(">")],
@@ -5183,7 +5212,7 @@ class ProgressTemplateTests(unittest.TestCase):
         The order and the state sequence are the recovery story for stages
         01-07, whose outputs Git cannot reconstruct.
         """
-        stages = pas.parse_tracker(progress_template())["stages"]
+        stages = pas.parse_tracker(filled_progress_template())["stages"]
         self.assertEqual(tuple(row["stage"] for row in stages), pas.STAGES)
         self.assertEqual([row["stage_state"] for row in stages],
                          ["active"] + ["pending"] * (len(pas.STAGES) - 1))
@@ -5206,7 +5235,8 @@ class ProgressTemplateTests(unittest.TestCase):
         for _, _, header in pas._SECTIONS[1:]:
             self.assertIn(pas._row(header), lines)
         self.assertEqual(
-            tuple(pas.parse_tracker(progress_template())["run"]), pas._RUN_KEYS)
+            tuple(pas.parse_tracker(filled_progress_template())["run"]),
+            pas._RUN_KEYS)
 
     def test_every_table_but_the_stage_table_starts_empty(self):
         """An empty `## Quorum` is the normal state of a healthy run.
@@ -5215,7 +5245,7 @@ class ProgressTemplateTests(unittest.TestCase):
         then have to be deleted by hand; the row that survives is a decision
         nobody made, recorded as though somebody had.
         """
-        tracker = pas.parse_tracker(progress_template())
+        tracker = pas.parse_tracker(filled_progress_template())
         self.assertEqual(
             {key: tracker[key] for _, key, _ in pas._SECTIONS[2:]},
             {key: [] for _, key, _ in pas._SECTIONS[2:]})
@@ -5463,6 +5493,607 @@ class SddWorkspaceTests(unittest.TestCase):
         self.assertNotIn("/home/", text)
         self.assertNotIn("/Users/", text)
 
+
+#: The five rung names as they must appear in a rung-defaulting mistake. Used by
+#: the AST detector below and by the test OF that detector, so the detector is
+#: never proven against a pattern only it and nothing else uses.
+_RUNG_WORDS = ("RUNGS", "RUNG_ORDER", "RUNG_NAMES", "_RUNG_VALUES", "ADOPTABLE")
+
+
+def rung_defaulting_nodes(source: str) -> list[str]:
+    """Every place the rung enum could acquire a fallback, by SHAPE not by name.
+
+    ``RUNGS.get(rung_id, 0.55)`` is the sharpest single mistake available in
+    this phase: 0.55 is ``engineering-judgement``, it is already in the module
+    for the citation-demotion rule, so defaulting to it looks principled and
+    reads as defensive — and it converts every malformed brain response into a
+    legal engineering-judgement vote. The value that arrives is legal; the door
+    it came through is not, which is exactly why nothing downstream can detect
+    it.
+
+    A module-wide ban on ``dict.get`` with a default is not available: P02 uses
+    one for batch counting and two ``setdefault`` calls for grouping, and both
+    are correct. So the detector is shaped instead — a lookup-with-fallback
+    whose subtree names anything rung-related — which is what catches the four
+    spellings of the same hole:
+
+    * ``RUNGS.get(rung, 0.55)`` and ``dict(RUNGS).get(rung, 0.55)``
+    * ``RUNGS.setdefault(rung, 0.55)``
+    * ``RUNGS.get(rung) or 0.55`` and ``RUNGS[rung] if rung in RUNGS else 0.55``
+    * ``try: RUNGS[rung] / except KeyError: return 0.55``
+    """
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        dump = ast.dump(node)
+        if not any(word in dump for word in _RUNG_WORDS):
+            continue
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("get", "setdefault", "pop")
+                and len(node.args) >= 2):
+            found.append(f"{node.func.attr}-with-default at line {node.lineno}")
+        elif isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+            found.append(f"or-fallback at line {node.lineno}")
+        elif isinstance(node, ast.IfExp):
+            found.append(f"conditional fallback at line {node.lineno}")
+        elif isinstance(node, ast.Try) and any(
+            "KeyError" in ast.dump(handler) for handler in node.handlers
+        ):
+            found.append(f"KeyError fallback at line {node.lineno}")
+    return found
+
+
+def assignment_subtree(source: str, name: str) -> ast.AST:
+    """The value expression of the one module-level assignment to ``name``."""
+    matches = [node for node in ast.parse(source).body
+               if isinstance(node, ast.Assign)
+               and any(isinstance(target, ast.Name) and target.id == name
+                       for target in node.targets)]
+    if len(matches) != 1:
+        raise AssertionError(
+            f"expected exactly one module-level assignment to {name}, "
+            f"found {len(matches)}")
+    return matches[0].value
+
+
+def names_in(node: ast.AST) -> set[str]:
+    return {inner.id for inner in ast.walk(node) if isinstance(inner, ast.Name)}
+
+
+class QuorumRungLadderTests(unittest.TestCase):
+    """The rung ladder, which is the whole of this skill's decision authority.
+
+    A brain never types a number: it selects a grounding rung and the controller
+    derives the value. Everything that can go wrong with that is a way for a
+    number to arrive from somewhere other than this ladder — a run-configurable
+    floor, a second definition of the names that drifts from P02's, a default
+    for a rung the enum does not contain, or a demotion target that is itself
+    adoptable. Each has a case below.
+    """
+
+    def test_the_ladder_is_built_over_p02s_rung_names_and_not_redefined(self):
+        """P02 owns the five names and asserts membership against them directly.
+
+        A second literal here is the same hole with an extra step: the two
+        spellings pass every test on the day they are written and diverge the
+        day either is edited, and the divergence shows up as a quorum whose
+        rung the tracker refuses — or, worse, accepts under a different value.
+
+        Asserted structurally as well as by value, because equal-today is what
+        a re-typed literal looks like. The mutant this kills is
+        ``RUNG_ORDER = ("specified", "code-evidenced", ...)``: it passes every
+        value assertion in this class and dies here.
+        """
+        self.assertEqual(set(pas.RUNGS), set(pas.RUNG_NAMES))
+        self.assertEqual(len(pas.RUNGS), len(pas.RUNG_NAMES))
+        self.assertEqual(pas.RUNG_ORDER, tuple(reversed(pas.RUNG_NAMES)))
+        source = module_source()
+        self.assertIn("RUNG_NAMES", names_in(assignment_subtree(source, "RUNG_ORDER")),
+                      "RUNG_ORDER must be derived from P02's RUNG_NAMES")
+        self.assertTrue(
+            {"RUNG_ORDER", "RUNG_NAMES"} & names_in(assignment_subtree(source, "RUNGS")),
+            "RUNGS must be keyed by P02's rung names, not by a second literal")
+        #: The value table is allowed to be a literal — the five numbers have to
+        #: be written down somewhere — but it may not carry a key the enum does
+        #: not have. A stray ``"unknown": 0.55`` sitting in it is a sink waiting
+        #: for someone to wire a fallback up to.
+        self.assertEqual(set(pas._RUNG_VALUES), set(pas.RUNG_NAMES))
+
+    def test_the_five_values_are_the_spec_values(self):
+        self.assertEqual(pas.RUNGS["specified"], 0.95)
+        self.assertEqual(pas.RUNGS["code-evidenced"], 0.85)
+        self.assertEqual(pas.RUNGS["convention-cited"], 0.70)
+        self.assertEqual(pas.RUNGS["engineering-judgement"], 0.55)
+        self.assertEqual(pas.RUNGS["speculation"], 0.30)
+
+    def test_the_values_fall_strictly_along_rung_order(self):
+        """What makes ``RUNG_ORDER.index`` a legitimate stand-in for the value.
+
+        Spread is measured by rung: the winner's rung must be strictly HIGHER
+        than the runner-up's, compared by index, never by a float margin. That
+        substitution is only sound while the values are strictly decreasing
+        along the order. Two rungs sharing a value, or an order that disagrees
+        with the values, makes index comparison and value comparison give
+        different answers on the same pair of clusters — silently, and in the
+        direction of adopting.
+        """
+        values = [pas.RUNGS[name] for name in pas.RUNG_ORDER]
+        self.assertEqual(values, sorted(values, reverse=True))
+        self.assertEqual(len(set(values)), len(values),
+                         "two rungs sharing a value make demotion indistinguishable "
+                         "from the rung it demotes to")
+
+    def test_the_floor_and_the_adoptable_set_are_derived_from_the_ladder(self):
+        """``convention-cited`` cannot be adopted, and not by coincidence.
+
+        "The codebase does it this way" is not authority for a machine
+        decision. The bar is ``code-evidenced``; a typed ``ADOPTABLE`` literal
+        would let the two drift, so the set is derived from the floor and the
+        derivation is asserted structurally.
+        """
+        self.assertEqual(pas.ADOPTION_FLOOR, 0.85)
+        self.assertEqual(pas.ADOPTION_FLOOR, pas.RUNGS["code-evidenced"])
+        self.assertEqual(pas.ADOPTABLE, frozenset({"specified", "code-evidenced"}))
+        self.assertEqual(
+            pas.ADOPTABLE,
+            frozenset(name for name in pas.RUNGS if pas.RUNGS[name] >= pas.ADOPTION_FLOOR))
+        self.assertNotIn("convention-cited", pas.ADOPTABLE)
+        self.assertIsInstance(pas.ADOPTABLE, frozenset)
+        source = module_source()
+        self.assertIn("ADOPTION_FLOOR", names_in(assignment_subtree(source, "ADOPTABLE")))
+        self.assertIn("RUNGS", names_in(assignment_subtree(source, "ADOPTION_FLOOR")))
+
+    def test_the_demotion_rung_is_below_the_floor(self):
+        """The citation-demotion rule must not be able to adopt.
+
+        A brain whose evidence does not resolve is demoted to
+        ``engineering-judgement``. If the demotion target were at or above the
+        floor, an answer whose citation could not be read would adopt anyway —
+        which is the failure the demotion exists to prevent, reached through
+        the demotion itself.
+        """
+        self.assertEqual(pas.DEMOTION_RUNG, "engineering-judgement")
+        self.assertIn(pas.DEMOTION_RUNG, pas.RUNGS)
+        self.assertLess(pas.RUNGS[pas.DEMOTION_RUNG], pas.ADOPTION_FLOOR)
+        self.assertNotIn(pas.DEMOTION_RUNG, pas.ADOPTABLE)
+
+    def test_the_ladder_is_frozen_at_the_language_level(self):
+        """A controller that can edit its own adoption bar has no adoption bar.
+
+        Freezing makes the self-serving move fail where it is made rather than
+        at review, so the case asserts the refusal rather than the type: a
+        subclass of ``dict`` that overrides ``__setitem__`` is bypassed by
+        ``dict.__setitem__(RUNGS, ...)``, and a ``mappingproxy`` has no
+        mutation API to bypass.
+        """
+        with self.assertRaises(TypeError):
+            pas.RUNGS["specified"] = 0.99
+        with self.assertRaises(TypeError):
+            del pas.RUNGS["speculation"]
+        self.assertIsInstance(pas.RUNGS, types.MappingProxyType)
+        self.assertEqual(pas.RUNGS["specified"], 0.95)
+
+    def test_no_module_attribute_is_a_live_handle_on_the_frozen_ladder(self):
+        """``MappingProxyType(_RUNG_VALUES)`` is a proxy, and is not frozen.
+
+        A ``mappingproxy`` is a read-only VIEW, not a copy: writing through the
+        dict it wraps changes what the proxy reports. So a ladder built over a
+        named module-level dict passes the freeze case above and is still
+        editable by anything that can reach that name — which, in a module a
+        controller imports, is everything. The ladder must wrap a dict nothing
+        else holds.
+        """
+        sentinel = -1.0
+        for name, value in sorted(vars(pas).items()):
+            if not isinstance(value, dict) or not set(pas.RUNGS) <= set(value):
+                continue
+            with self.subTest(attribute=name):
+                original = value["specified"]
+                value["specified"] = sentinel
+                try:
+                    self.assertEqual(
+                        pas.RUNGS["specified"], 0.95,
+                        f"pipeline_auto_state.{name} is a live handle on RUNGS' "
+                        "own storage; the freeze is cosmetic")
+                finally:
+                    value["specified"] = original
+
+    def test_an_out_of_enum_rung_is_never_defaulted_to_a_legal_value(self):
+        """The named fault, asserted at the only place it can be written.
+
+        There is no runtime probe for this: the whole point is that a defaulted
+        rung produces a legal value and raises nothing. It is detectable only
+        in the source, so that is where it is refused.
+        """
+        self.assertEqual(rung_defaulting_nodes(module_source()), [])
+
+    def test_the_rung_defaulting_detector_catches_the_fault_it_claims_to(self):
+        """A test of the test. The guard above is an assertion that a pattern is
+        ABSENT, which is the shape that passes when the detector is broken, when
+        the file it reads is empty, and when the pattern was never findable in
+        the first place. Each spelling of the hole is put in front of it here.
+        """
+        for spelling in (
+            "def f(rung):\n    return RUNGS.get(rung, 0.55)\n",
+            "def f(rung):\n    return dict(RUNGS).get(rung, DEMOTION_RUNG)\n",
+            "def f(rung):\n    return RUNGS.setdefault(rung, 0.55)\n",
+            "def f(rung):\n    return RUNGS.get(rung) or 0.55\n",
+            "def f(rung):\n    return RUNGS[rung] if rung in RUNGS else 0.55\n",
+            "def f(rung):\n    try:\n        return RUNGS[rung]\n"
+            "    except KeyError:\n        return 0.55\n",
+        ):
+            with self.subTest(spelling=spelling.splitlines()[-1].strip()):
+                self.assertNotEqual(rung_defaulting_nodes(spelling), [])
+
+    def test_the_rung_values_are_not_run_configuration(self):
+        """They are schema constants and never enter ``## Run``.
+
+        The rendered half of this case is vacuous on its own — a fresh tracker
+        has no floats in it whatever the module does — and it is kept only as
+        the symptom. The half that dies under mutation is the second: a
+        ``## Run`` field named for the floor, the budget, the depth cap or the
+        ladder is a dial the controller can turn, and turning it is the one
+        self-interested move this phase's arithmetic exists to forbid.
+        """
+        run_dir, _ = new_run(self)
+        rendered = (run_dir / "progress.md").read_text(encoding="utf-8")
+        for value in pas.RUNGS.values():
+            self.assertNotIn(f"{value}", rendered)
+        policy = {
+            "rungs", "rung", "rung_order", "adoptable", "adoption_floor",
+            "floor", "demotion_rung", "depth_cap", "budget_per_phase",
+            "budget_per_run", "max_extensions", "irreversible_axes",
+        }
+        self.assertEqual(
+            set(pas._RUN_KEYS) & policy, set(),
+            "a policy constant has become a ## Run field: the controller can "
+            "now edit its own adoption bar through an ordinary transition")
+
+    def test_the_budget_depth_and_extension_caps_are_the_master_plans(self):
+        """Three adoptions per phase, ten per run, depth cap 2, two extensions.
+
+        ``bool`` is excluded by type rather than by arithmetic for the reason
+        ``initialize_run`` excludes it: ``True == 1`` and ``True >= 1`` both
+        hold, so a counter that became a flag would pass every comparison.
+        """
+        for name, expected in (("DEPTH_CAP", 2), ("BUDGET_PER_PHASE", 3),
+                               ("BUDGET_PER_RUN", 10), ("MAX_EXTENSIONS", 2)):
+            with self.subTest(constant=name):
+                value = getattr(pas, name)
+                self.assertEqual(value, expected)
+                self.assertIsInstance(value, int)
+                self.assertNotIsInstance(value, bool)
+        self.assertLess(pas.BUDGET_PER_PHASE, pas.BUDGET_PER_RUN)
+
+    def test_the_irreversible_axes_are_frozen_and_complete(self):
+        """The list adoption checks a blast radius against, so a MISSING member
+        fails open: an irreversible axis nobody enumerated matches nothing, and
+        the decision that should have reached a human is adopted by three
+        machines instead. Pinned by membership for that reason, and frozen for
+        the same reason the ladder is.
+        """
+        self.assertEqual(pas.IRREVERSIBLE_AXES, frozenset({
+            "product-scope", "destructive-data", "schema-migration",
+            "external-service", "paid-dependency", "public-api", "wire-format",
+            "authn-model", "authz-model", "runtime-cost", "licensing",
+            "writes-outside-repo",
+        }))
+        self.assertIsInstance(pas.IRREVERSIBLE_AXES, frozenset)
+        with self.assertRaises(AttributeError):
+            pas.IRREVERSIBLE_AXES.add("whatever")
+
+
+class QuorumErrorFamilyTests(unittest.TestCase):
+    def test_every_quorum_failure_is_a_tracker_error(self):
+        """One exception family per module, so a caller that catches this
+        module's root sees a quorum stop too. A ``QuorumError(Exception)``
+        escapes every ``except TrackerError`` the controller already writes,
+        and an escaped stop is a run that carries on.
+        """
+        self.assertTrue(issubclass(pas.QuorumError, pas.TrackerError))
+        for subclass in (pas.QuorumSchemaInvalid, pas.QuorumIncomplete):
+            with self.subTest(exception=subclass.__name__):
+                self.assertTrue(issubclass(subclass, pas.QuorumError))
+                self.assertTrue(issubclass(subclass, pas.TrackerError))
+
+    def test_the_two_quorum_stops_stay_distinguishable(self):
+        """"This response is malformed" and "this quorum is not finished yet"
+        are different facts with different recoveries — re-dispatch once then
+        escalate, against wait for the outstanding brain. An alias makes a
+        caller branching on the type take one of them for the other.
+        """
+        self.assertIsNot(pas.QuorumSchemaInvalid, pas.QuorumIncomplete)
+        self.assertFalse(issubclass(pas.QuorumSchemaInvalid, pas.QuorumIncomplete))
+        self.assertFalse(issubclass(pas.QuorumIncomplete, pas.QuorumSchemaInvalid))
+
+
+class DeriveQidTests(unittest.TestCase):
+    """``derive_qid(question, axis)`` — stable identity for one question.
+
+    What it hashes, exactly: the question text with runs of whitespace squashed
+    to one space and case folded, then a NUL, then the axis token VERBATIM.
+    Nothing else. Not the run id, not the phase, not the raiser, not the
+    options, and above all not the decisions digest.
+    """
+
+    QUESTION = "Which storage engine?"
+    AXIS = "storage-engine"
+
+    def test_the_question_is_normalised_for_whitespace_and_case(self):
+        """The same question retyped is the same question. Re-raised after a
+        compaction it arrives reflowed and recapitalised, and a qid that moved
+        would open a second quorum on ground the run had already settled.
+        """
+        self.assertEqual(
+            pas.derive_qid(self.QUESTION, self.AXIS),
+            pas.derive_qid("  which   STORAGE\n engine? ", self.AXIS))
+
+    def test_the_axis_is_hashed_verbatim(self):
+        """The axis is a stage-03 question ``ID`` or the literal ``new``, and
+        that namespace is case-SENSITIVE: ``_TOKEN`` admits upper case, so
+        ``Storage-Engine`` and ``storage-engine`` are two different questions
+        and folding them together would give two axes one quorum.
+        """
+        base = pas.derive_qid(self.QUESTION, self.AXIS)
+        self.assertNotEqual(base, pas.derive_qid(self.QUESTION, "Storage-Engine"))
+        self.assertNotEqual(base, pas.derive_qid(self.QUESTION, "new"))
+        self.assertNotEqual(base, pas.derive_qid("Which cache layer?", self.AXIS))
+
+    def test_a_qid_is_one_the_tracker_will_accept(self):
+        """The seam. ``_validate_quorum`` judges a ``QID`` cell against
+        ``_Hex(12)``, so a derivation that widened to sixteen characters or
+        emitted upper case would make every row this phase writes unparseable —
+        and would do it at the tracker, a phase later, not here.
+        """
+        qid = pas.derive_qid(self.QUESTION, self.AXIS)
+        self.assertEqual(len(qid), 12)
+        self.assertTrue(pas._QID.fullmatch(qid), qid)
+
+    def test_the_qid_does_not_move_when_anything_else_is_decided(self):
+        """THE COMPACTION-REPLAY SEED, pinned two ways.
+
+        The digest of the decisions so far is deliberately not an input. With
+        it, the same question acquires a new identity every time anything else
+        is decided, so a re-raise after a compaction dispatches a second quorum
+        and the run re-litigates ground it has already settled — while every
+        record on disk looks well-formed.
+
+        The arity assertion alone does not close it: a context argument added
+        as KEYWORD-ONLY still raises ``TypeError`` positionally. So the
+        signature itself is pinned, which is what kills that mutant.
+        """
+        with self.assertRaises(TypeError):
+            pas.derive_qid(self.QUESTION, self.AXIS, "deadbeef")
+        parameters = inspect.signature(pas.derive_qid).parameters
+        self.assertEqual(list(parameters), ["question", "axis"])
+        for name, parameter in parameters.items():
+            with self.subTest(parameter=name):
+                self.assertIs(parameter.default, inspect.Parameter.empty)
+                self.assertEqual(parameter.kind,
+                                 inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        expected = hashlib.sha256(
+            b"which storage engine?\x00storage-engine").hexdigest()[:12]
+        self.assertEqual(pas.derive_qid(self.QUESTION, self.AXIS), expected)
+
+    def test_the_field_separator_cannot_be_forged(self):
+        """Two fields joined by a delimiter either exclude the delimiter from
+        the fields or are not an encoding at all. ``"a\\x00b" + NUL + "c"`` and
+        ``"a" + NUL + "b\\x00c"`` are the same bytes, so without the refusal two
+        different questions on two different axes share one qid — one quorum
+        answering for both, with each record naming the other's question.
+
+        ``str.split`` does not treat NUL as whitespace, so squashing does not
+        remove it and the collision survives normalisation.
+        """
+        forged = "a\x00b"
+        self.assertEqual(" ".join(forged.split()), forged)
+        with self.assertRaises(pas.QuorumSchemaInvalid):
+            pas.derive_qid(forged, "c")
+        with self.assertRaises(pas.QuorumSchemaInvalid):
+            pas.derive_qid("a", "b\x00c")
+
+    def test_an_axis_outside_the_question_id_namespace_is_refused(self):
+        """The axis is a table cell before it is a hash input.
+
+        A padded or spaced axis hashes to a different qid from the token the
+        tracker will hold, and the disagreement surfaces a phase later as a
+        quorum record nobody can look up. The namespace is ``_TOKEN`` — the
+        grammar the ``## Questions`` ``ID`` column is already judged against —
+        so that is what is accepted here.
+        """
+        for axis in ("", " ", "storage-engine ", "storage engine", "-leading",
+                     "Not A Token"):
+            with self.subTest(axis=axis):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.derive_qid(self.QUESTION, axis)
+        for axis in ("new", "axis-2", "C-001", "storage-engine"):
+            with self.subTest(axis=axis):
+                self.assertTrue(pas._QID.fullmatch(pas.derive_qid(self.QUESTION, axis)))
+
+    def test_a_non_string_question_or_axis_is_refused_rather_than_coerced(self):
+        """``str(text)`` is the short spelling and the wrong one: it hashes the
+        REPR of whatever it is handed, so a question record whose ``question``
+        arrived as a dict, a list or ``None`` gets a stable, well-formed,
+        meaningless qid and no error anywhere. Coercion is the same fault as a
+        defaulted rung: an illegal input arriving as a legal value.
+        """
+        for question in (None, 12, {"question": "which?"}, ["which?"], b"which?"):
+            with self.subTest(question=question):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.derive_qid(question, self.AXIS)
+        for axis in (None, 12, ["storage-engine"], b"storage-engine"):
+            with self.subTest(axis=axis):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.derive_qid(self.QUESTION, axis)
+
+    def test_a_question_that_squashes_to_nothing_is_refused(self):
+        """Every blank question on an axis would otherwise share one qid, and
+        the first of them would answer for all the rest.
+        """
+        for question in ("", "   ", "\n\t "):
+            with self.subTest(question=question):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.derive_qid(question, self.AXIS)
+
+
+class ReservedAxisLiteralTests(unittest.TestCase):
+    """``new`` is the axis literal, and therefore not an available question id.
+
+    ``_validate_quorum`` resolves a quorum ``Axis`` against the stage-03
+    question ids PLUS the literal ``new``, for an axis the run discovered after
+    the gate closed. ``_validate_questions`` checked question ids for uniqueness
+    only, so a question could itself be called ``new`` — and then the axis cell
+    ``new`` has two readings at once: the reserved literal, and a reference to
+    that question. Both readings are live in the same cell, which is worse than
+    either: the contradiction check resolves the axis to decide what an adopted
+    answer would contradict, and an axis with two meanings resolves to whichever
+    the reader assumed.
+
+    One reading is closed here, and it is the question-id one: the literal is
+    load-bearing in the committed fixture and in this phase's own records, and
+    ``new`` is a name no stage-03 question needs.
+    """
+
+    def test_a_stage_03_question_may_not_be_called_new(self):
+        text = with_row("questions", "axis-2", {"id": "new"})
+        with self.assertRaises(pas.TrackerValidationError) as caught:
+            pas.parse_tracker(text)
+        self.assertIn("new", str(caught.exception))
+
+    def test_the_axis_literal_itself_stays_legal(self):
+        """The other half, and the reason this is a reservation rather than a
+        ban: the committed fixture's two quorum rows are both on axis ``new``,
+        and a rule that refused the literal would fail CLOSED on a value a
+        specified writer actually emits.
+        """
+        tracker = pas.parse_tracker(valid_text())
+        self.assertEqual({row["axis"] for row in tracker["quorum"]}, {"new"})
+        self.assertNotIn("new", {row["id"] for row in tracker["questions"]})
+
+    def test_the_two_namespaces_are_now_disjoint_on_the_literal(self):
+        """Stated as the invariant rather than as either symptom, so it holds
+        for a fixture that stops using ``new`` and for one that adds a third
+        question.
+        """
+        tracker = pas.parse_tracker(valid_text())
+        self.assertNotIn("new", {row["id"] for row in tracker["questions"]})
+        self.assertEqual(pas.derive_qid("Which cache layer?", "new"),
+                         pas.derive_qid("Which cache layer?", "new"))
+
+
+class RunSectionValidatorTests(unittest.TestCase):
+    """``## Run`` gains the semantic validator every other section has.
+
+    ``base_commit``, ``target_branch`` and ``worker_limit`` were checked in
+    ``initialize_run`` and nowhere else, so a later ``mutate`` could write
+    nonsense into any of them and only ``_IDENTITY_KEYS`` would object, and
+    only to the four keys it guards. ``worker_limit`` is not one of them, and
+    it is what the run reads to reserve brain slots; ``agent_dispatch_count``
+    and ``revision`` are not either, and they are counters other records cite.
+    """
+
+    def refused(self, text: str, needle: str):
+        with self.assertRaises(pas.TrackerValidationError) as caught:
+            pas.parse_tracker(text)
+        self.assertIn(needle, str(caught.exception))
+
+    def test_the_committed_fixture_still_parses(self):
+        """The positive control. A validator this strict is one typo away from
+        refusing every real tracker, and a suite of rejection cases alone
+        passes perfectly when it does.
+        """
+        self.assertEqual(pas.parse_tracker(valid_text())["run"]["worker_limit"], "6")
+
+    def test_a_worker_limit_that_is_not_a_positive_integer_is_refused(self):
+        """The cell the run reads to decide how many brain slots to reserve.
+
+        ``'True'`` is in the list because ``initialize_run`` refuses the ``bool``
+        by type and then writes ``str(worker_limit)`` — so the only spelling
+        that can reach the tracker from anywhere else is the STRING, and a
+        check that tested the python type would never see it.
+        """
+        for value in ("0", "-1", "1.5", "abc", "-", "True", "٣", "²", "+4"):
+            with self.subTest(worker_limit=value):
+                self.refused(swap("| worker_limit | 6 |",
+                                  f"| worker_limit | {value} |"), "worker_limit")
+
+    def test_a_counter_that_is_not_a_non_negative_integer_is_refused(self):
+        """``revision`` and ``agent_dispatch_count`` are both cited elsewhere —
+        the first by every record that names the revision it was written at —
+        and ``isdigit`` alone is true of ``'٣'`` and ``'²'``, one of which
+        parses as an integer and the other of which raises ``ValueError``,
+        outside this module's exception family, in whatever reads it next.
+        """
+        for cell, original in (("revision", "12"), ("agent_dispatch_count", "48")):
+            for value in ("-1", "1.0", "x", "-", "٣", "²"):
+                with self.subTest(cell=cell, value=value):
+                    self.refused(swap(f"| {cell} | {original} |",
+                                      f"| {cell} | {value} |"), cell)
+
+    def test_a_rewritten_schema_field_is_refused(self):
+        """The marker says ``pipeline-auto/v1`` and until now the FIELD was
+        never compared to it, so a tracker could carry the v1 marker and call
+        itself v2 in its own ``## Run`` table. There is no migration in either
+        direction, so the two disagreeing is a stop, not a version.
+        """
+        self.refused(swap("| schema | pipeline-auto/v1 |",
+                          "| schema | pipeline-auto/v2 |"), "schema")
+
+    def test_a_base_commit_that_is_not_a_full_object_name_is_refused(self):
+        """It is one end of every range proof the run makes; an abbreviation or
+        a symbolic name resolves somewhere else tomorrow.
+        """
+        for value in ("c8bddd6", "HEAD", "-", "C" * 40, "c" * 39):
+            with self.subTest(base_commit=value):
+                self.refused(
+                    swap("| base_commit | c8bddd610119f52b54bf077d284c7f5d8362ae77 |",
+                         f"| base_commit | {value} |"), "base_commit")
+
+    def test_a_target_branch_of_main_or_master_is_refused(self):
+        """``initialize_run`` refuses to START a run against them. Nothing
+        refused a transition that RE-POINTED one, and pipeline-auto never
+        merges or pushes, so the branch cell is the whole of what says where
+        the work lands.
+        """
+        for value in ("main", "master", "-", "two words", "feature branch"):
+            with self.subTest(target_branch=value):
+                self.refused(swap("| target_branch | feat/pipeline-auto |",
+                                  f"| target_branch | {value} |"), "target_branch")
+
+    def test_a_run_id_that_escapes_its_own_directory_is_refused_on_reparse(self):
+        """``initialize_run`` checks it once, at birth. The id is interpolated
+        into three artifact paths, and a transition that rewrote it would point
+        them at another run's audit trail — which ``_IDENTITY_KEYS`` catches
+        only while the tracker it compares against is the one on disk.
+        """
+        for value in ("../elsewhere", ".hidden", "with space", "-"):
+            with self.subTest(run_id=value):
+                self.refused(swap("| run_id | 2026-09-14-pipeline-auto |",
+                                  f"| run_id | {value} |"), "run_id")
+
+    def test_the_validator_is_wired_into_the_one_entry_point(self):
+        """Pinned the way the other eleven are pinned. A validator that exists
+        and is never called is the shape this file has shipped before: every
+        case below it passes when it is invoked directly, and nothing at all
+        runs on a real parse.
+        """
+        dispatcher = function_node(module_source(), "_validate_tracker_semantics")
+        called = {node.func.id for node in ast.walk(dispatcher)
+                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+        self.assertIn("_validate_run", called)
+
+    def test_a_transition_cannot_write_nonsense_into_the_worker_limit(self):
+        """The end-to-end shape the gap was about: not a hand-edited file, but
+        an ordinary ``locked_tracker_update`` whose ``mutate`` sets a cell
+        nothing downstream re-derives. The write must be refused AND the
+        tracker on disk left byte-identical.
+        """
+        run_dir = make_run(self)
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.locked_tracker_update(
+                run_dir, transition_id="capacity-1",
+                mutate=setting_run_field("worker_limit", "0"))
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
 
 if __name__ == "__main__":
     unittest.main()

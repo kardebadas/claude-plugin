@@ -17,6 +17,14 @@ import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
+#: For ``RUNGS`` alone, and it is a capability rather than a convenience:
+#: nothing already imported here can make a mapping that refuses to be
+#: written to. A ``dict`` subclass overriding ``__setitem__`` is bypassed by
+#: ``dict.__setitem__(RUNGS, ...)``; a ``mappingproxy`` has no mutation API
+#: to bypass at all. The adoption bar has to fail at the language level
+#: rather than at review, because the party most motivated to raise its own
+#: confidence is the controller running this module.
+from types import MappingProxyType
 
 #: Exactly one of these two is present on any platform this runs on, and the
 #: lock refuses to proceed if neither is. They are imported here, guarded,
@@ -314,6 +322,74 @@ STAGES = tuple(f"{index:02d}" for index in range(1, 13))
 _STAGE_STATES = ("complete", "active", "pending")
 
 
+def _is_count(value: str) -> bool:
+    """A non-negative integer as this schema spells one.
+
+    ``isdigit`` alone is true of ``'\u0663'`` and ``'\u00b2'``: the first parses as an
+    integer and the second raises ``ValueError`` -- outside this module's
+    exception family -- in whatever reads the cell next. ``isascii`` first is
+    what keeps every counter in this schema readable by ``int``.
+    """
+    return bool(value) and value.isascii() and value.isdigit()
+
+
+def _validate_run(tracker: dict) -> None:
+    """``## Run`` as a state the run can be in, not merely as fourteen cells.
+
+    Every other section gained a semantic validator; this one did not, and the
+    gap had a shape. ``base_commit``, ``target_branch`` and ``worker_limit``
+    were checked in exactly one place -- ``initialize_run`` -- and never again,
+    so a later ``mutate`` could write anything at all into them. Only
+    ``_IDENTITY_KEYS`` would object, and only to the four keys it guards.
+
+    ``worker_limit`` is not one of those four, and it is the cell the run reads
+    to decide how many brain slots to reserve: a run that quietly rewrote it
+    would dispatch against a capacity nobody granted. ``revision`` and
+    ``agent_dispatch_count`` are not either, and they are the counters other
+    records cite themselves against -- a run that rewrote a counter buys itself
+    standing it was never given, by a route no schema check was watching.
+
+    ``schema`` is checked against ``SCHEMA`` here for the first time. The MARKER
+    is what ``_sections`` judges; the FIELD was never compared to anything, so a
+    tracker could carry the v1 marker and call itself v2 in its own table. There
+    is no migration in either direction, so the two disagreeing is a stop.
+    """
+    run = tracker["run"]
+    if run["schema"] != SCHEMA:
+        raise TrackerValidationError(
+            f"schema field {run['schema']!r} is not {SCHEMA!r}: the marker and "
+            "the field disagree, and there is no migration in either direction")
+    if not _RUN_ID.fullmatch(run["run_id"]):
+        raise TrackerValidationError(
+            f"run_id {run['run_id']!r} is not a legal run id; it is interpolated "
+            f"into three artifact paths under {RUN_ARTIFACT_ROOT}/, so a "
+            "separator or a leading dot in it addresses another run's records")
+    if not _COMMIT.fullmatch(run["base_commit"]):
+        raise TrackerValidationError(
+            f"base_commit {run['base_commit']!r} is not a full 40-character "
+            "object name: it is one end of every range proof this run makes")
+    if not _TOKEN.fullmatch(run["target_branch"]):
+        raise TrackerValidationError(
+            f"target_branch {run['target_branch']!r} is not one token")
+    if run["target_branch"] in ("main", "master"):
+        raise TrackerValidationError(
+            "target_branch may not be main or master: pipeline-auto leaves a "
+            "clean committed feature branch and merges or pushes nothing")
+    #: ``initialize_run`` refuses a ``bool`` BY TYPE and then writes
+    #: ``str(worker_limit)``. So the only spelling that can reach a tracker from
+    #: anywhere else is the string ``'True'``, which no python-type check would
+    #: ever see -- and which ``int()`` raises on, in the caller reserving slots.
+    if not _is_count(run["worker_limit"]) or int(run["worker_limit"]) < 1:
+        raise TrackerValidationError(
+            f"worker_limit {run['worker_limit']!r} is not a positive integer in "
+            "ASCII digits; it is what the run reads to reserve brain slots")
+    for key in ("agent_dispatch_count", "revision"):
+        if not _is_count(run[key]):
+            raise TrackerValidationError(
+                f"{key} {run[key]!r} is not a non-negative integer in ASCII "
+                "digits; every record that cites it reads it as one")
+
+
 def _validate_stages(tracker: dict) -> None:
     """Stages run complete*, then at most one active, then pending*.
 
@@ -373,6 +449,13 @@ _INTENT_STATES = ("pending", "dispatched", "published", "frozen")
 #: Ordered by rank, and the order is the rule. An unresolved intent conflict is
 #: by definition higher blast radius than anything stage 02 synthesised, so it
 #: takes the earlier of the four stage-03 slots.
+#: The one axis token that is NOT a stage-03 question id: the axis a run
+#: discovered after the gate closed. It is spelled once, here, because it is
+#: read in two places that must not drift -- ``_validate_quorum``, which admits
+#: it into the axis namespace, and ``_validate_questions``, which refuses it as
+#: a question id so that the axis cell has exactly ONE reading.
+_RESERVED_AXIS = "new"
+
 _QUESTION_ORIGINS = ("intent-conflict", "synthesis")
 _QUESTION_STATES = ("proposed", "asked", "answered")
 
@@ -592,6 +675,21 @@ def _validate_questions(tracker: dict) -> None:
             f"stage 03 asks at most {_MAX_QUESTIONS} questions in one call")
     if len({row["id"] for row in rows}) != len(rows):
         raise TrackerValidationError("duplicate question axis id")
+    #: A question id is also a quorum AXIS token, and the axis namespace is the
+    #: question ids PLUS ``_RESERVED_AXIS``. Uniqueness within this section was
+    #: the only check, so a question could itself be called ``new`` -- and then
+    #: the axis cell ``new`` has two readings at once: the reserved literal, and
+    #: a reference to that question. That is worse than either, because the
+    #: contradiction check resolves the axis to decide what an adopted answer
+    #: would contradict, and an axis with two meanings resolves to whichever the
+    #: reader assumed. The question-id reading is the one closed, because the
+    #: literal is load-bearing and ``new`` is a name no question needs.
+    if any(row["id"] == _RESERVED_AXIS for row in rows):
+        raise TrackerValidationError(
+            f"{_RESERVED_AXIS!r} is the reserved quorum axis literal and is not "
+            "available as a stage-03 question id: one axis cell cannot mean "
+            "both 'an axis discovered after the gate closed' and 'the question "
+            f"called {_RESERVED_AXIS}'")
     if [row["slot"] for row in rows] != [str(n) for n in range(1, len(rows) + 1)]:
         raise TrackerValidationError("question slots must be 1..n, in order")
     origins = [row["origin"] for row in rows]
@@ -818,7 +916,7 @@ def _validate_quorum(tracker: dict) -> None:
     #: axis against the human decisions already recorded on it, so an axis
     #: matching no question contradicts nothing BY CONSTRUCTION and clears that
     #: check by being unrecognisable rather than by being compatible.
-    axes = {row["id"] for row in tracker["questions"]} | {"new"}
+    axes = {row["id"] for row in tracker["questions"]} | {_RESERVED_AXIS}
     phases = {row["id"] for row in tracker["phases"]}
     if len({row["qid"] for row in rows}) != len(rows):
         raise TrackerValidationError(
@@ -832,7 +930,7 @@ def _validate_quorum(tracker: dict) -> None:
         if row["axis"] not in axes:
             raise TrackerValidationError(
                 f"quorum axis {row['axis']!r} is neither a stage-03 question id "
-                "nor the literal 'new'")
+                f"nor the literal {_RESERVED_AXIS!r}")
         if row["phase"] != "-" and row["phase"] not in phases:
             raise TrackerValidationError(
                 "quorum row refers to an unknown phase; the drift budget is "
@@ -1624,7 +1722,12 @@ def _validate_tracker_semantics(tracker: dict) -> None:
     than add a second entry point, so there is exactly one place a tracker is
     judged and no way to obtain an unvalidated one.
     """
-    #: ``_validate_stages`` leads because ``_validate_intent`` reads stage 03's
+    #: ``_validate_run`` leads because ``## Run`` is the only section the others
+    #: read out of: the run id names the artifact paths, ``worker_limit`` bounds
+    #: capacity, and the counters are what later records cite. A section table
+    #: judged against a run header nobody has checked is judged against nothing.
+    _validate_run(tracker)
+    #: ``_validate_stages`` next because ``_validate_intent`` reads stage 03's
     #: state to decide whether the brief may be frozen, and a stage table that
     #: has not been proven to hold twelve known rows is not one to index into.
     _validate_stages(tracker)
@@ -2498,3 +2601,185 @@ def initialize_run(run_dir: Path, *, run_id: str, base_commit: str,
         run_dir / "progress.md", canonical.encode("utf-8"), "initial tracker",
         "Resume the existing run rather than initializing over it.")
     return validate_run(run_dir)
+
+
+# ---------------------------------------------------------------------------
+# Quorum contract (P03)
+# ---------------------------------------------------------------------------
+# A brain never types a number. It selects a grounding rung; the controller
+# resolves that rung's evidence against the repository and derives the value
+# from the ladder below. The ladder is a SCHEMA CONSTANT, frozen beside
+# ``SCHEMA`` and absent from ``## Run``: a controller that can edit its own
+# adoption bar has no adoption bar, and the freeze is what makes the
+# self-serving move fail at the language level rather than at review.
+#
+# The adoption floor is ``code-evidenced``. ``convention-cited`` and everything
+# below it cannot be adopted -- "the codebase does it this way" is not authority
+# for a machine decision. That single rule is the pipeline's zero-assumption law
+# re-encoded as arithmetic instead of prose.
+
+#: The five numbers, written down once. Keyed by name rather than paired with
+#: ``RUNG_NAMES`` by position, so that reordering P02's tuple cannot silently
+#: remap the values; the comprehension below raises at import if the two sets
+#: ever diverge. ``RUNGS`` wraps the comprehension's OWN dict and not this one:
+#: a ``mappingproxy`` is a read-only view, not a copy, so a proxy over a named
+#: module-level dict is editable by anything that can reach the name.
+_RUNG_VALUES = {
+    "specified": 0.95,
+    "code-evidenced": 0.85,
+    "convention-cited": 0.70,
+    "engineering-judgement": 0.55,
+    "speculation": 0.30,
+}
+
+#: Highest rung first. Every comparison between two rungs is an INDEX
+#: comparison into this tuple and never a float margin: spread is "the winner's
+#: rung is strictly higher than the runner-up's", full stop. There is no numeric
+#: spread threshold anywhere in this phase, and a ``>= 0.15`` written between
+#: two clusters would be the exact error the phase exists to prevent. The
+#: substitution of index for value is only sound while the values fall strictly
+#: along this order, which is asserted in the suite.
+RUNG_ORDER = tuple(reversed(RUNG_NAMES))
+
+#: Built OVER P02's names, never redefining them. A second list of the five
+#: would pass every test the day it was written and drift the day either copy
+#: was edited -- the same hole ``RUNG_NAMES`` was hoisted into P02 to close,
+#: with an extra step.
+RUNGS = MappingProxyType({name: _RUNG_VALUES[name] for name in RUNG_ORDER})
+
+#: There is no ``RUNGS.get(rung, ...)`` in this module and there must never be.
+#: ``RUNGS.get(rung_id, 0.55)`` reads as defensive -- 0.55 is
+#: ``engineering-judgement``, and it is already here for the citation-demotion
+#: rule below, so defaulting to it even looks principled -- and it silently
+#: converts every malformed brain response into a legal vote. The value that
+#: arrives is legal; the door it came through is not, which is precisely why
+#: nothing downstream can detect it. An out-of-enum rung is SCHEMA-INVALID:
+#: re-dispatch that brain once, then escalate, and never default.
+ADOPTION_FLOOR = RUNGS["code-evidenced"]
+
+#: Where a brain lands when its citation does not resolve. Strictly below the
+#: floor, and that is load-bearing rather than incidental: a demotion target at
+#: or above the floor would let an answer whose evidence could not be READ be
+#: adopted anyway, through the very mechanism that exists to stop it.
+DEMOTION_RUNG = "engineering-judgement"
+
+#: Derived from the floor, never typed out, so the two cannot disagree.
+ADOPTABLE = frozenset(
+    name for name in RUNG_ORDER if RUNGS[name] >= ADOPTION_FLOOR)
+
+#: Human decisions are depth 0. Depth 3 is three layers of inference away from
+#: the last thing a human actually said, which is where a run stops building the
+#: user's product and starts building its own.
+DEPTH_CAP = 2
+
+#: The drift budget caps DECISION AUTHORITY, not run cost: ``agent_dispatch_count``
+#: is a separate counter and these never bound it. Checked before dispatch.
+#: Escalations never count against it -- an escalation is the run asking for
+#: help, and charging for it teaches the controller to stop asking.
+BUDGET_PER_PHASE = 3
+BUDGET_PER_RUN = 10
+
+#: Two human-granted extensions per run, then the budget is terminal. A third
+#: grant with no change to the underlying problem is not a budget problem.
+MAX_EXTENSIONS = 2
+
+#: Axes a machine may not settle at all, whatever its rung. A frozenset for the
+#: same reason the ladder is frozen, and enumerated rather than inferred for the
+#: reason ``_BLAST_RADII`` is closed: adoption checks a blast radius against
+#: this list, so a member nobody wrote down matches nothing and the decision
+#: that should have reached a human is adopted by three machines instead.
+IRREVERSIBLE_AXES = frozenset({
+    "product-scope", "destructive-data", "schema-migration", "external-service",
+    "paid-dependency", "public-api", "wire-format", "authn-model", "authz-model",
+    "runtime-cost", "licensing", "writes-outside-repo",
+})
+
+
+class QuorumError(TrackerError):
+    """A quorum record is unusable.
+
+    Under ``TrackerError`` so that a controller which already catches this
+    module's root sees a quorum stop too: an exception outside the family
+    escapes every ``except TrackerError`` already written, and an escaped stop
+    is a run that carries on.
+    """
+
+
+class QuorumSchemaInvalid(QuorumError):
+    """A brain response violates the response schema; it is never repaired.
+
+    Distinct from ``QuorumIncomplete`` because the recoveries differ: this one
+    re-dispatches that brain once and then escalates.
+    """
+
+
+class QuorumIncomplete(QuorumError):
+    """The quorum cannot be finalised yet; the controller owes a dispatch."""
+
+
+def _squash(text: str) -> str:
+    """Question text as identity: whitespace runs collapsed, then case folded.
+
+    ``casefold`` rather than ``lower`` because the same question retyped may
+    arrive with any of the equivalences ``lower`` does not close.
+    """
+    return " ".join(text.split()).casefold()
+
+
+def derive_qid(question: str, axis: str) -> str:
+    """Stable identity for one question on one axis.
+
+    WHAT THIS HASHES, exactly: the question text with runs of whitespace
+    squashed to one space and case folded, then a NUL, then the axis token
+    VERBATIM. Nothing else -- not the run id, not the phase, not the raiser,
+    not the options, and above all not the decisions digest.
+
+    The decisions digest is deliberately NOT an input. Including it would give
+    the same question a new identity whenever anything else was decided, so a
+    re-raise after a compaction would dispatch a second quorum and the run would
+    re-litigate ground it had already settled -- with every record on disk
+    looking well-formed. Context is recorded separately, as ``context_digest``,
+    for audit.
+
+    THE AXIS is the stage-03 question ``ID`` or ``_RESERVED_AXIS``. That column
+    carries three roles -- intent-conflict id, axis token, and quorum axis
+    namespace -- but they are three USES of one token, not three tokens: the
+    ``ID`` column is a single identifier namespace and every role reads the same
+    string. So hashing it is right, and it is hashed as it is written: the
+    namespace is case-SENSITIVE (``_TOKEN`` admits upper case), so folding the
+    axis would give two different questions one quorum. For the same reason the
+    axis must already BE a legal token here -- a padded or spaced axis hashes to
+    a qid the tracker's own cell can never be keyed by, and the disagreement
+    would surface a phase later as a record nobody can look up.
+
+    The NUL is a field separator and is therefore excluded from both fields.
+    Without that refusal ``("a\\x00b", "c")`` and ``("a", "b\\x00c")`` produce the
+    same bytes and so the same qid -- one quorum answering for two questions --
+    and ``str.split`` does not treat NUL as whitespace, so squashing does not
+    remove it.
+    """
+    if not isinstance(question, str):
+        raise QuorumSchemaInvalid(
+            f"question is {type(question).__name__}, not str; coercing it would "
+            "hash a repr and mint a well-formed qid for a malformed record")
+    if not isinstance(axis, str):
+        raise QuorumSchemaInvalid(
+            f"axis is {type(axis).__name__}, not str; an axis is a table cell "
+            "before it is a hash input")
+    if "\x00" in question:
+        raise QuorumSchemaInvalid(
+            "a question may not contain the field separator: it would let one "
+            "question on one axis collide with another on another")
+    if not _TOKEN.fullmatch(axis):
+        raise QuorumSchemaInvalid(
+            f"axis {axis!r} is not a legal question id: the axis namespace is "
+            f"the stage-03 ids plus {_RESERVED_AXIS!r}, and a qid derived from "
+            "anything else keys a row the tracker will not hold")
+    squashed = _squash(question)
+    if not squashed:
+        raise QuorumSchemaInvalid(
+            "a question that squashes to nothing has no identity; every blank "
+            "question on an axis would share one qid and the first would answer "
+            "for all the rest")
+    payload = squashed.encode("utf-8") + b"\x00" + axis.encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:12]

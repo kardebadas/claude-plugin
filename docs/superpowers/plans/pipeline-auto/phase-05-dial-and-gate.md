@@ -104,6 +104,29 @@ A validator rule can. `parse_tracker` refuses a tracker in which a task with a f
 
 ---
 
+## Carried forward from P02 Task 6 (commit `0ecfa77`)
+
+**One ratchet hole is outside P02's reach and is yours to close.** P02 makes a
+downward reclassification unspellable: `Class Source` admits only `plan` (no
+ratchet record permitted) and `ratchet` (pinned to `required`, and required to
+name `<trigger>@<evidence>`). The whole cross product is asserted.
+
+What P02 cannot catch is a phase row claiming `Class Source: plan` while its
+phase plan's metadata says `required`. Detecting that needs the plan file, and
+the state module never opens one — `PlanMetadataError` exists for the phase that
+does. That phase is P05.
+
+Without this check, a controller can buy its way out of the full per-task gate by
+writing `plan` over a class it never had, which is the same self-interested move
+the one-way ratchet exists to forbid, taking the one route the schema cannot see.
+Read the phase plan's metadata and compare.
+
+**Also settled by Task 6:** the `Decisions` column is validated as a grammar
+(`H-<n>` | `Q-<qid>`), not referentially. Resolution is against `decisions.md`
+per `phase-06-master-gate.md:1438`, and the state module never opens that file.
+Do not add an in-tracker referential rule here — it broke nine pre-existing
+cases when tried.
+
 ## Interfaces
 
 ### Consumes from P02 — assumed to exist and work

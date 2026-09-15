@@ -10017,6 +10017,42 @@ class CheckContradictionTests(DecisionContractCase):
         the clear one rather than the absence of a verdict."""
         self.assertIsNone(pas.check_contradiction(self.decisions, candidate()))
 
+    def test_an_unhashable_d_id_in_the_index_is_a_stop_and_never_a_type_error(self):
+        """Standing rule 9, at the one call site a mutation pass found unpinned.
+
+        ``if did not in records`` HASHES ``did``. The D-IDs this walks come
+        from ``axis_index``, and ``check_contradiction`` takes a MAPPING rather
+        than a file -- its own docstring says so, because a caller that
+        assembles one (a projection, a merge of two runs, a test) can hand it
+        shapes the file grammar refuses. So an unhashable D-ID is reachable,
+        and a bare ``in`` would raise ``TypeError`` from inside the walk:
+        outside ``TrackerError``, past every handler a controller has written,
+        on the one check whose whole job is to not fail open.
+
+        Reverting ``_member(did, records)`` to a bare ``in`` must fail this.
+        """
+        for did in (["H-001"], {"id": "H-001"}, frozenset({"H-001"})):
+            with self.subTest(did=did):
+                assembled = {"decisions": dict(self.decisions["decisions"]),
+                             "axis_index": {"storage-engine": [did]}}
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.check_contradiction(assembled, candidate())
+
+    def test_a_hashable_d_id_the_records_lack_is_the_same_stop(self):
+        """The twin, so the case above cannot pass merely by refusing everything.
+
+        A D-ID that is a perfectly good string but names no record is the same
+        disagreement between the index and the records, and must stop for the
+        same reason -- while the unmodified fixture still returns its clear
+        verdict.
+        """
+        assembled = {"decisions": dict(self.decisions["decisions"]),
+                     "axis_index": {"storage-engine": ["H-001", "H-999"]}}
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.check_contradiction(assembled, candidate())
+        #: And the unbroken index still answers.
+        self.assertIsNone(pas.check_contradiction(self.decisions, candidate()))
+
     def test_a_different_option_on_a_decided_axis_names_the_decision(self):
         """The D-ID and not a boolean: the rejection status and the terminal
         report both key off WHICH decision was contradicted."""

@@ -6,7 +6,7 @@
 
 **Architecture:** All quorum state is files under `<run_dir>/quorum/`, because spec invariant 4 makes files the authority and an interruption must be classifiable from disk alone. The record has three separately-durable phases: `open.json` (owners, per-brain payload digests, the shared question digest, and the context digest, published **before** dispatch), `responses/<owner>__<attempt>.json` (one immutable file per response), and `final.json` (the computed outcome). Only the third goes through P02's tracker lock, with `transition_id = "quorum-" + qid`, so replay-is-inert semantics protect the one transition that changes run state. A brain never types a number: it selects a rung name, the controller resolves its evidence with a real file read, demotes on failure, and derives the value from `RUNGS`.
 
-**Tech Stack:** Python 3 standard library only (`hashlib`, `json`, `pathlib`, `re`, `types.MappingProxyType`). `pytest` for tests. Markdown for `decisions.md` and the findings ledger; JSON for quorum records and brain payloads.
+**Tech Stack:** Python 3 standard library only (`hashlib`, `json`, `pathlib`, `types.MappingProxyType`). **`re` is NOT available** — it was removed from the capability boundary; use `_CharClass` and the module's hand-rolled matchers. **`pytest` is NOT installed** — tests are `unittest.TestCase` under `python3 -m unittest discover -s <dir>`, never `-t .`. Markdown for the tracker, `decisions.md`, the findings ledger, worker results and the question record (`question.md`, not `question.md` — see Task 6, commit `629b6b8`); JSON for brain responses and the nested gate records.
 
 **Spec:** `docs/superpowers/specs/2026-09-14-pipeline-auto-design.md` — "The quorum contract" (lines 112–401) and "Failure modes and mitigations" (lines 497–562)
 
@@ -1532,7 +1532,7 @@ class BuildPayload(unittest.TestCase):
         _root, self.run_dir = quorum_run(self.stack)
         self.qid = pipeline_auto_state.derive_qid(QUESTION["question"], QUESTION["axis"])
         (self.run_dir / "quorum" / self.qid).mkdir(parents=True)
-        (self.run_dir / "quorum" / self.qid / "question.json").write_text(
+        (self.run_dir / "quorum" / self.qid / "question.md").write_text(
             json.dumps(QUESTION), encoding="utf-8")
         self.payloads = [pipeline_auto_state.build_payload(self.qid, index, run_dir=str(self.run_dir))
                          for index in range(3)]
@@ -1667,7 +1667,7 @@ def check_admissible(record: dict) -> list[str]:
 
 
 def _question_record(run_dir: str, qid: str) -> dict:
-    path = Path(run_dir) / "quorum" / qid / "question.json"
+    path = Path(run_dir) / "quorum" / qid / "question.md"
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError) as exc:
@@ -1776,6 +1776,56 @@ git commit -m "feat(pipeline-auto): manufacture brain independence with per-sour
 ---
 
 ### Task 7: Drift budget, events, and the human budget extension
+
+> **QUORUM DECISION — `json` is admitted to `ALLOWED_IMPORTS`, making it twelve.**
+> Three brains, 2-1 on the count but decided on rung rather than headcount:
+> `admit-json` at `specified`, `markdown-everywhere` demoted to
+> `engineering-judgement`. Strictly higher, above the floor, so it adopts.
+>
+> **Why the question arose.** Task 6 found the phase assumes JSON parsing the
+> module cannot do: the brief called `json.loads` and a `_dumps` that does not
+> exist, and would have raised `NameError` on first call. Task 6 made the
+> question record markdown (`question.md`, commit `629b6b8`) and correctly
+> reported that this defers rather than solves — `record_brain_response` takes a
+> **dict**, a brain returns JSON, and nothing bridges them.
+>
+> **Why `markdown-everywhere` demoted.** Its mechanism was "the controller
+> converts it into the section grammar the module already owns". Run against a
+> real response, that grammar **corrupts and rejects it**: `_csv` splits a quote
+> containing a comma into two values; `line` as `int`-not-`bool` and `blocker`
+> as `None`-distinct-from-`""` cannot be expressed; and a flat round-trip turns
+> a valid response into six violations from `validate_brain_response`. So the
+> grammar the module owns does **not** suffice, and building one that does is a
+> new nested, typed, escaping serialisation format — which is the hand-rolled
+> option in markdown clothing, refused in committed code at
+> `pipeline_auto_state.py:5471` as "strictly weaker than the format it
+> imitated". A cited authority that does not support the claim demotes; that is
+> `effective_rung`'s own rule, applied to the brains that invoked it.
+>
+> It is also **not a complete answer**: P04 and P06 read agent-authored JSON
+> embedded *inside* markdown fields (`phase-06-master-gate.md:1915` uses
+> `object_pairs_hook=_no_duplicate_keys`, a guard for a real past defect).
+> Markdown-everywhere cannot reach those at all.
+>
+> **Why `json` clears the boundary.** The master plan's rule is *capability, not
+> convenience* — "does this let the module do something it previously could
+> not?" All three brains agree the answer for `json` is **no**: it opens
+> nothing, execs nothing, reaches no filesystem. It is the `copy` case, kept
+> despite a hand-rolled version passing every test, not the `subprocess` case.
+>
+> **What does NOT change.** `master-plan:9` says markdown for all durable state,
+> and that still governs everything it already governs: the tracker,
+> `decisions.md`, the findings ledger, worker results, and the question record.
+> `json` is admitted for brain responses and the nested gate records — the
+> places whose values are typed and nested and whose author is an agent.
+>
+> **What the widening costs, stated so it is not forgotten.** The boundary moved
+> once, for an argued reason, recorded here. The committed guard is a subset
+> assertion whose own message reads "widen it on purpose only" — this is that
+> purpose. `json.loads` on agent-supplied text must still be wrapped: a parse
+> failure is a `TrackerError`, never a raw `JSONDecodeError`, or it escapes the
+> exception family every controller handler is written against.
+
 
 **Files:**
 - Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
@@ -2194,7 +2244,7 @@ def open_quorum(run_dir: str, *, question_record: str) -> dict:
 
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "responses").mkdir(exist_ok=True)
-    (directory / "question.json").write_text(_dumps(record), encoding="utf-8")
+    (directory / "question.md").write_text(_dumps(record), encoding="utf-8")
 
     # THE BUDGET TRIPS HERE, BEFORE DISPATCH. Checking at adoption time still
     # passes every other budget test while sending three brains a question that
@@ -2273,7 +2323,7 @@ class RecordBrainResponse(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.root, self.run_dir = quorum_run(self.stack)
         write_repo(self.root, "db/engine.py", "class PostgresEngine:\n")
-        path = self.run_dir / "question.json"
+        path = self.run_dir / "question.md"
         path.write_text(json.dumps(QUESTION), encoding="utf-8")
         self.qid = pipeline_auto_state.open_quorum(str(self.run_dir), question_record=str(path))["qid"]
         self.responses = self.run_dir / "quorum" / self.qid / "responses"
@@ -2431,7 +2481,7 @@ class ClassifyQuorum(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.root, self.run_dir = quorum_run(self.stack)
         write_repo(self.root, "db/engine.py", "class PostgresEngine:\n")
-        path = self.run_dir / "question.json"
+        path = self.run_dir / "question.md"
         path.write_text(json.dumps(QUESTION), encoding="utf-8")
         self.qid = pipeline_auto_state.open_quorum(str(self.run_dir), question_record=str(path))["qid"]
 
@@ -2734,7 +2784,7 @@ class FinalizeAdoption(unittest.TestCase):
         write_repo(self.root, "spec.md", "The session table is the run's own store.\n")
         (self.run_dir / "decisions.md").write_text(HUMAN.replace(
             "- **Axis:** storage-engine", "- **Axis:** unrelated-axis"), encoding="utf-8")
-        self.path = self.run_dir / "question.json"
+        self.path = self.run_dir / "question.md"
         self.path.write_text(json.dumps(QUESTION), encoding="utf-8")
         self.qid = pipeline_auto_state.open_quorum(
             str(self.run_dir), question_record=str(self.path))["qid"]
@@ -3250,7 +3300,7 @@ class QuorumTrackerRows(unittest.TestCase):
             (run_dir / "decisions.md").write_text(
                 HUMAN.replace("- **Axis:** storage-engine", "- **Axis:** unrelated-axis"),
                 encoding="utf-8")
-            path = run_dir / "question.json"
+            path = run_dir / "question.md"
             path.write_text(json.dumps(QUESTION), encoding="utf-8")
             qid = pipeline_auto_state.open_quorum(
                 str(run_dir), question_record=str(path))["qid"]
@@ -3615,7 +3665,7 @@ In `open_quorum`, immediately after the admissibility check, replace the qid der
 
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "responses").mkdir(exist_ok=True)
-    (directory / "question.json").write_text(_dumps(record), encoding="utf-8")
+    (directory / "question.md").write_text(_dumps(record), encoding="utf-8")
 
     raised_bar_rung = None
     if challenged:
@@ -3808,7 +3858,7 @@ guessed at in code beyond the minimum noted; each needs a ruling.
 1. ~~`build_payload(qid, brain_index)` has no way to find the run.~~
    **Settled.** `build_payload(qid, brain_index, *, run_dir)` is the pinned
    signature; the question record is read from
-   `<run_dir>/quorum/<qid>/question.json`. Also settled, after a correction from
+   `<run_dir>/quorum/<qid>/question.md`. Also settled, after a correction from
    the coordinator that P04 caught against the committed fixture: `## Quorum`'s
    `Payload Digest` is **one digest, not three** — over the shared payload plus
    the decisions projection. It binds all three brains because the reading

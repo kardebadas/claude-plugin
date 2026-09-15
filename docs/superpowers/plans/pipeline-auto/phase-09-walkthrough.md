@@ -47,7 +47,7 @@ The master plan asks for a walkthrough "proving the skill works from an installe
 
 **The nearest thing that can be done, and is:** every filesystem path the walkthrough touches is inside its own temporary directory; the script asserts that fact directly rather than assuming it. If the module writes anywhere else — this checkout, the user's home, a cached fixture — the assertion fails and names the path. That converts "we did not test installation" into "we proved the module confines itself to the root it was handed", which is the property installation would have been testing for.
 
-**`ALLOWED_IMPORTS` binds the module, not this script.** `pipeline_auto_state.py` must stay at eleven imports. The walkthrough may import what it needs (`tempfile`, `shutil`, `importlib.util`) because it is an example script, not the module — the same rule that lets the test suite import freely. A worker who "fixes" the walkthrough by adding an import to the module has inverted the constraint.
+**`ALLOWED_IMPORTS` binds the module, not this script.** `pipeline_auto_state.py` must stay at **twelve** imports — the original eleven plus `json`, admitted by quorum before P03 Task 7 and recorded at the head of that task. The walkthrough may import what it needs (`tempfile`, `shutil`, `importlib.util`) because it is an example script, not the module — the same rule that lets the test suite import freely. A worker who "fixes" the walkthrough by adding an import to the module has inverted the constraint.
 
 **Platform.** `classify_filesystem` returns `unknown` and halts on anything but Linux, by decision. The walkthrough therefore runs on Linux and **skips with a stated reason** elsewhere, rather than failing. A skip that says why is information; a failure on an unsupported platform is noise that trains a reader to ignore the suite.
 
@@ -436,7 +436,7 @@ for node in ast.walk(ast.parse(src)):
 print(len(mods), sorted(mods))
 PY
 ```
-Expected: exactly 11. The walkthrough may import `tempfile`, `shutil` and `importlib`; the module may not. A worker who simplified the example by widening the module inverted the constraint.
+Expected: exactly **12** — the eleven, plus `json`, admitted by quorum before P03 Task 7 (see the decision recorded at the head of that task). The walkthrough may additionally import `tempfile`, `shutil` and `importlib`; the module may not. A worker who simplified the example by widening the module inverted the constraint — `json` was widened for a reason argued and recorded, which is the only way the boundary may move.
 
 - [ ] **Step 4: State the closing position**
 

@@ -3210,7 +3210,7 @@ docs/superpowers/runs/<run-id>/
 ├── findings.md
 ├── completeness-proposals.md
 ├── intent-brief.md
-├── quorum/<qid>/               (question.json, in_flight, responses, finalised)
+├── quorum/<qid>/               (question.md, in_flight, responses, finalised)
 ├── agent-output/               (immutable worker results)
 └── scratch/                    (self-ignoring; briefs, reports, review packages)
 ```

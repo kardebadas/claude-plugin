@@ -47,7 +47,12 @@ WIDE_GAP = "| 12 | pending | - |\n\n\n## Intent\n"
 #: taken incidentally to make a failing test pass. ``hashlib`` is listed for the
 #: payload and context digests the quorum rows carry. ``pathlib`` is listed
 #: because ``validate_run`` takes its run directory as a ``Path`` and READS
-#: through it.
+#: through it. ``re`` is listed for the id grammars ``## Questions`` and
+#: ``## Escalations`` are judged against — ``H-<n>`` for a human decision,
+#: ``E-<n>`` for an escalation. A looser "some non-empty cell" test there would
+#: let a ``Q-<qid>`` quorum decision stand as the answer to the one human gate,
+#: which is the authority that gate exists to withhold. ``re`` is pure: it
+#: reaches no filesystem, network or interpreter state.
 #:
 #: What this allowlist does NOT prove is that the module cannot write. ``pathlib``
 #: is not a narrower capability than ``os`` or ``shutil``: ``Path.write_text``,
@@ -55,7 +60,7 @@ WIDE_GAP = "| 12 | pending | - |\n\n\n## Intent\n"
 #: ``touch``, ``chmod``, ``symlink_to`` and ``open(mode=...)`` all exist, and an
 #: earlier revision of this file claimed otherwise. The read-only guarantee is
 #: carried by ``write_capable_calls`` below, scoped to ``validate_run``.
-ALLOWED_IMPORTS = frozenset({"__future__", "hashlib", "pathlib"})
+ALLOWED_IMPORTS = frozenset({"__future__", "hashlib", "pathlib", "re"})
 
 #: Builtins that open a file or run generated code. Called anywhere in the
 #: module, by any function, they are refused — this half is module-wide.
@@ -792,6 +797,418 @@ class NextActionTests(unittest.TestCase):
                 row["next_action"] = "-"
         with self.assertRaises(pas.TrackerValidationError):
             pas.derive_next_action(tracker)
+
+
+#: Rows quoted from the fixture once, so each surgery below names exactly the
+#: cell it changed instead of re-typing the row it meant to leave alone.
+READER_1 = ("| reader-1 | reader | published | intent-reader-1 | "
+            "scratch/intent-reader-1.md | - |")
+READER_3 = ("| reader-3 | reader | published | intent-reader-3 | "
+            "scratch/intent-reader-3.md | - |")
+INTENT_BRIEF = "| brief | brief | frozen | reconciled | scratch/intent-brief.md | C-001 |"
+QUESTION_2 = "| axis-2 | synthesis | 2 | answered | H-2 |"
+ESCALATION_1 = "| E-1 | 7c6b5a4938d2 | phase | queued | - | - |"
+ESCALATION_2 = "| E-2 | - | run | answered | batch-1 | H-3 |"
+
+
+def swap(old: str, new: str, text: str | None = None) -> str:
+    """The valid fixture — or an already-edited copy of it — with one exact
+    substring replaced.
+
+    A ``str.replace`` whose pattern is absent is a silent no-op. A rejection
+    case built on one would assert against the untouched fixture — which
+    parses, so that case fails loudly — but a POSITIVE control built on one
+    would pass while exercising nothing at all. Both are refused here rather
+    than only the half that happens to be self-announcing.
+    """
+    text = valid_text() if text is None else text
+    if old not in text:
+        raise AssertionError(f"the fixture no longer contains {old!r}")
+    return text.replace(old, new)
+
+
+class IntentSectionTests(unittest.TestCase):
+    """``## Intent`` is the run's only record of what the user actually asked.
+
+    Three independent readings, reconciled into one brief whose conflicts are
+    **flagged and never resolved**. A conflict quietly reconciled here is a
+    requirement invented, and no later stage can tell an invented requirement
+    from a read one — the run goes on reporting success against it.
+    """
+
+    def test_the_fixtures_three_readers_and_one_brief_are_accepted(self):
+        """The positive control every rejection below is measured against.
+
+        Catches an over-strict validator that refuses the legal shape: with the
+        fixture itself rejected, every ``assertRaises`` below would pass for a
+        reason it does not name and the section would be untested.
+        """
+        tracker = pas.parse_tracker(valid_text())
+        self.assertEqual([row["id"] for row in tracker["intent"]],
+                         ["reader-1", "reader-2", "reader-3", "brief"])
+
+    def test_two_readers_are_rejected_because_a_count_is_never_reduced(self):
+        """Stage 01 dispatches exactly three readers, never two to fit capacity.
+
+        Catches a validator that judges each row and never the roster: a brief
+        reconciled from two readings renders identically to one reconciled from
+        three, so the missing reading is invisible from here on.
+        """
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(swap(READER_3 + "\n", ""))
+
+    def test_a_reader_row_claiming_the_briefs_kind_is_rejected(self):
+        """``ID`` and ``Kind`` must agree. Catches checking the id roster alone:
+        a row that is a reader by id and a brief by kind lets the reconciliation
+        step read three briefs and no readings."""
+        text = swap(READER_3, "| reader-3 | brief | published | intent-reader-3 | "
+                              "scratch/intent-reader-3.md | - |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_an_out_of_enum_intent_state_is_rejected(self):
+        """The brief is parked in a state the schema does not define, and every
+        other intent rule is satisfied. Catches omitting the membership guard:
+        an unknown state is then neither published nor frozen, so the freeze and
+        result rules below simply skip it and the row passes unjudged."""
+        text = swap(INTENT_BRIEF, "| brief | brief | paused | reconciled | - | C-001 |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_only_the_reconciled_brief_may_freeze(self):
+        """``frozen`` is the immutability the brief earns at stage 03 and a
+        reading never has. Catches validating state membership without asking
+        WHICH rows may hold which state: a frozen reader claims an authority
+        that was never conferred on it. The brief is left unpublished here so
+        the roster and result rules stay out of the way."""
+        text = swap(READER_3, "| reader-3 | reader | frozen | intent-reader-3 | - | - |")
+        text = swap(INTENT_BRIEF,
+                    "| brief | brief | pending | reconciled | - | C-001 |", text)
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_published_reader_must_name_its_immutable_result(self):
+        """A reading that published without a result file cannot be re-read.
+        Catches omitting the pairing: reconciliation then has three published
+        readers and only two readings to reconcile, and invents the third."""
+        text = swap(READER_1, "| reader-1 | reader | published | intent-reader-1 | - | - |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_an_unpublished_reader_cannot_claim_a_result(self):
+        """The other half of the same pairing. Catches enforcing only the
+        published direction: a dispatched reader naming a result file that does
+        not exist yet is a reading the reconciler will read as finished."""
+        text = swap(READER_1, "| reader-1 | reader | dispatched | intent-reader-1 | "
+                              "scratch/intent-reader-1.md | - |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_conflicts_belong_to_the_brief_and_never_to_a_reader(self):
+        """A reading reports what it read; only reconciliation can see that two
+        readings disagree. Catches accepting a conflict on a reader row: the
+        conflict is then recorded where the stage-03 ranking does not look for
+        it, and an unresolved conflict never reaches the human gate."""
+        text = swap(READER_1, "| reader-1 | reader | published | intent-reader-1 | "
+                              "scratch/intent-reader-1.md | C-002 |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_the_brief_cannot_publish_before_all_three_readers_have(self):
+        """Reader 2 is still in flight while the brief is frozen. Catches
+        validating rows independently: the reconciled brief is then a
+        reconciliation of whatever happened to be finished, and the third
+        reading lands after the brief that was supposed to contain it."""
+        text = swap("| reader-2 | reader | published | intent-reader-2 | "
+                    "scratch/intent-reader-2.md | - |",
+                    "| reader-2 | reader | dispatched | intent-reader-2 | - | - |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_published_brief_must_name_its_result(self):
+        """Catches omitting the brief's own result check: stage 04 onwards cites
+        the intent brief by path, and a published brief with no path is a run
+        whose every later ``consistent_with`` citation anchors to nothing."""
+        text = swap(INTENT_BRIEF,
+                    "| brief | brief | published | reconciled | - | C-001 |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_an_unpublished_brief_cannot_claim_a_result(self):
+        """Catches the mirror omission: a brief still being written that already
+        names its output file is one a resuming controller will cite rather
+        than finish."""
+        text = swap(INTENT_BRIEF, "| brief | brief | dispatched | reconciled | "
+                                  "scratch/intent-brief.md | C-001 |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_the_brief_cannot_freeze_before_stage_03_closes(self):
+        """The brief is immutable only AFTER the human gate — "a contradicting
+        finding escalates, the human amends". Catches freezing on publication
+        instead: the conflicts stage 03 exists to put to the user are sealed
+        into the brief before the user is asked about them, and the single gate
+        is reduced to a formality over an answer already chosen."""
+        states = ["complete", "active"] + ["pending"] * 10
+        actions = ["-", "synthesise-questions"] + ["-"] * 10
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(with_stages(states, actions))
+
+
+def with_questions(rows: list[str]) -> str:
+    """The fixture with its ``## Questions`` body replaced wholesale.
+
+    The row-count rules need tables the fixture's two rows cannot express, and
+    splicing rows in next to a heading is how a case ends up rejected for a
+    stray blank line instead of for the rule it names.
+    """
+    text = valid_text()
+    start = text.index("| axis-1 |")
+    end = text.index("\n\n## Quorum")
+    return text[:start] + "\n".join(rows) + text[end:]
+
+
+class QuestionSectionTests(unittest.TestCase):
+    """``## Questions`` holds the at-most-four questions of the one human gate.
+
+    Their answers are the only requirements this run may treat as
+    unimpeachable, so which questions occupy the four slots is the single most
+    consequential ranking the controller makes.
+    """
+
+    def test_four_questions_are_legal(self):
+        """The positive control for the cap. Catches an off-by-one that refuses
+        the fourth slot: stage 02 would then be silently limited to three and
+        the fourth-ranked open decision never reaches the user at all."""
+        text = with_questions([
+            "| axis-1 | intent-conflict | 1 | answered | H-1 |",
+            "| axis-2 | synthesis | 2 | answered | H-2 |",
+            "| axis-3 | synthesis | 3 | asked | - |",
+            "| axis-4 | synthesis | 4 | asked | - |",
+        ])
+        self.assertNotEqual(text, valid_text())
+        tracker = pas.parse_tracker(text)
+        self.assertEqual(len(tracker["questions"]), 4)
+
+    def test_a_fifth_question_is_rejected(self):
+        """Stage 03 is one ``AskUserQuestion`` call of at most four questions.
+        Catches dropping the cap: a fifth row records a question the single
+        gate physically cannot have asked, and its ``answered`` state would
+        then attribute an answer to a human who was never shown it."""
+        text = with_questions([
+            "| axis-1 | intent-conflict | 1 | answered | H-1 |",
+            "| axis-2 | synthesis | 2 | answered | H-2 |",
+            "| axis-3 | synthesis | 3 | asked | - |",
+            "| axis-4 | synthesis | 4 | asked | - |",
+            "| axis-5 | synthesis | 5 | asked | - |",
+        ])
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_duplicated_question_axis_is_rejected(self):
+        """Catches a length check standing in for an identity check: two rows
+        on one axis spend two of the four slots on the same decision, and the
+        answer recorded second silently overwrites the first."""
+        text = swap(QUESTION_2, "| axis-1 | synthesis | 2 | answered | H-2 |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_slots_must_be_one_through_n_in_order(self):
+        """Catches validating slots as a set or as a bound: a gap at slot 3
+        means a question was ranked, dropped, and never asked, while the rows
+        that remain still claim to be the top four."""
+        text = swap(QUESTION_2, "| axis-2 | synthesis | 4 | answered | H-2 |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_an_out_of_enum_question_origin_is_rejected(self):
+        """Catches letting an unknown origin reach the ranking comparison, where
+        ``_QUESTION_ORIGINS.index`` raises a bare ``ValueError`` — outside this
+        module's exception family, so the caller that branches on
+        ``TrackerError`` never sees the read-only stop it was promised."""
+        text = swap(QUESTION_2, "| axis-2 | guesswork | 2 | answered | H-2 |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_synthesised_question_cannot_take_a_slot_above_an_intent_conflict(self):
+        """An unresolved intent conflict is by definition higher blast radius
+        than anything stage 02 synthesised, so it takes the earlier slot.
+
+        Catches ranking the four slots by the synthesiser's own score alone: a
+        conflict between two readings of the user's prompt is then ranked
+        against downstream design questions, and pushed out of the four
+        entirely by enough of them — leaving the run to resolve the conflict
+        itself, which is the one thing stage 01 forbids.
+        """
+        text = swap("| axis-1 | intent-conflict | 1 | answered | H-1 |\n"
+                    "| axis-2 | synthesis | 2 | answered | H-2 |",
+                    "| axis-1 | synthesis | 1 | answered | H-1 |\n"
+                    "| axis-2 | intent-conflict | 2 | answered | H-2 |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_an_out_of_enum_question_state_is_rejected(self):
+        """The row carries no decision, so every other question rule passes it.
+        Catches omitting the state enum: a question in an undefined state is
+        neither asked nor answered, and stage 03 closes over it."""
+        text = swap(QUESTION_2, "| axis-2 | synthesis | 2 | skipped | - |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_an_answered_question_records_a_human_decision_id(self):
+        """A quorum can never answer the one human gate. Catches accepting any
+        non-``-`` decision: a ``Q-`` id here records three agreeing machines as
+        the unimpeachable requirement every later contradiction is measured
+        against, which is precisely the authority the gate exists to withhold."""
+        text = swap("| axis-1 | intent-conflict | 1 | answered | H-1 |",
+                    "| axis-1 | intent-conflict | 1 | answered | Q-3f2a1b0c9d8e |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_an_unanswered_question_cannot_carry_a_decision(self):
+        """Catches enforcing only the answered direction: a decision attached to
+        a question still in flight is an answer recorded before the human gave
+        one, and it reads as ``Provenance: human`` forever after."""
+        text = swap(QUESTION_2, "| axis-2 | synthesis | 2 | asked | H-2 |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+
+def with_escalations(rows: list[str]) -> str:
+    """The fixture with its ``## Escalations`` body replaced wholesale."""
+    text = valid_text()
+    start = text.index("| E-1 |")
+    end = text.index("\n\n## Tasks")
+    return text[:start] + "\n".join(rows) + text[end:]
+
+
+class EscalationSectionTests(unittest.TestCase):
+    """``## Escalations`` is how a run that cannot decide reaches the user.
+
+    It is the only path out of the autonomous middle of the run, so a shape
+    this section accepts but no human ever sees is a question the run answers
+    by itself while reporting that it asked.
+    """
+
+    def test_a_batch_of_four_is_legal(self):
+        """The positive control for the batch cap: four per ``AskUserQuestion``
+        call is the limit, not three. Catches an off-by-one that would strand
+        the fourth escalation in a batch that is never asked."""
+        text = with_escalations([
+            "| E-1 | 7c6b5a4938d2 | phase | asked | batch-1 | - |",
+            "| E-2 | - | run | asked | batch-1 | - |",
+            "| E-3 | - | task | asked | batch-1 | - |",
+            "| E-4 | - | contract | asked | batch-1 | - |",
+        ])
+        self.assertNotEqual(text, valid_text())
+        tracker = pas.parse_tracker(text)
+        self.assertEqual(len(tracker["escalations"]), 4)
+
+    def test_a_batch_of_five_is_rejected(self):
+        """Escalations batch at most four per ``AskUserQuestion`` call; more
+        than four pending means ask four and halt on the rest. Catches dropping
+        the cap: the fifth row records a question as asked that the call had no
+        room for, so the run waits for an answer to a question never put."""
+        text = with_escalations([
+            "| E-1 | 7c6b5a4938d2 | phase | asked | batch-1 | - |",
+            "| E-2 | - | run | asked | batch-1 | - |",
+            "| E-3 | - | task | asked | batch-1 | - |",
+            "| E-4 | - | contract | asked | batch-1 | - |",
+            "| E-5 | - | task | asked | batch-1 | - |",
+        ])
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_five_escalations_split_across_two_batches_are_legal(self):
+        """The cap is per CALL, not per run. Catches counting the section
+        instead of the batch, which would refuse the halt-and-ask-again shape
+        the spec prescribes for more than four pending escalations."""
+        text = with_escalations([
+            "| E-1 | 7c6b5a4938d2 | phase | answered | batch-1 | H-3 |",
+            "| E-2 | - | run | answered | batch-1 | H-4 |",
+            "| E-3 | - | task | answered | batch-1 | H-5 |",
+            "| E-4 | - | contract | answered | batch-1 | H-6 |",
+            "| E-5 | - | task | asked | batch-2 | - |",
+        ])
+        tracker = pas.parse_tracker(text)
+        self.assertEqual(len(tracker["escalations"]), 5)
+
+    def test_a_duplicated_escalation_id_is_rejected(self):
+        """Catches counting rows instead of identities: two escalations sharing
+        an id are one entry to every later lookup, so the second one's
+        resolution answers the first one's question."""
+        text = swap(ESCALATION_2, "| E-1 | - | run | answered | batch-1 | H-3 |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_an_escalation_id_outside_the_e_n_grammar_is_rejected(self):
+        """Catches leaving the id free-form: ``## Tasks`` and ``decisions.md``
+        both cite escalations by id, and an id that does not match the grammar
+        they search for is an escalation nothing downstream can find."""
+        text = swap(ESCALATION_1, "| ESC-1 | 7c6b5a4938d2 | phase | queued | - | - |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_an_escalation_cannot_point_at_an_unknown_quorum(self):
+        """Catches accepting any twelve hex digits: an escalation whose qid
+        matches no quorum row is one whose question, options and three brain
+        responses cannot be recovered, so the human is asked to decide
+        something the run can no longer describe."""
+        text = swap(ESCALATION_1, "| E-1 | 000000000000 | phase | queued | - | - |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_blast_radius_outside_the_closed_vocabulary_is_rejected(self):
+        """The vocabulary is closed *because* adoption checks it against the
+        irreversible-axis list. Catches accepting any token: an unenumerated
+        radius matches nothing on that list, so the check it is meant to fail
+        passes it — the fail-open the spec names explicitly."""
+        text = swap(ESCALATION_1, "| E-1 | 7c6b5a4938d2 | universe | queued | - | - |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_an_out_of_enum_escalation_state_is_rejected(self):
+        """The row carries no batch and no resolution, so every other
+        escalation rule passes it. Catches omitting the state enum: a row in an
+        undefined state is not pending by ``derive_next_action``'s reckoning, so
+        the run resumes dispatching past an escalation nobody has answered."""
+        text = swap(ESCALATION_1, "| E-1 | 7c6b5a4938d2 | phase | parked | - | - |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_queued_escalation_has_not_been_batched(self):
+        """``queued`` means waiting for a stage boundary, not waiting for the
+        human. Catches accepting a batch on a queued row: the escalation is
+        counted against a call it was never part of, displacing a question that
+        was."""
+        text = swap(ESCALATION_1, "| E-1 | 7c6b5a4938d2 | phase | queued | batch-1 | - |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_an_asked_escalation_must_name_its_batch(self):
+        """Catches enforcing only the queued direction: an asked escalation with
+        no batch cannot be traced back to the call that carried it, so a resumed
+        controller cannot tell whether it was ever put to the human."""
+        text = swap(ESCALATION_2, "| E-2 | - | run | answered | - | H-3 |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_an_answered_escalation_records_its_human_resolution(self):
+        """Catches accepting ``answered`` with no resolution: the escalation
+        stops blocking ``derive_next_action`` while recording no answer at all,
+        and the run continues past the decision it escalated as if it had been
+        made."""
+        text = swap(ESCALATION_2, "| E-2 | - | run | answered | batch-1 | - |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_an_unanswered_escalation_cannot_carry_a_resolution(self):
+        """The mirror omission. Catches a resolution recorded against a
+        still-queued escalation: an answer the human has not given yet, already
+        citable as ``Provenance: human`` by everything downstream."""
+        text = swap(ESCALATION_1, "| E-1 | 7c6b5a4938d2 | phase | queued | - | H-9 |")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
 
 
 class SuiteIsWhollyCollectedTests(unittest.TestCase):

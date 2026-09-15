@@ -10,6 +10,7 @@ direction — not here, not later.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 SCHEMA = "pipeline-auto/v1"
@@ -291,6 +292,198 @@ def _validate_stages(tracker: dict) -> None:
             raise TrackerValidationError("only the active stage carries a next action")
 
 
+#: ``## Intent`` is a fixed roster, not a list: three independent readings then
+#: the one brief that reconciles them. Stage 01 dispatches exactly three
+#: readers, and a count is never reduced to fit capacity, so the ORDER here is
+#: the check — a membership test would pass two readers and a duplicate.
+_INTENT_IDS = ("reader-1", "reader-2", "reader-3", "brief")
+_INTENT_STATES = ("pending", "dispatched", "published", "frozen")
+
+#: Ordered by rank, and the order is the rule. An unresolved intent conflict is
+#: by definition higher blast radius than anything stage 02 synthesised, so it
+#: takes the earlier of the four stage-03 slots.
+_QUESTION_ORIGINS = ("intent-conflict", "synthesis")
+_QUESTION_STATES = ("proposed", "asked", "answered")
+
+_ESCALATION_STATES = ("queued", "asked", "answered", "halted")
+
+#: The spec's closed vocabulary. Closed **because** adoption checks a blast
+#: radius against the irreversible-axis list: an unenumerated value matches
+#: nothing on that list and so passes the check by failing to be recognised.
+#: An open grammar here would be a fail-open one layer down.
+_BLAST_RADII = ("task", "phase", "run", "contract")
+
+#: The one human gate is one ``AskUserQuestion`` call, and escalations batch
+#: into the same call shape. Four is the platform's limit, not a policy dial.
+_MAX_QUESTIONS = 4
+_MAX_BATCH = 4
+
+#: ``H-<n>`` is a human decision; ``Q-<qid>`` is a quorum's. Only the first may
+#: answer a stage-03 question or an escalation, so the grammar — not merely
+#: "some non-empty cell" — is what these sections are judged against.
+_HUMAN_DECISION = re.compile(r"H-[0-9]+")
+_ESCALATION_ID = re.compile(r"E-[0-9]+")
+
+
+def _stage_state(tracker: dict, stage: str) -> str:
+    """The state of one stage row.
+
+    ``_validate_stages`` has already proven the twelve rows are exactly
+    ``STAGES``, once each, in order, so this indexes rather than searches. A
+    search that found nothing would raise ``StopIteration``, which inside a
+    generator expression degrades into an unrelated ``RuntimeError`` — an
+    escape from this module's exception family, which is what a read-only stop
+    may never do.
+    """
+    return tracker["stages"][STAGES.index(stage)]["stage_state"]
+
+
+def _validate_intent(tracker: dict) -> None:
+    """Three readings, one reconciled brief, and a brief that freezes after 03.
+
+    This section is the run's only record of what the user actually asked for.
+    The three readings are independent on purpose and their conflicts are
+    **flagged, never resolved**: a conflict quietly reconciled here is a
+    requirement invented, and nothing downstream can tell an invented
+    requirement from a read one.
+
+    The table is fixed-shape like ``## Stage`` — empty before stage 01 opens,
+    then all four rows at once, the brief sitting ``pending`` while the readers
+    run. A partial roster is refused rather than read as "in progress", because
+    a roster that may shrink is one a reconciler can satisfy with two readings.
+    """
+    rows = tracker["intent"]
+    if not rows:
+        return
+    if tuple(row["id"] for row in rows) != _INTENT_IDS:
+        raise TrackerValidationError(
+            "## Intent carries exactly three readers then one brief; a count is "
+            "never reduced to fit capacity")
+    readers, brief = rows[:3], rows[3]
+    if any(row["kind"] != "reader" for row in readers) or brief["kind"] != "brief":
+        raise TrackerValidationError("an intent row's kind must match its identity")
+    #: Ahead of every rule that branches on a state, for the same reason
+    #: ``_validate_stages`` checks its enum first: an unknown state is neither
+    #: published nor frozen, so each rule below would skip it in turn and the
+    #: row would pass having been judged by nothing.
+    unknown = [row["state"] for row in rows if row["state"] not in _INTENT_STATES]
+    if unknown:
+        raise TrackerValidationError(f"unknown intent state {unknown[0]!r}")
+    if any(row["state"] == "frozen" for row in readers):
+        raise TrackerValidationError(
+            "only the reconciled brief freezes; a reading never earns immutability")
+    for row in readers:
+        if (row["state"] == "published") != (row["result"] != "-"):
+            raise TrackerValidationError(
+                "a reader publishes with its immutable result, or neither")
+        if row["conflicts"] != "-":
+            raise TrackerValidationError(
+                "conflicts are flagged on the reconciled brief, never on a reader")
+    if brief["state"] in ("published", "frozen"):
+        if any(row["state"] != "published" for row in readers):
+            raise TrackerValidationError(
+                "the intent brief cannot publish before all three readers have")
+        if brief["result"] == "-":
+            raise TrackerValidationError("a published intent brief names its result")
+    elif brief["result"] != "-":
+        raise TrackerValidationError("an unpublished intent brief cannot claim a result")
+    #: The brief is immutable *after* the gate, not on publication. Freezing it
+    #: earlier seals the conflicts stage 03 exists to put to the user into the
+    #: brief before the user is asked, reducing the one gate to a formality
+    #: over an answer already chosen.
+    if brief["state"] == "frozen" and _stage_state(tracker, "03") != "complete":
+        raise TrackerValidationError(
+            "the intent brief freezes only once stage 03 closes")
+
+
+def _validate_questions(tracker: dict) -> None:
+    """At most four stage-03 questions; intent conflicts take the earlier slots.
+
+    These four answers are the only requirements the run may ever treat as
+    unimpeachable, so which questions occupy the slots — and that a machine
+    never supplies one of the answers — is what this section protects.
+    """
+    rows = tracker["questions"]
+    if len(rows) > _MAX_QUESTIONS:
+        raise TrackerValidationError(
+            f"stage 03 asks at most {_MAX_QUESTIONS} questions in one call")
+    if len({row["id"] for row in rows}) != len(rows):
+        raise TrackerValidationError("duplicate question axis id")
+    if [row["slot"] for row in rows] != [str(n) for n in range(1, len(rows) + 1)]:
+        raise TrackerValidationError("question slots must be 1..n, in order")
+    origins = [row["origin"] for row in rows]
+    #: Before the ranking comparison below, which would otherwise hand an
+    #: unknown origin to ``_QUESTION_ORIGINS.index`` and raise a bare
+    #: ``ValueError`` — outside ``TrackerError``, so a caller branching on this
+    #: module's own family never sees the stop.
+    unknown = [origin for origin in origins if origin not in _QUESTION_ORIGINS]
+    if unknown:
+        raise TrackerValidationError(f"unknown question origin {unknown[0]!r}")
+    if origins != sorted(origins, key=_QUESTION_ORIGINS.index):
+        raise TrackerValidationError(
+            "an unresolved intent conflict outranks any synthesised question and "
+            "takes the earlier slot")
+    for row in rows:
+        if row["state"] not in _QUESTION_STATES:
+            raise TrackerValidationError(f"unknown question state {row['state']!r}")
+        if row["state"] == "answered":
+            if not _HUMAN_DECISION.fullmatch(row["decision"]):
+                raise TrackerValidationError(
+                    "an answered stage-03 question records an H-<n> decision; a "
+                    "quorum can never answer the one human gate")
+        elif row["decision"] != "-":
+            raise TrackerValidationError("only an answered question carries a decision")
+
+
+def _validate_escalations(tracker: dict) -> None:
+    """The only path out of the autonomous middle of a run.
+
+    Escalations queue, surface at stage boundaries batched at most four per
+    ``AskUserQuestion`` call, and are answered by a human or by nobody. A shape
+    this accepts but no human ever sees is a question the run answers itself
+    while recording that it asked.
+    """
+    rows = tracker["escalations"]
+    qids = {row["qid"] for row in tracker["quorum"]}
+    if len({row["id"] for row in rows}) != len(rows):
+        raise TrackerValidationError("duplicate escalation id")
+    batches: dict[str, int] = {}
+    for row in rows:
+        if not _ESCALATION_ID.fullmatch(row["id"]):
+            raise TrackerValidationError("escalation ids are E-<n>")
+        if row["qid"] != "-" and row["qid"] not in qids:
+            raise TrackerValidationError(
+                "an escalation refers to an unknown qid; its question, options "
+                "and brain responses can no longer be recovered")
+        if row["blast"] not in _BLAST_RADII:
+            raise TrackerValidationError(
+                f"blast radius {row['blast']!r} is outside the closed vocabulary "
+                f"{_BLAST_RADII}")
+        if row["state"] not in _ESCALATION_STATES:
+            raise TrackerValidationError(f"unknown escalation state {row['state']!r}")
+        if row["state"] == "queued" and row["batch"] != "-":
+            raise TrackerValidationError("a queued escalation has not been batched yet")
+        if row["state"] in ("asked", "answered") and row["batch"] == "-":
+            raise TrackerValidationError("an asked escalation names its batch")
+        if row["state"] == "answered":
+            if not _HUMAN_DECISION.fullmatch(row["resolution"]):
+                raise TrackerValidationError(
+                    "an answered escalation records an H-<n> resolution")
+        elif row["resolution"] != "-":
+            raise TrackerValidationError(
+                "only an answered escalation carries a resolution")
+        if row["batch"] != "-":
+            batches[row["batch"]] = batches.get(row["batch"], 0) + 1
+    #: Per BATCH, not per section. More than four pending escalations means ask
+    #: four and halt on the rest, so a run legitimately carries any number of
+    #: them across several calls; it is one call that cannot carry five.
+    over = [batch for batch, count in batches.items() if count > _MAX_BATCH]
+    if over:
+        raise TrackerValidationError(
+            f"escalation batch {over[0]!r} asks more than {_MAX_BATCH} questions in "
+            "one AskUserQuestion call")
+
+
 def _validate_tracker_semantics(tracker: dict) -> None:
     """Every per-section semantic rule, run as the last step of a parse.
 
@@ -299,7 +492,13 @@ def _validate_tracker_semantics(tracker: dict) -> None:
     than add a second entry point, so there is exactly one place a tracker is
     judged and no way to obtain an unvalidated one.
     """
+    #: ``_validate_stages`` leads because ``_validate_intent`` reads stage 03's
+    #: state to decide whether the brief may be frozen, and a stage table that
+    #: has not been proven to hold twelve known rows is not one to index into.
     _validate_stages(tracker)
+    _validate_intent(tracker)
+    _validate_questions(tracker)
+    _validate_escalations(tracker)
 
 
 def derive_next_action(tracker: dict) -> str:

@@ -345,8 +345,14 @@ RUN_ID = "2026-09-14-quorum-tests"
 BASE = "0" * 40
 
 
-def new_run(stack):
+def quorum_run(stack):
     """A run at its REAL depth under a repo root, with repo_root asserted.
+
+    Named `quorum_run`, not `new_run`: `new_run(case, **overrides)` already
+    exists at `test_pipeline_auto_state.py:4570` and takes a TestCase. A case
+    wanting `addCleanup` rather than an ExitStack should call the equivalent
+    `repo_with_a_run(case, layout=...)` (added by Task 3, ~line 6648), which
+    builds the same production-depth layout AND writes a real cited file.
 
     The layout is the production one — docs/superpowers/runs/<run-id>/ — so any
     phase tempted to derive the root from directory depth gets `parents[3]`, not
@@ -429,7 +435,7 @@ class QuorumConstants(unittest.TestCase):
 
     def test_rung_values_never_reach_the_tracker(self):
         with contextlib.ExitStack() as stack:
-            _root, run_dir = new_run(stack)
+            _root, run_dir = quorum_run(stack)
             rendered = (run_dir / "progress.md").read_text(encoding="utf-8")
         for value in ("0.95", "0.85", "0.70", "0.55", "0.30"):
             self.assertNotIn(value, rendered)
@@ -553,7 +559,7 @@ git commit -m "feat(pipeline-auto): freeze the rung ladder and derive context-fr
 > **Corrected after `497cad8` and `268f712`.** `repo_root` is now a REQUIRED
 > keyword of `initialize_run` and a `## Run` field; `validate_run` takes a `Path`
 > and never coerces it; `section_columns`, `append_row` and `classify_filesystem`
-> now exist. The signatures and the `new_run` helper above were written against
+> now exist. The signatures and the `quorum_run` helper above were written against
 > a module where none of that was true, and the old call raises `TypeError`.
 > Copy from the corrected forms, not from memory of an earlier task.
 
@@ -736,11 +742,16 @@ git commit -m "feat(pipeline-auto): reject brain responses that type a number or
 > at least one item. An `IndexError` here would escape `TrackerError` entirely,
 > which is the defect Task 2 just removed from its own validator.
 >
-> Also: the context's `new_run(stack)` helper **collides** with the existing
-> `new_run(case, **overrides)` at `test_pipeline_auto_state.py:4570`. Rename one
-> — do not shadow — or the real-depth `repo_root` assertion silently never runs,
-> and that assertion is the only thing standing between this task and the failure
-> where every citation fails to resolve while the run looks correctly cautious.
+> Also: the context's helper **collided** with the existing
+> `new_run(case, **overrides)` at `test_pipeline_auto_state.py:4570`, which takes
+> a TestCase. It is renamed `quorum_run(stack)` throughout this plan — shadowing
+> it would have bound every `new_run(self.stack)` in Tasks 4-13 to the
+> case-taking helper, and the real-depth `repo_root` assertion would silently
+> never run. That assertion is the only thing standing between this phase and the
+> failure where every citation fails to resolve while the run looks correctly
+> cautious. A case wanting `addCleanup` instead of an `ExitStack` should call
+> `repo_with_a_run(case, layout=...)` (Task 3, ~line 6648), which builds the same
+> production-depth layout and writes a real cited file into it.
 
 ### Task 3: Evidence resolution and rung demotion
 
@@ -847,7 +858,7 @@ class EffectiveRung(unittest.TestCase):
 
     def test_the_recorded_repo_root_is_the_one_citations_resolve_against(self):
         with contextlib.ExitStack() as stack:
-            root, run_dir = new_run(stack)
+            root, run_dir = quorum_run(stack)
             write_repo(root, "db/engine.py", "class PostgresEngine:\n")
             recorded = pipeline_auto_state.repo_root(pipeline_auto_state.validate_run(str(run_dir)))
             self.assertEqual(pipeline_auto_state.effective_rung(response(), recorded),
@@ -1398,6 +1409,19 @@ Three instances of one model reading one payload are **not three independent sam
 
 The three payloads are bound by **one digest over the shared payload**, not by three. The reading assignment is a *constant rule* rather than data — index 0 grounds in the spec and intent brief, index 1 in repository code and tests, index 2 in the decisions record and phase plan — and `build_payload` is pure with respect to the index, so brain n's payload is fully determined by `(shared payload, n)` and a re-dispatch of index n is reproducible from `(payload_digest, n)`. That is precisely the property the partial-quorum recovery path rests on, and it is the reason the assignment rule lives in the module's frozen constants beside `RUNGS` rather than in `## Run`: a controller that can write its own assignment rule can change what a brain was asked after the fact.
 
+> **From Task 3 (`5eb82dc`).** Every path a brain may cite has to be
+> **repo-root-relative**. `effective_rung(response, repo_root)` takes exactly one
+> root — the `## Run` field — resolves `evidence[].path` against it, and requires
+> the result to lie inside it. So the `reading_roots` this payload hands a brain,
+> and the `decisions_effective` path beside them, are repo-root-relative paths
+> (`docs/superpowers/runs/<run-id>/decisions-effective.md`), never run-dir-relative
+> ones. Hand a brain `decisions-effective.md` and every decision citation it makes
+> resolves to `<repo_root>/decisions-effective.md`, which does not exist — and a
+> citation that does not resolve **demotes silently**. The run then escalates every
+> question it is ever asked while looking like a correctly cautious quorum. The
+> signature is master-plan-pinned at two arguments, so this is the only place the
+> contract can be held.
+
 `_shared_payload` is a **whitelist constructor**. It names every key it emits, so the prohibited material is not filtered out, it is never reachable: the raiser's identity, candidate answers and recommendation, the adoption floor, the budget, every rung value, and any elapsed-time or cost signal. A filter can be defeated by a new field; a whitelist cannot.
 
 Admissibility is enforced only where it can be enforced mechanically. Criteria 2 ("decidable from the repository") and 5 ("one decision, not several") are judgment calls carried by P07's prose and the raiser's own declaration; criteria 1, 3 and 4 are checked here. Criterion 4 reuses the options test from `plugins/superb/agents/architecture-discovery.md:54-73`: blank the title, keep the options, and a reader can still tell what is being decided — mechanically, adjectives are not options.
@@ -1415,9 +1439,13 @@ QUESTION = {
     "options": [{"key": "postgres"}, {"key": "sqlite"}],
     "candidate_answers": ["postgres because we already run it"],
     "recommendation": "postgres",
-    "reading_roots": {"spec": "spec.md", "intent-brief": "intent-brief.md", "repo": ".",
-                      "tests": "tests", "decisions-effective": "decisions-effective.md",
-                      "phase-plan": "phase-04.md"},
+    # Repo-root-relative, every one: these become the brain's citations, and
+    # effective_rung resolves a citation against the REPO root.
+    "reading_roots": {"spec": "docs/superpowers/specs/design.md",
+                      "intent-brief": "docs/superpowers/runs/R/intent-brief.md",
+                      "repo": ".", "tests": "tests",
+                      "decisions-effective": "docs/superpowers/runs/R/decisions-effective.md",
+                      "phase-plan": "docs/superpowers/plans/phase-04.md"},
     "owners": ["brain-a", "brain-b", "brain-c"],
 }
 
@@ -1449,7 +1477,7 @@ class BuildPayload(unittest.TestCase):
     def setUp(self):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
-        _root, self.run_dir = new_run(self.stack)
+        _root, self.run_dir = quorum_run(self.stack)
         self.qid = pipeline_auto_state.derive_qid(QUESTION["question"], QUESTION["axis"])
         (self.run_dir / "quorum" / self.qid).mkdir(parents=True)
         (self.run_dir / "quorum" / self.qid / "question.json").write_text(
@@ -1594,6 +1622,27 @@ def _question_record(run_dir: str, qid: str) -> dict:
         raise QuorumError(f"no question record for {qid}: {exc}") from exc
 
 
+def _run_relative(run_dir: str, name: str) -> str:
+    """A file inside the run, expressed the way a brain must CITE it.
+
+    Repo-root-relative, because `effective_rung` resolves every citation
+    against the recorded repo root and refuses one that escapes it. The root is
+    READ BACK here, never derived: a run lives at `docs/superpowers/runs/<id>/`
+    so the root looks like `parents[3]` — until a run sits somewhere else, and
+    there is no index right for both.
+    """
+    root = Path(repo_root(validate_run(Path(run_dir)))).resolve()
+    try:
+        inside = Path(run_dir).resolve().relative_to(root)
+    except ValueError:
+        raise QuorumError(
+            f"run_dir {run_dir!r} is not inside the recorded repo_root "
+            f"{str(root)!r}; a brain handed a path it cannot cite produces "
+            "evidence that never resolves, and evidence that never resolves "
+            "demotes without raising") from None
+    return (inside / name).as_posix()
+
+
 def _shared_payload(qid: str, run_dir: str) -> dict:
     """The index-INDEPENDENT half of every brain's payload.
 
@@ -1609,7 +1658,10 @@ def _shared_payload(qid: str, run_dir: str) -> dict:
         "axis": record["axis"],
         "options": [{"key": option["key"]} for option in record.get("options") or ()],
         "reading_roots": dict(record.get("reading_roots") or {}),
-        "decisions_effective": "decisions-effective.md",
+        # Repo-root-relative, like every reading root: this is a path the
+        # brain will CITE, and effective_rung resolves citations against the
+        # repo root, not against run_dir.
+        "decisions_effective": _run_relative(run_dir, "decisions-effective.md"),
         "rungs": list(RUNG_ORDER),               # NAMES only, never values
         "response_schema": _RESPONSE_SCHEMA_DOC,
         "you_are_one_of_several": True,
@@ -1723,7 +1775,7 @@ class QuorumBudget(unittest.TestCase):
     def setUp(self):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
-        _root, self.run_dir = new_run(self.stack)
+        _root, self.run_dir = quorum_run(self.stack)
 
     def test_escalations_never_consume_the_budget(self):
         # THE NAMED FAULT: a counter incremented on every finalisation rather
@@ -1962,7 +2014,7 @@ class OpenQuorum(unittest.TestCase):
     def setUp(self):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
-        self.root, self.run_dir = new_run(self.stack)
+        self.root, self.run_dir = quorum_run(self.stack)
         self.record_path = self.run_dir / "question-T04.json"
         self.record_path.write_text(json.dumps(QUESTION), encoding="utf-8")
         self.qid = pipeline_auto_state.derive_qid(QUESTION["question"], QUESTION["axis"])
@@ -2167,7 +2219,7 @@ class RecordBrainResponse(unittest.TestCase):
     def setUp(self):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
-        self.root, self.run_dir = new_run(self.stack)
+        self.root, self.run_dir = quorum_run(self.stack)
         write_repo(self.root, "db/engine.py", "class PostgresEngine:\n")
         path = self.run_dir / "question.json"
         path.write_text(json.dumps(QUESTION), encoding="utf-8")
@@ -2325,7 +2377,7 @@ class ClassifyQuorum(unittest.TestCase):
     def setUp(self):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
-        self.root, self.run_dir = new_run(self.stack)
+        self.root, self.run_dir = quorum_run(self.stack)
         write_repo(self.root, "db/engine.py", "class PostgresEngine:\n")
         path = self.run_dir / "question.json"
         path.write_text(json.dumps(QUESTION), encoding="utf-8")
@@ -2451,6 +2503,13 @@ git commit -m "feat(pipeline-auto): classify every quorum interruption point fro
 - Consumes: `effective_rung`, `RUNG_ORDER`, `RUNGS`, `ADOPTION_FLOOR`, `locked_tracker_update`
 - Produces: `group_responses(responses, *, options_supplied)`, `cluster_rung(cluster) -> str`, `finalize_quorum(run_dir, *, qid) -> dict` (adoption path), `current_floor(run_dir) -> dict`
 
+> **From Task 3 (`5eb82dc`).** `_demotion_reason(response)` already names WHY a
+> response that cites real files is still ungrounded — `empty-falsifier`,
+> `second-best-in-the-same-rung`, `anchored-only-in-repository-code`. Record that
+> name per response in `final.json`. Deriving it again at read time means deriving
+> it from a different code path than the one that priced the answer, and the two
+> can disagree without anything failing.
+
 **Order is load-bearing.** Every response's `effective_rung` is recomputed from disk **before** any comparison between responses. Running the resolution afterwards lets a top-rung response with a dangling citation win on a claim no file supports, and no other test in this suite covers the ordering.
 
 A cluster's rung is its **highest** member rung, never the mean. Averaging punishes a correct lone expert and lets two weak agreers manufacture a majority.
@@ -2527,7 +2586,7 @@ class FinalizeAdoption(unittest.TestCase):
     def setUp(self):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
-        self.root, self.run_dir = new_run(self.stack)
+        self.root, self.run_dir = quorum_run(self.stack)
         write_repo(self.root, "db/engine.py", "class PostgresEngine:\n")
         write_repo(self.root, "db/pool.py", "PostgresEngine pool\n")
         write_repo(self.root, "spec.md", "The session table is the run's own store.\n")
@@ -2935,7 +2994,7 @@ class FinalizeRejections(unittest.TestCase):
     def setUp(self):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
-        self.root, self.run_dir = new_run(self.stack)
+        self.root, self.run_dir = quorum_run(self.stack)
         write_repo(self.root, "db/engine.py", "class PostgresEngine:\n")
         write_repo(self.root, "spec.md", "The session table is the run's own store.\n")
 
@@ -3019,7 +3078,7 @@ class FinalizeRejections(unittest.TestCase):
 class QuorumTrackerRows(unittest.TestCase):
     def test_every_event_is_mirrored_with_its_provenance_visible(self):
         with contextlib.ExitStack() as stack:
-            _root, run_dir = new_run(stack)
+            _root, run_dir = quorum_run(stack)
             seed_final(run_dir, "aaaaaaaaaaaa", status="adopted", phase="P04",
                        decision_id="Q-aaaaaaaaaaaa")
             seed_final(run_dir, "bbbbbbbbbbbb", status="rejected-contradicts-human", phase="P04")
@@ -3033,7 +3092,7 @@ class QuorumTrackerRows(unittest.TestCase):
     def test_rows_are_ordered_by_p02s_columns_and_break_loudly_on_a_mismatch(self):
         columns = pipeline_auto_state.section_columns("Quorum")
         with contextlib.ExitStack() as stack:
-            _root, run_dir = new_run(stack)
+            _root, run_dir = quorum_run(stack)
             seed_final(run_dir, "aaaaaaaaaaaa", status="adopted", phase="P04",
                        decision_id="Q-aaaaaaaaaaaa")
             row = pipeline_auto_state.quorum_tracker_rows(str(run_dir))[0]
@@ -3043,7 +3102,7 @@ class QuorumTrackerRows(unittest.TestCase):
 
     def test_an_escalation_is_mirrored_into_the_escalations_section(self):
         with contextlib.ExitStack() as stack:
-            root, run_dir = new_run(stack)
+            root, run_dir = quorum_run(stack)
             write_repo(root, "db/engine.py", "class PostgresEngine:\n")
             write_repo(root, "db/pool.py", "PostgresEngine pool\n")
             (run_dir / "decisions.md").write_text(
@@ -3246,7 +3305,7 @@ class ReopenRaisedBar(unittest.TestCase):
     def setUp(self):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
-        self.root, self.run_dir = new_run(self.stack)
+        self.root, self.run_dir = quorum_run(self.stack)
         write_repo(self.root, "db/engine.py", "class PostgresEngine:\n")
         write_repo(self.root, "db/pool.py", "PostgresEngine pool\n")
         write_repo(self.root, "spec.md", "The session table is the run's own store.\n")
@@ -3577,7 +3636,7 @@ in the phase computes it. The named test
 `test_a_wrong_repo_root_silently_demotes_every_grounded_answer` guards the one
 failure in this design with no error, no exception and no other failing test:
 a wrong root resolves nothing, so every grounded answer falls to 0.55, so the run
-escalates every question while looking correctly cautious. `new_run` now builds
+escalates every question while looking correctly cautious. `quorum_run` now builds
 the run at its production depth and asserts the recorded root, so a disagreement
 with P02 surfaces at the seam.
 

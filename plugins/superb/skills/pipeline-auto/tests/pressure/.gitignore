@@ -13,3 +13,12 @@ oracles.md
 # documentation. P08 depends on RED-baseline.md, which IS committed, so a
 # different workspace loses nothing that matters.
 records/
+
+# RECORD-TEMPLATE.md is the scaffold a raw record is copied from. Like
+# records/ it is workspace-local and PERMANENTLY ignored -- no phase commits
+# it, so unlike the oracles.md rule above this one has no expiry and must not
+# be removed when P01 closes. Without this line the template is an untracked
+# file one `git add -A` away from the repository, and it breaks the empty
+# `git status --short` every task in this phase gates on.
+# tests/test_record_template_ignored.py enforces it.
+RECORD-TEMPLATE.md

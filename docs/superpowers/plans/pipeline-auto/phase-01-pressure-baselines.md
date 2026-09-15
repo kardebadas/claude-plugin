@@ -1238,6 +1238,14 @@ This task stages nothing. Confirm `git status --short` prints nothing and move o
 
 ---
 
+> **Recorded during Task 3 (commit `53f2198`).** The `records/actual-agent/`
+> and `records/simulated/` directories exist on disk but are EMPTY, and git does
+> not track empty directories — so they do not survive a clone. The first task
+> that writes a record must `mkdir -p` its class directory first, or the
+> validator reports two missing-directory errors instead of the single expected
+> RED line, and the failure looks like a validator bug rather than a missing
+> directory.
+
 ## Task 4: Dispatch wave 1 — S01, S02, S03
 
 Three concurrent dispatches, all three `Agent` calls in **one message**.
@@ -1796,6 +1804,17 @@ git commit -m "docs(pipeline-auto): record P01 RED pressure baselines"
 Expected: `check-ignore` prints nothing and exits 1 — the `.gitignore` names only `oracles.md` and `records/`, so `RED-baseline.md` is trackable. The `git diff --name-only` prints nothing.
 
 ---
+
+> **Recorded during Task 3 (commit `53f2198`).** `tests/pressure/.gitignore`
+> now holds THREE rules: `oracles.md` (temporary, yours to remove),
+> `records/` (permanent) and `RECORD-TEMPLATE.md` (permanent — Task 3 added it
+> because the brief wrongly assumed a whitelist-shaped ignore and the template
+> would otherwise have been left untracked).
+>
+> Remove ONLY the `oracles.md` line. Target that line specifically, not the
+> file's tail — a tail-anchored edit would strip a permanent rule and leave the
+> template or the records tree untracked, which `git status --short` would then
+> fail on for a reason unrelated to publishing the oracle.
 
 ## Task 11: Publish the oracle, and make the ordering a condition the repository enforces
 

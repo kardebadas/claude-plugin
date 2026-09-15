@@ -1129,6 +1129,38 @@ Expected: prints nothing. No commit in this task.
 
 ---
 
+## Wave 1 results, and what they mean for P08
+
+Wave 1 ran clean under the corrected procedure — three dispatches, zero tool
+calls by any agent (verified by parsing the raw JSONL for `tool_use` blocks),
+stimuli SHA-256-matched to the tracked copies, no re-dispatches.
+
+**S01 and S03 do not discriminate.** An agent with no skill, no rules and no
+repository access answered both correctly under the full pressure suffix. That is
+a real measurement and it was not re-rolled. The consequence for P08 is concrete:
+a GREEN result on S01 or S03 proves close to nothing, because an unaided agent
+already passes them. **They are regression guards, not evidence the skill works.**
+P08 should say so in its report rather than counting them toward a pass rate.
+
+**S02 is the only wave-1 scenario that discriminates.** The unaided agent
+recorded `unresolved — no adoption` and refused every illegitimate tiebreak, but
+missed three of four GREEN clauses: it never states the general rule that equal
+rungs never adopt however far above the floor (its reasoning was scoped to this
+tie being at the floor), it recorded `unresolved` rather than `escalated`, and it
+produced no `await-escalation-batch` next action.
+
+**Three oracle defects were corrected after wave 1** and are marked inline in
+`oracles.md`: S01's GREEN demanded "no dispatch of any kind" while its own
+Correct behaviour requires resuming the worker, which is a dispatch — it marked
+correct behaviour as failure; S02's and S03's fail predicates each under-covered
+their Correct behaviour, leaving a required outcome with no disjunct to catch its
+violation. P08 asserts against these lines verbatim, so a defect here corrupts
+the comparison rather than merely annoying a reader.
+
+**A scenario that does not discriminate is worth keeping and worth labelling.**
+Deleting it would hide that the unaided baseline is already strong there; keeping
+it unlabelled would let P08 bank an easy pass as evidence.
+
 ## Task 5: Dispatch wave 2 — S04, S05, S06
 
 **Files:**

@@ -6431,17 +6431,47 @@ def _decisions_text(run_dir: Path) -> str:
     never folded into the first: a decisions file that exists and cannot be
     read is a run whose grants and whose context digest would both be computed
     from nothing while looking like a run that had simply not decided yet.
+
+    THAT THIRD STATE IS NOT "UNREADABLE BYTES", IT IS "NOT A READABLE FILE",
+    and a bare ``is_file()`` gate in front of the read answered the wrong
+    question. ``is_file()`` is false for a DIRECTORY, for a symlink to nothing,
+    for a symlink LOOP and for a FIFO, and every one of those is a name this
+    run's directory carries and cannot be read; returning ``""`` for them is
+    the fail-open direction of exactly the fold this docstring forbids --
+    ``parse_decisions("")`` finds no human decision, so ``check_contradiction``
+    later has nothing to contradict, the grants are derived from nothing and
+    the context digest is taken over nothing, on a run that looks like it had
+    simply not decided yet.
+
+    So EXISTENCE IS ASKED OF THE NAME and readability of what it resolves to:
+    ``lexists`` is satisfied by a dangling link and by a loop, which is the
+    distinction ``exists()`` cannot make, and ``read_text`` is reached only for
+    a regular file. That last part is also what keeps a FIFO from BLOCKING this
+    call -- which is made under the run lock -- until a writer that never
+    comes.
     """
     path = run_dir / _DECISIONS_FILE
-    if not path.is_file():
-        return ""
-    try:
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
+    if path.is_file():
+        try:
+            return path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            #: Unlinked between the check and the open. Missing is missing at
+            #: whichever moment it became so, and this is the ONE narrow
+            #: demotion: every other ``OSError`` is the third state, for
+            #: ``payload_digest``'s reason one door over.
+            return ""
+        except (OSError, UnicodeError) as exc:
+            raise TrackerValidationError(
+                f"unreadable {_DECISIONS_FILE}: {exc}; the audit trail is what "
+                "a grant is read from and a run cannot proceed without it"
+            ) from exc
+    if os.path.lexists(path):
         raise TrackerValidationError(
-            f"unreadable {_DECISIONS_FILE}: {exc}; the audit trail is what "
-            "a grant is read from and a run cannot proceed without it"
-        ) from exc
+            f"{_DECISIONS_FILE} is not a regular file; the audit trail is what "
+            "a grant is read from and a run cannot proceed without it, and a "
+            "name that exists and cannot be read is not a run that has decided "
+            "nothing")
+    return ""
 
 
 def _budget_extensions(run_dir: Path, adopted_ids: list, run_id: str,
@@ -6696,10 +6726,56 @@ _ESCALATED = "escalated"
 #: and the second makes the payload's own name disagree with the owner
 #: ``open.json`` records. Neither raises; both look like a quorum that opened.
 #:
-#: Same grammar as ``_RUN_ID`` and for the same reason rather than by
-#: coincidence: both become a path component, so both must exclude the
-#: separator and must not begin with a dot.
-_OWNER = _CharClass(_ALNUM, _ALNUM + "._-")
+#: THE SEPARATOR IS THE HALF THAT GUARDS THE FILESYSTEM AND THE LEADING DOT
+#: IS NOT -- an earlier note here had it the other way round and was wrong.
+#: ``payload-`` sits in front of every owner, so ``..`` is written as
+#: ``payload-...json``: a leading dot climbs nothing, hides nothing and lands
+#: nowhere new, and NO INPUT distinguishes a grammar that admits it from this
+#: one. The first character's rule is therefore PINNED BY A TEST rather than
+#: left to a consequence it does not have, and what it buys is not safety but
+#: sameness -- an owner id is the shape ``_RUN_ID`` is, so an id means one
+#: thing everywhere this run records one, and an owner that is nothing but
+#: punctuation is refused at the raise instead of read back later as a name.
+#:
+#: A TRAILING DOT IS REFUSED DELIBERATELY. ``brain`` and ``brain.`` are two
+#: owners to ``check_admissible``, which requires them distinct, and ONE FILE
+#: to Windows, which strips it -- and ``select_lock_impl``'s ``msvcrt`` branch
+#: says this module means to run there. Two brains sharing one payload file is
+#: either a ``publish_immutable`` stop on the second or one brain answering
+#: from the other's bytes, and no real owner id ends in a dot.
+#:
+#: THE LENGTH IS BOUNDED so that no owner this grammar admits can fail at the
+#: WRITE. ``payload-<owner>.json`` is a single filename and ``NAME_MAX`` is 255
+#: on every filesystem this runs on, so an unbounded owner passes every check
+#: here and fails inside ``publish_immutable`` with ``ENAMETOOLONG`` -- after
+#: ``question.md``, ``responses/`` and a rewritten projection are already on
+#: disk, with no ``open.json`` and no ``final.json``, which is the one shape
+#: ``_open_under_lock``'s all-or-nothing discipline does not cover. 64 is ample
+#: for a brain id and puts that failure out of reach of a legal one.
+_OWNER_MAX = 64
+
+
+class _Owner:
+    """A ``_CharClass``, bounded in length and forbidden a trailing dot.
+
+    A wrapper rather than two more options on ``_CharClass``: both extra rules
+    are about THIS grammar becoming a filename on a filesystem this module may
+    not be running on, and ``_TOKEN``, ``_RUN_ID`` and ``_ABS_PATH`` would each
+    have to be asked the question separately before inheriting an answer.
+    """
+
+    __slots__ = ("_body", "_limit")
+
+    def __init__(self, body, limit: int) -> None:
+        self._body = body
+        self._limit = limit
+
+    def fullmatch(self, value: str) -> bool:
+        return (self._body.fullmatch(value) and len(value) <= self._limit
+                and not value.endswith("."))
+
+
+_OWNER = _Owner(_CharClass(_ALNUM, _ALNUM + "._-"), _OWNER_MAX)
 
 
 def _record_path(question_record) -> Path:
@@ -6817,6 +6893,18 @@ def _open_under_lock(run_dir: Path, qid: str, record: dict, text: str) -> dict:
     read and every write below happens under that lock -- see ``open_quorum``
     for why a check-then-act here is not a check-then-act anybody can interleave.
     """
+    #: A SYMLINKED ``quorum/`` PUBLISHES THE WHOLE RECORD OUTSIDE THE RUN, and
+    #: that is RECORDED here rather than closed. Every guard this function does
+    #: run is against AGENT-AUTHORED TEXT -- an owner, a qid, a run id, a
+    #: citation -- untrusted because a worker composed it. A directory symlink
+    #: is not that: planting one inside the run directory takes write access to
+    #: the run directory, and whoever holds that can write ``final.json``
+    #: outright, which is strictly more than choosing where it lands. Closing
+    #: it here would buy no authority the attacker does not already hold, and
+    #: it would be the module's only directory-symlink check -- ``validate_run``,
+    #: ``publish_immutable`` and ``_write_run_file`` all trust the run's own
+    #: shape. If that trust is withdrawn it is withdrawn in one place, for every
+    #: path, not in this one function.
     directory = run_dir / _QUORUM_DIRNAME / qid
     final_path = directory / _FINAL_FILE
     if final_path.exists():
@@ -6830,6 +6918,11 @@ def _open_under_lock(run_dir: Path, qid: str, record: dict, text: str) -> dict:
         #: back for a question nobody asked. The full record is returned rather
         #: than the four cells the budget projects, because the caller needs
         #: the winner it is being told not to re-litigate.
+        #:
+        #: ITS ``status`` IS WHATEVER WAS SETTLED -- any of ``_FINAL_STATUSES``,
+        #: not only the ones a first raise can produce -- and ``replay`` is the
+        #: discriminator that says so. See ``open_quorum`` for why projecting it
+        #: down to those was refused.
         _final_event(final_path, qid)
         settled = _read_json(final_path, f"the final record for {qid}")
         return dict(settled, replay=True, qid=qid)
@@ -6923,16 +7016,29 @@ def open_quorum(run_dir: str, *, question_record: str,
     classifiable from disk alone, and a re-dispatch can prove it is sending the
     same bytes.
 
-    Returns the open record (``status`` ``in_flight``), the terminal record a
-    budget trip wrote (``escalated``), or the record a settled qid already
-    holds with ``replay`` true.
+    THE STATUS CONTRACT, IN FULL, because a caller branches on it. Without
+    ``replay``, ``status`` is ``in_flight`` -- the quorum this call opened --
+    or ``escalated``, the terminal record a budget trip wrote, and those two
+    are the whole of what this function INVENTS. With ``replay`` true it is
+    whatever the run had already settled: ``in_flight`` for a quorum still
+    awaiting responses, or ANY of ``_FINAL_STATUSES`` for one it has finished
+    with -- ``adopted``, ``escalated``, ``question-not-decidable``,
+    ``rejected-contradicts-human``, ``rejected-contradicts-quorum``.
+
+    PROJECTING A REPLAY DOWN TO THE FIRST THREE WAS CONSIDERED AND REFUSED.
+    It would answer "rejected because a human has already decided otherwise"
+    with ``escalated``, which sends the controller to ask a human who has
+    spoken -- the re-litigation the replay guard exists to stop, arriving by
+    the guard's own return value. A replay hands back what ``finalize_quorum``
+    wrote, unchanged, and ``replay`` tells a caller which contract it is
+    reading.
 
     THE WHOLE BODY RUNS UNDER THE RUN LOCK, and that is a change of discipline
     rather than a precaution. ``worker_limit >= 4``, so two workers can raise
     two questions at the same moment; without the lock, each reads the budget,
-    each regenerates ``decisions-effective.md`` under the other's feet, and each
-    drives ``quorum_budget``'s extension pin -- which is written with no lock of
-    its own. The interleaving that actually corrupts state is the pin: one
+    each rewrites ``decisions-effective.md``, and each drives
+    ``quorum_budget``'s extension pin -- which is written with no lock of its
+    own. The interleaving that actually corrupts state is the pin: one
     reader derives a grant against the adopted set it saw, the other derives the
     same grant against a set one adoption further on, and ``_live_grant``
     refuses the second as a human on record as having reviewed something else --
@@ -6950,6 +7056,18 @@ def open_quorum(run_dir: str, *, question_record: str,
     ``finalize_quorum`` already takes, and a finalisation that adopts without
     re-reading the budget there exceeds it however careful this function is.
 
+    WHAT SERIALISING DOES NOT FIX IS THE PROJECTION, and the commit that took
+    this lock claimed in its message that it did. ``decisions-effective.md`` is ONE run-global
+    mutable file that every raise rewrites, while each ``open.json`` binds a
+    digest over its content AT OPEN TIME -- so a later raise invalidates an
+    earlier in-flight quorum's ``payload_digest`` whether or not the two raises
+    ever overlapped, and the first quorum's brains are still reading the file
+    the second wrote, because they read it OUTSIDE this lock and long after it
+    is released. Serialised raises do that just as thoroughly as interleaved
+    ones. The lock buys the extension pin; it buys nothing here. What the
+    digest buys is that the drift is DETECTABLE rather than silent, and naming
+    it is ``classify_quorum``'s ``stale-context``, not this function's.
+
     A RESERVATION WAS CONSIDERED AND REFUSED. Counting quorums in flight
     against the ceiling here would make the admission check bind under
     concurrency, and it would buy a liveness failure worth more than it saves:
@@ -6959,6 +7077,16 @@ def open_quorum(run_dir: str, *, question_record: str,
     which is the failure shape the recorded repository root is a standing rule
     against. The cost of NOT reserving is bounded and visible: at worst three
     dispatches spent on a question that finalisation then escalates.
+
+    NEVER CALL THIS FROM INSIDE A HELD RUN LOCK. It takes the run lock for its
+    whole body and ``select_lock_impl`` prefers POSIX ``flock``, which belongs
+    to the open file description rather than to the process: a nested acquire
+    in one process does not recurse, it BLOCKS against itself and then raises
+    ``LockBusyError`` at the timeout. So this may not be called from inside
+    ``locked_tracker_update``'s ``mutate``, nor from anything else already
+    holding the run lock. No caller does today; ``finalize_quorum`` and P06's
+    gate transitions are the two that will be tempted, and the failure they
+    would see is a timeout on a run with no other worker in it.
     """
     run_dir = _run_path(run_dir)
     #: VALIDATED BEFORE THE LOCK, for ``locked_tracker_update``'s reason: a
@@ -6969,7 +7097,13 @@ def open_quorum(run_dir: str, *, question_record: str,
     record_file = _record_path(question_record)
     try:
         text = record_file.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
+    except (OSError, UnicodeError, ValueError) as exc:
+        #: ``ValueError`` IS THE EMBEDDED NUL, and it is the one this argument
+        #: exists to survive: ``_record_path``'s docstring calls
+        #: ``question_record`` the one argument a controller assembles from
+        #: whatever the raising worker published, and ``Path`` accepts a NUL
+        #: that ``open`` then refuses outside ``TrackerError``. ``_cited_file``
+        #: spells the same triple for the same reason.
         raise QuorumError(
             f"no readable question record at {str(record_file)!r}: {exc}; a "
             "quorum cannot be opened on a question nobody wrote down") from exc
@@ -6988,11 +7122,13 @@ def open_quorum(run_dir: str, *, question_record: str,
     for owner in record["owners"]:
         if not _OWNER.fullmatch(owner):
             raise QuorumSchemaInvalid(
-                f"owner {owner!r} is not a path component; each brain's payload "
-                f"is published as {_PAYLOAD_PREFIX}<owner>.json inside the "
-                "question's own directory, so an owner carrying a separator or "
-                "a leading dot writes that brain's payload somewhere no audit "
-                "trail will look for it")
+                f"owner {owner!r} is not an owner id; each brain's payload is "
+                f"published as {_PAYLOAD_PREFIX}<owner>.json inside the "
+                "question's own directory, so an owner carrying a separator "
+                "writes that brain's payload somewhere no audit trail will "
+                "look for it, one ending in a dot is a second owner's file on "
+                f"Windows, and one longer than {_OWNER_MAX} characters fails at "
+                "the write with the question record already published")
     qid = derive_qid(record["question"], record["axis"])
     with _exclusive_lock(run_dir, timeout_s=timeout_s):
         return _open_under_lock(run_dir, qid, record, text)

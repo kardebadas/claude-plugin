@@ -10707,6 +10707,16 @@ QUESTION = {
 HOSTILE_VALUES = ([], ["modern"], {}, {"modern": 1}, 0, 1, 1.5, True, None, "",
                   "  ", "modern")
 
+#: The hostile corpus for a PATH ARGUMENT, which is not the corpus above.
+#: ``HOSTILE_VALUES`` is built for JSON FIELD values — the shapes a reader
+#: coerces or an ``in`` raises on — and holds no NUL, because no JSON field
+#: reader ever opens its value. A path argument does, and an embedded NUL is
+#: the one string ``Path`` accepts and ``open`` then refuses with
+#: ``ValueError``: outside ``TrackerError`` and outside the
+#: ``(OSError, UnicodeError)`` a read is usually written for. A sweep over the
+#: field corpus alone looks total and is not, which is how it was missed.
+HOSTILE_PATHS = HOSTILE_VALUES + ("\x00", "a\x00b", "a\x00b/question.md")
+
 
 def question_text(*, heading=f"## Q-{QID} — Session storage", drop=(),
                   extra=(), **overrides) -> str:
@@ -13285,6 +13295,52 @@ class OpenQuorum(unittest.TestCase):
                           for path in sorted(self.directory.glob("payload-*.json"))},
                          payloads)
 
+    # --- the two path arguments -------------------------------------------
+
+    def test_an_embedded_nul_in_a_path_argument_stops_inside_the_family(self):
+        """`Path` accepts an embedded NUL; `open` then refuses it with
+        `ValueError`, which is neither `OSError` nor `UnicodeError` and is
+        outside `TrackerError` altogether — so it escapes every handler a
+        controller has written, from the one read this function makes of the
+        argument `_record_path`'s docstring calls "the one a controller
+        assembles from whatever the raising worker published"."""
+        for record in (str(self.record_path) + "\x00", "a\x00b.md", "\x00"):
+            with self.subTest(question_record=record):
+                with self.assertRaises(pas.QuorumError):
+                    self.open(record=record)
+        for run_dir in ("a\x00b", "\x00"):
+            with self.subTest(run_dir=run_dir):
+                with self.assertRaises(pas.TrackerError):
+                    self.open(run_dir=run_dir)
+        self.assertFalse(self.directory.exists())
+
+    def test_a_question_record_that_is_not_a_path_is_never_coerced(self):
+        """`_record_path`'s stated reason, made observable.
+
+        `Path(str(value))` stops on every hostile value too — on
+        `FileNotFoundError`, and only because nothing happens to be named by the
+        repr — so a sweep of hostile values pins the refusal and not the reason.
+        This object's `str()` IS the real record, which is the case the
+        docstring describes: a coercing reader opens it, three brains are
+        dispatched, and the run has opened a quorum on a file named by an object
+        nobody meant as a path.
+        """
+        class Stringifies:
+            """Anything a controller might hold whose `str()` is a path: a lazy
+            path wrapper, a config value, a test double."""
+
+            def __init__(self, path):
+                self._path = path
+
+            def __str__(self):
+                return str(self._path)
+
+        with self.assertRaises(pas.QuorumError) as caught:
+            pas.open_quorum(str(self.run_dir),
+                            question_record=Stringifies(self.record_path))
+        self.assertIn("not a path", str(caught.exception))
+        self.assertFalse(self.directory.exists())
+
     # --- an owner is a path component -------------------------------------
 
     def test_an_owner_carrying_a_separator_writes_no_payload_anywhere(self):
@@ -13315,6 +13371,66 @@ class OpenQuorum(unittest.TestCase):
                 self.assertEqual(list(self.run_dir.rglob("payload-*.json")), [])
                 self.assertFalse(landing.exists())
                 self.assertFalse(self.directory.exists())
+
+    def test_an_owner_that_is_not_an_id_is_refused_before_anything_is_written(self):
+        """The halves of `_OWNER` that the separator case does not reach, each
+        pinned to the reason it is actually there.
+
+        A LEADING DOT has no consequence on disk and the comment that claimed
+        one was wrong: `payload-` in front of `..` writes `payload-...json`
+        inside the question's own directory, which is asserted here rather than
+        assumed. No input distinguishes a grammar admitting it from one that
+        does not, so this case is the whole of what holds that rule — it is a
+        rule about an owner id being the shape every other id this run records
+        is, and nothing else.
+
+        A TRAILING DOT does have one: `brain.` and `brain` are two owners to
+        `check_admissible`, which requires them distinct, and ONE file to
+        Windows, which strips it — and `select_lock_impl`'s `msvcrt` branch is
+        this module saying it means to run there.
+
+        A LONG OWNER has the worst one. It passes every check in this module and
+        fails inside `publish_immutable` with ENAMETOOLONG, by which time
+        `question.md`, `responses/` and a rewritten projection are on disk with
+        neither `open.json` nor `final.json` to classify them — the one shape
+        the budget trip's all-or-nothing discipline has no counterpart for, and
+        a re-entry that repeats the same failure forever. So the ABSENCE is what
+        is asserted, exactly as the budget trip's case asserts it.
+        """
+        for owner in (".hidden", ".", "..", "brain.",
+                      "b" * (pas._OWNER_MAX + 1)):
+            with self.subTest(owner=owner):
+                landing = Path(os.path.normpath(os.path.join(
+                    str(self.directory), f"payload-{owner}.json")))
+                self.assertEqual(
+                    landing.parent, self.directory,
+                    f"payload-{owner}.json lands inside the question's own "
+                    "directory, which is what makes this owner a rule about "
+                    "ids and not about traversal; a case that escaped belongs "
+                    "with the separator ones above")
+                self.record_path.write_text(
+                    question_text(owners=f"{owner}, brain-b, brain-c"),
+                    encoding="utf-8")
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    self.open()
+                self.assertFalse(self.directory.exists())
+                self.assertEqual(list(self.run_dir.rglob("payload-*.json")), [])
+                self.assertFalse(
+                    (self.run_dir / "decisions-effective.md").exists(),
+                    "the refusal is before the first byte, or a re-entry finds "
+                    "a projection rewritten for a dispatch that never happened")
+
+    def test_the_longest_owner_the_grammar_admits_still_dispatches(self):
+        """The positive control the bound needs. A length limit bought by
+        refusing real owner ids would be the cure the finding warns about."""
+        longest = "b" * pas._OWNER_MAX
+        self.record_path.write_text(
+            question_text(owners=f"{longest}, brain-b, brain-c"),
+            encoding="utf-8")
+        opened = self.open()
+        self.assertEqual(opened["status"], "in_flight")
+        self.assertEqual(opened["owners"][0], longest)
+        self.assertTrue((self.directory / f"payload-{longest}.json").is_file())
 
     def test_the_ordinary_owner_spellings_are_still_accepted(self):
         """The half a blanket rule breaks. Paired with the case above so a
@@ -13393,6 +13509,80 @@ class OpenQuorum(unittest.TestCase):
         self.assertTrue(pas._QUORUM_OUTCOME.fullmatch(pas._ESCALATED))
         self.assertEqual(pas._OPEN_STATES, frozenset({pas._IN_FLIGHT}))
 
+    def test_the_documented_status_contract_names_every_status_it_returns(self):
+        """P05 and P06 are told what `open_quorum().status` can be and branch on
+        it, and a status the docstring does not name is a branch that silently
+        falls through. The enumeration is checked against `_FINAL_STATUSES`
+        rather than transcribed, so a sixth finalised status cannot be added
+        without this line and the docstring moving together."""
+        document = inspect.getdoc(pas.open_quorum)
+        for status in pas._FINAL_STATUSES | {pas._IN_FLIGHT}:
+            with self.subTest(status=status):
+                self.assertIn(f"``{status}``", document,
+                              "a status open_quorum can return and its "
+                              "docstring does not name")
+        self.assertIn("THE STATUS CONTRACT, IN FULL", document,
+                      "the contract belongs in one place a caller can read, "
+                      "not spread across the paragraphs that motivate it")
+        self.assertIn("``replay``", document,
+                      "the discriminator between the two contracts must be "
+                      "named, or a caller cannot tell which one it has")
+
+    def test_a_replay_hands_back_every_status_a_finalisation_can_write(self):
+        """The contract, exercised rather than read. A settled qid replays with
+        the status the run settled on — ANY of `_FINAL_STATUSES`, not only the
+        ones a first raise can produce — and `replay` is the discriminator that
+        tells a caller which contract it is reading.
+
+        Projecting a replay down to `in_flight`/`escalated` was the alternative
+        and it is worse: it would answer "rejected because a human has already
+        decided otherwise" with `escalated`, sending the controller to ask a
+        human who has spoken. That is the re-litigation the replay guard exists
+        to stop, arriving through the guard's own return value.
+        """
+        for status in sorted(pas._FINAL_STATUSES):
+            with self.subTest(status=status):
+                _root, run_dir = repo_with_a_run(self)
+                record = run_dir / "question-T04.md"
+                record.write_text(question_text(), encoding="utf-8")
+                settled = seed_final(
+                    run_dir, self.qid, status=status, phase="P04",
+                    decision_id=f"Q-{self.qid}" if status == "adopted" else None)
+                replayed = pas.open_quorum(str(run_dir),
+                                           question_record=str(record))
+                self.assertEqual(replayed["status"], status)
+                self.assertTrue(replayed["replay"])
+                self.assertEqual(replayed["qid"], self.qid)
+                self.assertEqual(replayed["winner"], settled["winner"],
+                                 "the caller needs the outcome it is being told "
+                                 "not to re-litigate")
+                self.assertEqual(self.names(run_dir / "quorum" / self.qid),
+                                 ["final.json"], "a replay dispatches nothing")
+
+    def test_it_may_not_be_called_from_inside_a_held_run_lock(self):
+        """The precondition the whole-body lock created, pinned rather than left
+        for the first caller that breaks it.
+
+        `select_lock_impl` prefers POSIX `flock`, which belongs to the OPEN FILE
+        DESCRIPTION rather than to the process, so a nested acquire in one
+        process does not recurse: it waits for itself and gives up at the
+        timeout. `locked_tracker_update` holds that same lock for the whole of
+        `mutate`, so "raise a question as part of a transition" is not a thing
+        this module can do. No caller does it today — `finalize_quorum` and
+        P06's gate transitions are the two that will be tempted, and this is
+        what they would see: a timeout on a run with no other worker in it.
+        """
+        def raise_a_question(tracker):
+            self.open(timeout_s=0.25)
+            return tracker
+
+        started = time.monotonic()
+        with self.assertRaises(pas.LockBusyError):
+            pas.locked_tracker_update(self.run_dir, transition_id="raise-1",
+                                      mutate=raise_a_question, timeout_s=0.25)
+        self.assertLess(time.monotonic() - started, CONTENDED_UPDATE_BOUND_S)
+        self.assertFalse(self.directory.exists())
+
     def test_a_foreign_run_stops_before_a_lock_file_is_created_in_it(self):
         """`locked_tracker_update`'s discipline, one function over: a foreign,
         missing or malformed run is a read-only stop, and it must stop WITHOUT
@@ -13412,14 +13602,71 @@ class OpenQuorum(unittest.TestCase):
         self.assertFalse(self.directory.exists())
 
     def test_an_unreadable_audit_trail_is_never_read_as_an_empty_one(self):
-        """The third state `_decisions_text` keeps apart. A run that has decided
-        nothing and a run whose decisions file cannot be read look identical to
-        a reader that folds them together — and the second would have its
-        grants derived from nothing and its context digest taken over nothing,
-        while dispatching three brains as though all were well."""
-        (self.run_dir / "decisions.md").write_bytes(b"## H-001\n\xff\xfe not utf-8\n")
-        with self.assertRaises(pas.TrackerValidationError):
+        """The third state `_decisions_text` keeps apart, in every spelling the
+        filesystem has for it.
+
+        A run that has decided nothing and a run whose decisions file cannot be
+        read look identical to a reader that folds them together — and the
+        second would have its grants derived from nothing and its context digest
+        taken over nothing, while dispatching three brains as though all were
+        well. The fold is the FAIL-OPEN direction and that is what makes it the
+        dangerous one: `parse_decisions("")` finds no human decision, so
+        `check_contradiction` later has nothing to contradict.
+
+        THE NON-REGULAR CASES ARE THE POINT. `is_file()` is false for a
+        directory, for a symlink to nothing and for a symlink loop just as it is
+        for an absent file, so a gate written `if not path.is_file(): return ""`
+        reads all three as a run that had simply not decided yet. Nor does
+        `exists()` fix it — it folds the dangling link and the loop the other
+        way, and stops on the directory only by accident, one `read_text`
+        deeper, with a message about errno 21. So the DIAGNOSTIC is asserted
+        and not merely the exception type: nothing else distinguishes a reader
+        that knows the file is not readable from one that discovered it while
+        trying.
+        """
+        cases = (
+            ("a directory", lambda path: path.mkdir(), "is not a regular file"),
+            ("a dangling symlink",
+             lambda path: path.symlink_to(path.parent / "no-such-file.md"),
+             "is not a regular file"),
+            ("a symlink loop", lambda path: path.symlink_to(path),
+             "is not a regular file"),
+            ("invalid utf-8",
+             lambda path: path.write_bytes(b"## H-001\n\xff\xfe not utf-8\n"),
+             "unreadable decisions.md"),
+        )
+        for label, make, diagnostic in cases:
+            with self.subTest(label):
+                _root, run_dir = repo_with_a_run(self)
+                record = run_dir / "question-T04.md"
+                record.write_text(question_text(), encoding="utf-8")
+                make(run_dir / "decisions.md")
+                with self.assertRaises(pas.TrackerValidationError) as caught:
+                    pas.open_quorum(str(run_dir), question_record=str(record))
+                self.assertIn(diagnostic, str(caught.exception))
+                self.assertFalse((run_dir / "quorum" / self.qid).exists())
+                self.assertFalse((run_dir / "decisions-effective.md").exists())
+        #: The half a blanket refusal would buy for free. An ABSENT decisions
+        #: file is the state all of the above are kept apart FROM, and it opens.
+        self.assertFalse((self.run_dir / "decisions.md").exists())
+        self.assertEqual(self.open()["status"], "in_flight")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "POSIX FIFOs only")
+    def test_a_decisions_file_that_would_block_the_read_is_refused_promptly(self):
+        """The liveness half of the same rule, and the sharpest reason the check
+        asks whether the file is REGULAR rather than whether the name exists.
+
+        Opening a FIFO with no writer blocks until one arrives. Reached through
+        a gate that had only asked `exists()`, this call would block there —
+        inside `_open_under_lock`, holding the run lock — and the run would stop
+        dead without ever saying so, taking every other worker's raise with it.
+        """
+        os.mkfifo(self.run_dir / "decisions.md")
+        started = time.monotonic()
+        with self.assertRaises(pas.TrackerValidationError) as caught:
             self.open()
+        self.assertLess(time.monotonic() - started, CONTENDED_UPDATE_BOUND_S)
+        self.assertIn("is not a regular file", str(caught.exception))
         self.assertFalse(self.directory.exists())
         self.assertFalse((self.run_dir / "decisions-effective.md").exists())
 
@@ -13470,8 +13717,15 @@ class OpenQuorum(unittest.TestCase):
         `progress.md`, every `*/final.json`, `quorum/extensions.json` and
         `decisions.md`; `_decisions_text` reads `decisions.md` again.
 
-        Each is varied with both an unhashable value and a wrong-typed scalar
-        where it is an argument, and with malformed JSON where it is a file.
+        Each is varied with malformed JSON where it is a file, and where it is
+        an ARGUMENT with `HOSTILE_PATHS` — which is `HOSTILE_VALUES` plus the
+        embedded NUL. That distinction is the one this sweep was missing:
+        `HOSTILE_VALUES` is a corpus of JSON FIELD values, no reader ever opens
+        one, and a NUL is exactly the string `Path` accepts and `open` refuses
+        with `ValueError`. Reusing the field corpus for the path arguments made
+        the sweep look total while never testing the one value the arguments
+        can carry and the fields cannot.
+
         The outcomes are COLLECTED AND ASSERTED — a sweep that discarded them
         would assert only that nothing escaped, which is satisfied by an
         implementation that accepts everything.
@@ -13492,10 +13746,18 @@ class OpenQuorum(unittest.TestCase):
             #: discarded it would assert only "nothing escaped TrackerError",
             #: which an implementation that accepted every one of these inputs
             #: satisfies completely.
-            self.assertIn(result["status"], ("in_flight", "escalated"))
+            if result.get("replay"):
+                #: A REPLAY carries any settled status. Nothing below seeds a
+                #: readable `final.json`, so this branch is unreachable here —
+                #: it is written out so that the sweep states the whole
+                #: contract rather than the half its own corpus reaches.
+                self.assertIn(result["status"],
+                              set(pas._FINAL_STATUSES) | {pas._IN_FLIGHT})
+            else:
+                self.assertIn(result["status"], ("in_flight", "escalated"))
             accepted.setdefault(label, set()).add(case)
 
-        for value in HOSTILE_VALUES:
+        for value in HOSTILE_PATHS:
             sweep("run_dir", value, lambda value=value: pas.open_quorum(
                 value, question_record=str(self.record_path)))
             sweep("question_record", value, lambda value=value: pas.open_quorum(

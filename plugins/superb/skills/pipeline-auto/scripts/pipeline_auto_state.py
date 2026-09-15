@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import errno
 import os
-import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -1984,6 +1983,20 @@ def _sync_directory(directory: Path) -> None:
         os.close(descriptor)
 
 
+#: The mode ``progress.md`` is created with, before this process's umask is
+#: applied. It is named here because ``os.replace`` carries the TEMP file's
+#: mode onto the target: whatever the temp file is created with becomes the
+#: tracker's mode on every single write, forever. Left to a helper it was
+#: 0600, and each update silently narrowed a document a human reads.
+#:
+#: 0644 rather than ``open``'s 0666 default, and the cap is the point: the
+#: tracker is the authority an autonomous controller obeys, so a second local
+#: account being able to WRITE it is a different class of problem from being
+#: able to read it. The run lock next door is 0600 because nothing but this
+#: module ever opens it; the tracker is the opposite — it exists to be read.
+TRACKER_MODE = 0o644
+
+
 def _replace_tracker(run_dir, text: str, transition_id: str) -> None:
     """Replace ``progress.md`` atomically, and be exact about which of the
     three outcomes occurred.
@@ -2006,19 +2019,31 @@ def _replace_tracker(run_dir, text: str, transition_id: str) -> None:
     has to be re-derived from a flag instead of from the block it came out of.
     Separating them structurally is what makes the claim checkable.
 
-    The temp file is created with ``dir=run_dir`` so that it shares a
-    filesystem with ``progress.md``. A temp file anywhere else makes
-    ``os.replace`` a cross-device rename, which raises instead of swapping, and
-    the atomicity this function exists for is gone.
+    The temp file is created inside ``run_dir`` so that it shares a filesystem
+    with ``progress.md``. A temp file anywhere else makes ``os.replace`` a
+    cross-device rename, which raises instead of swapping, and the atomicity
+    this function exists for is gone. It is created with
+    ``O_CREAT | O_EXCL | O_WRONLY``, which is the whole of the guarantee this
+    needs: the open either creates that name or fails, so no file belonging to
+    a second writer is ever opened, truncated, or unlinked by this call.
     """
     run_dir = Path(run_dir)
     progress = run_dir / "progress.md"
     descriptor = -1
     temporary: str | None = None
     try:
-        descriptor, temporary = tempfile.mkstemp(
-            dir=str(run_dir), prefix=".progress.", suffix=".tmp"
-        )
+        #: pid and a nanosecond timestamp, not a random name: the exclusivity
+        #: is carried by ``O_EXCL`` alone, and this only has to avoid colliding
+        #: with a temp file a CRASHED earlier writer left behind. A collision
+        #: is not a corruption — the open fails and the caller retries — so an
+        #: unguessable name buys nothing inside a directory this run owns.
+        candidate = run_dir / f".progress.{os.getpid()}.{time.time_ns()}.tmp"
+        descriptor = os.open(
+            candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, TRACKER_MODE)
+        #: Assigned only AFTER the open succeeds. On EEXIST the path names a
+        #: file this call did not create, and the cleanup below must not
+        #: unlink another writer's work.
+        temporary = str(candidate)
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
             #: The handle owns the descriptor from here, so the cleanup path
             #: below must not close it a second time.
@@ -2026,21 +2051,36 @@ def _replace_tracker(run_dir, text: str, transition_id: str) -> None:
             handle.write(text)
             _sync_file(handle)
         os.replace(temporary, progress)
+        #: The name is gone — it IS ``progress.md`` now — so this call no
+        #: longer owns anything for the cleanup below to remove.
+        temporary = None
     except OSError as exc:
-        if descriptor >= 0:
-            os.close(descriptor)
-        if temporary is not None:
-            #: Nothing else ever removes this file. A stranded
-            #: ``.progress.*.tmp`` in a run directory is indistinguishable from
-            #: one a live writer is holding.
-            try:
-                os.unlink(temporary)
-            except OSError:
-                pass
         raise TrackerWriteError(
             f"tracker update {transition_id} failed before replacement; "
             f"the old tracker is intact and nothing changed: {exc}"
         ) from exc
+    finally:
+        #: Cleanup lives in ``finally`` rather than in the ``except OSError``
+        #: because the two questions are different. What ESCAPES is a write
+        #: outcome only for an OSError; anything else raised in this region —
+        #: ``handle.write`` on text the encoder rejects, say — is a programming
+        #: fault, and it propagates as itself rather than being laundered into
+        #: a ``TrackerWriteError`` that would promise a caller a safe retry of
+        #: a bug. What gets CLEANED UP is every one of them: nothing else ever
+        #: removes this file, and a stranded ``.progress.*.tmp`` in a run
+        #: directory is indistinguishable from one a live writer is holding.
+        if descriptor >= 0:
+            #: Only reachable when ``os.fdopen`` itself failed; past that the
+            #: handle owns the descriptor and has closed it.
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
 
     try:
         _sync_directory(run_dir)

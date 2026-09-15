@@ -93,19 +93,23 @@ WIDE_GAP = "| 12 | pending | - |\n\n\n## Intent\n"
 #: carried by ``write_capable_calls`` below, scoped to ``validate_run``, and
 #: widening this allowlist to ``os`` does not touch it: ``validate_run``'s own
 #: subtree is still checked call by call.
-#: ``tempfile`` was added for the atomic replace, and for that alone. The temp
-#: file MUST be created inside the run directory — a name anywhere else makes
-#: ``os.replace`` a cross-device rename, which raises instead of swapping — and
-#: it must be created without a window in which a second writer can guess or
-#: pre-create the name. ``tempfile.mkstemp(dir=...)`` is the standard library's
-#: one answer to both; hand-rolling it out of ``os.open(..., O_CREAT | O_EXCL)``
-#: plus a name generator would be strictly more code for strictly less
-#: guarantee. The phase plan's Tech Stack names it. This is a widening argued
-#: for, not one taken incidentally to make a failing test pass: nothing else in
-#: this module may use it, and ``re`` is still absent and stays absent.
+#: ``tempfile`` was admitted here for the atomic replace and has since been
+#: taken back out, which is the outcome this list is supposed to make cheap.
+#: The temp file must be created inside the run directory — a name anywhere
+#: else makes ``os.replace`` a cross-device rename, which raises instead of
+#: swapping — and it must be created without a window in which a second
+#: writer's file could be opened or truncated. ``os.open(path, O_CREAT |
+#: O_EXCL | O_WRONLY, mode)`` gives exactly that exclusivity, in the same call
+#: the run lock two hundred lines above already uses, with NO import at all;
+#: what ``mkstemp`` adds on top is an unguessable name and collision retry, and
+#: neither buys anything inside a directory this one run owns — while it also
+#: chooses the file's mode, silently, at 0600, and ``os.replace`` then carries
+#: that onto ``progress.md``. This list is a capability boundary: a member kept
+#: for convenience weakens it for everything admitted after. ``re`` is still
+#: absent and stays absent, and so, now, is ``tempfile``.
 ALLOWED_IMPORTS = frozenset({
     "__future__", "contextlib", "errno", "fcntl", "hashlib", "msvcrt", "os",
-    "pathlib", "tempfile", "time",
+    "pathlib", "time",
 })
 
 #: Builtins that open a file or run generated code. Called anywhere in the
@@ -3802,6 +3806,142 @@ class ReplaceTrackerTests(unittest.TestCase):
             leaked.exception.errno, errno.EBADF,
             "the directory descriptor is still open after _sync_directory "
             "returned; this leaks one descriptor per tracker write")
+
+    def test_a_non_oserror_in_the_write_region_strands_no_temp_file(self):
+        """The cleanup is about the temp file, the ``except`` is about what
+        escapes, and they are not the same question.
+
+        Text carrying a lone surrogate cannot be encoded, so ``handle.write``
+        raises ``UnicodeEncodeError`` — a ``ValueError``, not an ``OSError``.
+        With the unlink living in ``except OSError`` that exception walked
+        straight out of the region and left a ``.progress.*.tmp`` behind, in
+        the one function whose own comment says nothing else ever removes it.
+        Two separate claims are asserted here: the temp file is gone, and the
+        exception arrives as ITSELF. A programming fault laundered into
+        ``TrackerWriteError`` would tell an autonomous retry loop that a bug is
+        a transient write failure, and it would spin on it.
+        """
+        run_dir = make_run(self)
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(UnicodeEncodeError) as caught:
+            pas._replace_tracker(run_dir, valid_text() + "\ud800", "transition-7")
+        self.assertNotIsInstance(
+            caught.exception, pas.TrackerError,
+            "an encoding fault was re-raised as a tracker write outcome; a "
+            "retry loop will treat a bug as a transient failure")
+        self.assertEqual(
+            (run_dir / "progress.md").read_bytes(), before,
+            "the tracker changed although the replacement never ran")
+        self.assertEqual(
+            sorted(p.name for p in run_dir.iterdir()), ["progress.md"],
+            "a temp file survived a non-OSError and nothing will clean it up")
+
+    def test_a_replacement_leaves_the_tracker_at_the_declared_mode(self):
+        """``os.replace`` carries the TEMP file's mode onto the target, so
+        whatever the temp file is created with becomes ``progress.md``'s mode
+        on every write, forever. Under ``tempfile.mkstemp`` that was 0600 —
+        chosen by the helper, not by anyone here — and each update quietly
+        narrowed a document a human reads from 0644 down to owner-only.
+
+        The umask is pinned for the duration so this asserts the module's
+        declared mode rather than the machine's default, and restored in a
+        ``finally`` so the setting does not leak into any later case.
+        """
+        run_dir = make_run(self)
+        progress = run_dir / "progress.md"
+        previous = os.umask(0o022)
+        try:
+            pas._replace_tracker(run_dir, valid_text(), "transition-8")
+        finally:
+            os.umask(previous)
+        self.assertEqual(
+            os.stat(progress).st_mode & 0o777, 0o644,
+            "the atomic replace re-permissioned progress.md: the temp file's "
+            "mode is the tracker's mode, so this is what the next change to "
+            "the temp-file mechanism must not move without saying so")
+        self.assertEqual(
+            pas.TRACKER_MODE & 0o022, 0,
+            "the tracker is group- or world-WRITABLE: a second local account "
+            "can rewrite the state an autonomous controller obeys")
+
+    def test_a_failure_before_the_handle_takes_over_closes_the_descriptor(self):
+        """There is exactly one window in which the raw descriptor is this
+        function's to close: between ``os.open`` returning it and ``os.fdopen``
+        taking ownership. If ``os.fdopen`` raises in that window and the
+        cleanup skips the close, every such failure leaks a descriptor, and the
+        run dies much later and somewhere else as ``EMFILE``.
+
+        The mirror-image mistake is closing it twice: past ``os.fdopen`` the
+        handle owns it, so the cleanup is guarded by ``descriptor >= 0`` and
+        that guard is reset the moment ownership moves.
+        """
+        run_dir = make_run(self)
+        opened = []
+        real_open = os.open
+
+        def spy(path, flags, mode=0o777):
+            descriptor = real_open(path, flags, mode)
+            if str(path).endswith(".tmp"):
+                opened.append(descriptor)
+            return descriptor
+
+        with mock.patch.object(pas.os, "open", side_effect=spy):
+            with mock.patch.object(
+                    pas.os, "fdopen",
+                    side_effect=OSError(errno.ENOMEM, "simulated fdopen failure")):
+                with self.assertRaises(pas.TrackerWriteError):
+                    pas._replace_tracker(run_dir, valid_text(), "transition-10")
+        self.assertEqual(len(opened), 1)
+        with self.assertRaises(OSError) as leaked:
+            os.fstat(opened[0])
+        self.assertEqual(
+            leaked.exception.errno, errno.EBADF,
+            "the temp file's descriptor is still open after the failure; this "
+            "leaks one descriptor per failed tracker write")
+        self.assertEqual(
+            sorted(p.name for p in run_dir.iterdir()), ["progress.md"],
+            "a temp file survived the failure and nothing will clean it up")
+
+    def test_the_temp_file_is_created_exclusively_and_spares_a_foreign_one(self):
+        """``O_CREAT | O_EXCL`` is the whole of the guarantee ``mkstemp`` was
+        carrying, so it is asserted directly. The spy creates the exact name
+        the module picked in the instant before the real open runs — the race
+        itself, not an imitation of it — so the open must fail with ``EEXIST``
+        rather than truncate what it found.
+
+        The second half matters as much: the failed create must not unlink
+        that file. The cleanup is driven by ``temporary``, which is assigned
+        only after the open succeeds; hoist that assignment above the open and
+        this call deletes a file it never created.
+        """
+        run_dir = make_run(self)
+        before = (run_dir / "progress.md").read_bytes()
+        foreign = "another writer is using this name\n"
+        squatted = []
+        real_open = os.open
+
+        def squat(path, flags, mode=0o777):
+            if str(path).endswith(".tmp") and not squatted:
+                squatted.append(Path(path))
+                Path(path).write_text(foreign, encoding="utf-8")
+            return real_open(path, flags, mode)
+
+        with mock.patch.object(pas.os, "open", side_effect=squat):
+            with self.assertRaises(pas.TrackerWriteError) as caught:
+                pas._replace_tracker(run_dir, valid_text(), "transition-9")
+        self.assertEqual(len(squatted), 1)
+        self.assertEqual(
+            caught.exception.__cause__.errno, errno.EEXIST,
+            "the create did not fail on an existing name, so O_EXCL is gone "
+            "and a second writer's file was opened for writing")
+        self.assertEqual(
+            squatted[0].read_text(encoding="utf-8"), foreign,
+            "the failed create clobbered or unlinked a file this call never "
+            "created")
+        self.assertEqual(
+            (run_dir / "progress.md").read_bytes(), before,
+            "the tracker changed although the temp file was never written")
+
 
 
 class SuiteIsWhollyCollectedTests(unittest.TestCase):

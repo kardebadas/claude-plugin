@@ -981,6 +981,56 @@ git commit -m "feat(pipeline-auto): price a rung by resolving its evidence from 
 
 ### Task 4: Decisions contract, effective projection, and the findings ledger
 
+> **QUORUM DECISION (three brains, unanimous `keep-yes-everywhere`; cluster rung
+> `specified` 0.95, well above the floor; runner-up cluster none).**
+> The generic-approval rule is **provenance-blind**, and `yes` stays refused in
+> every record. A verification pass challenged the reasoning that had been
+> written into the code comment, and it was right that the reasoning was wrong —
+> and wrong that the membership was.
+>
+> **The rule is specified as uniform.** Spec lines 752-753: "The
+> generic-approval rejection carries over unchanged: a quorum answer of
+> `proceed` is as empty as a human's." `templates/decisions.md:30-31` repeats it
+> to whoever writes a record. `split-by-provenance` would overturn a line the
+> spec states outright.
+>
+> **The challenge's premise is false twice.** It held that the options test
+> governs only quorum questions while human escalations are free prose. But
+> `phase-07-skill-prose.md:2439` drops a question that fails admissibility
+> *before* the gate, so the options test governs human questions too; and
+> `phase-02-schema-core.md:3191` specifies a human record's answer as "the
+> option chosen, never a bare approval". Meanwhile a *quorum* question may have
+> no options at all, in which case the brain is told to answer in prose — so
+> prose-without-options is a quorum shape, not a human-only one. The premise had
+> the two backwards.
+>
+> **It is not unrecordable, only unkeyable.** `answer_key` is the text before
+> the em dash, so `proceed with the destructive migration — the backup is
+> verified` parses today. Only the spellings where `yes` is the *key* are
+> refused, which is exactly where `yes` is doing a decision key's job.
+>
+> **And relaxing it would have cost more than it bought.** `_contradiction`
+> compares `answer_key` with no provenance test, so a string legal in an `H-`
+> record and illegal in a `Q-` record on the same axis is a disagreement nothing
+> checks. Worse, the relaxed branch would admit `pending user response —
+> awaiting the user` into an **Adopted** human record: the Open-status
+> exact-match never sees that spelling, so `_PENDING_ANSWER` would lose its only
+> guard and an unanswered question would be recorded as a settled decision.
+>
+> **Why `go` was still right to remove, and `yes` is not the same case.** The
+> inherited rule at `plugins/superb/skills/pipeline/scripts/pipeline_state.py:1926`
+> tests `answer.casefold()` — the WHOLE answer — and contains `go`. pipeline-auto
+> added the `answer_key` reach, which is what turned `go — it compiles fast` from
+> passing into refused. So every inherited member that could be a legitimate key
+> had to be re-examined under the new reach, and `go` is the one that could:
+> removing it restores the inherited behaviour for that case rather than
+> departing from it. `yes` has no such carrier — spec:427 names it as *the*
+> reflex answer to "may I continue?".
+>
+> **Action taken:** membership unchanged; the justification in
+> `_GENERIC_ANSWERS`' comment and in the sibling test docstring is re-argued
+> from spec:752-753 and spec:427 instead of from the options test.
+
 **Files:**
 - Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`
 - Create: `plugins/superb/skills/pipeline-auto/templates/findings.md`

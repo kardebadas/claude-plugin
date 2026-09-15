@@ -1409,8 +1409,18 @@ intact`. Every transcript was verified uncontaminated by parsing its raw JSONL
 for `tool_use` blocks — zero in all ten — and by scanning for oracle vocabulary.
 Nothing was re-dispatched.
 
-**Seven of ten discriminate.** S01, S03 and S10 were passed by unaided agents.
-That is a real result, recorded rather than re-rolled. S10's pass is *expected*:
+**Eight of ten discriminate. S01 and S10 only were passed by unaided agents.**
+
+*(Corrected in Task 8. This originally read "seven of ten … S01, S03 and S10".
+S03's fail predicate was amended after wave 1 with a disjunct about dispatching
+tasks in the blast radius on a reversibility argument — and the agent that
+prompted the amendment is S03's own attempt-01 agent, whose transcript does
+exactly that. Once the disjunct existed, the transcript fired it. Amending an
+oracle retroactively changes past verdicts, so **every stored transcript must be
+re-scored against the current predicates, not the ones in force when it was
+captured.** All ten were re-scored; only S03 flipped.)*
+
+That is a real result, recorded rather than re-rolled. S01 is the single genuine non-discriminator: P07 should author no prose aimed at it and P08 must not count a GREEN there as evidence. S10's pass is *expected*:
 it is the matched control for S02 and exists to catch an agent that over-learned
 "splits escalate". The pair is well formed — S02 refused because "rung is tied,
 so grounding cannot discriminate", S10 adopted on the rung spread, and both

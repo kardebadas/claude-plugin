@@ -610,3 +610,159 @@ class ForeignSchemaStopTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def with_stages(states: list[str], actions: list[str] | None = None) -> str:
+    """The valid fixture with its twelve stage rows replaced wholesale.
+
+    Surgery on the fixture's own bytes, like every other rejection input here,
+    so each case states exactly which cell made the tracker impossible.
+    """
+    actions = actions if actions is not None else ["-"] * len(states)
+    lines = valid_text().splitlines(keepends=True)
+    start = next(index for index, line in enumerate(lines)
+                 if line.startswith("| 01 | "))
+    rows = [f"| {stage} | {state} | {action} |\n"
+            for stage, state, action in zip(pas.STAGES, states, actions)]
+    return "".join(lines[:start] + rows + lines[start + 12:])
+
+
+class StageSectionTests(unittest.TestCase):
+    """``## Stage`` is the only record that stages 01-07 ever ran.
+
+    Their outputs — the reconciled intent brief, the four human answers, the
+    design, the spec, the plans — are not in Git and are never named by the
+    task table. A controller resuming after a compaction reads this section or
+    it reads nothing, so every impossible shape of it has to be refused here.
+    """
+
+    def test_the_fixture_is_stages_01_through_12_in_order(self):
+        """Catches a mis-built enum: ``range(12)`` (00..11), an off-by-one
+        upper bound (01..11, so stage 12 has no row to be pending in), or an
+        unpadded ``f"{index}"`` that spells stage 01 as ``1`` and stops
+        matching the tracker's own rows."""
+        tracker = pas.parse_tracker(valid_text())
+        self.assertEqual(pas.STAGES, tuple(f"{n:02d}" for n in range(1, 13)))
+        self.assertEqual(tuple(row["stage"] for row in tracker["stages"]), pas.STAGES)
+
+    def test_a_pending_stage_before_an_active_one_is_rejected(self):
+        """The compaction fault itself: stage 02 is running, stage 01 reads
+        unstarted, and a resuming controller re-dispatches the three intent
+        readers, producing a different brief and forking the run from its own
+        history. Catches an implementation that validates each row in isolation
+        and never compares one row's state against its neighbours'."""
+        states = ["pending", "active"] + ["pending"] * 10
+        actions = ["-", "synthesise-questions"] + ["-"] * 10
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(with_stages(states, actions))
+
+    def test_a_stage_completing_before_an_earlier_one_started_is_rejected(self):
+        """Stage 02 is finished while stage 01 reads unstarted, and no stage is
+        active. Catches the narrower guard someone reaches for first — 'nothing
+        pending may precede the ACTIVE stage' — which has no active row to
+        anchor on here and waves the whole tracker through, leaving a run that
+        skipped stage 01 outright looking resumable."""
+        states = ["pending", "complete"] + ["pending"] * 10
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(with_stages(states))
+
+    def test_two_active_stages_are_rejected(self):
+        """Two actives are monotone by state order, so the ordering check alone
+        passes them. Catches dropping the separate cardinality guard: with two
+        actives ``derive_next_action`` silently returns whichever comes first
+        and the run works on a stage it never recorded as started."""
+        states = ["active", "active"] + ["pending"] * 10
+        actions = ["read-intent", "synthesise-questions"] + ["-"] * 10
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(with_stages(states, actions))
+
+    def test_a_missing_stage_row_is_rejected(self):
+        """Catches validating only the rows that are present. Eleven rows are
+        internally consistent; the twelfth stage has simply vanished, and a run
+        that never records stage 12 can never be resumed into it."""
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(valid_text().replace("| 12 | pending | - |\n", ""))
+
+    def test_a_duplicated_stage_row_is_rejected(self):
+        """Catches a length check standing in for an identity check: twelve
+        rows are present, but stage 10 appears twice and stage 11 not at all.
+        Membership tests (``in STAGES``, ``set(...)``) miss it the same way."""
+        text = valid_text().replace("| 11 | pending | - |\n",
+                                    "| 10 | pending | - |\n")
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_the_active_stage_must_name_its_next_action(self):
+        """An active stage with ``-`` for an action is a run that knows it is
+        mid-stage and not what to do next. Catches omitting the pairing check:
+        ``derive_next_action`` would then hand the controller the literal
+        ``-`` as its instruction."""
+        states = ["complete"] * 8 + ["active"] + ["pending"] * 3
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(with_stages(states))
+
+    def test_a_pending_stage_cannot_carry_a_next_action(self):
+        """A leftover action on a non-active row is a stale instruction that
+        outlives the stage that wrote it. Catches checking only the active
+        direction of the pairing and leaving the other half unenforced."""
+        states = ["complete"] * 8 + ["active"] + ["pending"] * 3
+        actions = ["-"] * 8 + ["run-task-gate-P02-T01", "debug-later"] + ["-", "-"]
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(with_stages(states, actions))
+
+    def test_an_unknown_stage_state_is_rejected(self):
+        """Catches letting an out-of-enum state reach the ordering comparison,
+        where it surfaces as a bare ``ValueError`` from the sort key rather
+        than as this module's own read-only-stop exception family — so the
+        caller that branches on ``TrackerError`` never sees it."""
+        states = ["complete"] * 8 + ["paused"] + ["pending"] * 3
+        actions = ["-"] * 8 + ["run-task-gate-P02-T01"] + ["-"] * 3
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(with_stages(states, actions))
+
+
+class NextActionTests(unittest.TestCase):
+    def test_a_queued_escalation_outranks_the_active_stage(self):
+        """The fixture is mid-stage-09 with escalation E-1 queued. Catches
+        reading the stage first: the controller would dispatch stage 09 work
+        while a question it raised is still waiting on a human."""
+        tracker = pas.parse_tracker(valid_text())
+        self.assertEqual(pas.derive_next_action(tracker), "await-escalation-batch")
+
+    def test_an_asked_escalation_also_holds_the_run(self):
+        """Catches treating only ``queued`` as blocking. ``asked`` is the state
+        an escalation is in once its batch has gone to the human — the longest
+        window in the run — and a controller that resumes dispatching during it
+        answers the question itself instead of waiting."""
+        tracker = pas.parse_tracker(valid_text())
+        for row in tracker["escalations"]:
+            if row["state"] == "queued":
+                row["state"] = "asked"
+        self.assertEqual(pas.derive_next_action(tracker), "await-escalation-batch")
+
+    def test_without_a_pending_escalation_the_active_stage_supplies_the_action(self):
+        """The fixture still holds an ``answered`` escalation. Catches testing
+        the list for emptiness rather than for pending members, which would
+        park the run forever on escalations that are already resolved."""
+        tracker = pas.parse_tracker(valid_text())
+        tracker["escalations"] = [row for row in tracker["escalations"]
+                                  if row["state"] == "answered"]
+        self.assertEqual(pas.derive_next_action(tracker), "run-task-gate-P02-T01")
+
+    def test_a_run_whose_stages_are_all_complete_is_complete(self):
+        """Catches a fallthrough that returns the last row's ``-``, or ``None``,
+        instead of the terminal verdict the controller stops on."""
+        tracker = pas.parse_tracker(with_stages(["complete"] * 12))
+        tracker["escalations"] = []
+        self.assertEqual(pas.derive_next_action(tracker), "complete")
+
+    def test_a_run_with_no_active_stage_and_work_left_is_not_reported_complete(self):
+        """Catches the unguarded ``return "complete"`` fallback. A tracker whose
+        stages are all pending has done nothing at all, and reporting it
+        complete ends the run at stage 00 with every artifact unwritten — the
+        same silent-fork failure ``## Stage`` exists to prevent, arriving from
+        the other end."""
+        tracker = pas.parse_tracker(with_stages(["pending"] * 12))
+        tracker["escalations"] = []
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.derive_next_action(tracker)

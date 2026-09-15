@@ -227,7 +227,93 @@ def parse_tracker(text: str) -> dict:
         tracker[key] = [
             dict(zip(fields, row)) for row in _table(sections[heading], header)
         ]
+    _validate_tracker_semantics(tracker)
     return tracker
+
+
+#: The twelve stages of a run, in order. Every tracker carries all twelve rows
+#: at all times: a stage that has no row has no state, and a state nobody wrote
+#: down is one a resuming controller cannot read back.
+STAGES = tuple(f"{index:02d}" for index in range(1, 13))
+
+#: The only stage states, in the order a stage moves through them. The tuple is
+#: also the sort key that defines "monotone", so its ORDER is load-bearing and
+#: not merely a membership set.
+_STAGE_STATES = ("complete", "active", "pending")
+
+
+def _validate_stages(tracker: dict) -> None:
+    """Stages run complete*, then at most one active, then pending*.
+
+    This ordering is the whole recovery story for stages 01-07, whose outputs
+    Git cannot reconstruct and the task table never mentions. A tracker showing
+    stage 01 pending while stage 02 is active would let a resuming controller
+    re-dispatch the intent readers, produce a different brief, and fork the run
+    from its own history with nothing downstream able to notice.
+    """
+    stages = tracker["stages"]
+    if tuple(row["stage"] for row in stages) != STAGES:
+        raise TrackerValidationError(
+            "## Stage must list stages 01..12 exactly once, in order")
+    states = [row["stage_state"] for row in stages]
+    #: Ahead of every check that sorts or counts by state, because an
+    #: out-of-enum value reaches ``_STAGE_STATES.index`` as a bare ValueError:
+    #: a caller branching on TrackerError would never see it, and a read-only
+    #: stop that escapes its own exception family is not one.
+    unknown = [state for state in states if state not in _STAGE_STATES]
+    if unknown:
+        raise TrackerValidationError(f"unknown stage state {unknown[0]!r}")
+    #: Two actives are monotone under the sort below, so the ordering check
+    #: alone accepts them. Cardinality is a separate fact and needs its own say.
+    if states.count("active") > 1:
+        raise TrackerValidationError("at most one stage may be active")
+    if states != sorted(states, key=_STAGE_STATES.index):
+        raise TrackerValidationError(
+            "stage states must run complete*, then at most one active, then pending*"
+        )
+    for row in stages:
+        if row["stage_state"] == "active" and row["next_action"] == "-":
+            raise TrackerValidationError("the active stage must name its next action")
+        if row["stage_state"] != "active" and row["next_action"] != "-":
+            raise TrackerValidationError("only the active stage carries a next action")
+
+
+def _validate_tracker_semantics(tracker: dict) -> None:
+    """Every per-section semantic rule, run as the last step of a parse.
+
+    Structural parsing proves the bytes are a tracker; this proves they are a
+    state the run can actually be in. Later phases extend the dispatcher rather
+    than add a second entry point, so there is exactly one place a tracker is
+    judged and no way to obtain an unvalidated one.
+    """
+    _validate_stages(tracker)
+
+
+def derive_next_action(tracker: dict) -> str:
+    """The single next action, derived from files rather than remembered.
+
+    A pending escalation outranks the stage: the spec requires ``next_action``
+    to read ``await-escalation-batch`` rather than any generic block, so a
+    resuming controller and the terminal report both see why the run is waiting.
+    ``asked`` counts as pending alongside ``queued`` — the window after a batch
+    has gone to the human is the longest wait in the run, and it is exactly the
+    window in which a controller must not answer the question itself.
+
+    The terminal verdict is guarded rather than a fallthrough. A tracker with no
+    active stage and work still pending is not finished, and returning
+    ``complete`` for it would end the run with its artifacts unwritten — the
+    silent fork ``## Stage`` exists to prevent, arriving from the other end.
+    """
+    if any(row["state"] in ("queued", "asked") for row in tracker["escalations"]):
+        return "await-escalation-batch"
+    for row in tracker["stages"]:
+        if row["stage_state"] == "active":
+            return row["next_action"]
+    if all(row["stage_state"] == "complete" for row in tracker["stages"]):
+        return "complete"
+    raise TrackerValidationError(
+        "no stage is active and stages remain pending: the run has no next "
+        "action to derive and is not complete")
 
 
 def _row(values: tuple[str, ...]) -> str:

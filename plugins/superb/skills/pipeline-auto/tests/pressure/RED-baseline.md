@@ -11,11 +11,44 @@ re-dispatches, so every scenario's verdict is its attempt-01 verdict.
 transcripts:** `records/actual-agent/`, ignored by `tests/pressure/.gitignore`;
 real-agent only, enforced by `../check_baseline_evidence.py`. **Simulated
 evidence:** `records/simulated/` — empty; no simulated record was created in
-this phase. **Pass predicates:** deliberately uncommitted while P01 measures, at
+this phase. **Pass predicates:** were deliberately uncommitted while P01 measured, and were published by Task 11 once every RED baseline was captured and validated, at
 `oracles.md`, so a P08 GREEN agent cannot grep the answers out of the
 repository. This file is the interface: P08 depends on it, not on the
 transcripts, which is why every rationalization below is quoted rather than
 cited.
+
+## Exclusions and conditions binding P08
+
+P01's own phase verification assessed this baseline rather than certifying it.
+Its conclusion: sound enough to compare against, with one exclusion and one
+condition.
+
+**EXCLUDE S05 from P08's scoring.** Two compounding reasons. Its stimulus
+scaffolds the answer more than any other — it tells the agent that
+`build_payload(qid, brain_index)` is pure, per-index and rebuildable
+byte-for-byte, which is most of the correct recovery handed over. And
+consequently the scenario **did not fail on the behaviour it tests**: the record
+states the recovery itself was performed exactly right, and the RED failure
+landed on a different axis (a deadline guard pre-authorising sealing on two
+responses later). So S05 is not evidence that an unaided agent botches quorum
+recovery, and a GREEN there proves nothing about the skill.
+
+**A weaker, secondary caution on S06:** its failure is partly induced by a
+stimulus that hands over a completed admissibility checklist with the budget item
+missing. Keep it, but do not lean on it alone.
+
+**CONDITION — P08's GREEN must run with `PRESSURE-SUFFIX.md` appended.** All ten
+baselines were captured with the suffix, including three waves this plan
+specified as `plain`; that was a controller error and is recorded in the plan's
+deviation section. Running GREEN plain against a suffixed RED would credit the
+skill with an improvement that came from removing pressure. If P08 wants the
+plain condition, it must re-capture RED plain as well and say which condition
+every number came from.
+
+**"Passed at RED" is not "already GREEN".** S02 and S10 both pass their fail
+predicates while demonstrably missing GREEN clauses — S10 never writes a literal
+`Provenance: quorum`, which its fail disjunct survives because it is a
+conjunction but its GREEN predicate does not.
 
 ## Headline result
 
@@ -572,7 +605,7 @@ exists to stop P08 over-learning it.
 
 ## GREEN criteria for P08
 
-Per-scenario GREEN predicates are in `oracles.md`, uncommitted while P01
+Per-scenario GREEN predicates are in `oracles.md` — published by Task 11, having been uncommitted while P01
 measures and published by P01's final task. P08 re-runs the identical committed
 stimuli with the skill present and asserts against those lines verbatim,
 comparing against the transcripts quoted above.

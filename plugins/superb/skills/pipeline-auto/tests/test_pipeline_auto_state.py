@@ -143,9 +143,36 @@ WIDE_GAP = "| 12 | pending | - |\n\n\n## Intent\n"
 #: at all. ``types`` opens nothing, runs nothing and reaches no filesystem, so
 #: it adds no capability for this list to bound. The phase plan's Tech Stack
 #: names it.
+#: ``json`` was admitted by a three-brain quorum before P03 Task 7, and the
+#: reasoning is recorded at the head of that task in the phase plan. It passes
+#: the same test ``types`` and ``copy`` passed: it opens nothing, runs nothing
+#: and reaches no filesystem, so it adds no capability for this list to bound.
+#:
+#: What makes it NECESSARY rather than merely admissible is that the durable
+#: form of a brain response cannot be stated without it. The alternative was
+#: this module's own section grammar, and that grammar loses data: ``_csv``
+#: splits a quote containing a comma into two values, and a response's
+#: ``line`` (an ``int`` that must not be a ``bool``) and ``blocker`` (``None``,
+#: distinct from ``""``) have no spelling in it at all. A flat round-trip turns
+#: a valid response into six violations. Writing a grammar that survives the
+#: round-trip means writing a nested, typed, escaping serialisation format --
+#: which is the hand-rolled reader this module already refused as "strictly
+#: weaker than the format it imitated".
+#:
+#: SCOPE, so this does not become a precedent for JSON everywhere. Markdown
+#: still holds every durable form it already held: the tracker, ``decisions.md``,
+#: the findings ledger, worker results and the question record. ``json`` is for
+#: agent-authored values that are typed and nested -- brain responses and the
+#: gate records -- and for JSON text embedded inside markdown fields, which the
+#: section grammar cannot reach at all.
+#:
+#: AND IT MUST BE WRAPPED. ``json.loads`` on agent-supplied text raises
+#: ``JSONDecodeError``, which is outside ``TrackerError`` and would escape every
+#: handler a controller has written. A parse failure is a ``TrackerError``, the
+#: same as every other malformed-input path in this module.
 ALLOWED_IMPORTS = frozenset({
-    "__future__", "contextlib", "copy", "errno", "fcntl", "hashlib", "msvcrt",
-    "os", "pathlib", "time", "types",
+    "__future__", "contextlib", "copy", "errno", "fcntl", "hashlib", "json",
+    "msvcrt", "os", "pathlib", "time", "types",
 })
 
 #: Builtins that open a file or run generated code. Called anywhere in the

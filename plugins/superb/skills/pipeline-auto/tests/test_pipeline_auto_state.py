@@ -1960,6 +1960,495 @@ class QuorumSectionTests(unittest.TestCase):
                     pas.parse_tracker(adopted_with(
                         "| adopted | Q-3f2a1b0c9d8e |", f"| {outcome} | - |"))
 
+#: ``## Tasks``, ``## Phases`` and ``## Gates`` are addressed by column NAME
+#: below. The header tuples come from the module rather than being retyped, so a
+#: column added or moved reaches these helpers as a KeyError-shaped
+#: ``AssertionError`` instead of silently shifting every cell one place left.
+SECTION_HEADERS = {key: header for _, key, header in pas._SECTIONS[1:]}
+
+
+def row_fields(key: str) -> tuple[str, ...]:
+    return tuple(pas._field(column) for column in SECTION_HEADERS[key])
+
+
+def with_row(key: str, row_id: str, cells: dict[str, str],
+             text: str | None = None) -> str:
+    """The fixture with named cells of ONE row of ONE section replaced.
+
+    By column NAME, never by substring. ``## Tasks`` carries sixteen columns and
+    ten of them read ``-`` in the rows these cases edit, so a substring pattern
+    over a task row is either ambiguous inside the row or long enough that it
+    stops matching the day a column is added — and a ``str.replace`` whose
+    pattern is absent is a silent no-op that leaves the case asserting against
+    the untouched, VALID fixture.
+
+    That is not hypothetical here. The brief for this task carried four such
+    patterns, each written one column short of the committed fixture's sixteen:
+    the in-flight case, the completed-artifact case, the blocked-task case and
+    the ``Provisional`` case all edited nothing at all. A rejection case built
+    on a no-op merely fails; a POSITIVE control built on one passes while
+    exercising nothing. Both are refused here.
+
+    Row lookup is scoped to the section, because ``| P01-T01 | `` opens a row in
+    ``## Tasks``, another in ``## Task Review`` and a third in ``## Fix Rounds``.
+    """
+    text = valid_text() if text is None else text
+    fields = row_fields(key)
+    unknown = sorted(set(cells) - set(fields))
+    if unknown:
+        raise AssertionError(f"{key!r} has no column(s) {unknown}")
+    heading = next(head for head, name, _ in pas._SECTIONS if name == key)
+    prefix = f"| {row_id} | "
+    matches = [line for line in pas._sections(text)[heading]
+               if line.startswith(prefix)]
+    if len(matches) != 1:
+        raise AssertionError(
+            f"expected exactly one {heading} row starting {prefix!r}, "
+            f"found {len(matches)}")
+    old = matches[0]
+    values = tuple(part.strip() for part in old[1:-1].split("|"))
+    if len(values) != len(fields):
+        raise AssertionError(
+            f"{heading} row {row_id!r} is {len(values)} cells, not {len(fields)}")
+    if text.count(old) != 1:
+        raise AssertionError(f"{old!r} is not unique in the tracker")
+    return swap(old, pas._row(tuple(
+        cells[name] if name in cells else value
+        for name, value in zip(fields, values))), text)
+
+
+#: Every lifecycle cell of ``## Tasks``, spelled out rather than imported from
+#: ``pas._TASK_LIFECYCLE``. Importing it would make the subtest set move with
+#: the constant, so dropping a name from the constant would drop the subtest
+#: that catches the drop — a test that agrees with the mutation.
+TASK_LIFECYCLE_CELLS = {
+    "owner": "impl-9",
+    "attempt": "attempt-001",
+    "result": "scratch/x-result.md",
+    "checkpoints": "red",
+    "source_ref": "refs/heads/feat/pipeline-auto",
+    "commits": "0123456789abcdef0123456789abcdef01234567",
+    "artifacts": "scratch/x-notes.md",
+    "integration": "fedcba9876543210fedcba9876543210fedcba98",
+    "verification": "scratch/x-tests.txt",
+    "question": "scratch/x-question.md",
+}
+
+#: P02-T01 wound all the way back: a task the plan names and nobody has picked
+#: up. ``Decisions`` and ``Provisional`` are deliberately NOT cleared.
+UNSTARTED_TASK = dict({key: "-" for key in TASK_LIFECYCLE_CELLS}, state="[ ]")
+
+#: P02-T01 wound all the way forward, as a legally completed artifact task.
+COMPLETED_ARTIFACT_TASK = {
+    "state": "[x]",
+    "result": "scratch/p02-t01-result.md",
+    "artifacts": "scratch/p02-t01-notes.md",
+    "integration": "N/A",
+    "verification": "scratch/p02-t01-tests.txt",
+}
+
+RATCHET_RECORD = "accumulated-surface@scratch/p02-ratchet.md"
+
+#: The ONLY three (Review Class, Class Source, Ratchet) triples the schema
+#: admits. Everything else in the two-by-two-by-two cross product is refused,
+#: and that is the whole of the one-way ratchet: there is no spelling of a
+#: downward reclassification for a run to write down. ``plan`` means "this is
+#: the class stage 04 fixed", so it carries no ratchet record; ``ratchet`` means
+#: "this differs from plan metadata", so it must name its trigger and evidence
+#: AND it must be the upward end.
+LEGAL_CLASS_RECORDS = frozenset({
+    ("required", "plan", "-"),
+    ("final-only", "plan", "-"),
+    ("required", "ratchet", RATCHET_RECORD),
+})
+
+
+class TaskSectionTests(unittest.TestCase):
+    """``## Tasks`` is the only record of what was built and what it rests on.
+
+    Two facts this section keeps apart are worth naming because collapsing
+    either loses work. Completion and integration are separate: a finished task
+    is ``[x]`` with its integration ``held`` while the budget freeze holds, and
+    freezing the import too would discard a finished task's evidence and repeat
+    the work on resume. And ``Decisions`` is separate from the lifecycle: the
+    decisions a task's plan rests on are known before anyone picks the task up,
+    which is exactly what lets taint cross a phase boundary.
+    """
+
+    def test_an_unstarted_task_cannot_carry_lifecycle_state(self):
+        """One subtest per lifecycle cell, so dropping a single name from the
+        constant leaves its own case failing rather than being covered by a
+        neighbour."""
+        for column, value in TASK_LIFECYCLE_CELLS.items():
+            with self.subTest(column=column):
+                text = with_row("tasks", "P02-T01",
+                                dict(UNSTARTED_TASK, **{column: value}))
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_an_unstarted_task_may_still_cite_the_decisions_its_plan_rests_on(self):
+        """The positive control the case above needs, and the reason
+        ``Decisions`` is not a lifecycle cell. A task in a later phase is named
+        by the plan — and tainted by a decision an earlier phase adopted —
+        before any worker touches it. If citing that decision required the task
+        to have started, the taint would have nowhere to be written down until
+        the work was already under way, and the closure would stop at the phase
+        that raised the decision."""
+        tracker = pas.parse_tracker(
+            with_row("tasks", "P02-T01", UNSTARTED_TASK))
+        unstarted = next(row for row in tracker["tasks"] if row["id"] == "P02-T01")
+        self.assertEqual(unstarted["state"], "[ ]")
+        self.assertEqual(unstarted["decisions"], "Q-3f2a1b0c9d8e")
+
+    def test_a_started_task_needs_owner_attempt_and_checkpoints(self):
+        for column in ("owner", "attempt", "checkpoints"):
+            with self.subTest(column=column):
+                text = with_row("tasks", "P02-T01", {column: "-"})
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_an_in_flight_task_cannot_claim_completion_or_integration(self):
+        for column in ("source_ref", "commits", "artifacts", "integration"):
+            with self.subTest(column=column):
+                text = with_row("tasks", "P02-T01",
+                                {column: TASK_LIFECYCLE_CELLS[column]})
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_a_blocked_task_names_its_question(self):
+        text = with_row("tasks", "P02-T02", {"question": "-"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_completed_source_task_may_hold_its_integration(self):
+        """Completion and integration are separate facts. When the drift budget
+        trips, running work finishes, publishes and imports to ``[x]``; only
+        integration is held. Freezing the import too would lose a finished
+        task's evidence and repeat the work on resume."""
+        tracker = pas.parse_tracker(valid_text())
+        held = next(row for row in tracker["tasks"] if row["id"] == "P01-T02")
+        self.assertEqual(held["state"], "[x]")
+        self.assertEqual(held["integration"], "held")
+
+    def test_a_completed_source_task_records_its_integration_or_the_hold(self):
+        """``held`` is the one word that may stand in for the commit, and it
+        says a specific thing: finished, not yet integrated. ``-`` says nothing
+        at all, ``N/A`` borrows the artifact task's marker to claim integration
+        does not apply to source, and a branch name is not an immutable edge."""
+        for integration in ("-", "N/A", "merged", "refs/heads/feat/pipeline-auto",
+                            "FEDCBA9876543210FEDCBA9876543210FEDCBA98",
+                            "fedcba9876543210fedcba9876543210fedcba9"):
+            with self.subTest(integration=integration):
+                text = with_row("tasks", "P01-T02", {"integration": integration})
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_a_completed_source_task_needs_its_source_ref_and_commits(self):
+        for column in ("source_ref", "commits"):
+            with self.subTest(column=column):
+                text = with_row("tasks", "P01-T02", {column: "-"})
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_a_task_commit_list_is_commit_shas(self):
+        """``Commits`` is what the ``baseline..source-head`` range proof is run
+        over. A symbolic name resolves differently tomorrow, so a range built on
+        one proves nothing about what was reviewed."""
+        for commits in ("HEAD~1", "0123456789abcdef0123456789abcdef0123456",
+                        "0123456789abcdef0123456789abcdef01234567,HEAD"):
+            with self.subTest(commits=commits):
+                text = with_row("tasks", "P01-T02", {"commits": commits})
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_a_completed_task_needs_its_result_and_verification(self):
+        for column in ("result", "verification"):
+            with self.subTest(column=column):
+                text = with_row("tasks", "P01-T01", {column: "-"})
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_a_completed_artifact_task_parses_with_na_integration(self):
+        """The positive control for the two cases below: this exact row is
+        legal, so their raises are caused by the one cell each changes and not
+        by winding P02-T01 forward to ``[x]``."""
+        tracker = pas.parse_tracker(
+            with_row("tasks", "P02-T01", COMPLETED_ARTIFACT_TASK))
+        done = next(row for row in tracker["tasks"] if row["id"] == "P02-T01")
+        self.assertEqual((done["state"], done["integration"]), ("[x]", "N/A"))
+
+    def test_a_completed_artifact_task_carries_na_integration(self):
+        """An artifact task produces no source range to integrate. Letting it
+        record ``held`` would put a task that can never be integrated into the
+        set the budget freeze is waiting on."""
+        text = with_row("tasks", "P02-T01",
+                        dict(COMPLETED_ARTIFACT_TASK, integration="held"))
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_completed_artifact_task_names_its_artifacts(self):
+        text = with_row("tasks", "P02-T01",
+                        dict(COMPLETED_ARTIFACT_TASK, artifacts="-"))
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_provisional_is_yes_or_no(self):
+        text = with_row("tasks", "P01-T01", {"provisional": "maybe"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_task_kind_is_source_or_artifact(self):
+        text = with_row("tasks", "P02-T01", {"kind": "docs"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_task_state_is_a_known_checkbox(self):
+        """Built on the row that is otherwise LEGALLY COMPLETE, so the enum is
+        the only thing left to refuse it. Spelling this on the in-flight row
+        instead would raise either way — an unknown state falls past the
+        in-flight branch into the completion rules and trips those — and the
+        case would then pass against an enum quietly widened to admit ``[X]``,
+        which is the mutation it exists to catch."""
+        for state in ("[X]", "[-]", "[ x]", "x"):
+            with self.subTest(state=state):
+                text = with_row("tasks", "P02-T01",
+                                dict(COMPLETED_ARTIFACT_TASK, state=state))
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_a_task_cannot_belong_to_an_unknown_phase(self):
+        text = with_row("tasks", "P01-T01", {"phase": "P99"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_duplicate_task_id_is_refused(self):
+        """Every task helper in the later phases locates a task by scanning for
+        its single ``ID`` row, so a second row on one id is a task whose state
+        depends on which copy the scan reaches first."""
+        row = next(line for line in valid_text().splitlines()
+                   if line.startswith("| P02-T01 | "))
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(swap(row + "\n", row + "\n" + row + "\n"))
+
+    def test_a_cited_decision_lies_in_one_of_the_two_id_namespaces(self):
+        """``Decisions`` is the edge the provisional closure walks, and the
+        prefix on each id is what the contradiction routing reads: a finding
+        tracing to a human decision HALTS to the escalation queue, one tracing
+        to a quorum decision re-opens that qid at a raised bar. An id in
+        neither namespace routes as neither, and the task carries a taint no
+        reviewer can be handed the answer to.
+
+        Every value below is a near miss rather than obvious rubbish, because
+        the mistake is not someone typing prose into the cell — it is a
+        truncated qid, a case-folded one, or a decision id borrowed from
+        another document's scheme, each of which reads like a match."""
+        for decisions in ("H1", "h-1", "H-", "D-001", "scratch/p01-notes.md",
+                          "Q-3f2a1b0c9d8", "Q-3F2A1B0C9D8E",
+                          "H-1,Q-3f2a1b0c9d8"):
+            with self.subTest(decisions=decisions):
+                text = with_row("tasks", "P01-T02", {"decisions": decisions})
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_a_task_cites_human_and_quorum_decisions_side_by_side(self):
+        """The positive control: both id shapes in one cell, and a third task
+        citing none. Whether an id RESOLVES is settled against ``decisions.md``,
+        which this module never opens — so a well-formed id stands here even
+        when no row of this tracker happens to hold it, and the quorum cases
+        above stay free to rewrite a quorum's own Decision cell."""
+        tracker = pas.parse_tracker(valid_text())
+        cited = {row["id"]: row["decisions"] for row in tracker["tasks"]}
+        self.assertEqual(cited["P01-T02"], "H-1,Q-3f2a1b0c9d8e")
+        self.assertEqual(cited["P02-T02"], "-")
+        pas.parse_tracker(with_row("tasks", "P01-T02", {"decisions": "H-9"}))
+
+
+class PhaseSectionTests(unittest.TestCase):
+    """``## Phases`` holds the review-intensity dial, and the dial is the one
+    cost optimization an autonomous controller is most motivated to make about
+    ITSELF: ``required`` buys the full per-task gate, ``final-only`` buys
+    mechanical verification only. So the downward move is not discouraged here,
+    it is unspellable.
+    """
+
+    def test_the_ratchet_is_one_way(self):
+        """``final-only -> required`` only. A ratchet record paired with a
+        ``final-only`` class is a downward reclassification wearing a ratchet's
+        clothes, and the schema refuses it."""
+        text = with_row("phases", "P02", {"review_class": "final-only"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_no_spelling_of_a_downward_reclassification_parses(self):
+        """The whole cross product, asserted exhaustively rather than as three
+        separate rules. Structural impossibility is a claim about what the
+        schema admits, and only enumerating the alternatives proves it: five of
+        these eight triples are refused, and the two that would let a run buy
+        its way out of its own review — a ``final-only`` class carrying a
+        ratchet record, and a ``plan`` class carrying one — are among them."""
+        for review_class in ("required", "final-only"):
+            for class_source in ("plan", "ratchet"):
+                for ratchet in ("-", RATCHET_RECORD):
+                    combination = (review_class, class_source, ratchet)
+                    text = with_row("phases", "P02", {
+                        "review_class": review_class,
+                        "class_source": class_source,
+                        "ratchet": ratchet,
+                    })
+                    with self.subTest(combination=combination):
+                        if combination in LEGAL_CLASS_RECORDS:
+                            pas.parse_tracker(text)
+                        else:
+                            with self.assertRaises(pas.TrackerValidationError):
+                                pas.parse_tracker(text)
+
+    def test_a_ratcheted_class_must_name_its_trigger_and_evidence(self):
+        """``<trigger>@<evidence>``: what fired, and where the proof is. A bare
+        trigger is an assertion the run makes about itself with nothing behind
+        it, and a bare evidence path names no trigger to check it against —
+        either one lets a class change be recorded that nothing can audit."""
+        for ratchet in ("accumulated-surface", "@scratch/p02-ratchet.md",
+                        "accumulated-surface@", "a@b@c",
+                        "accumulated surface@scratch/p02-ratchet.md"):
+            with self.subTest(ratchet=ratchet):
+                text = with_row("phases", "P02", {"ratchet": ratchet})
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_review_class_is_final_only_or_required(self):
+        text = with_row("phases", "P01", {"review_class": "medium"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_class_source_is_plan_or_ratchet(self):
+        text = with_row("phases", "P01", {"class_source": "controller"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_phase_state_is_a_known_checkbox(self):
+        """``[?]`` is a TASK state and is the near miss that matters: a phase
+        blocked on a question is a set of blocked tasks, and a phase-level
+        ``[?]`` would be a second place to write a fact the task rows hold. P02
+        is unverified with no evidence, so every other phase rule is satisfied
+        and only the enum stands between this row and a parse."""
+        for state in ("[?]", "[X]", "done"):
+            with self.subTest(state=state):
+                text = with_row("phases", "P02", {"state": state})
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_verification_evidence_and_the_verified_state_stand_together(self):
+        """Both directions, under BOTH review classes. The dial controls whether
+        a reviewer runs, never what the state machine records, so a
+        ``final-only`` phase is held to this exactly as a ``required`` one is."""
+        for review_class in ("required", "final-only"):
+            base = with_row("phases", "P02", {
+                "review_class": review_class, "class_source": "plan",
+                "ratchet": "-"})
+            for phase_id, verification in (("P02", "scratch/x.txt"), ("P01", "-")):
+                with self.subTest(review_class=review_class, phase=phase_id):
+                    text = with_row("phases", phase_id,
+                                    {"verification": verification}, base)
+                    with self.assertRaises(pas.TrackerValidationError):
+                        pas.parse_tracker(text)
+
+    def test_a_phase_cannot_point_at_an_unknown_gate(self):
+        text = with_row("phases", "P01", {"gate": "gate-p99"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_duplicate_phase_id_is_refused(self):
+        row = next(line for line in valid_text().splitlines()
+                   if line.startswith("| P02 | "))
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(swap(row + "\n", row + "\n" + row + "\n"))
+
+    def test_a_final_only_phase_keeps_every_task_and_gate_rule(self):
+        """The defect this class exists to prevent: a validator a phase's own
+        class can switch off. The dial buys review, never integrity, so the
+        tracker rules below have to fire identically on a ``final-only`` phase —
+        including the ones a run under budget pressure would most like to skip,
+        the immutable gate edge and the recorded integration."""
+        relaxed = with_row("phases", "P02", {
+            "review_class": "final-only", "class_source": "plan", "ratchet": "-"})
+        pas.parse_tracker(relaxed)
+        for key, row_id, cells in (
+            ("tasks", "P02-T01", {"kind": "docs"}),
+            ("tasks", "P02-T01", {"owner": "-"}),
+            ("tasks", "P02-T01", {"phase": "P99"}),
+            ("gates", "gate-p02", {"base": "-"}),
+            ("gates", "gate-p02", {"head": "HEAD~1"}),
+            ("gates", "gate-p02", {"assignments": "-"}),
+        ):
+            with self.subTest(section=key, row=row_id, cells=cells):
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(with_row(key, row_id, cells, relaxed))
+
+
+class GateSectionTests(unittest.TestCase):
+    """``## Gates`` records the edge a review was actually run over.
+
+    The edge is the reviewable unit. Its two ends are commit shas because the
+    ``baseline..source-head`` range proof is only a proof if both ends are
+    immutable — the spec is explicit that a review package comes from the
+    persisted reservation baseline and never from ``HEAD~1``.
+    """
+
+    def test_a_master_gate_cannot_name_a_phase(self):
+        text = with_row("gates", "gate-master", {"phase": "P02"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_phase_gate_must_name_a_known_phase(self):
+        for phase in ("P99", "-"):
+            with self.subTest(phase=phase):
+                text = with_row("gates", "gate-p01", {"phase": phase})
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_gate_type_is_phase_or_master(self):
+        text = with_row("gates", "gate-p01", {"type": "task"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_gate_state_is_known(self):
+        text = with_row("gates", "gate-p02", {"state": "open"})
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_an_opened_gate_needs_its_immutable_edge(self):
+        for column in ("base", "head", "assignments"):
+            with self.subTest(column=column):
+                text = with_row("gates", "gate-p02", {column: "-"})
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_a_gate_edge_is_spelled_as_commit_shas(self):
+        for column in ("base", "head"):
+            for value in ("HEAD~1", "feat/pipeline-auto",
+                          "111111111111111111111111111111111111111",
+                          "C8BDDD610119F52B54BF077D284C7F5D8362AE77"):
+                with self.subTest(column=column, value=value):
+                    text = with_row("gates", "gate-p02", {column: value})
+                    with self.assertRaises(pas.TrackerValidationError):
+                        pas.parse_tracker(text)
+
+    def test_an_evaluated_gate_needs_reports_and_verification(self):
+        for state in ("accepted", "blocked"):
+            for column in ("reports", "verification"):
+                with self.subTest(state=state, column=column):
+                    text = with_row("gates", "gate-p01",
+                                    {"state": state, column: "-"})
+                    with self.assertRaises(pas.TrackerValidationError):
+                        pas.parse_tracker(text)
+
+    def test_a_duplicate_gate_id_is_refused(self):
+        row = next(line for line in valid_text().splitlines()
+                   if line.startswith("| gate-p02 | "))
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(swap(row + "\n", row + "\n" + row + "\n"))
+
+
 class SuiteIsWhollyCollectedTests(unittest.TestCase):
     """``if __name__ == "__main__": unittest.main()`` must be the LAST statement.
 

@@ -439,6 +439,15 @@ _QID = _Hex(12)
 #: made, and it is what the contradiction check reads to tell them apart.
 _QUORUM_DECISION = _Hex(12, "Q-")
 
+#: A Git object name: forty lowercase hex characters. Task commits, a task's
+#: integration commit and both ends of a gate edge are spelled this way and
+#: nothing else is accepted for them. A symbolic name — ``HEAD~1``, a branch, a
+#: tag — reads like an edge and is not one: it resolves somewhere else tomorrow,
+#: which is precisely why the spec requires a review package to be generated
+#: from the PERSISTED reservation baseline rather than from ``HEAD~1``. The
+#: ``baseline..source-head`` range proof is a proof only between immutable ends.
+_COMMIT = _Hex(40)
+
 
 def _stage_state(tracker: dict, stage: str) -> str:
     """The state of one stage row.
@@ -882,6 +891,329 @@ def _validate_quorum(tracker: dict) -> None:
                 "only an adopted quorum carries a decision")
 
 
+_TASK_KINDS = ("source", "artifact")
+#: Unstarted, running, blocked on a question, complete.
+_TASK_STATES = ("[ ]", "[~]", "[?]", "[x]")
+#: A task can be blocked on a question; a PHASE cannot. A phase blocked on a
+#: question is a set of blocked tasks, and giving the phase its own ``[?]``
+#: would be a second place to write a fact the task rows already hold.
+_PHASE_STATES = ("[ ]", "[~]", "[x]")
+#: The review-intensity dial, and nothing else. ``required`` buys the full
+#: per-task gate; ``final-only`` buys mechanical verification only, with stage
+#: 11 as the net. There is no middle value, because a middle value is a place
+#: for a run to put itself when it wants less than it was given.
+_REVIEW_CLASSES = ("final-only", "required")
+#: Where the class in this tracker came from. ``plan`` means "the class stage 04
+#: fixed, mirrored here". ``ratchet`` means "this DIFFERS from plan metadata",
+#: which the spec permits only with a matching ratchet record. There is no third
+#: source, and in particular none that means "lowered".
+_CLASS_SOURCES = ("plan", "ratchet")
+_GATE_TYPES = ("phase", "master")
+_GATE_STATES = ("pending", "in_progress", "blocked", "accepted")
+#: A gate that has been judged, either way. Both outcomes rest on the same two
+#: artifacts, so both demand them: an acceptance with no reports is a verdict
+#: with no basis, and a block with none is a halt nobody can answer.
+_GATE_EVALUATED = ("blocked", "accepted")
+
+#: Every ``## Tasks`` cell that records something a worker did. An unstarted
+#: task has none of them. ``Decisions`` and ``Provisional`` are deliberately
+#: absent: the decisions a task's plan rests on are known when the plan is
+#: written, before anyone picks the task up, and that is exactly what lets taint
+#: cross a phase boundary. Requiring a task to have STARTED before it could cite
+#: the decision that taints it would leave the closure stopping at the phase
+#: that raised the decision.
+_TASK_LIFECYCLE = (
+    "owner", "attempt", "result", "checkpoints", "source_ref", "commits",
+    "artifacts", "integration", "verification", "question",
+)
+#: The cells that assert work is finished. A running or blocked task has none of
+#: them: a row that is simultaneously in flight and integrated is one an
+#: interrupted controller cannot classify, the same shape ``## Quorum`` refuses.
+_TASK_COMPLETION = ("source_ref", "commits", "artifacts", "integration")
+
+#: Completion and integration are SEPARATE FACTS, and ``held`` is the word that
+#: keeps them apart. When the drift budget trips, running work still finishes,
+#: publishes and imports to ``[x]``; only integration is held. Freezing the
+#: import as well would discard a finished task's evidence and repeat the work
+#: on resume. So ``held`` is a legal integration value — and an UNRECORDED one
+#: never is, because "not written down" and "deliberately deferred" are the two
+#: states a resuming controller must be able to tell apart.
+_INTEGRATION_HELD = "held"
+#: An artifact task produces no source range, so there is nothing to integrate
+#: and nothing to prove ancestry over. It is not the same as ``held``: a task
+#: marked ``held`` is one the budget freeze is still waiting on.
+_INTEGRATION_NA = "N/A"
+
+
+def _ratchet_record(value: str) -> bool:
+    """``<trigger>@<evidence>``: what fired, and where the proof of it is.
+
+    Both halves or neither. A bare trigger is a claim the run makes about its
+    own review intensity with nothing behind it; a bare evidence path names no
+    trigger to check the evidence against. The trigger is a TOKEN rather than a
+    closed vocabulary for the reason an escalation's ``Blast`` column is: the
+    spec lists five conditions but no canonical names for them, P05 owns the
+    ratchet DECISION, and an enum invented here would halt a run on a value a
+    conforming writer emits.
+    """
+    parts = value.split("@")
+    return len(parts) == 2 and all(_TOKEN.fullmatch(part) for part in parts)
+
+
+def _decision_id(value: str) -> bool:
+    """``H-<n>`` or ``Q-<qid>``: a human's answer, or a quorum's.
+
+    The prefix is the entire difference between a decision a machine made and
+    one the user made, and it is what the contradiction routing reads to tell
+    them apart — a plan-mandated finding tracing to a human decision HALTS to
+    the escalation queue, while one tracing to a quorum decision re-opens that
+    qid at a raised bar. A cited id in neither namespace routes as neither.
+
+    Shape only. Whether the id RESOLVES is settled against ``decisions.md``,
+    which is the decision index and is named by ``## Run``'s ``decisions``
+    field; this module reads no file but the tracker, and a quorum row is not
+    that index — a decision the run recorded and later escalated still has a
+    task resting on it.
+    """
+    return _HUMAN_DECISION.fullmatch(value) or _QUORUM_DECISION.fullmatch(value)
+
+
+def _validate_tasks(tracker: dict) -> None:
+    """One row per task, and every row a state the task can actually be in.
+
+    Two separations carry most of the weight here.
+
+    **Completion is not integration.** A finished task is ``[x]`` with its
+    integration ``held`` while the budget freeze holds. Collapsing the two —
+    refusing to mark a task complete until it is integrated — would throw away
+    the evidence of finished work every time the freeze trips and repeat that
+    work on resume.
+
+    **The plan's decisions are not lifecycle state.** ``Decisions`` names the
+    decision ids a task rests on, and a task in a later phase rests on an
+    earlier phase's decision before any worker touches it. That column is the
+    edge the provisional closure walks — the decision's own scope stops at the
+    phase that RAISED it — so each cited id is held to one of the two decision
+    namespaces here, and resolved against ``decisions.md`` by the phase that
+    reads that file.
+
+    Nothing here reads ``Review Class``. These are the state machine's own
+    integrity rules, not review, and the dial buys review only.
+    """
+    phases = {row["id"] for row in tracker["phases"]}
+    seen: set[str] = set()
+    for task in tracker["tasks"]:
+        if task["id"] in seen:
+            raise TrackerValidationError(
+                f"duplicate task id {task['id']!r}: the lifecycle helpers locate "
+                "a task by scanning for its single ID row, so a second row is a "
+                "task whose state depends on which copy the scan reaches first")
+        seen.add(task["id"])
+        if task["phase"] not in phases:
+            raise TrackerValidationError(
+                f"task {task['id']!r} refers to unknown phase {task['phase']!r}; "
+                "the per-phase drift budget is derived by filtering on Phase, so "
+                "a task in no phase is work no budget counts")
+        if task["kind"] not in _TASK_KINDS:
+            raise TrackerValidationError(f"unknown task kind {task['kind']!r}")
+        if task["state"] not in _TASK_STATES:
+            raise TrackerValidationError(f"unknown task state {task['state']!r}")
+        if task["provisional"] not in ("yes", "no"):
+            raise TrackerValidationError(
+                f"Provisional is 'yes' or 'no'; {task['provisional']!r} is neither")
+        for decision in _csv(task["decisions"]):
+            if not _decision_id(decision):
+                raise TrackerValidationError(
+                    f"task {task['id']!r} cites {decision!r} as a decision; a "
+                    "cited decision is 'H-<n>' or 'Q-<qid>', and an id in "
+                    "neither namespace cannot be looked up in decisions.md, "
+                    "cannot be routed as human or machine, and cannot be copied "
+                    "into a reviewer's constraints — so the taint is a label")
+        if task["state"] == "[ ]":
+            if any(task[key] != "-" for key in _TASK_LIFECYCLE):
+                raise TrackerValidationError(
+                    f"unstarted task {task['id']!r} carries lifecycle state; a "
+                    "task nobody has picked up has no owner, no attempt and no "
+                    "evidence, and a row claiming otherwise is a reservation "
+                    "that was lost or a completion that was invented")
+            continue
+        if any(task[key] == "-" for key in ("owner", "attempt", "checkpoints")):
+            raise TrackerValidationError(
+                f"started task {task['id']!r} needs its owner, attempt and "
+                "checkpoints; without all three a resuming controller cannot "
+                "tell whose work is outstanding or which attempt to resume")
+        if task["state"] in ("[~]", "[?]"):
+            if any(task[key] != "-" for key in _TASK_COMPLETION):
+                raise TrackerValidationError(
+                    f"in-flight task {task['id']!r} claims completion or "
+                    "integration; a row that is both running and finished is one "
+                    "an interrupted controller cannot classify at all")
+            if task["state"] == "[?]" and task["question"] == "-":
+                raise TrackerValidationError(
+                    f"blocked task {task['id']!r} names no question record; a "
+                    "block with no question is a halt nobody can be asked about")
+            continue
+        if task["result"] == "-" or task["verification"] == "-":
+            raise TrackerValidationError(
+                f"completed task {task['id']!r} needs its immutable result and "
+                "its verification evidence; the RED-before-GREEN record and the "
+                "independent re-run live in those two documents, and the dial "
+                "never switches either off")
+        if task["kind"] == "source":
+            if task["source_ref"] == "-" or task["commits"] == "-":
+                raise TrackerValidationError(
+                    f"completed source task {task['id']!r} needs its source ref "
+                    "and commits; the baseline..source-head range proof has no "
+                    "far end without them")
+            for commit in _csv(task["commits"]):
+                if not _COMMIT.fullmatch(commit):
+                    raise TrackerValidationError(
+                        f"task {task['id']!r} records {commit!r} as a commit; the "
+                        "range proof is only a proof between immutable ends, and "
+                        "a symbolic name resolves somewhere else tomorrow")
+            if task["integration"] != _INTEGRATION_HELD and not _COMMIT.fullmatch(
+                task["integration"]
+            ):
+                raise TrackerValidationError(
+                    f"completed source task {task['id']!r} records neither an "
+                    f"integration commit nor {_INTEGRATION_HELD!r}; 'deliberately "
+                    "deferred' and 'never written down' are the two states a "
+                    "resuming controller has to tell apart")
+        elif task["artifacts"] == "-" or task["integration"] != _INTEGRATION_NA:
+            raise TrackerValidationError(
+                f"completed artifact task {task['id']!r} names its artifacts and "
+                f"carries {_INTEGRATION_NA!r} integration; it produces no source "
+                f"range, so recording it as {_INTEGRATION_HELD!r} would add a task "
+                "that can never integrate to the set the budget freeze waits on")
+
+
+def _validate_phases(tracker: dict) -> None:
+    """The review-intensity dial, and why its downward move is unspellable.
+
+    ``required`` buys the full per-task gate: a fresh implementer working from a
+    brief, a reviewer returning three verdicts, and a fix loop to zero open
+    findings at every severity. ``final-only`` buys mechanical verification
+    only. Reclassifying a phase DOWNWARD is therefore the single cost
+    optimization an autonomous controller is most motivated to make about
+    itself, and a schema that merely discouraged it would be bought out by the
+    first run under budget pressure.
+
+    So it is not discouraged, it has no spelling. ``Class Source`` admits two
+    values and neither means "lowered": ``plan`` is the class stage 04 fixed,
+    which is why it may carry no ratchet record, and ``ratchet`` is the only way
+    to record a class that DIFFERS from plan metadata — and it is pinned to
+    ``required``. The three legal triples are (required, plan, -),
+    (final-only, plan, -) and (required, ratchet, <trigger>@<evidence>). The
+    other five are refused, including the two that matter: a ``final-only``
+    class carrying a ratchet record, which is a downward move wearing a
+    ratchet's clothes, and a ``plan`` class carrying one, which is a ratchet
+    laundered into plan metadata.
+
+    What this cannot see is the plan file itself. A phase claiming ``plan`` as
+    its source while the phase plan says otherwise is caught where the metadata
+    is read — ``PlanMetadataError`` exists for exactly that — and not here.
+    P02 records; it does not fetch.
+    """
+    gates = {row["id"] for row in tracker["gates"]}
+    seen: set[str] = set()
+    for phase in tracker["phases"]:
+        if phase["id"] in seen:
+            raise TrackerValidationError(
+                f"duplicate phase id {phase['id']!r}: two rows are two review "
+                "classes for one phase, and the run would obey whichever it read")
+        seen.add(phase["id"])
+        if phase["state"] not in _PHASE_STATES:
+            raise TrackerValidationError(f"unknown phase state {phase['state']!r}")
+        if phase["review_class"] not in _REVIEW_CLASSES:
+            raise TrackerValidationError(
+                f"review class {phase['review_class']!r} is outside "
+                f"{_REVIEW_CLASSES!r}; there is no partial dial setting")
+        if phase["class_source"] not in _CLASS_SOURCES:
+            raise TrackerValidationError(
+                f"class source {phase['class_source']!r} is outside "
+                f"{_CLASS_SOURCES!r}")
+        if phase["class_source"] == "ratchet":
+            if not _ratchet_record(phase["ratchet"]):
+                raise TrackerValidationError(
+                    f"phase {phase['id']!r} differs from its plan metadata, which "
+                    "is legal only with a matching ratchet record naming its "
+                    "trigger AND its evidence as '<trigger>@<evidence>'; "
+                    f"{phase['ratchet']!r} is not one")
+            if phase["review_class"] != "required":
+                raise TrackerValidationError(
+                    f"phase {phase['id']!r} records a ratchet onto "
+                    f"{phase['review_class']!r}: the ratchet is UPWARD ONLY, "
+                    "final-only -> required and never back. A downward "
+                    "reclassification is a run buying its way out of its own "
+                    "review, and it has no spelling in this schema")
+        elif phase["ratchet"] != "-":
+            raise TrackerValidationError(
+                f"phase {phase['id']!r} is plan-sourced and carries a ratchet "
+                "record; a class that came from the plan did not change, and a "
+                "ratchet recorded against it is a class change hidden inside the "
+                "one source that is never checked against the plan")
+        if (phase["state"] == "[x]") != (phase["verification"] != "-"):
+            raise TrackerValidationError(
+                f"phase {phase['id']!r} is verified with evidence or is neither; "
+                "evidence on an unfinished phase is a proof about a moving edge, "
+                "and a finished phase without it was never mechanically checked")
+        if phase["gate"] != "-" and phase["gate"] not in gates:
+            raise TrackerValidationError(
+                f"phase {phase['id']!r} points at unknown gate {phase['gate']!r}")
+
+
+def _validate_gates(tracker: dict) -> None:
+    """A gate is a review over an EDGE, and the edge is two immutable ends.
+
+    ``Base`` and ``Head`` are commit shas and nothing else. The spec requires a
+    review package generated from the persisted reservation baseline and never
+    from ``HEAD~1``, and that requirement is empty if the tracker will accept a
+    symbolic name here: a range whose ends move is not a range anything was
+    proven over. Like every other rule in this module, it holds whatever the
+    phase's review class says — ``final-only`` buys less review, never a softer
+    record of what was reviewed.
+    """
+    phases = {row["id"] for row in tracker["phases"]}
+    seen: set[str] = set()
+    for gate in tracker["gates"]:
+        if gate["id"] in seen:
+            raise TrackerValidationError(f"duplicate gate id {gate['id']!r}")
+        seen.add(gate["id"])
+        if gate["type"] not in _GATE_TYPES:
+            raise TrackerValidationError(f"unknown gate type {gate['type']!r}")
+        if gate["type"] == "phase" and gate["phase"] not in phases:
+            raise TrackerValidationError(
+                f"phase gate {gate['id']!r} names {gate['phase']!r}, which is not "
+                "a phase of this run")
+        if gate["type"] == "master" and gate["phase"] != "-":
+            raise TrackerValidationError(
+                f"master gate {gate['id']!r} names phase {gate['phase']!r}; the "
+                "master gate reviews the whole run, and scoping it to one phase "
+                "is how the final net comes to cover a fraction of the branch")
+        if gate["state"] not in _GATE_STATES:
+            raise TrackerValidationError(f"unknown gate state {gate['state']!r}")
+        for key in ("base", "head"):
+            if gate[key] != "-" and not _COMMIT.fullmatch(gate[key]):
+                raise TrackerValidationError(
+                    f"gate {gate['id']!r} records {gate[key]!r} as its {key}; a "
+                    "gate edge is a commit sha, because a symbolic end resolves "
+                    "elsewhere tomorrow and the range proof then proves nothing")
+        if gate["state"] != "pending" and any(
+            gate[key] == "-" for key in ("base", "head", "assignments")
+        ):
+            raise TrackerValidationError(
+                f"opened gate {gate['id']!r} needs its immutable edge and its "
+                "assignments; an edge pinned after the review is an edge chosen "
+                "to fit the result")
+        if gate["state"] in _GATE_EVALUATED and any(
+            gate[key] == "-" for key in ("reports", "verification")
+        ):
+            raise TrackerValidationError(
+                f"evaluated gate {gate['id']!r} needs its reports and its "
+                "verification evidence; a verdict with neither is a verdict with "
+                "no basis, in whichever direction it went")
+
+
 def _validate_tracker_semantics(tracker: dict) -> None:
     """Every per-section semantic rule, run as the last step of a parse.
 
@@ -900,11 +1232,23 @@ def _validate_tracker_semantics(tracker: dict) -> None:
     #: roster is four rows and the origins are in the enum, which is what the
     #: two validators above have just proven.
     _validate_intent_conflicts(tracker)
+    #: Ahead of ``_validate_quorum``, ``_validate_tasks`` and ``_validate_gates``,
+    #: all three of which resolve a ``Phase`` cell against this section. A phase
+    #: roster that has not been proven to hold one row per id is not one to look
+    #: a reference up in, and an unknown phase id is a fault to report against
+    #: the phase table rather than against whichever row happened to cite it.
+    _validate_phases(tracker)
     #: Before ``_validate_escalations``, which resolves an escalation's ``QID``
     #: against this section: a qid set that has not been proven well-formed is
     #: not one to look a reference up in.
     _validate_quorum(tracker)
     _validate_escalations(tracker)
+    #: Last, and in this order. ``_validate_tasks`` resolves every cited
+    #: ``Decisions`` id against the three sections that record decisions, so it
+    #: follows all of them; ``_validate_gates`` closes the one reference
+    #: ``_validate_phases`` had to make forward, from a phase to its gate.
+    _validate_tasks(tracker)
+    _validate_gates(tracker)
 
 
 def derive_next_action(tracker: dict) -> str:

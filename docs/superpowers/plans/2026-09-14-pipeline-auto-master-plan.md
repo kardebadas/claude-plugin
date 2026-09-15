@@ -215,6 +215,45 @@ previously could not?"** If yes, justify the capability or find another way. If
 no, the cost is a name in a list and the benefit is usually a rule stated once
 instead of twice.
 
+## Every phase closes with an interface sweep
+
+**This step exists because four pinned interfaces escaped two complete phases.**
+`repo_root`, `section_columns`, `append_row` and `classify_filesystem` were all
+named in the "P02 produces" block above. P02 ran twelve tasks and twelve reviews
+without building any of them, because **no P02 task consumed them** — every
+review checked what its task claimed, none checked what this plan promised the
+next phase. They surfaced only when P03 Task 1 reached for a name that was not
+there, and were closed after the fact in `497cad8` and `268f712`.
+
+`repo_root` is the one that shows the cost. Without it, P03 would have derived
+the repository root from run-directory depth; every citation would then fail to
+resolve, every grounded answer would demote to `engineering-judgement`,
+everything would land below the adoption floor, and the run would escalate every
+question it was ever asked **while looking like a correctly cautious quorum.** No
+error, no failing test.
+
+**So before a phase is called complete, check its own "produces" block against
+the module**, name by name. A name with no consumer inside its phase has nothing
+else checking it exists. This takes a minute and it is the only thing standing
+between a promised interface and a phase that consumes it discovering the
+absence.
+
+## Platform support is Linux-only, and fails closed
+
+`classify_filesystem` returns `unknown` on macOS and Windows, and unknown is a
+halt — the lock and the atomic replace rest on POSIX semantics that not every
+filesystem honours, so a run that cannot classify its filesystem does not start.
+
+Probing macOS needs `subprocess` and `plistlib`; Windows needs `ctypes`.
+**`ALLOWED_IMPORTS` stays at eleven and these are refused.** `subprocess` grants
+arbitrary command execution, which is the single capability this boundary most
+exists to withhold, and platform detection is not worth it. The failure is in the
+safe direction: the skill refuses to run rather than running with its
+single-writer and atomic-write guarantees quietly false.
+
+P07 must state this as a platform requirement in `SKILL.md` rather than leaving a
+macOS user to discover it as an unexplained halt.
+
 ## Cross-phase clarifications
 
 Resolved after the phase plans were written, where two phases needed the same

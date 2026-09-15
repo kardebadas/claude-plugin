@@ -5979,6 +5979,465 @@ class DeriveQidTests(unittest.TestCase):
                     pas.derive_qid(question, self.AXIS)
 
 
+def response(**overrides):
+    """A valid, grounded brain response; override exactly the field under test.
+
+    The canonical shape of the data contract, written once so a case can state
+    ONE deviation and nothing else. It is also the seam where the contract and
+    the module's ``_RESPONSE_KEYS`` are asserted to agree: a key the module
+    forgot to require is a key a brain may omit, and a key the module requires
+    that no brain is told to send rejects every real response.
+    """
+    base = {
+        "qid": "0" * 12,
+        "answer_key": "postgres",
+        "answer": "Use the existing PostgreSQL instance.",
+        "rung": "code-evidenced",
+        "evidence": [{"kind": "repo", "path": "db/engine.py", "line": 1,
+                      "quote": "PostgresEngine"}],
+        "consequences": [{"kind": "file-exists", "subject": "db/session.sql",
+                          "value": "present"}],
+        "consistent_with": [{"kind": "decision", "id": "H-001"}],
+        "forecloses": ["a filesystem-only deployment"],
+        "blast": ["storage-engine"],
+        "alternatives": [{"answer_key": "sqlite", "rung": "speculation",
+                          "reason": "no concurrent writers"}],
+        "what_would_change_my_mind": "A decision pinning the run to a single-file database.",
+        "blocker": None,
+    }
+    base.update(overrides)
+    return base
+
+
+class ValidateBrainResponseTests(unittest.TestCase):
+    """``validate_brain_response`` — the gate between "three agents were asked"
+    and "a decision was adopted".
+
+    Strict in BOTH directions: every known key must be present and no unknown
+    key may be. Unknown-key rejection is not tidiness — ``confidence``,
+    ``score`` and ``certainty`` are exactly the keys a brain that types a number
+    invents, and a validator that ignores extras lets that number reach the
+    arithmetic that was built so no brain could type one.
+
+    Three distinctions the cases below hold apart, because collapsing any of
+    them is how a malformed answer becomes a vote:
+
+    * An out-of-enum rung is SCHEMA-INVALID. It is never defaulted, never
+      demoted, and no violation this function returns ever names a rung the
+      brain could have meant.
+    * A malformed response is not a low-confidence answer and not a blocker.
+      It is not a response at all: the brain is re-dispatched once and a second
+      malformed reply leaves the quorum incomplete, which escalates.
+    * Grounding is NOT judged here. An empty falsifier and a citation that will
+      not resolve are both schema-valid, and both are punished later by
+      demotion. Rejecting them here would put two different recoveries —
+      re-dispatch and demote — behind one verdict.
+    """
+
+    def test_a_grounded_response_is_valid(self):
+        """The canonical contract shape passes. Without this case every other
+        case in the class is satisfied by ``return ["nope"]``."""
+        self.assertEqual(pas.validate_brain_response(response()), [])
+
+    def test_a_self_reported_number_is_rejected_as_an_unknown_key(self):
+        """The named fault. A brain never types a number; it selects a rung and
+        the controller derives the value. These three keys are what a brain
+        that ignores that invents, and the only thing standing between them and
+        the arithmetic is that an unknown key is a violation."""
+        for field, value in (("confidence", 0.97), ("score", 9),
+                             ("certainty", "high")):
+            with self.subTest(field=field):
+                payload = response()
+                payload[field] = value
+                problems = pas.validate_brain_response(payload)
+                self.assertIn(f"unknown-field:{field}", problems)
+
+    def test_a_rung_outside_the_enum_is_schema_invalid(self):
+        """``RUNGS.get(rung, 0.55)`` is the single sharpest mistake available
+        in this phase, and this is where it would be made. ``high`` is not a
+        rung: it is not a demotion, not an engineering-judgement vote, and not
+        a low-confidence answer. It is a response that does not exist."""
+        problems = pas.validate_brain_response(response(rung="high"))
+        self.assertIn("rung-not-in-enum", problems)
+
+    def test_a_numeric_rung_is_schema_invalid(self):
+        """Including the numbers that ARE legal rung values. A brain that types
+        0.85 has typed a number, and accepting it because the number happens to
+        be ``code-evidenced``'s value is the same hole reached from the other
+        side."""
+        for value in (0.95, 0.85, 0.55, 1, True):
+            with self.subTest(rung=value):
+                self.assertIn("rung-not-in-enum",
+                              pas.validate_brain_response(response(rung=value)))
+
+    def test_every_rung_name_in_the_frozen_ladder_is_accepted(self):
+        """The enum is the ladder, all five of it. A validator that admitted
+        only the adoptable two would reject every honest low-rung answer, and
+        every rejection is a re-dispatch and then an escalation — a run that
+        escalates everything while looking correctly strict."""
+        for name in pas.RUNG_NAMES:
+            with self.subTest(rung=name):
+                self.assertEqual(pas.validate_brain_response(response(rung=name)), [])
+
+    def test_a_rung_is_matched_exactly_and_never_normalised_or_widened(self):
+        """Only the five names, spelled the way the ladder spells them.
+
+        Two faults share this one case. Normalising — ``value.strip().lower()``
+        — is the defaulting fault wearing a tidier name: it repairs a brain's
+        output until it reaches a legal value, and the value that arrives is
+        legal while the door it came through is not. Widening is the other
+        half: one extra accepted token, an alias or a confidence word a brain
+        is likely to type, and that token now carries whatever rung the
+        arithmetic gives it.
+
+        The variants are derived from the ladder rather than typed out, so a
+        rung added or renamed in P02 is covered here the day it lands.
+        """
+        variants = set()
+        for name in pas.RUNG_NAMES:
+            variants.update({name.upper(), name.title(), name.capitalize(),
+                             f" {name}", f"{name} ", f"{name}\n",
+                             name.replace("-", "_"), name.replace("-", ""),
+                             name.replace("-", " "), name[:-1], name + "s"})
+        variants -= set(pas.RUNG_NAMES)
+        #: Free text a brain reaches for when it has not read the ladder. None
+        #: of these is a rung, and each would be a silent extra vote.
+        variants.update({"high", "medium", "low", "certain", "uncertain",
+                         "strong", "weak", "anything", "unknown", "default",
+                         "rung", "-", "0.85", "n/a", "none"})
+        for value in sorted(variants):
+            with self.subTest(rung=value):
+                self.assertIn("rung-not-in-enum",
+                              pas.validate_brain_response(response(rung=value)))
+                self.assertIn(
+                    "empty-alternatives",
+                    pas.validate_brain_response(response(alternatives=[
+                        {"answer_key": "sqlite", "rung": value,
+                         "reason": "no concurrent writers"}])),
+                    "the enum is relaxed inside an alternative")
+
+    def test_a_missing_rung_is_not_in_the_enum_either(self):
+        """A response with no rung at all has no legal rung, which is the same
+        fact as an illegal one and takes the same recovery. Reported as both,
+        so a caller keying on either code sees it."""
+        payload = response()
+        del payload["rung"]
+        problems = pas.validate_brain_response(payload)
+        self.assertIn("rung-not-in-enum", problems)
+        self.assertIn("missing-field:rung", problems)
+
+    def test_an_unhashable_rung_is_reported_and_never_raised(self):
+        """``["code-evidenced"] in RUNGS`` raises ``TypeError``: unhashable.
+
+        A validator that raises on a malformed response has not classified it.
+        The TypeError is not in this module's exception family, so it escapes
+        every ``except TrackerError`` the controller has written — the run dies
+        on a brain's typo instead of re-dispatching it. Every shape a JSON
+        document can carry must come back as a violation string."""
+        for value in (["code-evidenced"], {"name": "code-evidenced"},
+                      {"code-evidenced"}, None):
+            with self.subTest(rung=value):
+                problems = pas.validate_brain_response(response(rung=value))
+                self.assertIsInstance(problems, list)
+                self.assertIn("rung-not-in-enum", problems)
+
+    def test_no_violation_ever_names_a_rung_the_brain_could_have_meant(self):
+        """The defaulting fault, asserted from the outside.
+
+        A validator that answers "rung-not-in-enum, defaulted to
+        engineering-judgement" has defaulted it; so has one that reports the
+        nearest legal name or its value. The only legal output is that the
+        response is invalid. This is the runtime companion to the AST detector,
+        which catches the same fault where it would be written."""
+        for rung in ("high", "very-high", 0.85, None):
+            with self.subTest(rung=rung):
+                problems = pas.validate_brain_response(response(rung=rung))
+                for problem in problems:
+                    for name in pas.RUNG_NAMES:
+                        self.assertNotIn(name, problem)
+                    for value in pas.RUNGS.values():
+                        self.assertNotIn(str(value), problem)
+
+    def test_the_rung_enum_is_the_frozen_ladder_and_not_a_second_literal(self):
+        """Structural, because a re-typed enum is equal-today and divergent the
+        day either copy is edited — the same hole ``RUNG_NAMES`` was hoisted
+        into P02 to close. A rung name spelled out in this function's body is
+        that second copy."""
+        source = module_source()
+        defined = {node.name for node in ast.parse(source).body
+                   if isinstance(node, ast.FunctionDef)}
+        called = {node.func.id
+                  for node in ast.walk(function_node(source, "validate_brain_response"))
+                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+        reachable = sorted({"validate_brain_response"} | (called & defined))
+        literals = frozenset().union(
+            *(code_constants(source, name) for name in reachable))
+        self.assertEqual(
+            literals & set(pas.RUNG_NAMES), frozenset(),
+            "a rung name is written out where the response is judged; the enum "
+            "must be consulted, never re-typed")
+        names = set().union(*(names_in(function_node(source, name))
+                              for name in reachable))
+        self.assertIn("RUNGS", names,
+                      "the rung check must reach the frozen ladder")
+
+    def test_empty_alternatives_is_a_reserved_violation_not_a_demotion(self):
+        """A brain that offers no second-best has not considered one, and the
+        recovery is a re-dispatch rather than a lower rung. The code is
+        reserved, so it is asserted exactly rather than by substring."""
+        self.assertIn("empty-alternatives",
+                      pas.validate_brain_response(response(alternatives=[])))
+
+    def test_an_alternative_without_a_reason_is_empty_alternatives(self):
+        """An alternative with a blank reason is a field filled to pass a
+        validator. Whitespace is not a reason, and an unstated second-best is
+        the same fact as no second-best."""
+        payload = response(alternatives=[
+            {"answer_key": "sqlite", "rung": "speculation", "reason": "   "}])
+        self.assertIn("empty-alternatives", pas.validate_brain_response(payload))
+
+    def test_an_alternative_carrying_an_illegal_rung_is_empty_alternatives(self):
+        """The rung enum is not relaxed inside an alternative. An alternative
+        rung is read by the same arithmetic as the winner's, so a free-text
+        rung there is the same number-from-nowhere with one level of nesting
+        in front of it."""
+        for alt in ({"answer_key": "sqlite", "rung": "low", "reason": "no writers"},
+                    {"answer_key": "sqlite", "rung": 0.3, "reason": "no writers"},
+                    {"answer_key": "", "rung": "speculation", "reason": "no writers"},
+                    "sqlite"):
+            with self.subTest(alternative=alt):
+                self.assertIn("empty-alternatives",
+                              pas.validate_brain_response(response(alternatives=[alt])))
+
+    def test_an_empty_falsifier_is_schema_valid_and_demoted_later_not_rejected(self):
+        """Grounding is not judged here. An empty falsifier is a weak answer,
+        not a malformed one, and the two have different recoveries: demotion
+        against re-dispatch. Rejecting it here would put both behind one
+        verdict and the weak answer would be re-asked instead of demoted."""
+        self.assertEqual(
+            pas.validate_brain_response(response(what_would_change_my_mind="")), [])
+
+    def test_a_falsifier_that_is_not_a_string_is_a_violation(self):
+        """Absent is not empty. ``null`` and ``false`` are a brain declining the
+        field rather than answering it emptily, and the field is required."""
+        for value in (None, False, ["a decision record"], 0):
+            with self.subTest(falsifier=value):
+                self.assertIn(
+                    "falsifier-not-a-string",
+                    pas.validate_brain_response(
+                        response(what_would_change_my_mind=value)))
+
+    def test_forecloses_is_required(self):
+        """What an answer rules out is how a later contradiction is detected.
+        An empty list, a list of blanks and a non-list are the three ways to
+        supply nothing while appearing to have answered."""
+        for value in ([], ["", "   "], "a filesystem-only deployment", None):
+            with self.subTest(forecloses=value):
+                self.assertIn("empty-forecloses",
+                              pas.validate_brain_response(response(forecloses=value)))
+
+    def test_a_brain_cannot_raise_a_question(self):
+        """There is no field through which a brain raises a question of its
+        own; the only exit is ``blocker``. A brain that could raise one would
+        open a quorum on its own question — depth without a human anywhere in
+        it — and the unknown-key rule is what makes that unreachable."""
+        for field in ("raises", "question", "escalate", "needs"):
+            with self.subTest(field=field):
+                payload = response()
+                payload[field] = {"question": "and what about caching?"}
+                self.assertIn(f"unknown-field:{field}",
+                              pas.validate_brain_response(payload))
+
+    def test_every_contract_key_is_required_and_never_defaulted(self):
+        """Each of the twelve, one at a time, rather than one representative.
+
+        The mutant this kills is a ``_RESPONSE_KEYS`` missing a member: the
+        response then validates without it, and whichever consumer reads that
+        field downstream gets a ``KeyError`` at adoption time or, worse, a
+        default nobody chose."""
+        self.assertEqual(set(pas._RESPONSE_KEYS), set(response()),
+                         "the module's required keys and the data contract have "
+                         "drifted apart")
+        for key in sorted(response()):
+            with self.subTest(missing=key):
+                payload = response()
+                del payload[key]
+                self.assertIn(f"missing-field:{key}",
+                              pas.validate_brain_response(payload))
+
+    def test_the_three_identity_fields_may_not_be_blank(self):
+        """A blank ``answer_key`` clusters with every other blank one, so three
+        brains that answered nothing agree unanimously."""
+        for key in ("qid", "answer_key", "answer"):
+            for value in ("", "   ", None, 7):
+                with self.subTest(field=key, value=value):
+                    self.assertIn(f"empty-field:{key}",
+                                  pas.validate_brain_response(response(**{key: value})))
+
+    def test_consequences_must_be_a_non_empty_list_of_checkable_assertions(self):
+        """A consequence is something that would be verifiably TRUE of the
+        repository if the answer were adopted — never a rationale. A free-text
+        item is a rationale wearing a consequence's name, and it is what makes
+        an adopted decision unfalsifiable afterwards."""
+        self.assertIn("empty-consequences",
+                      pas.validate_brain_response(response(consequences=[])))
+        self.assertIn("empty-consequences",
+                      pas.validate_brain_response(response(consequences="file-exists")))
+        for item in ("because postgres is already running",
+                     {"kind": "because", "subject": "db", "value": "x"},
+                     {"kind": "file-exists", "subject": "", "value": "present"},
+                     {"kind": "file-exists", "subject": "db/session.sql"}):
+            with self.subTest(consequence=item):
+                self.assertIn("consequence-item-malformed",
+                              pas.validate_brain_response(response(consequences=[item])))
+
+    def test_consistent_with_must_be_a_non_empty_list_of_anchors(self):
+        """``consistent_with`` is what ``decision_depth`` walks. An answer
+        anchored to nothing is depth-unbounded by construction: nothing ties it
+        back to a thing a human said."""
+        for value in ([], None, "H-001"):
+            with self.subTest(consistent_with=value):
+                self.assertIn("empty-consistent-with",
+                              pas.validate_brain_response(response(consistent_with=value)))
+        for item in ({"kind": "hunch", "id": "H-001"}, {"id": "H-001"}, "H-001"):
+            with self.subTest(anchor=item):
+                self.assertIn("consistent-with-item-malformed",
+                              pas.validate_brain_response(response(consistent_with=[item])))
+
+    def test_an_evidence_item_is_checked_against_its_own_kind(self):
+        """A ``repo`` citation carries a line number and a ``decision`` citation
+        carries the decision it cites. ``line`` is an int and NOT a bool, for
+        the reason ``initialize_run`` excludes bools: ``True == 1`` holds, so a
+        flag that became a line number would pass every comparison and resolve
+        against line 1 of whatever file was cited."""
+        cases = (
+            {"kind": "rumour", "path": "db/engine.py", "line": 1, "quote": "x"},
+            {"kind": "repo", "path": "", "line": 1, "quote": "x"},
+            {"kind": "repo", "path": "db/engine.py", "line": 1, "quote": "  "},
+            {"kind": "repo", "path": "db/engine.py", "quote": "x"},
+            {"kind": "repo", "path": "db/engine.py", "line": "12", "quote": "x"},
+            {"kind": "repo", "path": "db/engine.py", "line": True, "quote": "x"},
+            {"kind": "decision", "path": "decisions.md", "quote": "x"},
+            "db/engine.py:12",
+        )
+        for item in cases:
+            with self.subTest(evidence=item):
+                self.assertIn("evidence-item-malformed",
+                              pas.validate_brain_response(response(evidence=[item])))
+        good = {"kind": "decision", "path": "decisions.md", "quote": "postgres",
+                "decision": "H-001"}
+        self.assertEqual(pas.validate_brain_response(response(evidence=[good])), [])
+
+    def test_evidence_that_is_not_a_list_is_reported_not_iterated(self):
+        """``for item in payload["evidence"]`` over an int raises TypeError, and
+        over a string walks it character by character — a malformed response
+        that crashes the controller, or one that reports eight violations for
+        one bad field."""
+        for value in (12, None, {"kind": "repo"}, True):
+            with self.subTest(evidence=value):
+                problems = pas.validate_brain_response(response(evidence=value))
+                self.assertIn("evidence-not-a-list", problems)
+
+    def test_blast_is_a_list_of_axis_tokens(self):
+        """The blast radius is matched against ``IRREVERSIBLE_AXES`` before a
+        machine may adopt. A member that is not a token matches no axis, so an
+        answer whose blast radius is ``[12]`` clears the irreversibility check
+        by being unrecognisable — the fail-open shape the axis list is frozen
+        against."""
+        for value in ("storage-engine", None, {"storage-engine": True}):
+            with self.subTest(blast=value):
+                self.assertIn("blast-not-a-list",
+                              pas.validate_brain_response(response(blast=value)))
+        for item in (12, "", "   ", None, ["storage-engine"]):
+            with self.subTest(item=item):
+                self.assertIn("blast-item-malformed",
+                              pas.validate_brain_response(response(blast=[item])))
+        self.assertEqual(pas.validate_brain_response(response(blast=[])), [])
+
+    def test_a_blocker_is_a_reason_or_null_and_nothing_else(self):
+        """``blocker`` is the only exit a brain has, so a blank one is an exit
+        taken without a reason: the controller has to escalate something it
+        cannot describe."""
+        self.assertEqual(pas.validate_brain_response(
+            response(blocker="the spec contradicts the intent brief")), [])
+        for value in ("", "   ", 7, [], {"reason": "x"}):
+            with self.subTest(blocker=value):
+                self.assertIn("blocker-not-a-string",
+                              pas.validate_brain_response(response(blocker=value)))
+
+    def test_a_blocker_does_not_excuse_a_schema_violation(self):
+        """A malformed response is not a blocker. If declaring one suspended
+        the schema, every malformed reply could be relabelled as a legitimate
+        exit — and an exit is recorded as a quorum outcome, while a malformed
+        reply is a re-dispatch."""
+        payload = response(rung="high", blocker="I cannot answer this")
+        problems = pas.validate_brain_response(payload)
+        self.assertIn("rung-not-in-enum", problems)
+
+    def test_a_response_that_is_not_an_object_is_one_violation(self):
+        """A brain that returns a list, a bare string or nothing at all. The
+        single code says the whole response is unusable rather than emitting
+        twelve missing-field lines about a thing that is not a record."""
+        for payload in (None, [], ["postgres"], "postgres", 7, True):
+            with self.subTest(payload=payload):
+                self.assertEqual(pas.validate_brain_response(payload),
+                                 ["response-not-an-object"])
+
+    def test_the_validator_never_repairs_the_payload_it_judges(self):
+        """A validator that fills in what it found missing has adopted an answer
+        no brain gave. ``setdefault`` is the one-character version of that, and
+        it would make the response file on disk disagree with the bytes the
+        brain actually returned — while every later reader sees a clean record."""
+        for payload, twin in ((response(), response()),
+                              (response(rung="high"), response(rung="high"))):
+            with self.subTest(rung=payload["rung"]):
+                pas.validate_brain_response(payload)
+                self.assertEqual(payload, twin)
+        stripped = response()
+        del stripped["alternatives"]
+        pas.validate_brain_response(stripped)
+        self.assertNotIn("alternatives", stripped)
+
+    def test_the_validator_is_total_over_every_malformed_shape(self):
+        """Every field replaced by every wrong kind of JSON, one at a time.
+
+        The property is the whole contract of the return type: a list of
+        violations, for any input, always. An exception here is not a strict
+        validator — it is an unhandled failure outside this module's family,
+        on the one path that exists to handle a brain getting it wrong."""
+        for key in sorted(response()):
+            for value in (None, 0, True, "x", [], {}, [None], {"a": None}):
+                with self.subTest(field=key, value=value):
+                    problems = pas.validate_brain_response(response(**{key: value}))
+                    self.assertIsInstance(problems, list)
+                    for problem in problems:
+                        self.assertIsInstance(problem, str)
+
+    def test_grounding_is_not_judged_and_no_file_is_read(self):
+        """An unresolvable citation is schema-valid and demoted later.
+
+        Resolution needs the repository root, which P03 reads from ``## Run``
+        and never derives; a validator that quietly resolved a citation against
+        the process's working directory would demote every answer in a run
+        whose repository is anywhere else — every citation unresolved, every
+        answer below the floor, every question escalated, and nothing red
+        anywhere."""
+        payload = response(evidence=[{"kind": "repo", "line": 4096,
+                                      "path": "no/such/file/anywhere.py",
+                                      "quote": "not in any repository"}])
+        self.assertEqual(pas.validate_brain_response(payload), [])
+        source = module_source()
+        self.assertEqual(write_capable_calls(source, "validate_brain_response"), [])
+        reads = {node.attr for node in ast.walk(function_node(source, "validate_brain_response"))
+                 if isinstance(node, ast.Attribute)}
+        self.assertEqual(
+            reads & {"read_text", "read_bytes", "exists", "is_file", "iterdir",
+                     "resolve", "glob"},
+            set(),
+            "validate_brain_response touches the filesystem; grounding is "
+            "resolved elsewhere, against the recorded repo_root")
+
+
 class ReservedAxisLiteralTests(unittest.TestCase):
     """``new`` is the axis literal, and therefore not an available question id.
 

@@ -3159,3 +3159,263 @@ def derive_qid(question: str, axis: str) -> str:
             "for all the rest")
     payload = squashed.encode("utf-8") + b"\x00" + axis.encode("utf-8")
     return hashlib.sha256(payload).hexdigest()[:12]
+
+
+# --- the brain-response schema -------------------------------------------
+#
+# A brain's response is the only thing standing between "three agents were
+# asked" and "a decision was adopted", so the schema is strict in BOTH
+# directions: every key must be present and no other key may be. Unknown-key
+# rejection is not tidiness. ``confidence``, ``score`` and ``certainty`` are
+# exactly the keys a brain that types a number invents, and a validator that
+# ignores extras lets that number reach the arithmetic that exists so that no
+# brain could type one. There is likewise no field through which a brain raises
+# a question of its own -- the only exit is ``blocker`` -- and the unknown-key
+# rule is what makes that unreachable rather than merely undocumented.
+#
+# What this validator does NOT do is judge grounding. An empty falsifier and a
+# citation that will not resolve are both schema-VALID and are punished later,
+# by demotion against the recorded ``repo_root``. The two verdicts have
+# different recoveries -- re-dispatch against demote -- and collapsing them
+# would re-ask a weak answer instead of demoting it, or demote a malformed one
+# instead of re-asking it.
+#
+# A malformed response is not a low-confidence answer and not a blocker. It is
+# NOT A RESPONSE: the brain is re-dispatched once, a second malformed reply
+# leaves the quorum incomplete, and an incomplete quorum escalates. A quorum is
+# never evaluated on fewer than three.
+
+#: The twelve keys of a brain response, exhaustively. A key missing from this
+#: set is a key a brain may omit and some later consumer will read anyway; a
+#: key here that no prompt asks for rejects every real response.
+_RESPONSE_KEYS = frozenset({
+    "qid", "answer_key", "answer", "rung", "evidence", "consequences",
+    "consistent_with", "forecloses", "blast", "alternatives",
+    "what_would_change_my_mind", "blocker",
+})
+
+#: A ``decision`` citation carries ``decision`` where the others carry ``line``.
+_EVIDENCE_KINDS = frozenset({"spec", "intent-brief", "decision", "repo"})
+
+#: What an answer may be anchored to. ``decision_depth`` walks these, so an
+#: answer anchored to nothing is depth-unbounded by construction.
+_ANCHOR_KINDS = frozenset({"decision", "spec", "repo"})
+
+#: A consequence is an assertion that would be verifiably TRUE of the
+#: repository if the answer were adopted -- never a rationale. Free text here
+#: is what makes an adopted decision unfalsifiable afterwards.
+_CONSEQUENCE_KINDS = frozenset({"file-exists", "signature", "command-passes",
+                                "config-value"})
+
+
+def _text(value) -> bool:
+    """A field that was actually filled in: a string with something in it.
+
+    Whitespace is not an answer. A blank ``answer_key`` would cluster with
+    every other blank one, so three brains that answered nothing would agree
+    unanimously.
+    """
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _member(value, allowed) -> bool:
+    """Enum membership for a value of ANY type, without raising on it.
+
+    ``["code-evidenced"] in RUNGS`` raises ``TypeError``: unhashable. A
+    validator that raises on a malformed response has not classified it, and
+    the ``TypeError`` is outside this module's exception family, so it escapes
+    every ``except TrackerError`` a controller has written -- the run dies on a
+    brain's typo instead of re-dispatching it. Every shape a JSON document can
+    carry has to come back as a violation string, so membership is tested only
+    after the type is known.
+    """
+    return isinstance(value, str) and value in allowed
+
+
+def _is_rung(value) -> bool:
+    """Whether ``value`` is one of the five names, and nothing else.
+
+    NO DEFAULT, here or anywhere else. ``RUNGS.get(rung, 0.55)`` reads as
+    defensive -- 0.55 is ``engineering-judgement``, already in the module for
+    the citation-demotion rule -- and it silently converts every malformed
+    response into a legal vote. An out-of-enum rung is SCHEMA-INVALID: the
+    brain is re-dispatched once and then the quorum escalates. The enum is
+    consulted here, never re-typed: a second copy of the five names would pass
+    on the day it was written and diverge the day either copy was edited.
+    """
+    return _member(value, RUNGS)
+
+
+def _evidence_problems(evidence) -> list[str]:
+    """Citations, checked against their own kind.
+
+    ``line`` is an int and explicitly NOT a bool, for the reason
+    ``initialize_run`` excludes bools from its counters: ``True == 1`` holds,
+    so a flag that became a line number would pass every comparison and resolve
+    against line 1 of whatever file was cited.
+    """
+    if not isinstance(evidence, list):
+        #: Reported rather than iterated. ``for item in 12`` raises, and ``for
+        #: item in "db/engine.py"`` walks the string character by character and
+        #: reports one violation per letter.
+        return ["evidence-not-a-list"]
+    problems = []
+    for item in evidence:
+        if not isinstance(item, dict):
+            problems.append("evidence-item-malformed")
+            continue
+        kind = item.get("kind")
+        if not _member(kind, _EVIDENCE_KINDS):
+            problems.append("evidence-item-malformed")
+            continue
+        if not _text(item.get("path")) or not _text(item.get("quote")):
+            problems.append("evidence-item-malformed")
+            continue
+        if kind == "decision":
+            if not _text(item.get("decision")):
+                problems.append("evidence-item-malformed")
+            continue
+        line = item.get("line")
+        if not isinstance(line, int) or isinstance(line, bool):
+            problems.append("evidence-item-malformed")
+    return problems
+
+
+def _consequence_problems(consequences) -> list[str]:
+    if not isinstance(consequences, list) or not consequences:
+        return ["empty-consequences"]
+    problems = []
+    for item in consequences:
+        if not isinstance(item, dict):
+            problems.append("consequence-item-malformed")
+            continue
+        if (not _member(item.get("kind"), _CONSEQUENCE_KINDS)
+                or not _text(item.get("subject"))
+                or not _text(item.get("value"))):
+            problems.append("consequence-item-malformed")
+    return problems
+
+
+def _anchor_problems(anchors) -> list[str]:
+    if not isinstance(anchors, list) or not anchors:
+        return ["empty-consistent-with"]
+    problems = []
+    for item in anchors:
+        if (not isinstance(item, dict)
+                or not _member(item.get("kind"), _ANCHOR_KINDS)):
+            problems.append("consistent-with-item-malformed")
+    return problems
+
+
+def _blast_problems(blast) -> list[str]:
+    """The blast radius is matched against ``IRREVERSIBLE_AXES`` before a
+    machine may adopt, so a member that is not a token matches no axis: an
+    answer whose blast radius is ``[12]`` clears the irreversibility check by
+    being unrecognisable. That is the same fail-open shape ``_BLAST_RADII`` is
+    closed against, arriving through the response instead of the tracker.
+    """
+    if not isinstance(blast, list):
+        return ["blast-not-a-list"]
+    return ["blast-item-malformed" for item in blast if not _text(item)]
+
+
+def _alternative_is_stated(alternative) -> bool:
+    """A second-best the brain actually considered: a key, a rung, a reason.
+
+    The rung enum is not relaxed inside an alternative. An alternative's rung
+    is read by the same arithmetic as the winner's, so free text there is the
+    same number-from-nowhere with one level of nesting in front of it.
+    """
+    if not isinstance(alternative, dict):
+        return False
+    if not _text(alternative.get("answer_key")):
+        return False
+    if not _text(alternative.get("reason")):
+        return False
+    return _is_rung(alternative.get("rung"))
+
+
+def validate_brain_response(payload: dict) -> list[str]:
+    """Every schema violation in one response. An empty list means it is legal.
+
+    Strict in both directions: an unknown key is a violation because a brain
+    that types a number invents exactly ``confidence``, ``score`` or
+    ``certainty``, and a validator that ignores extras lets that number reach
+    the arithmetic. There is no field through which a brain can raise a
+    question of its own; the only exit is ``blocker``, and a blocker does not
+    suspend the schema -- if it did, every malformed reply could be relabelled
+    as a legitimate exit, and an exit is recorded as an outcome while a
+    malformed reply is a re-dispatch.
+
+    An out-of-enum rung is SCHEMA-INVALID and is never defaulted: no violation
+    returned here names a rung the brain could have meant, because naming one
+    is the first half of substituting it.
+
+    Grounding is NOT judged. An empty falsifier is legal and is punished later
+    by demotion; an unresolvable citation is legal here for the same reason and
+    is resolved elsewhere, against the recorded ``repo_root``. This function
+    reads no file: resolving a citation against the process's working directory
+    would demote every answer in a run whose repository is anywhere else, put
+    everything below the floor and escalate the entire run while looking
+    correctly cautious.
+
+    Total by construction: any JSON value at all comes back as a list of
+    violation strings. A raise here would be an unhandled failure outside this
+    module's exception family, on the one path that exists to handle a brain
+    getting it wrong.
+    """
+    if not isinstance(payload, dict):
+        return ["response-not-an-object"]
+    problems = []
+    #: Sorted by ``str`` rather than naturally: a non-string key is malformed
+    #: input too, and ``sorted`` over mixed types raises.
+    for key in sorted(set(payload) - _RESPONSE_KEYS, key=str):
+        problems.append(f"unknown-field:{key}")
+    for key in sorted(_RESPONSE_KEYS - set(payload), key=str):
+        problems.append(f"missing-field:{key}")
+
+    for key in ("qid", "answer_key", "answer"):
+        if not _text(payload.get(key)):
+            problems.append(f"empty-field:{key}")
+
+    #: Present-and-illegal and absent are the same fact -- this response has no
+    #: legal rung -- and they take the same recovery.
+    if "rung" in payload:
+        if not _is_rung(payload["rung"]):
+            problems.append("rung-not-in-enum")
+    else:
+        problems.append("rung-not-in-enum")
+
+    problems.extend(_evidence_problems(payload.get("evidence")))
+    problems.extend(_consequence_problems(payload.get("consequences")))
+    problems.extend(_anchor_problems(payload.get("consistent_with")))
+
+    forecloses = payload.get("forecloses")
+    if not isinstance(forecloses, list) or not any(
+            _text(entry) for entry in forecloses):
+        problems.append("empty-forecloses")
+
+    problems.extend(_blast_problems(payload.get("blast")))
+
+    alternatives = payload.get("alternatives")
+    if not isinstance(alternatives, list) or not alternatives:
+        #: RESERVED CODE. This is the one violation that drives the single
+        #: permitted re-dispatch, so an unstated second-best reports as the
+        #: same fact as no second-best: a brain that offers neither has not
+        #: considered one, and that is a re-ask rather than a lower rung.
+        problems.append("empty-alternatives")
+    elif not all(_alternative_is_stated(item) for item in alternatives):
+        problems.append("empty-alternatives")
+
+    #: Absent is not empty. An empty falsifier is a weak answer and legal;
+    #: ``null`` is the field declined, and the field is required.
+    if not isinstance(payload.get("what_would_change_my_mind"), str):
+        problems.append("falsifier-not-a-string")
+
+    #: ``null`` is the legal "no blocker". A blank one is an exit taken without
+    #: a reason: the controller would have to escalate something it cannot
+    #: describe.
+    blocker = payload.get("blocker")
+    if blocker is not None and not _text(blocker):
+        problems.append("blocker-not-a-string")
+    return problems

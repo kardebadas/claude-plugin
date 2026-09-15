@@ -2547,6 +2547,25 @@ git commit -m "feat(pipeline-auto): classify every quorum interruption point fro
 
 ### Task 11: Clustering, rung strictness, and adoption
 
+> **From Task 5 (`52497d0`) — the adoption path's obligations, now enforced.**
+> `check_contradiction` refuses the reserved axis literal, so the `new` → qid
+> mint recorded above must happen **before** the contradiction check, not after.
+> The candidate it takes is a **composed** dict: a raw brain response has no
+> `axis`, so the caller assembles one.
+>
+> `decision_depth` raises `QuorumSchemaInvalid` on an anchor that is id-less,
+> ungrammatical, unresolvable, or names a record not in effect. That is a
+> **re-dispatch of that brain**, not a run stop — catching it as a stop would
+> convert one brain's malformed citation into a halted run.
+>
+> `DEPTH_CAP` is still compared by the caller; `decision_depth` returns the
+> number and does not enforce the cap.
+>
+> **Anything walking `axis_index` directly must apply the same `_decision_binds`
+> filter**, or it compares the candidate against retired answers and reports a
+> contradiction with a decision that was superseded.
+
+
 > **QUORUM DECISION (three brains, unanimous on `mint-qid`; cluster rung
 > `code-evidenced` 0.85, at the adoption floor; runner-up cluster none).**
 > A question whose axis is the reserved literal `new` **is adopted like any

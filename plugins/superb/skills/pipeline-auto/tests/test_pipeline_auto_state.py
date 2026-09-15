@@ -47,12 +47,17 @@ WIDE_GAP = "| 12 | pending | - |\n\n\n## Intent\n"
 #: taken incidentally to make a failing test pass. ``hashlib`` is listed for the
 #: payload and context digests the quorum rows carry. ``pathlib`` is listed
 #: because ``validate_run`` takes its run directory as a ``Path`` and READS
-#: through it. ``re`` is listed for the id grammars ``## Questions`` and
-#: ``## Escalations`` are judged against — ``H-<n>`` for a human decision,
-#: ``E-<n>`` for an escalation. A looser "some non-empty cell" test there would
-#: let a ``Q-<qid>`` quorum decision stand as the answer to the one human gate,
-#: which is the authority that gate exists to withhold. ``re`` is pure: it
-#: reaches no filesystem, network or interpreter state.
+#: through it.
+#:
+#: ``re`` was listed here for the id grammars ``## Intent``, ``## Questions``
+#: and ``## Escalations`` are judged against — ``C-<n>``, ``H-<n>``, ``E-<n>``,
+#: and the free token. It is listed no longer. Each of those is a prefix plus
+#: ASCII digits, or a character class, and the module states them directly with
+#: ``str.startswith``, ``isascii`` and ``isdigit`` at exactly the strictness
+#: the patterns had. Nothing was loosened to make the import go away: a looser
+#: "some non-empty cell" test would let a ``Q-<qid>`` quorum decision stand as
+#: the answer to the one human gate, which is the authority that gate exists to
+#: withhold, and ``GrammarTests`` below pins each grammar against that.
 #:
 #: What this allowlist does NOT prove is that the module cannot write. ``pathlib``
 #: is not a narrower capability than ``os`` or ``shutil``: ``Path.write_text``,
@@ -60,7 +65,7 @@ WIDE_GAP = "| 12 | pending | - |\n\n\n## Intent\n"
 #: ``touch``, ``chmod``, ``symlink_to`` and ``open(mode=...)`` all exist, and an
 #: earlier revision of this file claimed otherwise. The read-only guarantee is
 #: carried by ``write_capable_calls`` below, scoped to ``validate_run``.
-ALLOWED_IMPORTS = frozenset({"__future__", "hashlib", "pathlib", "re"})
+ALLOWED_IMPORTS = frozenset({"__future__", "hashlib", "pathlib"})
 
 #: Builtins that open a file or run generated code. Called anywhere in the
 #: module, by any function, they are refused — this half is module-wide.
@@ -614,14 +619,20 @@ class ForeignSchemaStopTests(unittest.TestCase):
         self.assert_untouched(run_dir, ["progress.md"])
 
 
-def with_stages(states: list[str], actions: list[str] | None = None) -> str:
+def with_stages(states: list[str], actions: list[str] | None = None,
+                text: str | None = None) -> str:
     """The valid fixture with its twelve stage rows replaced wholesale.
 
     Surgery on the fixture's own bytes, like every other rejection input here,
     so each case states exactly which cell made the tracker impossible.
+
+    ``text`` takes an already-edited copy instead, because the intent-conflict
+    rule spans two sections and a stage: a case that has to move stage 03 AND
+    rewrite the brief AND rewrite the questions cannot be built from three
+    helpers that each start again from the pristine fixture.
     """
     actions = actions if actions is not None else ["-"] * len(states)
-    lines = valid_text().splitlines(keepends=True)
+    lines = (valid_text() if text is None else text).splitlines(keepends=True)
     start = next(index for index, line in enumerate(lines)
                  if line.startswith("| 01 | "))
     rows = [f"| {stage} | {state} | {action} |\n"
@@ -803,6 +814,8 @@ class NextActionTests(unittest.TestCase):
 #: cell it changed instead of re-typing the row it meant to leave alone.
 READER_1 = ("| reader-1 | reader | published | intent-reader-1 | "
             "scratch/intent-reader-1.md | - |")
+READER_2 = ("| reader-2 | reader | published | intent-reader-2 | "
+            "scratch/intent-reader-2.md | - |")
 READER_3 = ("| reader-3 | reader | published | intent-reader-3 | "
             "scratch/intent-reader-3.md | - |")
 INTENT_BRIEF = "| brief | brief | frozen | reconciled | scratch/intent-brief.md | C-001 |"
@@ -914,6 +927,90 @@ class IntentSectionTests(unittest.TestCase):
         with self.assertRaises(pas.TrackerValidationError):
             pas.parse_tracker(text)
 
+    def test_three_readers_naming_one_result_file_are_one_reading(self):
+        """Three READINGS, not three rows. The roster check proves the ids are
+        ``reader-1``, ``reader-2``, ``reader-3`` and nothing more, so three rows
+        citing the same result file satisfy it completely.
+
+        Catches checking the roster by id alone. Every conflict this section can
+        flag is a disagreement BETWEEN readings; one file cited three times can
+        disagree with nothing, so the ``Conflicts`` cell is legitimately empty,
+        stage 03 asks nothing, and the decorrelation the whole design rests on
+        has collapsed with no downstream stage able to notice it did.
+        """
+        text = swap(READER_1, "| reader-1 | reader | published | intent-reader-1 | "
+                              "scratch/intent-reader-2.md | - |")
+        text = swap(READER_3, "| reader-3 | reader | published | intent-reader-3 | "
+                              "scratch/intent-reader-2.md | - |", text)
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_two_unpublished_readers_sharing_a_dash_result_are_not_a_collision(self):
+        """The distinctness rule is about readings, not about the absence of
+        one. Catches implementing it as ``len(set(results)) != 3`` over the raw
+        column: two readers still in flight both hold ``-``, and the roster
+        would be refused for the crime of not having finished yet."""
+        text = swap(READER_1, "| reader-1 | reader | dispatched | intent-reader-1 | - | - |")
+        text = swap(READER_3, "| reader-3 | reader | dispatched | intent-reader-3 | - | - |",
+                    text)
+        text = swap(INTENT_BRIEF,
+                    "| brief | brief | pending | reconciled | - | C-001 |", text)
+        tracker = pas.parse_tracker(text)
+        self.assertEqual([row["result"] for row in tracker["intent"][:3]],
+                         ["-", "scratch/intent-reader-2.md", "-"])
+
+    def test_the_conflicts_cell_refuses_prose(self):
+        """The reviewer's third probe, and the one that reads worst in a
+        tracker: ``resolved-by-controller`` in the cell whose entire purpose is
+        to record that nothing resolved the conflict.
+
+        Catches leaving the cell free-form. The conflict is then "recorded",
+        the run reports it recorded, and no id exists for the gate to claim —
+        so the rule that every flagged conflict reaches the human has nothing
+        to enforce, and the run has resolved a conflict it may never resolve.
+        """
+        for conflicts in ("resolved-by-controller", "resolved", "C-001 and C-002",
+                          "C-", "X-001", "C-1x"):
+            with self.subTest(conflicts=conflicts):
+                text = swap(INTENT_BRIEF, "| brief | brief | frozen | reconciled | "
+                                          f"scratch/intent-brief.md | {conflicts} |")
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_one_conflict_flagged_twice_cannot_buy_itself_two_slots(self):
+        """``C-001,C-001`` with two ``intent-conflict`` questions balances the
+        claim count exactly, so the gate rule waves it through: one conflict has
+        taken two of the four slots the run has, and the conflict ranked fourth
+        is the one pushed out of the single human gate by a duplicate.
+
+        Stated as its own case because the claim count hides it otherwise — one
+        duplicated id and one question is already refused for the count, which
+        would let this check be deleted with the suite still green.
+        """
+        text = swap(INTENT_BRIEF, "| brief | brief | frozen | reconciled | "
+                                  "scratch/intent-brief.md | C-001,C-001 |")
+        text = with_questions([
+            "| axis-1 | intent-conflict | 1 | answered | H-1 |",
+            "| axis-2 | intent-conflict | 2 | answered | H-2 |",
+        ], text)
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_list_of_conflict_ids_is_the_shape_the_cell_takes(self):
+        """The positive control for the grammar: several ids, comma-separated,
+        each claimed by a question. Catches a grammar so tight it admits only
+        one conflict, which would make the second disagreement between two
+        readings unrecordable and so, in practice, resolved by silence."""
+        text = swap(INTENT_BRIEF, "| brief | brief | frozen | reconciled | "
+                                  "scratch/intent-brief.md | C-001,C-002 |")
+        text = with_questions([
+            "| axis-1 | intent-conflict | 1 | answered | H-1 |",
+            "| axis-2 | intent-conflict | 2 | answered | H-2 |",
+            "| axis-3 | synthesis | 3 | asked | - |",
+        ], text)
+        tracker = pas.parse_tracker(text)
+        self.assertEqual(tracker["intent"][3]["conflicts"], "C-001,C-002")
+
     def test_the_brief_cannot_publish_before_all_three_readers_have(self):
         """Reader 2 is still in flight while the brief is frozen. Catches
         validating rows independently: the reconciled brief is then a
@@ -955,16 +1052,25 @@ class IntentSectionTests(unittest.TestCase):
             pas.parse_tracker(with_stages(states, actions))
 
 
-def with_questions(rows: list[str]) -> str:
-    """The fixture with its ``## Questions`` body replaced wholesale.
+def with_questions(rows: list[str], text: str | None = None) -> str:
+    """The fixture — or an already-edited copy — with its ``## Questions`` body
+    replaced wholesale.
 
     The row-count rules need tables the fixture's two rows cannot express, and
     splicing rows in next to a heading is how a case ends up rejected for a
     stray blank line instead of for the rule it names.
+
+    An EMPTY body is the table with no data rows, not a table with a blank line
+    in it. The separator row keeps its own newline and the section's single
+    blank line is the one already standing before ``## Quorum``; taking both
+    would hand the parser a two-blank-line gap and every case built on it would
+    be rejected for spacing rather than for the rule under test.
     """
-    text = valid_text()
+    text = valid_text() if text is None else text
     start = text.index("| axis-1 |")
     end = text.index("\n\n## Quorum")
+    if not rows:
+        return text[:start] + text[end + 1:]
     return text[:start] + "\n".join(rows) + text[end:]
 
 
@@ -1074,6 +1180,132 @@ class QuestionSectionTests(unittest.TestCase):
             pas.parse_tracker(text)
 
 
+#: Stages for a run parked mid-stage-03: the gate is open, the question has not
+#: been put yet, and a flagged conflict is therefore simply not yet asked.
+STAGE_03_OPEN = (["complete"] * 2 + ["active"] + ["pending"] * 9,
+                 ["-", "-", "ask-the-one-human-gate"] + ["-"] * 9)
+
+
+class IntentConflictsReachTheGateTests(unittest.TestCase):
+    """A flagged intent conflict must occupy a stage-03 question slot.
+
+    ``_validate_intent`` and ``_validate_questions`` each judge one section and
+    neither can see this. The brief may flag three conflicts while every
+    question row reads ``Origin: synthesis``; both sections pass, stage 03
+    closes, the brief freezes, and the run reports success with three conflicts
+    recorded and none of them ever asked.
+
+    The ranking rule in ``## Questions`` is not this rule and cannot be. It
+    orders the conflict-derived questions that happen to exist — relative order
+    among whatever rows are present — and an empty set is trivially ordered.
+    This is the rule that populates the set.
+    """
+
+    def test_flagged_conflicts_with_only_synthesised_questions_are_rejected(self):
+        """The reviewer's first probe. Three conflicts flagged, four questions
+        asked, every one of them synthesised — accepted by the committed code,
+        because the ranking check finds nothing out of order in a list with no
+        ``intent-conflict`` row in it at all."""
+        text = swap(INTENT_BRIEF, "| brief | brief | frozen | reconciled | "
+                                  "scratch/intent-brief.md | C-001,C-002,C-003 |")
+        text = with_questions([
+            "| axis-1 | synthesis | 1 | answered | H-1 |",
+            "| axis-2 | synthesis | 2 | answered | H-2 |",
+            "| axis-3 | synthesis | 3 | asked | - |",
+            "| axis-4 | synthesis | 4 | asked | - |",
+        ], text)
+        with self.assertRaises(pas.TrackerValidationError) as caught:
+            pas.parse_tracker(text)
+        self.assertIn("C-001", str(caught.exception))
+
+    def test_a_frozen_brief_with_no_conflict_question_at_all_is_rejected(self):
+        """The reviewer's second probe, and the barest form of the fault: the
+        conflict is recorded, the question table holds nothing derived from it,
+        and the brief is sealed. Catches a rule written as "order the conflict
+        questions" rather than "there must be one"."""
+        text = with_questions(["| axis-2 | synthesis | 1 | answered | H-2 |"])
+        with self.assertRaises(pas.TrackerValidationError) as caught:
+            pas.parse_tracker(text)
+        self.assertIn("C-001", str(caught.exception))
+
+    def test_an_unnamed_conflict_is_the_one_the_error_names(self):
+        """Two flagged, one asked. Catches a bare count check: the operator who
+        has to act on this needs the id of the conflict that was dropped, and
+        "a conflict was not asked" sends them to diff two tables by hand."""
+        text = swap(INTENT_BRIEF, "| brief | brief | frozen | reconciled | "
+                                  "scratch/intent-brief.md | C-001,C-007 |")
+        with self.assertRaises(pas.TrackerValidationError) as caught:
+            pas.parse_tracker(text)
+        self.assertIn("C-007", str(caught.exception))
+
+    def test_a_conflict_question_the_brief_never_flagged_is_rejected(self):
+        """The mirror direction. Catches enforcing only "every conflict has a
+        question": a second ``intent-conflict`` row then spends one of the four
+        slots on a conflict no reading raised, displacing a synthesised question
+        that was ranked into the gate on its merits."""
+        text = with_questions([
+            "| axis-1 | intent-conflict | 1 | answered | H-1 |",
+            "| axis-2 | intent-conflict | 2 | answered | H-2 |",
+        ])
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_a_conflict_is_simply_unasked_while_stage_03_is_still_open(self):
+        """The positive control that keeps the rule a gate rule rather than an
+        ordering-of-writes rule. Stage 02 synthesises and stage 03 asks, so
+        between the brief publishing and the gate opening a flagged conflict
+        legitimately has no question yet. Catches enforcing the claim on every
+        parse: the controller could then never write the brief at all, because
+        the question that claims the conflict cannot exist before it."""
+        text = swap(INTENT_BRIEF, "| brief | brief | published | reconciled | "
+                                  "scratch/intent-brief.md | C-001,C-002 |")
+        text = with_questions([], text)
+        text = with_stages(*STAGE_03_OPEN, text=text)
+        tracker = pas.parse_tracker(text)
+        self.assertEqual(tracker["questions"], [])
+        self.assertEqual(tracker["intent"][3]["conflicts"], "C-001,C-002")
+
+    def test_the_claim_is_checked_the_moment_stage_03_closes(self):
+        """The same tracker one transition later: stage 03 is complete and the
+        questions were never synthesised. Catches tying the rule to the brief's
+        ``frozen`` state alone — the brief may still be ``published``, and a
+        closed stage 03 is already the point past which no question can be put.
+        """
+        text = swap(INTENT_BRIEF, "| brief | brief | published | reconciled | "
+                                  "scratch/intent-brief.md | C-001,C-002 |")
+        text = with_questions([], text)
+        with self.assertRaises(pas.TrackerValidationError) as caught:
+            pas.parse_tracker(text)
+        self.assertIn("C-001", str(caught.exception))
+
+    def test_conflict_questions_still_outrank_synthesised_ones(self):
+        """The ranking rule is kept, now over a set this section populates.
+        Catches replacing the ordering check with the claim count: two conflicts
+        and two claims would balance while the synthesised question sat in slot
+        1, pushing a conflict towards the end of a list the gate truncates."""
+        text = swap(INTENT_BRIEF, "| brief | brief | frozen | reconciled | "
+                                  "scratch/intent-brief.md | C-001,C-002 |")
+        text = with_questions([
+            "| axis-3 | synthesis | 1 | answered | H-3 |",
+            "| axis-1 | intent-conflict | 2 | answered | H-1 |",
+            "| axis-2 | intent-conflict | 3 | answered | H-2 |",
+        ], text)
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.parse_tracker(text)
+
+    def test_an_intent_table_not_yet_written_claims_nothing(self):
+        """``## Intent`` is empty before stage 01 opens. Catches indexing the
+        brief row unconditionally: the cross-section rule would raise
+        ``IndexError`` — outside this module's exception family — on every
+        tracker created before the readers are dispatched."""
+        text = valid_text()
+        for row in (READER_1, READER_2, READER_3, INTENT_BRIEF):
+            text = swap(row + "\n", "", text)
+        text = with_questions(["| axis-2 | synthesis | 1 | answered | H-2 |"], text)
+        tracker = pas.parse_tracker(text)
+        self.assertEqual(tracker["intent"], [])
+
+
 def with_escalations(rows: list[str]) -> str:
     """The fixture with its ``## Escalations`` body replaced wholesale."""
     text = valid_text()
@@ -1158,14 +1390,62 @@ class EscalationSectionTests(unittest.TestCase):
         with self.assertRaises(pas.TrackerValidationError):
             pas.parse_tracker(text)
 
-    def test_a_blast_radius_outside_the_closed_vocabulary_is_rejected(self):
-        """The vocabulary is closed *because* adoption checks it against the
-        irreversible-axis list. Catches accepting any token: an unenumerated
-        radius matches nothing on that list, so the check it is meant to fail
-        passes it — the fail-open the spec names explicitly."""
+    def test_the_blast_column_takes_the_axis_list_a_quorum_payload_emits(self):
+        """The reviewer's Finding 2, as the values that actually arrive here.
+
+        ``phase-03-quorum-contract.md:3089-3097`` builds this cell by joining a
+        quorum payload's axis list, or writing ``-`` when the list is empty, so
+        ``storage-engine`` and ``-`` are exactly what a SPECIFIED writer emits.
+        Judging them against the question vocabulary ``task|phase|run|contract``
+        halted the run on its own output — a fail-CLOSED, and a different fault
+        from the fail-open that vocabulary is closed to prevent.
+        """
+        text = with_escalations([
+            "| E-1 | 7c6b5a4938d2 | storage-engine | queued | - | - |",
+            "| E-2 | - | storage-engine, external-service | answered | batch-1 | H-3 |",
+            "| E-3 | - | - | queued | - | - |",
+        ])
+        tracker = pas.parse_tracker(text)
+        self.assertEqual([row["blast"] for row in tracker["escalations"]],
+                         ["storage-engine", "storage-engine, external-service", "-"])
+        self.assertEqual(pas.render_tracker(tracker), text)
+
+    def test_the_closed_question_vocabulary_no_longer_governs_this_column(self):
+        """The negative half of the same disambiguation, stated as a value.
+
+        Catches a "fix" that merely widens the closed tuple with the axes seen
+        so far: the column is a free token list and the next payload names an
+        axis nobody enumerated. Nothing branches on this cell, so there is
+        nothing for an unenumerated value to fail open against — which is the
+        whole reason it may be open here and may not be on a question.
+        """
         text = swap(ESCALATION_1, "| E-1 | 7c6b5a4938d2 | universe | queued | - | - |")
-        with self.assertRaises(pas.TrackerValidationError):
-            pas.parse_tracker(text)
+        self.assertEqual(
+            [row["blast"] for row in pas.parse_tracker(text)["escalations"]],
+            ["universe", "run"])
+
+    def test_the_blast_column_takes_tokens_and_not_prose(self):
+        """Open is not unvalidated. Catches dropping the column's grammar
+        altogether: a human reads this cell out of a batched ``AskUserQuestion``
+        call, and a sentence there is a list with one unsplittable element."""
+        for blast in ("storage engine", "storage-engine,,external-service",
+                      "-storage-engine", "storage-engine, "):
+            with self.subTest(blast=blast):
+                text = swap(ESCALATION_1,
+                            f"| E-1 | 7c6b5a4938d2 | {blast} | queued | - | - |")
+                with self.assertRaises(pas.TrackerValidationError):
+                    pas.parse_tracker(text)
+
+    def test_the_closed_vocabulary_is_intact_for_the_column_that_owns_it(self):
+        """A question's admissibility blast radius is the OTHER "blast", and it
+        stays closed: adoption checks it against the irreversible-axis list,
+        where an unenumerated value matches nothing and so passes the check it
+        was meant to fail. Catches deleting the constant along with its
+        misapplication — the column that carries it lands with the quorum phase,
+        and a vocabulary re-derived there is one re-argued there."""
+        self.assertEqual(pas._BLAST_RADII, ("task", "phase", "run", "contract"))
+        for radius in pas._BLAST_RADII:
+            self.assertTrue(pas._TOKEN.fullmatch(radius), radius)
 
     def test_an_out_of_enum_escalation_state_is_rejected(self):
         """The row carries no batch and no resolution, so every other
@@ -1209,6 +1489,61 @@ class EscalationSectionTests(unittest.TestCase):
         text = swap(ESCALATION_1, "| E-1 | 7c6b5a4938d2 | phase | queued | - | H-9 |")
         with self.assertRaises(pas.TrackerValidationError):
             pas.parse_tracker(text)
+
+
+class GrammarTests(unittest.TestCase):
+    """The id grammars, stated without a regex engine and no looser for it.
+
+    ``re`` left ``ALLOWED_IMPORTS`` — an allowlist described in that file as a
+    capability boundary, so a member that buys nothing is one that should not
+    be there. What it bought was three patterns this module can state directly.
+    The risk in removing it is not the import: it is that a hand-written
+    grammar quietly accepts more than the pattern did, and the cells these
+    guard are the ones that decide whether a machine may answer the one human
+    gate. So each is pinned here on both sides, accepting and rejecting.
+    """
+
+    def test_a_human_decision_id_is_a_prefix_and_ascii_digits(self):
+        for value in ("H-1", "H-12", "H-007"):
+            self.assertTrue(pas._HUMAN_DECISION.fullmatch(value), value)
+        for value in ("H-", "H", "", "h-1", "H-1x", "xH-1", "H-1 ", " H-1",
+                      "H-1,H-2", "Q-3f2a1b0c9d8e", "H-١٢", "H-²"):
+            self.assertFalse(pas._HUMAN_DECISION.fullmatch(value), value)
+
+    def test_non_ascii_digits_are_not_digits_here(self):
+        """``str.isdigit`` is true of ``'١'`` and ``'²'``, and ``re``'s
+        ``[0-9]`` is not. Catches writing the grammar as ``isdigit`` alone: an
+        id spelled in Arabic-Indic digits renders back into the tracker looking
+        like a human decision that no downstream lookup can ever match, and the
+        decision it points at is simply not there."""
+        for value in ("H-١", "E-٢", "C-٠٠١"):
+            with self.subTest(value=value):
+                self.assertTrue(value[2:].isdigit())
+                self.assertFalse(pas._HUMAN_DECISION.fullmatch(value))
+                self.assertFalse(pas._ESCALATION_ID.fullmatch(value))
+                self.assertFalse(pas._CONFLICT_ID.fullmatch(value))
+
+    def test_the_escalation_and_conflict_ids_are_the_same_shape(self):
+        self.assertTrue(pas._ESCALATION_ID.fullmatch("E-12"))
+        self.assertFalse(pas._ESCALATION_ID.fullmatch("ESC-1"))
+        self.assertFalse(pas._ESCALATION_ID.fullmatch("E-1-2"))
+        self.assertTrue(pas._CONFLICT_ID.fullmatch("C-001"))
+        self.assertFalse(pas._CONFLICT_ID.fullmatch("C-001a"))
+        self.assertFalse(pas._CONFLICT_ID.fullmatch("resolved-by-controller"))
+
+    def test_the_free_token_grammar_is_the_one_the_plan_specifies(self):
+        """``_TOKEN`` is ``[A-Za-z0-9][A-Za-z0-9._/@:+-]*`` — restored, because
+        its absence was a Task 1 regression and later P02 tasks already spell
+        ``_TOKEN.fullmatch(value)`` at ``phase-02-schema-core.md:1942`` and
+        ``:2620``. It must lead with an alphanumeric, so a cell cannot start
+        with the ``-`` that means absence, and it must exclude the space, which
+        is what separates a token from a sentence."""
+        for value in ("storage-engine", "a", "P02-T01", "refs/heads/feat/x",
+                      "scratch/p01-t01.md", "v1.2.3", "a@b:c+d", "0"):
+            self.assertTrue(pas._TOKEN.fullmatch(value), value)
+        for value in ("", "-", "-storage", ".config", "/abs/path", "two words",
+                      "a,b", "a|b", "naïve", "a\tb"):
+            self.assertFalse(pas._TOKEN.fullmatch(value), value)
 
 
 class SuiteIsWhollyCollectedTests(unittest.TestCase):

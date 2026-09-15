@@ -10,7 +10,6 @@ direction — not here, not later.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 SCHEMA = "pipeline-auto/v1"
@@ -121,6 +120,56 @@ _SECTIONS = (
 )
 
 _HEADINGS = tuple(heading for heading, _, _ in _SECTIONS)
+
+
+#: Every id grammar in this module states itself, rather than being compiled by
+#: ``re``. The import allowlist the test suite holds is a capability boundary,
+#: not a convenience list, and a regex engine bought nothing these two shapes
+#: cannot say directly: a leading character class plus a trailing one, and a
+#: fixed prefix plus ASCII digits. Both grammars keep ``.fullmatch`` as their
+#: one method, so a caller — including the later P02 tasks that already spell
+#: ``_TOKEN.fullmatch(value)`` — cannot tell the difference at the call site.
+class _CharClass:
+    """``[<head>][<tail>]*``: one leading character, then any number more."""
+
+    __slots__ = ("_head", "_tail")
+
+    def __init__(self, head: str, tail: str) -> None:
+        self._head = frozenset(head)
+        self._tail = frozenset(tail)
+
+    def fullmatch(self, value: str) -> bool:
+        return (bool(value) and value[0] in self._head
+                and all(character in self._tail for character in value[1:]))
+
+
+class _Numbered:
+    """``<prefix><digits>``: ``H-3``, ``E-12``, ``C-001``.
+
+    ``isdigit`` alone is not the ``[0-9]`` the grammar means — it is true of
+    ``'٣'`` and ``'³'`` too, and an id spelled with those renders back into the
+    tracker looking like a decision id that nothing downstream can match. The
+    ``isascii`` conjunct is what narrows it to the ten characters intended.
+    """
+
+    __slots__ = ("_prefix",)
+
+    def __init__(self, prefix: str) -> None:
+        self._prefix = prefix
+
+    def fullmatch(self, value: str) -> bool:
+        digits = value[len(self._prefix):]
+        return (value.startswith(self._prefix) and bool(digits)
+                and digits.isascii() and digits.isdigit())
+
+
+_ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+#: The general free-token grammar: a descriptive cell nothing branches on, held
+#: to "a word, not prose" so a token list stays a token list. It is deliberately
+#: wide — an axis name, a path fragment, a version — and deliberately excludes
+#: the space, which is what separates a token from a sentence.
+_TOKEN = _CharClass(_ALNUM, _ALNUM + "._/@:+-")
 
 
 def _field(column: str) -> str:
@@ -307,10 +356,23 @@ _QUESTION_STATES = ("proposed", "asked", "answered")
 
 _ESCALATION_STATES = ("queued", "asked", "answered", "halted")
 
-#: The spec's closed vocabulary. Closed **because** adoption checks a blast
-#: radius against the irreversible-axis list: an unenumerated value matches
-#: nothing on that list and so passes the check by failing to be recognised.
-#: An open grammar here would be a fail-open one layer down.
+#: A QUESTION's admissibility blast radius, and nothing else. The spec's closed
+#: vocabulary, closed **because** adoption checks a blast radius against the
+#: irreversible-axis list: an unenumerated value matches nothing on that list
+#: and so passes the check by failing to be recognised. An open grammar there
+#: would be a fail-open one layer down.
+#:
+#: Two different things are called "blast" and they must not share a validator.
+#: An ESCALATION row's ``Blast`` column is the other one: a free token list of
+#: the axes that escalation touches, joined from a quorum payload by
+#: ``phase-03-quorum-contract.md:3089-3097`` and carrying values like
+#: ``storage-engine`` or ``-``. It is descriptive, nothing branches on it, and
+#: it is validated with ``_TOKEN`` below. Judging it with the closed vocabulary
+#: fails CLOSED — a loud halt on a value a specified writer actually emits —
+#: which is a different fault from the fail-open this tuple exists to prevent,
+#: and not one this tuple can fix. The column that carries an admissibility
+#: blast radius arrives with the quorum phase that owns it; this constant is a
+#: schema constant meanwhile, like ``RUNG_NAMES``, and is not redefined there.
 _BLAST_RADII = ("task", "phase", "run", "contract")
 
 #: The one human gate is one ``AskUserQuestion`` call, and escalations batch
@@ -321,8 +383,13 @@ _MAX_BATCH = 4
 #: ``H-<n>`` is a human decision; ``Q-<qid>`` is a quorum's. Only the first may
 #: answer a stage-03 question or an escalation, so the grammar — not merely
 #: "some non-empty cell" — is what these sections are judged against.
-_HUMAN_DECISION = re.compile(r"H-[0-9]+")
-_ESCALATION_ID = re.compile(r"E-[0-9]+")
+_HUMAN_DECISION = _Numbered("H-")
+_ESCALATION_ID = _Numbered("E-")
+#: The id of one flagged, unresolved intent conflict. The ``Conflicts`` cell is
+#: ``-`` or a comma-separated list of these and NOTHING else: a cell that took
+#: prose would take ``resolved-by-controller``, which records a conflict the
+#: run settled by itself in the one place the schema promises it never does.
+_CONFLICT_ID = _Numbered("C-")
 
 
 def _stage_state(tracker: dict, stage: str) -> str:
@@ -336,6 +403,28 @@ def _stage_state(tracker: dict, stage: str) -> str:
     may never do.
     """
     return tracker["stages"][STAGES.index(stage)]["stage_state"]
+
+
+def _conflict_ids(row: dict) -> tuple[str, ...]:
+    """The conflict ids one ``Conflicts`` cell flags, grammar proven.
+
+    ``-`` or a comma-separated list of ``C-<n>``. Nothing else, and in
+    particular no prose: the cell is the only record that a disagreement
+    between two readings of the user's own prompt is still open, and a writer
+    able to put ``resolved`` or ``resolved-by-controller`` there records the
+    run resolving a conflict it is forbidden to resolve — in the very cell that
+    was supposed to make that impossible.
+    """
+    ids = _csv(row["conflicts"])
+    for value in ids:
+        if not _CONFLICT_ID.fullmatch(value):
+            raise TrackerValidationError(
+                f"a Conflicts cell is '-' or a comma-separated list of C-<n> ids; "
+                f"{value!r} is neither — a conflict is flagged, never narrated")
+    if len(set(ids)) != len(ids):
+        raise TrackerValidationError(
+            "the same conflict id is flagged twice in one Conflicts cell")
+    return ids
 
 
 def _validate_intent(tracker: dict) -> None:
@@ -379,6 +468,21 @@ def _validate_intent(tracker: dict) -> None:
         if row["conflicts"] != "-":
             raise TrackerValidationError(
                 "conflicts are flagged on the reconciled brief, never on a reader")
+    #: Three readers, three READINGS. The roster check above proves the three
+    #: ids are distinct and nothing else, so three rows citing one result file
+    #: satisfy it — and that is one reading counted three times. Every conflict
+    #: this section can flag is a disagreement BETWEEN readings; a roster that
+    #: may collapse onto a single file can raise none, and the decorrelation
+    #: the whole design rests on is gone with nothing downstream able to see it.
+    results = [row["result"] for row in readers if row["result"] != "-"]
+    if len(set(results)) != len(results):
+        raise TrackerValidationError(
+            "the three intent readings must be three distinct results; a result "
+            "cited twice is one reading counted twice")
+    #: Flagged, never resolved — so the cell that carries the flags is a list of
+    #: ids, never prose. See ``_validate_intent_conflicts`` for the other half:
+    #: an id flagged here and never asked at the gate.
+    _conflict_ids(brief)
     if brief["state"] in ("published", "frozen"):
         if any(row["state"] != "published" for row in readers):
             raise TrackerValidationError(
@@ -435,6 +539,55 @@ def _validate_questions(tracker: dict) -> None:
             raise TrackerValidationError("only an answered question carries a decision")
 
 
+def _validate_intent_conflicts(tracker: dict) -> None:
+    """Every flagged intent conflict holds a stage-03 question slot.
+
+    ``_validate_intent`` and ``_validate_questions`` each judge their own
+    section and neither can see this: the brief may flag ``C-001, C-002,
+    C-003`` while every question row reads ``Origin: synthesis``, and both
+    sections pass. Stage 03 then closes, the brief freezes, and the run reports
+    success with three conflicts recorded and none of them ever asked — a
+    requirement invented, which is the exact failure ``## Intent`` exists to
+    prevent.
+
+    The ranking rule in ``_validate_questions`` is not this rule. It orders the
+    conflict-derived questions that happen to exist; it cannot notice that none
+    do. Here the set is POPULATED instead: the conflict-derived questions are
+    exactly the flagged conflicts, paired in order — and because the ranking
+    rule has already sorted ``intent-conflict`` ahead of ``synthesis``, the
+    ``n``-th flagged conflict is the question in slot ``n``.
+
+    Timing is the whole of the gate. Stage 02 synthesises and stage 03 asks, so
+    a conflict flagged while stage 03 is still open is simply one not yet
+    asked. The moment stage 03 closes it is one that never will be, and that is
+    where this refuses. A brief cannot freeze earlier than that either —
+    ``_validate_intent`` already ties freezing to stage 03 closing — so this
+    single trigger covers both halves of the brief's immutability.
+
+    More than four conflicts is unsatisfiable rather than merely tight: the one
+    human gate is one ``AskUserQuestion`` call of at most four questions, so a
+    run holding five unresolved readings of the user's own prompt cannot legally
+    close stage 03 at all. Halting loudly there is correct. The alternative is
+    choosing which conflict to drop, and nothing in this run has the authority.
+    """
+    rows = tracker["intent"]
+    if not rows:
+        return
+    conflicts = _csv(rows[3]["conflicts"])
+    if _stage_state(tracker, "03") != "complete":
+        return
+    claims = [row for row in tracker["questions"] if row["origin"] == "intent-conflict"]
+    if len(claims) < len(conflicts):
+        raise TrackerValidationError(
+            f"intent conflict {conflicts[len(claims)]!r} was flagged and never "
+            "asked; stage 03 closes only once every unresolved conflict holds one "
+            "of its question slots")
+    if len(claims) > len(conflicts):
+        raise TrackerValidationError(
+            "a stage-03 question claims an intent conflict the brief never "
+            "flagged; a conflict the brief did not record is one no reading raised")
+
+
 def _validate_escalations(tracker: dict) -> None:
     """The only path out of the autonomous middle of a run.
 
@@ -455,10 +608,17 @@ def _validate_escalations(tracker: dict) -> None:
             raise TrackerValidationError(
                 "an escalation refers to an unknown qid; its question, options "
                 "and brain responses can no longer be recovered")
-        if row["blast"] not in _BLAST_RADII:
-            raise TrackerValidationError(
-                f"blast radius {row['blast']!r} is outside the closed vocabulary "
-                f"{_BLAST_RADII}")
+        #: TOKENS, not the closed question vocabulary. This column carries the
+        #: axes an escalation touches, joined from a quorum payload, so its
+        #: legal values include ``storage-engine`` and ``-``. Judging it with
+        #: ``_BLAST_RADII`` halted the run on values a specified writer emits;
+        #: nothing branches on this cell, so tokens are the whole requirement
+        #: and P06 owns any enumeration it later needs.
+        for axis in _csv(row["blast"]):
+            if not _TOKEN.fullmatch(axis):
+                raise TrackerValidationError(
+                    f"an escalation's Blast column is '-' or a comma-separated list "
+                    f"of axis tokens; {axis!r} is not a token")
         if row["state"] not in _ESCALATION_STATES:
             raise TrackerValidationError(f"unknown escalation state {row['state']!r}")
         if row["state"] == "queued" and row["batch"] != "-":
@@ -498,6 +658,10 @@ def _validate_tracker_semantics(tracker: dict) -> None:
     _validate_stages(tracker)
     _validate_intent(tracker)
     _validate_questions(tracker)
+    #: After both sections it spans, and never instead of either: it assumes the
+    #: roster is four rows and the origins are in the enum, which is what the
+    #: two validators above have just proven.
+    _validate_intent_conflicts(tracker)
     _validate_escalations(tracker)
 
 

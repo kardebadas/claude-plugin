@@ -8503,6 +8503,20 @@ def _minted_axis(axis: str, qid: str, tracker: dict) -> str:
     and manufacture a contradiction that does not exist -- a run halted on a
     disagreement nobody had. The writer already holds the tracker.
 
+    THE REFUSAL IS RAISED HERE AND CAUGHT BY ``_finalisation_base``, which
+    turns it into the ``unmintable-axis`` escalation. "Mint one or refuse" is
+    this helper's whole contract and a sentinel return would file the refusal
+    in the same cell as a legal axis, so the raise stays; the CONSEQUENCE is
+    what changed. Raising out of ``finalize_quorum`` wedged the quorum for
+    ever -- ``ready-to-finalise``, no ``final.json``, every call raising, no
+    re-dispatch owed and nothing else that could move it -- and refusing to
+    ADOPT is not the same act as refusing to FINISH. Only the first is what the
+    fail-false property above needs: an escalation adopts nothing and writes no
+    decision record, so it buckets nothing either, and unlike an exception it is
+    counted, inspectable and reaches the terminal report. The ruling, and the
+    measurement behind it, is P03's in
+    ``docs/superpowers/plans/pipeline-auto/phase-03-quorum-contract.md``.
+
     KNOWN AND ACCEPTED: two questions that each open the SAME conceptual axis
     mint different axes and are never compared. That is bounded by the drift
     budget and the depth cap, and it fails silent-but-inspectable -- the axis
@@ -8517,7 +8531,10 @@ def _minted_axis(axis: str, qid: str, tracker: dict) -> str:
             f"{qid!r}; the minted axis would share a bucket with that "
             "question's decisions and manufacture a contradiction that does "
             "not exist, which is the fail-false twin of the fail-open the "
-            "reserved literal is closed against")
+            "reserved literal is closed against. The remedy is a human one and "
+            "there are two: reword the question so derive_qid mints a "
+            "different id, or tag it onto the real axis it belongs to instead "
+            "of the reserved literal -- then re-open it")
     return qid
 
 
@@ -8528,6 +8545,21 @@ def _finalisation_base(run_dir: Path, qid: str, tracker: dict) -> tuple:
     ``check_contradiction`` REFUSES the reserved literal outright: a candidate
     arriving on ``new`` would raise rather than be compared, and moving the
     mint after the check is the one ordering that cannot work.
+
+    AND IT IS THE ONE CELL THAT CAN COME BACK ABSENT. ``_minted_axis`` refuses
+    a mint that would collide with a stage-03 question id; the refusal is
+    caught here and handed back BESIDE the base rather than propagated, so
+    ``_compute_quorum_result`` can escalate on it instead of raising out of
+    every finalisation for ever. ``decision_axis`` is then ``None``, which is
+    reachable on that outcome and on no other: every reader of the cell --
+    ``check_contradiction``'s candidate, ``_decision_record``,
+    ``_rendered_decisions``, ``_assert_records_what_was_decided`` -- sits on
+    the ADOPTION path, behind gates the escalation returns in front of.
+
+    THE REFUSAL TRAVELS ALONGSIDE, not inside ``base``. Every outcome is
+    ``dict(base, ...)`` and is published verbatim into ``final.json``, so a
+    cell carried in the base is a cell every adopted record carries too --
+    always ``None``, and mistakable for a fact about the adoption.
     """
     opened = _open_record(run_dir, qid)
     axis = _opened_token(
@@ -8538,6 +8570,10 @@ def _finalisation_base(run_dir: Path, qid: str, tracker: dict) -> tuple:
         opened, qid, "phase",
         "the per-phase drift budget groups by it, and a finalisation charged to "
         "no phase at all is an adoption the ceiling cannot see")
+    try:
+        decision_axis, mint_refusal = _minted_axis(axis, qid, tracker), None
+    except QuorumSchemaInvalid as exc:
+        decision_axis, mint_refusal = None, str(exc)
     base = {
         "qid": qid,
         #: THE QUESTION AS ASKED, carried in the outcome rather than re-read at
@@ -8548,7 +8584,7 @@ def _finalisation_base(run_dir: Path, qid: str, tracker: dict) -> tuple:
         #: against rather than whatever the file says when the repair runs.
         "question": _question_record(run_dir, qid)["question"],
         "axis": axis,
-        "decision_axis": _minted_axis(axis, qid, tracker),
+        "decision_axis": decision_axis,
         "phase": phase,
         "blocks": _opened_blocks(opened, qid),
         "context_digest": _bound_digest(
@@ -8565,7 +8601,7 @@ def _finalisation_base(run_dir: Path, qid: str, tracker: dict) -> tuple:
         "reason": None,
         "dispatched": True,
     }
-    return base, opened
+    return base, opened, mint_refusal
 
 
 def _stale_moves(run_dir: Path, qid: str, opened: dict, base: dict) -> list:
@@ -8641,8 +8677,28 @@ def _compute_quorum_result(run_dir: Path, qid: str, tracker: dict) -> dict:
     because a cluster below the bar is not adopted however far it is above the
     runner-up; and the budget is re-checked LAST, at the moment the adoption
     would actually charge it.
+
+    THE MINT REFUSAL IS ANSWERED FIRST, in the position the raise it replaced
+    used to fire from -- inside ``_finalisation_base``, ahead of staleness.
+    Only the consequence changed, not the order: a colliding mint is a fact
+    about the question record alone, true before any answer is read and
+    unchanged by anything the brains say or by the trail moving underneath
+    them, so there is no state it could outrank and none that could clear it.
     """
-    base, opened = _finalisation_base(run_dir, qid, tracker)
+    base, opened, mint_refusal = _finalisation_base(run_dir, qid, tracker)
+    if mint_refusal is not None:
+        #: NO AXIS, SO NOTHING IS BUCKETED -- which is the whole of what the
+        #: collision check protects. The check is untouched and the decision is
+        #: still refused; what is no longer refused is FINISHING. Raised, this
+        #: left the quorum at ``ready-to-finalise`` with no ``final.json``, no
+        #: re-dispatch owed and every call raising again: a run that can never
+        #: finalise, which is not the right answer to a hash collision. An
+        #: escalation adopts nothing and appends nothing --
+        #: ``_ensure_decision_recorded`` writes only on ``adopted`` -- so the
+        #: fail-false property survives intact, and it arrives as a counted,
+        #: inspectable outcome a human can read the remedy off.
+        return dict(base, status=_ESCALATED, reason="unmintable-axis",
+                    refusal=mint_refusal)
     owners = _record_owners(opened, qid)
     options_supplied = opened.get("options_supplied")
     if not isinstance(options_supplied, bool):

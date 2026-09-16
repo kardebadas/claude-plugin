@@ -17553,12 +17553,9 @@ class AdoptedDecisionRecordTests(unittest.TestCase):
                                   question="Do we keep a session table at all?")
         self.assertEqual(result["status"], "adopted")
 
-    def test_a_minted_axis_colliding_with_a_stage_03_question_id_is_refused(self):
-        """The fail-FALSE twin of the fail-open the reservation exists to
-        prevent: a minted axis equal to a stage-03 question id would bucket this
-        decision with that axis's decisions and halt the run on a contradiction
-        nobody had."""
-        question = "Do we keep a session table at all?"
+    def collide(self, question="Do we keep a session table at all?"):
+        """One dispatched `new`-axis quorum whose minted axis is a registered
+        stage-03 question id, and its qid."""
         qid = pas.derive_qid(question, "new")
         path = self.run_dir / "progress.md"
         tracker = pas.parse_tracker(path.read_text(encoding="utf-8"))
@@ -17568,13 +17565,73 @@ class AdoptedDecisionRecordTests(unittest.TestCase):
         path.write_text(pas.render_tracker(tracker), encoding="utf-8")
         opened = open_question(self, self.run_dir, axis="new",
                                question=question)
+        self.assertEqual(opened, qid, "the mint is the question's own bare "
+                                      "qid, or this fixture collides with "
+                                      "nothing")
         answer_quorum(self.run_dir, opened,
                       [graded("postgres", "specified"),
                        graded("postgres", "speculation"),
                        graded("sqlite", "speculation")])
-        with self.assertRaises(pas.QuorumSchemaInvalid):
-            pas.finalize_quorum(str(self.run_dir), qid=opened)
+        return opened
+
+    def test_a_minted_axis_colliding_with_a_stage_03_question_id_escalates(self):
+        """The fail-FALSE twin of the fail-open the reservation exists to
+        prevent: a minted axis equal to a stage-03 question id would bucket this
+        decision with that axis's decisions and halt the run on a contradiction
+        nobody had.
+
+        IT ESCALATES AND DOES NOT RAISE, and the two halves of that are
+        separable. Refusing to ADOPT is what the fail-false property needs;
+        refusing to FINISH is what a raise here also did, and it wedged the
+        quorum for ever — `ready-to-finalise`, no `final.json`, no re-dispatch
+        owed, every call raising again. This pins the property the raise
+        existed to protect — NOTHING BUCKETED, NOTHING WRITTEN — as a property
+        of the escalation instead."""
+        opened = self.collide()
+        result = pas.finalize_quorum(str(self.run_dir), qid=opened)
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "unmintable-axis")
+        #: THE AXIS IS ABSENT, which is what "buckets nothing" means here: the
+        #: outcome carries no key any contradiction check could group it by.
+        self.assertIsNone(result["decision_axis"])
+        self.assertEqual(result["axis"], "new")
+        #: The refusal names the collision AND the remedy — a diagnostic that
+        #: names no remedy is a stop a human cannot act on.
+        self.assertIn(opened, result["refusal"])
+        self.assertIn("reword", result["refusal"].lower())
+        #: NOTHING WAS WRITTEN. No decision record, and no axis bucketed.
         self.assertEqual(self.trail(), UNRELATED_HUMAN)
+        decisions = self.parsed()
+        self.assertEqual(sorted(decisions["decisions"]), ["H-001"])
+        self.assertNotIn(f"Q-{opened}", decisions["decisions"])
+        self.assertNotIn(opened, decisions["axis_index"])
+
+    def test_the_unmintable_escalation_settles_the_quorum_instead_of_wedging_it(self):
+        """A raise left `final.json` unwritten, so the quorum stayed at
+        `ready-to-finalise` with nothing that could ever move it and the
+        controller spun. The escalation is a settled outcome: it is published,
+        it is replay-stable, and it still writes no decision."""
+        opened = self.collide()
+        first = pas.finalize_quorum(str(self.run_dir), qid=opened)
+        final = self.run_dir / "quorum" / opened / "final.json"
+        self.assertTrue(final.exists())
+        self.assertEqual(
+            pas.classify_quorum(str(self.run_dir), qid=opened,
+                                live_owners=list(QUORUM_OWNERS))["state"],
+            "finalised")
+        self.assertEqual(pas.finalize_quorum(str(self.run_dir), qid=opened),
+                         first)
+        self.assertEqual(self.trail(), UNRELATED_HUMAN)
+
+    def test_a_minted_axis_that_collides_with_nothing_still_adopts(self):
+        """The positive control. The collision check refuses one input and
+        exactly one: the same reserved-literal question, with no stage-03 row
+        carrying its qid, adopts under its own minted axis as it always did."""
+        qid, result = self.adopt(axis="new",
+                                 question="Do we keep a session table at all?")
+        self.assertEqual(result["status"], "adopted")
+        self.assertEqual(result["decision_axis"], qid)
+        self.assertEqual(self.parsed()["axis_index"][qid], [f"Q-{qid}"])
 
     # --- validate before writing ------------------------------------------
 

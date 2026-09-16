@@ -2767,6 +2767,48 @@ git commit -m "feat(pipeline-auto): classify every quorum interruption point fro
 > standing between a 12-hex coincidence and a run that halts on a contradiction
 > that does not exist.
 >
+> **COORDINATOR OVERRIDE — "stop if it is" is WRONG, and the collision
+> ESCALATES.** The check stays exactly as written above; only its *consequence*
+> changed. `_minted_axis` still raises, `_finalisation_base` catches, and
+> `_compute_quorum_result` returns `escalated` / `reason="unmintable-axis"` /
+> `refusal=<the message>` as its first gate — the position the raise itself used
+> to fire from, so the gate order is untouched.
+>
+> *The measurement.* Driven end to end on the committed source, the stop is the
+> same wedge that was fixed as CRITICAL 1 one commit earlier: `classify_quorum`
+> pins the quorum at `ready-to-finalise`, no re-dispatch is owed, `finalize_quorum`
+> raises `QuorumSchemaInvalid` on call 0, 1 and 2, and `final.json` is never
+> written. A run that can never finalise is not the right answer to a hash
+> collision. After the change, the same input returns
+> `escalated`/`unmintable-axis` on every call, publishes `final.json`, classifies
+> `finalised`, and `decisions.md` is byte-identical to its pre-run contents.
+>
+> *The property the escalation preserves.* The stop existed to keep this
+> decision out of a stage-03 axis's bucket. An escalation adopts nothing and
+> appends nothing — `_ensure_decision_recorded` writes only on `adopted` — and
+> the outcome carries `decision_axis: None`, so there is no key anything could
+> bucket it by. Refusing to ADOPT and refusing to FINISH are separable acts and
+> only the first was ever required. Pinned by
+> `test_a_minted_axis_colliding_with_a_stage_03_question_id_escalates`, which
+> asserts the reason, the absent axis, an untouched trail and an empty
+> `axis_index` entry; the check itself is pinned by mutation — removing it makes
+> that test adopt.
+>
+> *Why "run state raises, agent content escalates" does not save the stop.*
+> Every other run-state raise in this module stops the *whole* run and is loud
+> by construction. This one stopped exactly **one** quorum, silently, while the
+> rest of the run carried on — the single-question wedge that rule exists to
+> prevent. The old diagnostic also named no remedy; the message now names two
+> (reword the question so `derive_qid` mints a different id, or tag the question
+> onto a real axis) and it reaches a human through the escalation record rather
+> than through a traceback.
+>
+> *What argues the other way.* The collision is essentially unreachable by
+> accident — a 48-bit digest coinciding with a registered question id — and not
+> cheap on purpose either. That bounds the **likelihood** and lowers the
+> priority; it does not make wedging correct. **Do not "restore" the raise
+> because this block originally said stop.**
+>
 > **Known and accepted:** two questions that each open the *same* conceptual
 > axis mint different axes and will never be compared. That is bounded by the
 > drift budget (3 per phase, 10 per run) and the depth cap of 2, and it fails
@@ -4123,6 +4165,21 @@ guessed at in code beyond the minimum noted; each needs a ruling.
     What must not survive the ruling is the hang: whichever class is chosen, the
     shape is asked before the open.
 
-Items 1, 2 and 8 are closed by coordinator ruling. Items 3–7, 9 and 12 remain
-reported; item 12 is the only one that leaves a reachable hang, and none blocks
-execution of this phase.
+13. ~~A minted axis colliding with a stage-03 question id stops the run.~~
+    **Settled by coordinator ruling, overriding this plan's own Task 11 text.**
+    The brief said "assert the minted axis is not in the registered ids and
+    **stop** if it is". The assertion is right and the stop is wrong: measured
+    end to end, it left the quorum at `ready-to-finalise` with no `final.json`
+    and `finalize_quorum` raising on every call — the identical wedge fixed as
+    CRITICAL 1 in commit `d872932`. The consequence is now an escalation on the
+    new reason token **`unmintable-axis`**, raised by `_minted_axis`, caught by
+    `_finalisation_base`, returned by `_compute_quorum_result` as its first
+    gate. **The check is not weakened** — the axis still never buckets with a
+    stage-03 id — because an escalation adopts nothing, appends nothing, and
+    carries `decision_axis: None`. Full reasoning in the Task 11 ruling block
+    under "COORDINATOR OVERRIDE". This is the **first and only** outcome whose
+    `decision_axis` cannot be minted; Task 12's row writer must render it.
+
+Items 1, 2, 8 and 13 are closed by coordinator ruling. Items 3–7, 9 and 12
+remain reported; item 12 is the only one that leaves a reachable hang, and none
+blocks execution of this phase.

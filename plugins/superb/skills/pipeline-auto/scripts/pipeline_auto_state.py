@@ -9049,12 +9049,15 @@ _FINALIZED = "finalized"
 #: string, which is a different fact.
 _ABSENT_CELL = "-"
 
-#: What a cell may not contain, whatever the record says. ``|`` re-columns the
-#: row, a newline splits it into two rows that are each the wrong width, and
-#: ``,`` splits one token into two inside every list-valued cell. All three
-#: PARSE -- that is the whole danger -- and the tracker comes back holding
-#: cells nobody wrote.
-_CELL_POISON = "|,\n\r"
+#: The characters that re-column a ROW, and the whole of them: ``|`` gives the
+#: row an extra column and ``,`` splits one token into two inside every
+#: list-valued cell. Both PARSE -- that is the whole danger -- and the tracker
+#: comes back holding cells nobody wrote.
+#:
+#: THE CHARACTERS THAT ADD A ROW ARE NOT LISTED HERE. They are asked of the
+#: reader, in ``_splits_the_section``, because a written-down list of them was
+#: wrong.
+_CELL_SEPARATORS = "|,"
 
 #: The statuses that put a question in front of a human, and the whole of them.
 #:
@@ -9110,6 +9113,29 @@ _ESCALATION_BLAST = MappingProxyType({
 })
 
 
+def _splits_the_section(char: str) -> bool:
+    """Would ``char`` give ``## Quorum`` an extra row? ASKED, NOT LISTED.
+
+    ``_sections`` re-splits the rendered tracker with ``str.splitlines()``, and
+    that reader breaks on TEN characters -- ``\n``, ``\r``, ``\v``, ``\f``,
+    ``\x1c``, ``\x1d``, ``\x1e``, ``\x85``, ``\u2028`` and ``\u2029``. A
+    constant naming "the newline characters" named two of them, and the other
+    eight passed the screen and split the rendered row in half exactly as a
+    newline would -- silently, with both halves the wrong width. Measured:
+    ``_cell("a\x0bb")`` passed and its row came back as two lines.
+
+    So the screen asks the reader instead of remembering it. Anything
+    ``splitlines`` treats as a line break is a row break here BY DEFINITION,
+    including whatever a later Python adds to that set.
+
+    NOT DEAD CODE FOR ``_mirror_quorum``, where every cell is grammar-validated
+    upstream -- but ``quorum_tracker_rows`` takes ``axis``, ``depth`` and
+    ``winner_rung`` straight out of a hand-editable ``final.json`` and hands
+    them to P06 with this as the only screen between.
+    """
+    return len(f"a{char}b".splitlines()) > 1
+
+
 def _cell(value, what: str) -> str:
     """One tracker cell, screened out of a record a human may have edited.
 
@@ -9125,12 +9151,17 @@ def _cell(value, what: str) -> str:
     ``str(True)`` is ``'True'`` and ``isinstance(True, int)`` is true, so
     admitting it writes a word no column has a meaning for.
 
-    THE THREE POISON CHARACTERS ARE THE ONES THAT STILL PARSE. A ``|`` gives
-    the row an extra column, a newline gives the section an extra row, and a
-    ``,`` turns one token into two inside every comma-separated cell. None of
-    them raises anywhere; the tracker simply comes back holding cells nobody
-    wrote, which is the failure ``_TOKEN`` exists to prevent one layer up and
-    is asked again here because this writer is the one that composes them.
+    THE POISON CHARACTERS ARE THE ONES THAT STILL PARSE. A ``|`` gives the row
+    an extra column, a line break gives the section an extra row, and a ``,``
+    turns one token into two inside every comma-separated cell. None of them
+    raises anywhere; the tracker simply comes back holding cells nobody wrote,
+    which is the failure ``_TOKEN`` exists to prevent one layer up and is asked
+    again here because this writer is the one that composes them.
+
+    THE SET IS NOT CLOSED AND IS NOT WRITTEN DOWN. Two separators are named
+    here; every row break is DERIVED from the reader that will do the splitting
+    -- see ``_splits_the_section``, and the eight characters an earlier closed
+    list of "the newline characters" let through.
     """
     if value is None:
         return _ABSENT_CELL
@@ -9140,12 +9171,15 @@ def _cell(value, what: str) -> str:
             "would render a repr into the tracker, which parses back looking "
             "exactly like a value somebody wrote")
     text = str(value).strip()
-    if any(char in text for char in _CELL_POISON):
+    poison = [char for char in text
+              if char in _CELL_SEPARATORS or _splits_the_section(char)]
+    if poison:
         raise QuorumSchemaInvalid(
-            f"{what} is {text!r}, which carries one of {_CELL_POISON!r}; each "
-            "of those re-shapes the table SILENTLY -- a pipe adds a column, a "
-            "newline adds a row, a comma splits one token into two -- so the "
-            "tracker parses back holding cells nobody wrote")
+            f"{what} is {text!r}, which carries {poison[0]!r}; that re-shapes "
+            "the table SILENTLY -- a pipe adds a column, anything the section "
+            "reader treats as a line break adds a row, a comma splits one "
+            "token into two -- so the tracker parses back holding cells "
+            "nobody wrote")
     return text or _ABSENT_CELL
 
 

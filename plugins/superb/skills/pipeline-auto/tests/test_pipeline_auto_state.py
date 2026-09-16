@@ -17639,6 +17639,16 @@ class AdoptedDecisionRecordTests(unittest.TestCase):
         #: outcome carries no key any contradiction check could group it by.
         self.assertIsNone(result["decision_axis"])
         self.assertEqual(result["axis"], "new")
+        #: AND THE ROW STILL SAYS SOMETHING. This is the one outcome whose
+        #: `decision_axis` is `None`, so a `Blast` cell read from that field
+        #: renders `-` — which `_csv` returns as `()`, which
+        #: `_validate_escalations` then checks no token of at all. The run
+        #: stays green and the one column the batching human reads says
+        #: nothing. The cell is the axis AS ASKED.
+        escalation = pas.validate_run(self.run_dir)["escalations"][0]
+        self.assertEqual(escalation["qid"], opened)
+        self.assertEqual(escalation["blast"], "new")
+        self.assertNotEqual(escalation["blast"], "-")
         #: The refusal names the collision AND the remedy — a diagnostic that
         #: names no remedy is a stop a human cannot act on.
         self.assertIn(opened, result["refusal"])
@@ -17865,23 +17875,28 @@ def emitted_escalation_reasons() -> set:
     `quorum_budget` assigns to its own local `reason` and the finaliser then
     forwards as `budget["reason"]` — invisible to a scan for constants at the
     call site.
+
+    THE WHOLE MODULE, NOT THREE NAMED FUNCTIONS. The AST walk was real and the
+    fourteen it returned were genuine, but the LIST of functions to walk was
+    transcribed from memory — the same shape this function exists to refuse,
+    one level up: a fourth emitter added later would be silently uncovered.
+    Widening the walk to the module costs nothing (the producers really are
+    only those three today, and this returns the same fourteen) and the cover
+    then follows the code instead of the author.
     """
-    source = module_source()
     tokens = set()
-    for name in ("_compute_quorum_result", "_apply_adoption_gates",
-                 "quorum_budget"):
-        for node in ast.walk(function_node(source, name)):
-            if (isinstance(node, ast.keyword) and node.arg == "reason"
-                    and isinstance(node.value, ast.Constant)
-                    and isinstance(node.value.value, str)):
-                tokens.add(node.value.value)
-            if (isinstance(node, ast.Assign)
-                    and isinstance(node.value, ast.Constant)
-                    and isinstance(node.value.value, str)
-                    and any(isinstance(target, ast.Name)
-                            and target.id == "reason"
-                            for target in node.targets)):
-                tokens.add(node.value.value)
+    for node in ast.walk(ast.parse(module_source())):
+        if (isinstance(node, ast.keyword) and node.arg == "reason"
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            tokens.add(node.value.value)
+        if (isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+                and any(isinstance(target, ast.Name)
+                        and target.id == "reason"
+                        for target in node.targets)):
+            tokens.add(node.value.value)
     return tokens
 
 
@@ -17973,7 +17988,7 @@ class QuorumRowGrammarTests(unittest.TestCase):
             pas._row_for("Quorum", built)
 
     def test_a_cell_that_would_silently_reshape_the_table_is_refused(self):
-        """The three characters that PARSE. A pipe gives the row an extra
+        """The characters that PARSE. A pipe gives the row an extra
         column, a newline gives the section an extra row and a comma splits one
         token into two — none of them raises anywhere, and the tracker comes
         back holding cells nobody wrote."""
@@ -17981,6 +17996,57 @@ class QuorumRowGrammarTests(unittest.TestCase):
             with self.subTest(value=poison):
                 with self.assertRaises(pas.QuorumSchemaInvalid):
                     pas._cell(poison, "a probe")
+
+    def test_every_character_the_section_reader_breaks_a_line_on_is_refused(self):
+        """A CLOSED LIST OF "THE NEWLINE CHARACTERS" IS WRONG AND WAS. The
+        screen named `\n` and `\r`; `_sections` re-splits the rendered tracker
+        with `str.splitlines`, which breaks on TEN characters, and the other
+        EIGHT passed the screen and cut the rendered row in half exactly as a
+        newline would — both halves the wrong width, nothing raised anywhere.
+
+        Derived here from the same reader the module uses, so this case cannot
+        inherit the gap it exists to close, and so a Python that adds an
+        eleventh is a red test rather than a new hole.
+        """
+        splitters = [chr(code) for code in range(0x3000)
+                     if len(f"a{chr(code)}b".splitlines()) > 1]
+        self.assertGreater(len(splitters), 2,
+                           "if the reader split on two characters the old "
+                           "closed list was right and this case tests nothing")
+        self.assertEqual(
+            [char for char in splitters if char not in "\n\r"],
+            ["\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85",
+             "\u2028", "\u2029"],
+            "the eight the closed list let through, named rather than counted")
+        for char in splitters:
+            with self.subTest(char=hex(ord(char))):
+                #: The damage, first, so the refusal below is not a bare
+                #: assertion about a character nobody showed was dangerous.
+                self.assertEqual(len(f"a{char}b".splitlines()), 2)
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas._cell(f"a{char}b", "a probe")
+
+    def test_the_only_characters_named_by_hand_are_the_two_column_separators(self):
+        """The row-breaks are ASKED of the reader; only the two that re-column
+        a row are written down, and they are written down because no reader
+        derives them."""
+        self.assertEqual(sorted(pas._CELL_SEPARATORS), [",", "|"])
+        self.assertFalse(pas._splits_the_section("|"))
+        self.assertFalse(pas._splits_the_section(","))
+        self.assertTrue(pas._splits_the_section("\n"))
+        self.assertTrue(pas._splits_the_section("\x0b"))
+        self.assertFalse(pas._splits_the_section("a"))
+        self.assertFalse(pas._splits_the_section(" "))
+
+    def test_a_cell_the_grammar_allows_is_not_swept_up_by_the_derived_screen(self):
+        """The accept case the widening is paired with: a screen that refused
+        one character too many would stop a run on an axis token, a rung name
+        or a response path that is entirely legal."""
+        for value in ("storage-engine", "convention-cited", "P04", "Q-" + "a" * 12,
+                      "quorum/" + "a" * 12 + "/responses/alpha__2.json",
+                      "a" * 64, "0", "question-not-decidable", "new", "-"):
+            with self.subTest(value=value):
+                self.assertEqual(pas._cell(value, "a probe"), value)
 
     def test_a_cell_that_is_not_a_cell_is_refused_rather_than_repr_ed(self):
         """`str(["a"])` renders, parses back and reads as a value somebody
@@ -18073,6 +18139,52 @@ class QuorumMirrorTests(unittest.TestCase):
         self.assertEqual(tracker["escalations"], [])
         self.assertEqual(result["status"], "adopted")
 
+    def test_the_phase_cell_is_the_one_this_question_charges_not_the_only_one_registered(self):
+        """A FIXTURE WITH ONE PHASE PINS NOTHING. `## Phases` here held exactly
+        `P04` and every question was raised under it, so the cell had no
+        discriminating power at all: replacing the read with the literal
+        `"P04"` survived the whole suite, and so did any mutant reading a
+        different field whose value happened to be a registered phase.
+
+        The cell is not decoration. `_validate_quorum` resolves it against
+        `## Phases` and THE DRIFT BUDGET IS COUNTED BY FILTERING THESE ROWS ON
+        IT, so a row charging the wrong phase spends another phase's ceiling.
+        Both phases are registered on purpose: a constant `P04` here would be
+        ACCEPTED by the validator and caught only by the assertion below.
+        """
+        register_phases(self.run_dir, "P05")
+        registered = {row["id"] for row in self.tracker()["phases"]}
+        self.assertEqual(registered, {"P04", "P05"},
+                         "the phase the mutant would write has to be a legal "
+                         "one, or the validator kills it and the cell is still "
+                         "unpinned")
+        _qid, result = self.finalize(phase="P05")
+        self.assertEqual(result["status"], "adopted")
+        row = self.tracker()["quorum"][0]
+        self.assertEqual(row["phase"], "P05")
+        self.assertNotEqual(row["phase"], "P04")
+
+    def test_the_depth_cell_is_the_depth_this_answer_was_adopted_at(self):
+        """EVERY OTHER MIRROR FIXTURE ADOPTS AT DEPTH 1, so `str(depth)` and
+        the literal `1` were the same function: a writer that stamped `1` on
+        every adopted row and `-` on every other passed the whole suite. This
+        one is anchored one layer further out.
+
+        `Depth` is the distance the cap measures and it is written into an
+        append-only file nothing later corrects.
+        """
+        (self.run_dir / "decisions.md").write_text(
+            UNRELATED_HUMAN + DERIVED_DEPTH_ONE, encoding="utf-8")
+        deep = graded("postgres", "specified", consistent_with=[
+            {"kind": "decision", "id": "Q-cccccccccccc"}])
+        _qid, result = self.finalize([deep, graded("postgres", "speculation"),
+                                      graded("sqlite", "speculation")])
+        self.assertEqual(result["status"], "adopted")
+        self.assertEqual(result["depth"], 2)
+        row = self.tracker()["quorum"][0]
+        self.assertEqual(row["depth"], "2")
+        self.assertNotEqual(row["depth"], "1")
+
     def test_the_owners_cell_is_the_dispatch_order_and_the_whole_roster(self):
         qid, _result = self.finalize()
         row = self.tracker()["quorum"][0]
@@ -18154,9 +18266,16 @@ class QuorumMirrorTests(unittest.TestCase):
         cell the batching human reads saying nothing at all."""
         qid, result = self.finalize([graded("postgres", "convention-cited")] * 3)
         self.assertEqual(result["reason"], "below-floor")
-        escalation = self.tracker()["escalations"][0]
+        tracker = self.tracker()
+        escalation = tracker["escalations"][0]
         self.assertEqual(escalation["qid"], qid)
         self.assertEqual(escalation["blast"], "storage-engine")
+        #: THE RUNG CELL, PINNED OFF `specified` FOR ONCE. Every other mirror
+        #: fixture wins at `specified`, so a writer that stamped that one word
+        #: on every row with a winner survived the whole suite. This quorum
+        #: wins at `convention-cited` and the row has to say so.
+        self.assertEqual(tracker["quorum"][0]["rung"], "convention-cited")
+        self.assertNotEqual(tracker["quorum"][0]["rung"], "specified")
         #: RULE 5. The floor this tripped on is in the record and must not be
         #: in a row: the tracker is a file a brain can be handed, and the bar
         #: it has to clear frames every answer it would give.
@@ -18165,6 +18284,33 @@ class QuorumMirrorTests(unittest.TestCase):
         self.assertNotIn("floor", rendered)
         for value in ("0.95", "0.85", "0.70", "0.55", "0.30"):
             self.assertNotIn(value, rendered)
+
+    def test_an_escalation_on_the_reserved_axis_names_the_literal_not_the_minted_axis(self):
+        """`axis` AND `decision_axis` ARE TWO FACTS AND THIS ROW CARRIES THE
+        FIRST. On a `new`-axis question they legally disagree: the question was
+        asked on the reserved literal, and the decision record buckets under
+        the question's own bare qid. `Blast` is what the batching human is
+        shown about THIS QUESTION, so it is the axis as asked.
+
+        Without this fixture the two fields agreed in every mirror case, and
+        swapping the read for `decision_axis` survived the whole suite — a qid
+        is a `_TOKEN`, so `_validate_escalations` accepts it without a word and
+        the human is handed twelve hex characters where an axis should be.
+        """
+        _qid, result = self.finalize(
+            [graded("postgres", "convention-cited")] * 3, axis="new",
+            question="Do we keep a session table at all?")
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "below-floor")
+        minted = result["decision_axis"]
+        self.assertEqual(minted, result["qid"],
+                         "a reserved-axis question mints its own bare qid, or "
+                         "the two fields do not disagree here and this case "
+                         "distinguishes nothing")
+        self.assertNotEqual(minted, "new")
+        escalation = self.tracker()["escalations"][0]
+        self.assertEqual(escalation["blast"], "new")
+        self.assertNotEqual(escalation["blast"], minted)
 
     def test_a_rejection_is_recorded_as_an_outcome_and_never_batched_to_a_human(self):
         """A quorum may decide an open question and may never overrule a
@@ -18307,6 +18453,25 @@ class EscalationReasonMappingTests(unittest.TestCase):
             [reason for reason, source in pas._ESCALATION_BLAST.items()
              if source == pas._BLAST_FROM_TRESPASS],
             ["irreversible-axis"])
+
+    def test_the_row_names_its_own_qid_and_not_the_one_appended_just_before_it(self):
+        """`_mirror_quorum` appends the `## Quorum` row first, so the record's
+        qid and `tracker["quorum"][-1]["qid"]` are the same string on every
+        path through the public API — and a writer that read the tracker
+        instead of the record was therefore invisible to the whole suite. It is
+        also a writer that makes the append ORDER load-bearing, which the
+        mirror's own docstring says it is not. Called directly, with a tracker
+        whose last quorum row belongs to somebody else.
+        """
+        mine, theirs = "a" * 12, "b" * 12
+        tracker = {"escalations": [],
+                   "quorum": [{"qid": theirs}, {"qid": theirs}]}
+        row = pas._escalation_row(tracker, {"qid": mine, "status": "escalated",
+                                            "axis": "storage-engine",
+                                            "reason": "below-floor"})
+        self.assertEqual(row["qid"], mine)
+        self.assertNotEqual(row["qid"], theirs)
+        self.assertEqual(row["blast"], "storage-engine")
 
     def test_an_unmapped_reason_is_refused_rather_than_written_as_a_dash(self):
         tracker = {"escalations": []}

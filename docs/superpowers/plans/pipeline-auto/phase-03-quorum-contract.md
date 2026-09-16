@@ -4180,6 +4180,33 @@ guessed at in code beyond the minimum noted; each needs a ruling.
     under "COORDINATOR OVERRIDE". This is the **first and only** outcome whose
     `decision_axis` cannot be minted; Task 12's row writer must render it.
 
+14. **`## Escalations` has no `Reason` column, and that is a PREREQUISITE for
+    P06's batching UI — not a nice-to-have.** Task 12 deferred adding one, and
+    the deferral itself is right: inventing a column is P03 re-declaring P02's
+    grammar, and folding the reason into `Blast` would put a non-axis token
+    into the one cell `_validate_escalations` checks as a list of axis tokens.
+    What was understated is the cost. `_ESCALATION_BLAST` maps **13 of the 14**
+    reasons to `_BLAST_FROM_AXIS`, so for everything except `irreversible-axis`
+    the `Blast` cell merely **restates the `Axis` cell of the `## Quorum` row
+    for the same qid**. Two escalations needing completely different remedies
+    render as:
+
+    ```
+    E-1 | b852362319fb | external-service | queued | - | -   (irreversible-axis)
+    E-2 | cc6e211f7303 | new              | queued | - | -   (below-floor)
+    ```
+
+    — distinguishable only by qid, and on a `new`-axis question the cell
+    carries the reserved literal, so the row says nothing at all but the qid.
+    `derive_next_action` returns the same `await-escalation-batch` for every
+    one of them, so the batching human's only route to "why" is opening
+    `quorum/<qid>/final.json` **once per escalation, inside the one human gate
+    the whole design has**. A batch of four is four file reads before the
+    question can even be phrased. **P02 must add the column before P06 builds
+    the batching UI on this section**; until it does, any P06 batching code has
+    to read `final.json` per row and must say so.
+
 Items 1, 2, 8 and 13 are closed by coordinator ruling. Items 3–7, 9 and 12
-remain reported; item 12 is the only one that leaves a reachable hang, and none
-blocks execution of this phase.
+remain reported; item 14 is a prerequisite for P06 rather than a question, item
+12 is the only one that leaves a reachable hang, and none blocks execution of
+this phase.

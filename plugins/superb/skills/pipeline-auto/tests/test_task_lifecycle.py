@@ -23,6 +23,7 @@ import contextlib
 import itertools
 import json
 import os
+import re
 import signal
 import sys
 import tempfile
@@ -3634,9 +3635,6 @@ class PathInScopeTests(unittest.TestCase):
         self.assertIsInstance(state._path_in_scope("x/a.py", "tree:src"), bool)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 # --------------------------------------------------------------------------
 # Task 4 tests -- fault F5
 #
@@ -3654,6 +3652,33 @@ DIGEST = "a" * 64
 COMMIT = "b" * 40
 QUESTION_RECORD = f"docs/superpowers/runs/run-1/questions/q1.md#sha256={DIGEST}"
 EVIDENCE_REF = f"docs/superpowers/runs/run-1/evidence/T1.md#sha256={DIGEST}"
+
+#: THE ROUTING REVERSAL, WRITTEN DOWN A SECOND TIME AS LITERALS. `_status_route`
+#: derives it from three tuples; an oracle that asks `_status_route` which route
+#: a status takes is asking the implementation under test, so a mutation inside
+#: the mapping moves both sides of the comparison together and the cross product
+#: says nothing. Measured: swapping `(QUORUM_STATUSES, _ROUTE_QUORUM)` for
+#: `(QUORUM_STATUSES, _ROUTE_COMPLETION)` -- which RESTORES `superb:pipeline`'s
+#: semantics and is the whole point of this phase -- was killed by ten tests and
+#: by neither cross-product test. The five entries are spelled by hand; the
+#: totality assertion below is what stops a sixth status from being routed by
+#: this table's silence.
+STATUS_ROUTE = {
+    "DONE": state._ROUTE_COMPLETION,
+    "DONE_WITH_CONCERNS": state._ROUTE_COMPLETION,
+    "NEEDS_CONTEXT": state._ROUTE_QUORUM,
+    "PLAN_CONFLICT": state._ROUTE_QUORUM,
+    "BLOCKED": state._ROUTE_HALT,
+}
+
+#: P06's reviewer-independence scan, COPIED FROM `phase-06-master-gate.md` rather
+#: than re-derived from what P04 happens to render. The master plan pins
+#: `- **Owner:** <id>` as a binding cross-phase contract: P06 walks the run's
+#: results tree with this pattern and refuses to hand a task to anyone who ever
+#: owned an attempt at it. If P04's renderer and this pattern disagree, the scan
+#: harvests the empty set and the check passes vacuously -- the fail-open
+#: direction of the property P06 names.
+P06_OWNER_LINE = re.compile(r"^-\s+\*\*Owner:\*\*\s*(\S+)\s*$", re.MULTILINE)
 
 
 def worker_result(**overrides) -> dict:
@@ -3879,6 +3904,19 @@ class StatusPartitionTests(unittest.TestCase):
                      state._ROUTE_HALT),
                 )
 
+    def test_the_route_of_every_status_is_the_one_the_table_names(self):
+        """The literal half of the oracle, and the only place in this file that
+        states the reversal without asking the code that implements it.
+
+        `test_status_route_is_total_over_the_vocabulary` above says every status
+        routes SOMEWHERE; this says WHICH, and the key-set assertion is what
+        makes the pair total: a sixth status added to `WORKER_STATUSES` fails
+        here rather than being routed by this table's silence."""
+        self.assertEqual(sorted(STATUS_ROUTE), sorted(state.WORKER_STATUSES))
+        for status, route in STATUS_ROUTE.items():
+            with self.subTest(status=status):
+                self.assertEqual(state._status_route(status), route)
+
     def test_every_status_has_at_least_one_renderable_result(self):
         """A vocabulary entry no document can carry is a lie in the template.
         Measured by CONSTRUCTION -- one body per route -- rather than asserted."""
@@ -3893,7 +3931,7 @@ class StatusPartitionTests(unittest.TestCase):
         }
         for status in state.WORKER_STATUSES:
             with self.subTest(status=status):
-                result = bodies[state._status_route(status)](status)
+                result = bodies[STATUS_ROUTE[status]](status)
                 self.assertEqual(
                     state.parse_worker_result(
                         state.render_worker_result(result)),
@@ -3965,7 +4003,7 @@ class RoutingAgreementTests(unittest.TestCase):
             state.WORKER_STATUSES, ROUTING_CELLS, state.TASK_KINDS
         ):
             expected = (body_route(question_record, blocking_reason)
-                        == state._status_route(status))
+                        == STATUS_ROUTE[status])
             with self.subTest(status=status, question_record=question_record,
                               blocking_reason=blocking_reason, kind=kind):
                 result = routed_body(status, question_record, blocking_reason,
@@ -3993,7 +4031,7 @@ class RoutingAgreementTests(unittest.TestCase):
                                     kind))
                 except state.TrackerValidationError:
                     continue
-                accepting.add(state._status_route(status))
+                accepting.add(STATUS_ROUTE[status])
             with self.subTest(question_record=question_record,
                               blocking_reason=blocking_reason, kind=kind):
                 self.assertLessEqual(len(accepting), 1, accepting)
@@ -4768,6 +4806,378 @@ class WorkerResultTemplateTests(unittest.TestCase):
         self.assertNotIn("/home/", self.template)
 
 
+# --------------------------------------------------------------------------
+# The owner grammar P06 parses out of a published result.
+#
+# The master plan pins `- **Owner:** <id>` as a BINDING CROSS-PHASE CONTRACT.
+# The first version of this codec rendered the owner as a table cell and
+# nothing else, so P06's `owner_history` scan over the results tree harvested
+# the EMPTY SET and reviewer independence was checked against nothing -- the
+# fail-open direction of the property P06 names, which is that a worker
+# released after finishing a task can be assigned to review it.
+#
+# The line can be added by no route but the renderer: `parse_worker_result`'s
+# last screen is a byte comparison against a re-render, so a hand-added or
+# Task-9-added line makes the document non-canonical and unimportable.
+# --------------------------------------------------------------------------
+
+
+class OwnerLineContractTests(unittest.TestCase):
+
+    def setUp(self):
+        self.text = state.render_worker_result(worker_result())
+
+    def test_the_rendered_result_carries_the_line_p06_actually_scans_for(self):
+        """Asked with P06's own pattern, not with a pattern re-derived from
+        what P04 renders -- the whole defect was that the two disagreed."""
+        self.assertEqual(P06_OWNER_LINE.findall(self.text), ["impl-1"])
+
+    def test_the_line_states_every_owner_the_grammar_admits(self):
+        """`_TOKEN` is the owner grammar and it admits dots, slashes, colons
+        and plus signs; P06's `(\\S+)` must capture all of them whole."""
+        for owner in ("impl-1", "a", "impl.1", "impl/1", "impl:1", "impl+1",
+                      "IMPL_1", "z9"):
+            with self.subTest(owner=owner):
+                text = state.render_worker_result(worker_result(owner=owner))
+                self.assertEqual(P06_OWNER_LINE.findall(text), [owner])
+                self.assertEqual(state.parse_worker_result(text)["owner"],
+                                 owner)
+
+    def test_p06s_results_tree_scan_finds_every_owner_of_every_attempt(self):
+        """The contract end to end: P06 walks the results tree, reads owner
+        history out of the immutable files, and must see the superseded
+        attempts as well as the surviving one."""
+        owners = ("impl-1", "impl-2", "impl-3")
+        with tempfile.TemporaryDirectory() as tmp:
+            results = Path(tmp) / "results"
+            (results / "T1").mkdir(parents=True)
+            for attempt, owner in enumerate(owners, start=1):
+                (results / "T1" / f"attempt-{attempt}.md").write_text(
+                    state.render_worker_result(
+                        worker_result(owner=owner, attempt=attempt)),
+                    encoding="utf-8")
+            harvested = set()
+            for path in sorted(results.rglob("*.md")):
+                harvested.update(
+                    P06_OWNER_LINE.findall(path.read_text(encoding="utf-8")))
+        self.assertEqual(harvested, set(owners))
+
+    def test_a_result_without_the_owner_line_is_refused_by_its_own_screen(self):
+        lines = [line for line in self.text.splitlines()
+                 if not line.startswith(state._OWNER_LINE_PREFIX)]
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.parse_worker_result("\n".join(lines) + "\n")
+        self.assertIn("reviewer-independence", str(caught.exception))
+        self.assertNotIn("not canonical", str(caught.exception))
+
+    def test_a_second_owner_line_is_refused_rather_than_read_once(self):
+        lines = self.text.splitlines()
+        index = next(i for i, line in enumerate(lines)
+                     if line.startswith(state._OWNER_LINE_PREFIX))
+        lines.insert(index, lines[index])
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.parse_worker_result("\n".join(lines) + "\n")
+        self.assertIn("exactly once", str(caught.exception))
+
+    def test_a_line_disagreeing_with_the_cell_names_the_disagreement(self):
+        """The canonical screen would refuse this anyway -- for `not
+        canonical`, which names the bytes rather than the fact. A document
+        stating two owners deserves the diagnosis of the rule it breaks."""
+        forged = self.text.replace(state._owner_line("impl-1"),
+                                   state._owner_line("reviewer-9"))
+        self.assertNotEqual(forged, self.text)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.parse_worker_result(forged)
+        self.assertIn("two owners", str(caught.exception))
+        self.assertNotIn("not canonical", str(caught.exception))
+
+    def test_the_line_and_the_cell_are_one_conversion_point(self):
+        """A second spelling of the owner grammar would be a second answer to
+        `who owned this attempt`, which is the question P06 decides reviewer
+        independence on."""
+        self.assertEqual(state._owner_line("impl-1"), "- **Owner:** impl-1")
+        self.assertIn(state._owner_line("impl-1"), self.text.splitlines())
+
+    def test_the_owner_line_is_inside_the_canonical_comparison(self):
+        """Not merely present: moved, it is still refused -- so no later task
+        can relocate it and keep the document importable."""
+        lines = self.text.splitlines()
+        index = next(i for i, line in enumerate(lines)
+                     if line.startswith(state._OWNER_LINE_PREFIX))
+        moved = lines[:index] + lines[index + 1:] + [lines[index]]
+        with self.assertRaises(state.TrackerValidationError):
+            state.parse_worker_result("\n".join(moved) + "\n")
+
+    def test_the_template_mirrors_the_owner_grammar(self):
+        template = (SKILL_DIR / "templates" / "worker-result.md").read_text(
+            encoding="utf-8")
+        self.assertEqual(len(P06_OWNER_LINE.findall(template)), 1)
+        self.assertIn(state._OWNER_LINE_PREFIX, template)
+
+    def test_the_template_still_does_not_parse_as_a_result(self):
+        """Mirroring the line must not have turned the template into a result
+        claiming a task nobody ran."""
+        template = (SKILL_DIR / "templates" / "worker-result.md").read_text(
+            encoding="utf-8")
+        with self.assertRaises(state.TrackerValidationError):
+            state.parse_worker_result(template)
+
+
+# --------------------------------------------------------------------------
+# render and parse are asked the SAME question, over a DERIVED corpus.
+#
+# The module promises this twice -- "the two directions cannot disagree about
+# what a legal result is", and "`_attempt_token` -- THE SINGLE CONVERSION
+# POINT, in both directions". The first version had two families where they
+# did disagree, and every corpus in this file answered accept/reject rather
+# than round-trip, so neither was reachable by any of them.
+#
+# A disagreement is not a cosmetic defect here: Task 9 renders THEN writes
+# immutably, so a result that renders and does not parse is published, bound
+# to a digest, unreadable by Task 10 and uncorrectable by anyone.
+# --------------------------------------------------------------------------
+
+
+def identity_vocabulary() -> list:
+    """Every word this codec writes into a document or reads structurally out
+    of one, DERIVED from the module's own constants rather than guessed.
+
+    `ID` is in here because `_CHECKPOINT_HEADER[0]` is, and `_TOKEN` admits it:
+    a checkpoint so named rendered as an ordinary row, parsed as the table
+    header, and vanished. Deriving the corpus from the constants is what makes
+    the next such word appear in it the moment it is written down.
+    """
+    words = set(state._RESULT_HEADER) | set(state._CHECKPOINT_HEADER)
+    words.add(state._TABLE_RULE)
+    words.add(state._ABSENT_CELL)
+    words.add(state._ATTEMPT_PREFIX)
+    words.add(state._WORKER_CHECKPOINTS)
+    words.update(state.WORKER_RESULT_FIELDS)
+    words.update(state._CHECKPOINT_STATES)
+    words.update(state.WORKER_STATUSES)
+    words.update(state.TASK_KINDS)
+    words.update(state.WORKER_RESULT_TITLE.split())
+    words.update(state._OWNER_LINE_PREFIX.split())
+    words.update(state.WORKER_RESULT_MARKER.split())
+    return sorted(words)
+
+
+#: The digit boundary `_MAX_ATTEMPT_DIGITS` names, from both sides, plus one
+#: value past `sys.int_max_str_digits` -- which is not a spelling question but
+#: an escape: `f"{attempt:d}"` over it raises `ValueError`, outside the family
+#: a controller catches. Measured: it did.
+ATTEMPT_BOUNDARY = (
+    1, 9, 10, 99, 100, 999, 1000,
+    10 ** (state._MAX_ATTEMPT_DIGITS - 1),
+    10 ** state._MAX_ATTEMPT_DIGITS - 1,
+    10 ** state._MAX_ATTEMPT_DIGITS,
+    10 ** state._MAX_ATTEMPT_DIGITS + 1,
+    10 ** 5000,
+)
+
+
+class RenderParseAgreementTests(unittest.TestCase):
+    """For every document in the corpus: either `render` refuses it, or `parse`
+    reads its bytes back unchanged. There is no third outcome."""
+
+    def agree(self, result: dict) -> str:
+        try:
+            text = state.render_worker_result(result)
+        except state.TrackerValidationError:
+            return "refused"
+        try:
+            back = state.parse_worker_result(text)
+        except state.TrackerValidationError as exc:
+            self.fail(f"render published what parse refuses: {exc}")
+        self.assertEqual(back, state._validate_worker_result(result))
+        return "rendered"
+
+    def test_identity_tokens_from_the_rendered_vocabulary_agree(self):
+        checked = 0
+        rendered = 0
+        for word in identity_vocabulary():
+            cases = {
+                "task_id": worker_result(task_id=word),
+                "owner": worker_result(owner=word),
+                "concerns": worker_result(concerns=word),
+                "checkpoint id": worker_result(checkpoints=(
+                    {"id": word, "status": "complete",
+                     "evidence": EVIDENCE_REF},)),
+            }
+            for position, result in cases.items():
+                with self.subTest(word=word, position=position):
+                    rendered += self.agree(result) == "rendered"
+                    checked += 1
+        self.assertEqual(checked, len(identity_vocabulary()) * 4)
+        self.assertGreater(rendered, 0)
+        self.assertGreater(checked, rendered)   # the corpus is not all-accept
+
+    def test_the_attempt_boundary_agrees_in_both_directions(self):
+        for attempt in ATTEMPT_BOUNDARY:
+            with self.subTest(attempt=attempt.bit_length()):
+                self.agree(worker_result(attempt=attempt))
+
+    def test_the_ceiling_is_the_same_number_on_both_sides(self):
+        """One digit under renders and parses; the ceiling itself is refused by
+        the renderer rather than published and refused by the parser."""
+        last = 10 ** state._MAX_ATTEMPT_DIGITS - 1
+        text = state.render_worker_result(worker_result(attempt=last))
+        self.assertEqual(state.parse_worker_result(text)["attempt"], last)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.render_worker_result(
+                worker_result(attempt=10 ** state._MAX_ATTEMPT_DIGITS))
+        self.assertIn(str(state._MAX_ATTEMPT_DIGITS), str(caught.exception))
+
+    def test_an_attempt_past_the_int_conversion_limit_stays_in_the_family(self):
+        """`f"{attempt:d}"` raises `ValueError` -- not a `TrackerError` -- once
+        the integer needs more than `sys.int_max_str_digits` digits, and it
+        raised it INSIDE the renderer before the ceiling was asked of both
+        directions. A controller catching `TrackerValidationError` saw nothing."""
+        with self.assertRaises(state.TrackerValidationError):
+            state.render_worker_result(worker_result(attempt=10 ** 5000))
+        self.assertFalse(state._ATTEMPT_TOKEN.fullmatch("attempt-" + "9" * 5000))
+
+    def test_every_checkpoint_state_and_cardinality_agrees(self):
+        checkpoint = lambda index, status: {
+            "id": f"c{index}", "status": status, "evidence": EVIDENCE_REF}
+        checked = 0
+        for count in (0, 1, 2):
+            for states in itertools.product(state._CHECKPOINT_STATES,
+                                            repeat=count):
+                with self.subTest(count=count, states=states):
+                    self.assertEqual(self.agree(worker_result(checkpoints=tuple(
+                        checkpoint(index, status)
+                        for index, status in enumerate(states)))), "rendered")
+                    checked += 1
+        self.assertEqual(checked, 1 + 3 + 9)
+
+    def test_list_cardinalities_agree_in_both_directions(self):
+        """0, 1 and 2 members: the empty cell is the `-` marker and re-reads as
+        no members, one member is the cell with no comma in it, two is the
+        comma that `_result_list` screens its members against."""
+        members = {
+            "commits": (COMMIT, "c" * 40),
+            "tests": ("python3 -m unittest -k T1", "python3 -m unittest -k T2"),
+            "evidence": (EVIDENCE_REF,
+                         f"docs/superpowers/runs/run-1/evidence/T2.md"
+                         f"#sha256={DIGEST}"),
+            "artifacts": ("docs/a.md", "docs/b.md"),
+        }
+        checked = 0
+        for field, pair in members.items():
+            for count in (0, 1, 2):
+                base = artifact_result() if field == "artifacts" else worker_result()
+                if field == "commits" and count == 0:
+                    base["source_ref"] = state._ABSENT_CELL
+                base[field] = pair[:count]
+                with self.subTest(field=field, count=count):
+                    self.agree(base)
+                    checked += 1
+        self.assertEqual(checked, 12)
+
+    def test_a_checkpoint_named_after_a_structural_row_word_is_refused(self):
+        """With its own diagnosis. Before this, `id="ID"` rendered, the
+        checkpoint vanished at parse, and the canonical screen refused the
+        document for `not canonical` -- naming the bytes rather than the cause."""
+        for word in state._RESERVED_ROW_WORDS:
+            with self.subTest(word=word):
+                message = refuse(self, worker_result(checkpoints=(
+                    {"id": word, "status": "complete",
+                     "evidence": EVIDENCE_REF},)))
+                self.assertNotIn("not canonical", message)
+        self.assertIn("structurally in column one", refuse(self, worker_result(
+            checkpoints=({"id": state._CHECKPOINT_HEADER[0],
+                          "status": "complete",
+                          "evidence": EVIDENCE_REF},))))
+
+    def test_the_reserved_words_are_the_ones_the_parser_actually_filters(self):
+        """Derived, not a fresh closed list: these are exactly the column-one
+        words `parse_worker_result` reads structurally."""
+        self.assertEqual(
+            sorted(state._RESERVED_ROW_WORDS),
+            sorted({state._RESULT_HEADER[0], state._CHECKPOINT_HEADER[0],
+                    state._TABLE_RULE}))
+
+
+def target_names(target) -> list:
+    """Every name one assignment target binds. `ast.Name` is the case the first
+    version of the guard handled; `Tuple`, `List` and `Starred` are the ones it
+    walked past, and `Attribute`/`Subscript` bind no module-level name at all."""
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, ast.Starred):
+        return target_names(target.value)
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return [name for element in target.elts
+                for name in target_names(element)]
+    return []
+
+
+def alternative_bindings(branches: list):
+    """The bindings of a set of MUTUALLY EXCLUSIVE branches, counted once.
+
+    `try: import fcntl / except ImportError: fcntl = None` binds `fcntl` twice
+    syntactically and once at runtime. Summing the arms would make the module's
+    own platform switch a duplicate, and a guard that has to be switched off is
+    a guard that catches nothing -- so each name is counted at its MAXIMUM over
+    the arms, which still sees a duplicate that sits inside a single arm.
+    """
+    merged = {}
+    for branch in branches:
+        for name, count in module_bindings(branch).items():
+            merged[name] = max(merged.get(name, 0), count)
+    return merged
+
+
+def module_bindings(body: list):
+    """How many times each name is bound at module level, over EVERY binding
+    form -- `def`, `class`, `=`, `x: T = ...`, tuple and starred targets,
+    `import`, `from ... import`, and the same again inside a module-level `if`,
+    `try`, `for` or `with`.
+
+    `AugAssign` is deliberately absent: `x += 1` rebinds a name that must
+    already exist, which is not a second definition of it.
+    """
+    counts = {}
+
+    def add(names):
+        for name in names:
+            counts[name] = counts.get(name, 0) + 1
+
+    def merge(other):
+        for name, count in other.items():
+            counts[name] = counts.get(name, 0) + count
+
+    for node in body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            add([node.name])
+        elif isinstance(node, ast.Assign):
+            add([name for target in node.targets
+                 for name in target_names(target)])
+        elif isinstance(node, ast.AnnAssign):
+            add(target_names(node.target) if node.value is not None else [])
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            add([alias.asname or alias.name.split(".")[0]
+                 for alias in node.names])
+        elif isinstance(node, ast.If):
+            merge(alternative_bindings([node.body, node.orelse]))
+        elif isinstance(node, ast.Try) or type(node).__name__ == "TryStar":
+            merge(alternative_bindings(
+                [node.body + node.orelse]
+                + [handler.body for handler in node.handlers]))
+            merge(module_bindings(node.finalbody))
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            add(target_names(node.target))
+            merge(alternative_bindings([node.body, node.orelse]))
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            add([name for item in node.items
+                 if item.optional_vars is not None
+                 for name in target_names(item.optional_vars)])
+            merge(module_bindings(node.body))
+    return counts
+
+
 class WorkerResultModuleBoundaryTests(unittest.TestCase):
     """What Task 4 must NOT have done to the module it extends."""
 
@@ -4790,21 +5200,77 @@ class WorkerResultModuleBoundaryTests(unittest.TestCase):
 
     def test_no_name_in_the_module_is_defined_twice(self):
         """The general form of both defects above, asked of the whole module
-        rather than of the two names that happened to be noticed."""
-        tree = ast.parse(
+        rather than of the two names that happened to be noticed.
+
+        THE FIRST VERSION OF THIS GUARD ENFORCED THREE BINDING FORMS, NOT ALL.
+        Measured against four injected duplicates of `_ABSENT_CELL`, it caught
+        `def`/`class`/plain `x = ...` and MISSED the annotated assignment, the
+        tuple target and the one inside a module-level `try`, and it ignored
+        `import` bindings entirely. The module happens to contain no annotated
+        assignment, no tuple target and only the `fcntl`/`msvcrt` platform
+        `try`, so it did enforce the `_cell`/`_field`/`_csv`/`_COMMIT` shape --
+        but "catches the next one without anyone remembering to look" is a
+        claim about every binding form, and `module_bindings` is what makes it
+        true. See the constraint paragraph in the master plan, which was
+        amended in the same commit as this test.
+        """
+        counts = module_bindings(ast.parse(
             (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
-                encoding="utf-8"))
-        defined = []
-        for node in tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                 ast.ClassDef)):
-                defined.append(node.name)
-            elif isinstance(node, ast.Assign):
-                defined.extend(target.id for target in node.targets
-                               if isinstance(target, ast.Name))
-        repeated = sorted({name for name in defined
-                           if defined.count(name) > 1})
-        self.assertEqual(repeated, [])
+                encoding="utf-8")).body)
+        self.assertEqual(
+            sorted(name for name, count in counts.items() if count > 1), [])
+
+    def test_the_binding_guard_sees_every_form_a_duplicate_can_take(self):
+        """The guard asked of itself. Each snippet binds `_ABSENT_CELL` a
+        second time in a different syntactic form; a guard that misses one is a
+        guard that is not looking for duplicates but for `def` statements."""
+        forms = {
+            "function": 'def _ABSENT_CELL(value):\n    return "~"\n',
+            "class": 'class _ABSENT_CELL:\n    pass\n',
+            "assign": '_ABSENT_CELL = "~"\n',
+            "annassign": '_ABSENT_CELL: str = "~"\n',
+            "tuple-target": '_ABSENT_CELL, _UNUSED = "~", 1\n',
+            "starred-target": '*_ABSENT_CELL, _UNUSED = "~", 1\n',
+            "list-target": '[_ABSENT_CELL, _UNUSED] = "~", 1\n',
+            "import-as": 'import json as _ABSENT_CELL\n',
+            "from-import-as": 'from json import dumps as _ABSENT_CELL\n',
+            "in-try": 'try:\n    _ABSENT_CELL = "~"\nexcept Exception:\n    pass\n',
+            "in-except": 'try:\n    pass\nexcept Exception:\n    _ABSENT_CELL = "~"\n',
+            "in-finally": 'try:\n    pass\nfinally:\n    _ABSENT_CELL = "~"\n',
+            "in-if": 'if True:\n    _ABSENT_CELL = "~"\n',
+            "in-else": 'if True:\n    pass\nelse:\n    _ABSENT_CELL = "~"\n',
+            "in-for": 'for _ABSENT_CELL in "~":\n    pass\n',
+            "in-for-body": 'for _UNUSED in "~":\n    _ABSENT_CELL = "~"\n',
+            "in-with": 'with open("x") as _ABSENT_CELL:\n    pass\n',
+            "nested": 'if True:\n    try:\n        _ABSENT_CELL: str = "~"\n'
+                      '    except Exception:\n        pass\n',
+        }
+        for name, snippet in forms.items():
+            with self.subTest(form=name):
+                counts = module_bindings(
+                    ast.parse('_ABSENT_CELL = "-"\n' + snippet).body)
+                self.assertEqual(counts["_ABSENT_CELL"], 2)
+
+    def test_the_binding_guard_does_not_call_a_platform_switch_a_duplicate(self):
+        """The two arms of an `if`/`else` or a `try`/`except` are ALTERNATIVES:
+        one of them runs. The module's own `try: import fcntl / except
+        ImportError: fcntl = None` binds the name twice syntactically and once
+        at runtime, and a guard that counted it would have to be switched off
+        -- which is how a guard stops catching anything."""
+        for source in (
+            'try:\n    import fcntl\nexcept ImportError:\n    fcntl = None\n',
+            'if True:\n    fcntl = 1\nelse:\n    fcntl = 2\n',
+            'try:\n    fcntl = 1\nexcept ImportError:\n    fcntl = 2\n'
+            'finally:\n    pass\n',
+        ):
+            with self.subTest(source=source.splitlines()[0]):
+                self.assertEqual(
+                    module_bindings(ast.parse(source).body)["fcntl"], 1)
+        nested = module_bindings(ast.parse(
+            'try:\n    fcntl = 1\n    fcntl = 2\nexcept ImportError:\n'
+            '    fcntl = 3\n').body)
+        self.assertEqual(nested["fcntl"], 2,
+                         "a duplicate INSIDE one arm is still a duplicate")
 
     def test_the_codec_still_states_its_grammars_without_a_regex_engine(self):
         source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
@@ -4847,3 +5313,13 @@ class WorkerResultModuleBoundaryTests(unittest.TestCase):
             with self.subTest(text=type(text).__name__):
                 with self.assertRaises(state.TrackerValidationError):
                     state.parse_worker_result(text)
+
+
+# THE RUNNER GOES LAST, and it has to. `unittest.main()` calls `sys.exit()`, so
+# this block sat at what was once the end of the file and became its MIDDLE the
+# moment the Task 4 block was appended after it: `python3 test_task_lifecycle.py`
+# exited at that line and never defined -- let alone ran -- a single Task 4
+# test. Discovery collected 386 and direct execution 252, both green, and the
+# 134 tests the difference names were the whole of the F5 work.
+if __name__ == "__main__":
+    unittest.main()

@@ -11907,6 +11907,43 @@ _RESULT_HEADER = ("Field", "Value")
 _CHECKPOINT_HEADER = ("ID", "Status", "Evidence")
 _TABLE_RULE = "---"
 
+#: THE CROSS-PHASE OWNER GRAMMAR, and it is a LINE rather than the table
+#: cell. The master plan pins ``- **Owner:** <id>`` as a binding contract:
+#: P06's reviewer-independence check scans every published result in the
+#: results tree with that pattern and refuses to hand a task to anyone who
+#: ever owned an attempt at it, INCLUDING a released or superseded attempt
+#: whose only surviving record is its immutable result file. Rendered as a
+#: table cell alone, that scan matches nothing at all and independence is
+#: checked against the empty set -- a fail-open, and exactly the property
+#: P06 names: a worker released after finishing a task can be assigned to
+#: review it.
+#:
+#: IT CANNOT BE ADDED ANYWHERE ELSE. ``parse_worker_result``'s last screen
+#: is a byte comparison against a re-render, so a line a human or a later
+#: task appended would make the document non-canonical and unimportable.
+#: The renderer is the only door, which is why the line is written here and
+#: not left to the caller.
+#:
+#: THE CELL STAYS. The cell is what ``parse`` reads the owner OUT of -- it
+#: is inside the positional field-order screen and every routing rule --
+#: and the line is a projection of it: one conversion point, asserted equal
+#: on the way back in, so the document cannot state two owners.
+_OWNER_LINE_PREFIX = "- **Owner:** "
+
+#: THE WORDS ``parse_worker_result`` READS STRUCTURALLY IN COLUMN ONE,
+#: stated from the two row filters that read them rather than listed a
+#: second time beside them. A checkpoint whose id is one of these renders
+#: as an ordinary row and parses as the table header or the table rule: the
+#: checkpoint VANISHES, and the only screen left to refuse the document is
+#: the canonical one -- which refuses it for "not canonical", naming the
+#: wrong cause. Measured: ``id="ID"`` rendered ``| ID | complete | ... |``,
+#: parsed back to zero checkpoints, and was refused with a diagnosis about
+#: bytes. ``_TOKEN`` already refuses ``---`` (its first character must be
+#: alphanumeric) and no field row is three cells wide, so ``ID`` is the only
+#: one reachable today; the tuple is derived from the filters so that a
+#: fourth structural word is covered the moment it is written down.
+_RESERVED_ROW_WORDS = (_RESULT_HEADER[0], _CHECKPOINT_HEADER[0], _TABLE_RULE)
+
 #: ``<repository-relative-path>#sha256=<64 lowercase hex>``. The delimiter is
 #: spelled once and the digest grammar is P02's ``_SHA256``, not a second
 #: ``[0-9a-f]{64}`` written beside it: a truncated digest that still looks like
@@ -11924,7 +11961,19 @@ _ATTEMPT_WIDTH = 3
 #: has to be reachable BEFORE the conversion is. Nine digits is a billion
 #: attempts at one task; the ceiling exists to keep the conversion total, not to
 #: express a policy about retries.
+#:
+#: IT IS ASKED OF BOTH DIRECTIONS, and by comparison rather than by measuring
+#: a string. ``_attempt_token`` screened only ``int``/``not bool``/``>= 1``,
+#: so ``render`` wrote ``attempt-1000000000`` -- ten digits -- and ``parse``
+#: refused its own renderer's bytes: a published, immutable, digest-bound
+#: result nothing could import. Worse, ``f"{attempt:d}"`` over an int of more
+#: than ``sys.int_max_str_digits`` digits raises ``ValueError`` INSIDE the
+#: renderer, which is the escape this bound exists to prevent -- measured,
+#: ``_attempt_token(10 ** 5000)`` raised ``ValueError`` before this line
+#: existed. ``attempt >= 10 ** _MAX_ATTEMPT_DIGITS`` is an INTEGER comparison,
+#: so it is reachable before any conversion is.
 _MAX_ATTEMPT_DIGITS = 9
+_ATTEMPT_CEILING = 10 ** _MAX_ATTEMPT_DIGITS
 
 
 def _attempt_token(attempt) -> str:
@@ -11940,6 +11989,15 @@ def _attempt_token(attempt) -> str:
             f"attempt must be a positive integer, not {attempt!r}; a bool is "
             "excluded on purpose, because True renders as attempt-001 and "
             "isinstance(True, int) is what would let it")
+    if attempt >= _ATTEMPT_CEILING:
+        raise TrackerValidationError(
+            f"an attempt of {attempt.bit_length()} bits is at least "
+            f"{_ATTEMPT_CEILING} and cannot be spelled in "
+            f"{_MAX_ATTEMPT_DIGITS} digits -- which is the ceiling "
+            "_parse_attempt_token enforces, so rendering it would publish an "
+            "immutable, digest-bound result no importer can read. The test is "
+            "an integer comparison so that it is reachable before the f-string "
+            "raises ValueError, which is not a TrackerError")
     return f"{_ATTEMPT_PREFIX}{attempt:0{_ATTEMPT_WIDTH}d}"
 
 
@@ -12177,6 +12235,14 @@ def _result_checkpoints(value) -> tuple[dict, ...]:
         if not _TOKEN.fullmatch(identifier):
             raise TrackerValidationError(
                 f"checkpoint id {identifier!r} is not an identifier token")
+        if _member(identifier, _RESERVED_ROW_WORDS):
+            raise TrackerValidationError(
+                f"checkpoint id {identifier!r} is a word the parser reads "
+                f"structurally in column one ({list(_RESERVED_ROW_WORDS)!r}); a "
+                "checkpoint named after a table header or the table rule "
+                "renders as an ordinary row and parses as neither, so the "
+                "checkpoint disappears out of a result whose identity is the "
+                "sha256 of bytes that still carry it")
         if not _member(checkpoint["status"], _CHECKPOINT_STATES):
             raise TrackerValidationError(
                 f"unknown checkpoint state {checkpoint['status']!r}; the "
@@ -12374,6 +12440,45 @@ def _result_cell(value) -> str:
     return str(value)
 
 
+def _owner_line(owner: str) -> str:
+    r"""``impl-1`` -> ``- **Owner:** impl-1``. THE SINGLE CONVERSION POINT for the
+    owner grammar P06 parses, in both directions, for the reason
+    ``_attempt_token`` is one: two spellings would be two answers to "who owned
+    this attempt", and P06 decides reviewer independence on the answer.
+
+    The owner has already been through ``_table_safe`` and ``_TOKEN``, so it
+    carries no whitespace and no line break: the rendered line always satisfies
+    P06's ``^-\s+\*\*Owner:\*\*\s*(\S+)\s*$`` and always yields exactly
+    this id.
+    """
+    return f"{_OWNER_LINE_PREFIX}{owner}"
+
+
+def _screen_owner_line(lines: list, owner: str) -> None:
+    """The owner line is present exactly once and agrees with the owner cell.
+
+    The canonical re-render would refuse a disagreement anyway -- but for "not
+    canonical", which names the bytes and not the fact. P06 reads this line to
+    decide whether a reviewer ever owned the task; a document whose line and
+    cell disagree is a document with two owners, and it deserves to be refused
+    by the rule it breaks.
+    """
+    found = [line for line in lines if line.startswith(_OWNER_LINE_PREFIX)]
+    if len(found) != 1:
+        raise TrackerValidationError(
+            f"a worker result states its owner as {_OWNER_LINE_PREFIX!r}<id> "
+            f"exactly once; this document has {len(found)}. The line is the "
+            "grammar P06's reviewer-independence check parses owner history "
+            "out of, and a result that does not carry it is one that reports "
+            "no owner to the check that must not hand the task back to them")
+    if found[0] != _owner_line(owner):
+        raise TrackerValidationError(
+            f"the owner line {found[0]!r} does not state the owner cell "
+            f"{owner!r}; a result naming two owners is one whose reviewer "
+            "independence depends on which of the two a reader happened to "
+            "scan")
+
+
 def _split_row(line: str) -> list:
     """``| a | b |`` -> ``["a", "b"]``. Cells are stripped, which is why
     ``_cell_safe`` refuses a value with surrounding whitespace: two spellings
@@ -12398,6 +12503,8 @@ def render_worker_result(result: dict) -> str:
     lines = [
         WORKER_RESULT_MARKER,
         WORKER_RESULT_TITLE,
+        "",
+        _owner_line(validated["owner"]),
         "",
         "## Result",
         *_render_table(_RESULT_HEADER, rows),
@@ -12439,6 +12546,7 @@ def parse_worker_result(text: str) -> dict:
             "worker result fields are missing, unknown, or reordered: expected "
             f"{list(WORKER_RESULT_FIELDS)}, read {names}")
     values = {row[0]: row[1] for row in field_rows}
+    _screen_owner_line(lines, values["owner"])
     result = dict(values)
     result["attempt"] = _parse_attempt_token(values["attempt"])
     for field in _WORKER_LIST_FIELDS:

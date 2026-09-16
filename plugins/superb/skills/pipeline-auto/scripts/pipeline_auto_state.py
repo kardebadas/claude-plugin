@@ -8062,3 +8062,1117 @@ def classify_quorum(run_dir: str, *, qid: str, live_owners: list) -> dict:
     #: caller reads brain n's index out of the position it found the name in.
     return {"state": "awaiting-responses", "qid": qid,
             "owners": [owner for owner in live if owner in unanswered]}
+
+
+# --- phase 3 of the record: clustering, strictness, and adoption -----------
+#
+# This is where a quorum's answers become a DECISION, and it is the only place
+# in the run where a machine may bind the run to something no human said. Four
+# rules meet here and every one of them is a rule a reasonable engineer would
+# "simplify" into a bug.
+#
+# A CLUSTER'S RUNG IS ITS HIGHEST MEMBER'S, never the mean and never a
+# headcount. Averaging punishes a correct lone expert -- the one brain that
+# read the spec, dragged down by the two that guessed -- and it lets two weak
+# agreers manufacture a majority out of nothing either of them could show.
+#
+# SPREAD IS MEASURED BY LADDER POSITION AND BY NOTHING ELSE. Where more than
+# one cluster exists the winner's rung must be STRICTLY HIGHER than the
+# runner-up's: ``RUNG_ORDER.index(winner) < RUNG_ORDER.index(runner_up)``, with
+# no float anywhere in it. Equal rungs never adopt even when both clear the
+# floor, because two brains reading the same code and reaching different
+# answers from evidence of the same quality is exactly where a numeric margin
+# would manufacture a winner out of noise. Unanimity is the one case with no
+# runner-up, so the test is vacuous there and the floor alone governs.
+#
+# THERE IS NO SEPARATE THREE-WAY-SPLIT RULE. Rung strictness subsumes it, and
+# it handles the case the old unconditional rule got wrong: one brain citing
+# the spec against two speculating SHOULD win, and an escalation there throws
+# away the only grounded answer in the room.
+#
+# AND ORDER IS LOAD-BEARING. Every response's ``effective_rung`` is recomputed
+# from disk BEFORE any comparison between responses. Run the resolution
+# afterwards and a top-rung response with a dangling citation wins at 0.95 on a
+# claim no file supports -- and is then recorded as the rung it declared rather
+# than the rung it earned.
+
+
+def cluster_rung(cluster: list) -> str:
+    """A cluster's rung: its HIGHEST member rung, as a name.
+
+    NEVER THE MEAN, never a sum, never headcount-weighted. Averaging punishes a
+    correct lone expert and lets two weak agreers manufacture a majority; a sum
+    IS a headcount wearing the ladder's clothes.
+
+    ``RUNG_ORDER`` is highest-first, so the highest rung is the SMALLEST index
+    and ``min`` over positions is the maximum over rungs. Positions, never
+    values: a comparison between two floats here would be the numeric threshold
+    this phase exists to keep out, arriving one function away from the place it
+    is forbidden.
+
+    Every member's rung is held to the enum on the way in. ``RUNG_ORDER.index``
+    raises ``ValueError`` on anything else -- outside ``TrackerError``, so it
+    escapes every handler a controller has written -- and this function is
+    public: a caller assembles the mapping it is handed.
+    """
+    if not isinstance(cluster, list) or not cluster:
+        raise QuorumError(
+            f"an empty cluster has no rung ({cluster!r}); a cluster is the "
+            "members that agreed, and nobody agreeing is not an answer priced "
+            "at the bottom of the ladder -- it is no answer at all")
+    positions = []
+    for member in cluster:
+        if not isinstance(member, dict):
+            raise QuorumSchemaInvalid(
+                f"cluster member {member!r} is {type(member).__name__}, not an "
+                "object; a member with no readable rung cannot be the maximum "
+                "and cannot be shown not to be")
+        rung = member.get("effective_rung")
+        if not _is_rung(rung):
+            raise QuorumSchemaInvalid(
+                f"cluster member states effective_rung {rung!r}, which is not "
+                "one of the five; a rung outside the enum is never defaulted, "
+                "because the value that would arrive is legal and the door it "
+                "came through is not")
+        positions.append(RUNG_ORDER.index(rung))
+    return RUNG_ORDER[min(positions)]
+
+
+def _answer_key(payload: dict) -> str:
+    """One response's answer key, held to being an answer.
+
+    ``payload["answer_key"]`` is the spelling this replaces: ``group_responses``
+    is public and a caller assembles what it is handed, so a key that is a list
+    compares unequal to every other key and silently makes its response its own
+    cluster -- an agreement that never happened, reported as a disagreement.
+    """
+    if not isinstance(payload, dict):
+        raise QuorumSchemaInvalid(
+            f"a response is {type(payload).__name__}, not an object; there is "
+            "no answer in it to compare and no consequence to compare it by")
+    key = payload.get("answer_key")
+    if not _text(key):
+        raise QuorumSchemaInvalid(
+            f"answer_key {key!r} is not an answer; a blank key names no option, "
+            "so it matches no other answer and clusters alone -- a brain "
+            "reported as disagreeing with two it never spoke against")
+    return key.strip()
+
+
+def _consequence_subjects(payload) -> dict:
+    """What a response ASSERTS, as the ``(kind, subject) -> value`` mapping.
+
+    ``_candidate_consequences`` rather than a second reader, and the reuse is
+    the point: it is the gate ``check_contradiction`` already puts a candidate
+    through, so a consequence legal in grouping and illegal in the
+    contradiction check cannot exist. It screens through
+    ``_consequence_problems`` -- the same gate ``validate_brain_response``
+    uses -- refuses the empty list, and refuses a response that asserts one
+    subject twice, which would otherwise agree with whichever other answer
+    happened to match the value the dict kept.
+    """
+    if not isinstance(payload, dict):
+        raise QuorumSchemaInvalid(
+            f"a response is {type(payload).__name__}, not an object; it "
+            "asserts nothing about the repository, so it agrees with nothing "
+            "and conflicts with nothing")
+    return _candidate_consequences(payload.get("consequences"))
+
+
+def _same_answer(left: dict, right: dict, options_supplied: bool):
+    """``True``, ``False``, or ``None`` when the two describe different things.
+
+    NAMED OPTIONS COMPARE BY KEY, because that is what a named option is: the
+    question supplied the vocabulary and an answer either used it or did not.
+
+    PROSE ANSWERS COMPARE BY CONSEQUENCE, because two sentences that mean the
+    same thing are not comparable as text and this module interprets no text.
+    Two prose answers agree only where they assert the same value for something
+    they both spoke about. Sharing NO subject is the third verdict and not a
+    fourth kind of agreement: two answers about different files have neither
+    agreed nor conflicted, and folding that into either is the fail-open
+    direction -- ``True`` manufactures a cluster out of silence, ``False``
+    manufactures a disagreement out of it.
+    """
+    if options_supplied:
+        return _answer_key(left) == _answer_key(right)
+    here = _consequence_subjects(left)
+    there = _consequence_subjects(right)
+    shared = sorted(set(here) & set(there))
+    if not shared:
+        return None
+    for key in shared:
+        if here[key] != there[key]:
+            return False
+    return True
+
+
+def group_responses(responses: list, *, options_supplied: bool) -> tuple:
+    """Cluster the answers. WHEN IN DOUBT THEY ARE DIFFERENT ANSWERS.
+
+    Returns ``(clusters, verdicts)``: clusters are lists of INDEXES into
+    ``responses``, in the order the responses were dispatched, and ``verdicts``
+    maps each ``(i, j)`` pair with ``i < j`` to ``True``, ``False`` or ``None``.
+
+    A response joins a cluster only when it is ``True`` against EVERY member of
+    it. ``None`` is not agreement and neither is a majority of the members: an
+    answer that agrees with one member and describes something else entirely to
+    another has not joined that cluster, and admitting it would let two answers
+    that never touched be counted as having agreed through a third. Different
+    pushes toward escalation, which is the safe direction.
+
+    ``options_supplied`` IS A BOOL AND IS NOT TRUTH-TESTED FROM A FILE. It
+    decides which of two incomparable comparisons is made, so ``"no"`` read
+    back off disk -- truthy -- would compare prose answers by an answer key
+    none of them was asked to supply, and three distinct answers would cluster
+    as one.
+    """
+    if not isinstance(responses, list):
+        raise QuorumSchemaInvalid(
+            f"responses are {type(responses).__name__}, not a list; a string "
+            "walks one character at a time and anything else walks not at all, "
+            "and a quorum over nothing agrees with itself")
+    if not isinstance(options_supplied, bool):
+        raise QuorumSchemaInvalid(
+            f"options_supplied is {options_supplied!r}, not a bool; it selects "
+            "between comparing answer keys and comparing consequences, and a "
+            "truthy string read back off disk compares prose answers by a key "
+            "none of them was asked to supply")
+    verdicts = {}
+    for first in range(len(responses)):
+        for second in range(first + 1, len(responses)):
+            verdicts[(first, second)] = _same_answer(
+                responses[first], responses[second], options_supplied)
+    clusters: list = []
+    for index in range(len(responses)):
+        for cluster in clusters:
+            if all(verdicts[(member, index)] is True for member in cluster):
+                cluster.append(index)
+                break
+        else:
+            clusters.append([index])
+    return clusters, verdicts
+
+
+def _best_member(cluster: list) -> dict:
+    """The member whose own rung IS the cluster's rung.
+
+    The cluster's answer is recorded from ONE member's payload -- its answer
+    text, its consequences, its anchors -- and it must be the member that
+    earned the rung the cluster was ranked at. Taking the first member instead
+    would record a ``speculation``'s wording and anchors under a ``specified``
+    cluster's rung: an audit trail stating that the run adopted an answer on
+    grounding the recorded answer never had.
+
+    ``min`` over ladder POSITION, so ties keep dispatch order, and never over
+    ``RUNGS`` values: a float comparison here is the numeric threshold this
+    phase forbids, one helper away from where it is forbidden.
+    """
+    return min(cluster,
+               key=lambda member: RUNG_ORDER.index(member["effective_rung"]))
+
+
+# --- the adoption floor ----------------------------------------------------
+#
+# Individual confidence claims are often unfalsifiable; the DISTRIBUTION is
+# not. A run whose adopted decisions are almost all top-rung is either working
+# on an exceptionally well-specified problem or grading itself generously, and
+# the second is far more common. So after enough adoptions to mean anything,
+# a mean above the inflation bar raises the floor one rung for the rest of the
+# run -- and the adjustment is RECORDED, because a bar that moved with no
+# record of moving is a bar a later reader cannot check.
+#
+# IT NEVER FALLS. A ratchet that could relax is not a ratchet: the run would
+# raise its own bar on the adoptions that inflated it and lower it again on the
+# next honest answer, which is the self-serving move every constant in this
+# section is frozen against.
+
+#: Where the raised floor is recorded, inside the run's own quorum tree.
+_FLOOR_FILE = "floor.json"
+
+#: The floor this run starts at, DERIVED from ``ADOPTION_FLOOR`` rather than
+#: re-typed beside it. Two spellings of one bar drift the day either is edited,
+#: and the drift is invisible: both values are legal rungs.
+_FLOOR_RUNG = next(name for name in RUNG_ORDER if RUNGS[name] == ADOPTION_FLOOR)
+
+#: How many adoptions a distribution needs before it is a distribution. Below
+#: this, one top-rung answer is a sample and not a signal.
+_INFLATION_SAMPLE = 5
+
+#: The mean above which the run is grading itself generously. This is NOT the
+#: spread threshold standing rule 1 forbids and the difference is not a
+#: technicality: that rule is about comparing two CLUSTERS, where a float
+#: margin manufactures a winner out of noise. This compares no clusters and
+#: decides no question -- it reads one run's own record of itself and moves a
+#: bar in one direction only.
+_INFLATION_MEAN = 0.90
+
+
+def _persisted_floor(path: Path) -> str:
+    """The floor this run has already raised itself to, or the schema floor.
+
+    ``lexists`` RATHER THAN ``exists``, for ``_decisions_text``'s reason and
+    with a sharper consequence. ``exists()`` is false for a directory, a
+    dangling symlink, a symlink loop and a FIFO, and answering any of them with
+    "nothing recorded" silently RESETS the floor to the schema minimum -- the
+    one direction this ratchet exists to make impossible, reached by a name the
+    run directory carries rather than by a decision anybody made.
+
+    AND A RECORDED FLOOR BELOW THE SCHEMA FLOOR IS A STOP, not a value to be
+    clamped. ``floor.json`` is a file in a directory a human -- or a controller
+    -- may edit, and ``{"floor_rung": "speculation"}`` is the whole of the
+    self-serving move: a machine that can lower its own adoption bar has no
+    adoption bar. Clamping it silently would leave the file saying one thing
+    and the run doing another, so the file is refused and named.
+    """
+    if not os.path.lexists(path):
+        return _FLOOR_RUNG
+    record = _read_json(path, "the recorded adoption floor")
+    if not isinstance(record, dict):
+        raise QuorumSchemaInvalid(
+            f"{_FLOOR_FILE} holds a {type(record).__name__}, not the recorded "
+            "floor; a bar that cannot be read is a bar nothing is held to")
+    rung = record.get("floor_rung")
+    if not _is_rung(rung):
+        raise QuorumSchemaInvalid(
+            f"{_FLOOR_FILE} records floor_rung {rung!r}, which is not one of "
+            "the five; a floor outside the ladder admits every answer or none "
+            "of them, and nothing downstream can say which")
+    if RUNG_ORDER.index(rung) > RUNG_ORDER.index(_FLOOR_RUNG):
+        raise QuorumSchemaInvalid(
+            f"{_FLOOR_FILE} records floor_rung {rung!r}, which is BELOW the "
+            f"schema floor {_FLOOR_RUNG!r}; the floor rises and never falls, "
+            "and a run that can write itself a lower bar has no bar -- this "
+            "file is refused rather than clamped, so it cannot say one thing "
+            "while the run does another")
+    return rung
+
+
+def _adopted_rungs(run_dir: Path) -> list:
+    """The winning rung of every adoption this run has recorded, from the records.
+
+    NOT FROM ``quorum_events``. That function is the BUDGET PROJECTION and says
+    so: four cells, and ``winner`` is not one of them, because the budget has no
+    stake in how well-grounded an adoption was. Reading the rung out of it is a
+    ``KeyError`` -- outside ``TrackerError`` -- and widening it would make the
+    budget's screening claim cover a field the budget never reads.
+
+    ``_final_event`` still does the reading, so the qid, the status and the
+    phase are validated exactly as the budget validates them, and the rung is
+    taken from the same single read rather than from a second one.
+    """
+    root = run_dir / _QUORUM_DIRNAME
+    if not root.is_dir():
+        return []
+    rungs = []
+    for final in sorted(root.glob("*/" + _FINAL_FILE)):
+        event, record = _final_event(final, final.parent.name)
+        if event["status"] != _CHARGED_STATUS:
+            continue
+        winner = record.get("winner")
+        if not isinstance(winner, dict) or not _is_rung(winner.get("rung")):
+            raise QuorumSchemaInvalid(
+                f"{event['qid']}: an adopted quorum records winner {winner!r}, "
+                "which states no rung; the floor is raised by the distribution "
+                "of what this run adopted, and an adoption that reports no "
+                "grounding is one the distribution cannot see")
+        rungs.append(winner["rung"])
+    return rungs
+
+
+def current_floor(run_dir: str) -> dict:
+    """The adoption floor for this run. It RISES on inflation and never falls.
+
+    Returns the floor as a name and as its value; every comparison against it
+    in this module is made by ladder POSITION, and the value is reported for
+    the terminal report a human reads.
+
+    THE ADJUSTMENT IS WRITTEN DOWN. A bar that moved with no record of moving
+    is a bar nobody can check afterwards, and the one question a reader of a
+    refused adoption has is what it was measured against.
+    """
+    path = _run_path(run_dir) / _QUORUM_DIRNAME / _FLOOR_FILE
+    rung = _persisted_floor(path)
+    adopted = _adopted_rungs(_run_path(run_dir))
+    if len(adopted) >= _INFLATION_SAMPLE:
+        mean = sum(RUNGS[name] for name in adopted) / len(adopted)
+        position = RUNG_ORDER.index(rung)
+        raised = RUNG_ORDER[max(0, position - 1)]
+        if mean > _INFLATION_MEAN and RUNG_ORDER.index(raised) < position:
+            rung = raised
+            _write_run_file(
+                path,
+                _dumps({"floor_rung": rung, "raised_after": len(adopted),
+                        "mean": round(mean, 4)}),
+                "the recorded adoption floor")
+    return {"floor_rung": rung, "floor_value": RUNGS[rung]}
+
+
+# --- phase 3: the outcome --------------------------------------------------
+
+#: The status a quorum whose three answers were not about one question carries.
+#: It is deliberately NOT ``escalated``: a question the quorum found
+#: undecidable and a question it escalated are different facts, and the
+#: terminal report keys off which.
+_UNDECIDABLE = "question-not-decidable"
+
+#: ``rejected-contradicts-<provenance>``, built from the provenance of the
+#: record that was contradicted so the two statuses cannot come apart from the
+#: two provenances.
+_REJECTED_PREFIX = "rejected-contradicts-"
+
+#: The transition id one finalisation replays against.
+_QUORUM_TRANSITION = "quorum-"
+
+#: Two blockers, not one. One brain unable to proceed is a brain; two is the
+#: question. Named so a comparison written at the site cannot drift from it.
+_BLOCKED_QUORUM = 2
+
+def _opened_token(opened: dict, qid: str, field: str, cost: str) -> str:
+    """One ``open.json`` cell that must be a single token, read back and held.
+
+    ``opened[field]`` is the spelling this replaces, for ``_bound_digest``'s
+    reason: a record that omits the key raises ``KeyError``, outside
+    ``TrackerError``. The grammar matters as much as the presence -- the phase
+    is copied into ``final.json`` and ``_final_event`` refuses a phase that is
+    not one token, so an open record carrying junk here would publish a final
+    record every later read of this run stops on.
+    """
+    value = opened.get(field)
+    if not _text(value) or not _TOKEN.fullmatch(value.strip()):
+        raise QuorumSchemaInvalid(
+            f"the open record for {qid} states {field} {value!r}, which is not "
+            f"one token; {cost}")
+    return value.strip()
+
+
+def _opened_blocks(opened: dict, qid: str) -> list:
+    """What this question BLOCKS, read back off the open record.
+
+    It becomes the decision record's ``Scope``, which is the cell a task reads
+    to find out whether a decision applies to it. A scope assembled out of
+    whatever the file happened to hold would name tasks that do not exist, or
+    none at all, in a field nothing downstream validates.
+    """
+    blocks = opened.get("blocks")
+    if not isinstance(blocks, list) or not blocks:
+        raise QuorumSchemaInvalid(
+            f"the open record for {qid} states blocks {blocks!r}; a question "
+            "that blocks nothing was never admissible, and a decision recorded "
+            "with no scope applies to every task or to none")
+    for entry in blocks:
+        if not _text(entry) or not _TOKEN.fullmatch(entry.strip()):
+            raise QuorumSchemaInvalid(
+                f"the open record for {qid} states block {entry!r}, which is "
+                "not a task token; the scope cell is read to decide whether a "
+                "decision binds a task, and one that names nothing binds none")
+    return [entry.strip() for entry in blocks]
+
+
+def _minted_axis(axis: str, qid: str, tracker: dict) -> str:
+    """The axis THE DECISION RECORD carries, minting one where none was tagged.
+
+    A question raised after the stage-03 gate closed is asked on the reserved
+    literal ``new``, and it is ADOPTED LIKE ANY OTHER -- the fixture holds an
+    adopted ``new``-axis row, the suite pins the literal as legal in the
+    tracker, and there is no escalation reason token for it anywhere in the
+    gate chain. Escalating it would be a schema change dressed as a policy
+    answer, and since stage 03 raises at most four questions, ``new`` is the
+    default for everything raised mid-run: it would hand the human the common
+    case in a skill whose entire point is not doing that.
+
+    THE MINT IS THE QUESTION'S OWN BARE QID. Not a derived slug -- nothing in
+    this repository derives one, so the name would be agent-invented and
+    unrecomputable, which is the failure ``derive_qid`` is written against: a
+    name no derivation can reproduce is a question that can never be found
+    again, and ``_ensure_decision_recorded`` must be able to recompute this
+    byte-identically to stay idempotent. And not ``axis-<qid>``, because the
+    fixture's own stage-03 ids include ``axis-2``: that prefix namespace is
+    already occupied by the very ids a minted axis must not collide with.
+
+    THE ROW AND THE RECORD LEGALLY DISAGREE, and both are right. The ``##
+    Quorum`` row records WHAT WAS ASKED and keeps ``new`` forever;
+    ``_validate_quorum`` closes that cell to the stage-03 question ids plus the
+    literal, so a minted axis could not be written there anyway. The decision
+    record records THE AXIS THAT QUESTION OPENED. So this is returned ALONGSIDE
+    the asked axis rather than replacing it.
+
+    THE COLLISION IS CLOSED HERE, and it is the fail-FALSE twin of the fail-open
+    the reservation exists to prevent: a minted axis that happened to equal a
+    stage-03 question id would bucket this decision with that axis's decisions
+    and manufacture a contradiction that does not exist -- a run halted on a
+    disagreement nobody had. The writer already holds the tracker.
+
+    KNOWN AND ACCEPTED: two questions that each open the SAME conceptual axis
+    mint different axes and are never compared. That is bounded by the drift
+    budget and the depth cap, and it fails silent-but-inspectable -- the axis
+    still resolves to the question that opened it -- rather than fail-open.
+    """
+    if axis != _RESERVED_AXIS:
+        return axis
+    registered = {row["id"] for row in tracker["questions"]}
+    if qid in registered:
+        raise QuorumSchemaInvalid(
+            f"the axis minted for {qid} collides with stage-03 question id "
+            f"{qid!r}; the minted axis would share a bucket with that "
+            "question's decisions and manufacture a contradiction that does "
+            "not exist, which is the fail-false twin of the fail-open the "
+            "reserved literal is closed against")
+    return qid
+
+
+def _finalisation_base(run_dir: Path, qid: str, tracker: dict) -> tuple:
+    """The cells every outcome carries, and the open record they came from.
+
+    THE MINT HAPPENS HERE, ahead of every gate, because
+    ``check_contradiction`` REFUSES the reserved literal outright: a candidate
+    arriving on ``new`` would raise rather than be compared, and moving the
+    mint after the check is the one ordering that cannot work.
+    """
+    opened = _open_record(run_dir, qid)
+    axis = _opened_token(
+        opened, qid, "axis",
+        "the axis is the key every contradiction check groups by, and one that "
+        "cannot be written into a decision record groups with nothing")
+    phase = _opened_token(
+        opened, qid, "phase",
+        "the per-phase drift budget groups by it, and a finalisation charged to "
+        "no phase at all is an adoption the ceiling cannot see")
+    base = {
+        "qid": qid,
+        #: THE QUESTION AS ASKED, carried in the outcome rather than re-read at
+        #: record time. ``_question_record`` re-derives the qid from the
+        #: record's own question and axis and compares, so this read is also
+        #: where a half-restored directory is caught; carrying the result means
+        #: the repair path writes the same words the outcome was computed
+        #: against rather than whatever the file says when the repair runs.
+        "question": _question_record(run_dir, qid)["question"],
+        "axis": axis,
+        "decision_axis": _minted_axis(axis, qid, tracker),
+        "phase": phase,
+        "blocks": _opened_blocks(opened, qid),
+        "context_digest": _bound_digest(
+            opened, qid, "context_digest",
+            "the drift a resumed quorum is judged by is the distance between "
+            "that value and the audit trail as it stands"),
+        "decision_id": None,
+        "winner": None,
+        "winner_rung": None,
+        "runner_up_rung": None,
+        "clusters": [],
+        "effective_rungs": {},
+        "demotion_reasons": {},
+        "reason": None,
+        "dispatched": True,
+    }
+    return base, opened
+
+
+def _stale_moves(run_dir: Path, qid: str, opened: dict, base: dict) -> list:
+    """What has moved under this quorum since it was dispatched.
+
+    ``classify_quorum`` asks the same two questions and puts the answer AHEAD
+    of every state that would act on the answers, and this is the resolution it
+    routes to. Waiting, re-dispatching and computing an outcome are all acts on
+    behalf of a question the run has since moved past, and re-deciding on
+    resume is precisely the silent-divergence failure this design exists to
+    prevent. Three good answers under a moved ``decisions.md`` are three good
+    answers to a question that is no longer the one in front of the run.
+
+    TWO DIGESTS, because they catch two facts at two moments and neither
+    subsumes the other: ``context_digest`` against ``decisions.md`` catches a
+    decision landing at the instant it lands, and ``payload_digest`` against a
+    fresh computation catches the file the brains were told to READ being
+    rewritten under them -- including by a hand edit of
+    ``decisions-effective.md``, which ``decisions.md`` cannot see at all.
+    """
+    moved = []
+    if base["context_digest"] != _context_digest(run_dir):
+        moved.append("decisions")
+    if _dispatched_digest(opened, qid) != payload_digest(qid, run_dir=run_dir):
+        moved.append("projection")
+    return moved
+
+
+def _latest_answers(run_dir: Path, qid: str, owners: list) -> tuple:
+    """Each owner's last answer, and the owners whose last answer was malformed.
+
+    ``_owner_attempts`` returns ``(digest, record)`` PAIRS, not records: the
+    digest is the identity ``publish_immutable`` returned for the bytes the
+    answer was stored as, and unpacking is what keeps the two apart.
+
+    An owner with NOTHING on record is a quorum that is not ready, and it is
+    ``QuorumIncomplete`` rather than an escalation: the controller owes a
+    dispatch, and escalating would hand a human a question three brains were
+    still working on. An owner whose FIRST answer was malformed is owed its one
+    re-dispatch for the same reason. An owner whose SECOND was malformed is
+    terminal -- a second invalid answer is a non-response -- and that is the
+    escalation, because a brain may force a human look and must never be able
+    to force an adoption by malforming.
+    """
+    latest, invalid = [], []
+    for owner in owners:
+        attempts = _owner_attempts(run_dir, qid, owner)
+        if not attempts:
+            raise QuorumIncomplete(
+                f"{owner} has not answered {qid}; the quorum is not ready and "
+                "the controller owes a dispatch, which is not the same fact as "
+                "a question a human must now settle")
+        _digest, attempt = attempts[-1]
+        if attempt["valid"]:
+            latest.append((owner, attempt["response"]))
+            continue
+        if len(attempts) < _MAX_ATTEMPTS:
+            raise QuorumIncomplete(
+                f"{owner} is owed its one re-dispatch for {qid}; a malformed "
+                "first answer buys exactly one re-ask, and finalising before it "
+                "is spent decides the question on two brains")
+        invalid.append(owner)
+    return latest, invalid
+
+
+def _compute_quorum_result(run_dir: Path, qid: str, tracker: dict) -> dict:
+    """The outcome of one quorum, computed from the files and from nothing else.
+
+    THE ORDER OF THE GATES IS THE DESIGN. Staleness outranks every state that
+    would act on the answers; a malformed quorum is escalated before anything
+    is priced; every response's rung is recomputed FROM DISK before any
+    comparison between responses; the floor is applied before the spread,
+    because a cluster below the bar is not adopted however far it is above the
+    runner-up; and the budget is re-checked LAST, at the moment the adoption
+    would actually charge it.
+    """
+    base, opened = _finalisation_base(run_dir, qid, tracker)
+    owners = _record_owners(opened, qid)
+    options_supplied = opened.get("options_supplied")
+    if not isinstance(options_supplied, bool):
+        raise QuorumSchemaInvalid(
+            f"the open record for {qid} states options_supplied "
+            f"{options_supplied!r}, not a bool; it decides whether answers are "
+            "compared by key or by consequence, and a truthy string read back "
+            "off disk clusters three distinct prose answers as one")
+
+    moved = _stale_moves(run_dir, qid, opened, base)
+    if moved:
+        #: NOT RE-OPENED AND NOT FINALISED ON THE MERITS. The answers may be
+        #: perfect and they are answers to a question the run has moved past.
+        return dict(base, status=_ESCALATED, reason="stale-context",
+                    moved=moved, route=_STALE_ROUTE)
+
+    latest, invalid = _latest_answers(run_dir, qid, owners)
+    if invalid:
+        return dict(base, status=_ESCALATED, reason="incomplete-quorum",
+                    invalid_owners=invalid)
+
+    #: ORDER IS LOAD-BEARING: every citation is resolved from disk BEFORE any
+    #: comparison between responses. Run afterwards, a top-rung response with a
+    #: dangling citation wins on a claim no file supports and is recorded at
+    #: the rung it declared rather than the rung it earned.
+    #:
+    #: THE ROOT IS THE ``## Run`` FIELD, read through ``repo_root``. Deriving
+    #: it here resolves nothing, demotes every grounded answer to
+    #: ``engineering-judgement``, puts every cluster below the floor and
+    #: escalates the entire run -- with no error anywhere to find it by.
+    root = repo_root(tracker)
+    for owner, payload in latest:
+        base["effective_rungs"][owner] = effective_rung(payload, root)
+        #: RECORDED, NOT RE-DERIVED LATER. ``_demotion_reason`` is what priced
+        #: this answer; deriving the name again at read time derives it from a
+        #: different code path than the one that made the decision, and the two
+        #: can disagree with nothing failing.
+        base["demotion_reasons"][owner] = _demotion_reason(payload)
+
+    blocked = [owner for owner, payload in latest
+               if _text(payload.get("blocker"))]
+    if len(blocked) >= _BLOCKED_QUORUM:
+        #: One brain unable to proceed is a brain. Two is the question.
+        return dict(base, status=_ESCALATED, reason="blocked",
+                    blocked_owners=blocked)
+
+    ordered = [owner for owner, _payload in latest]
+    payloads = [payload for _owner, payload in latest]
+    clusters, verdicts = group_responses(payloads,
+                                         options_supplied=options_supplied)
+    if verdicts and all(verdict is None for verdict in verdicts.values()):
+        #: No two answers spoke about the same thing. That is not a tie and not
+        #: a disagreement -- there is nothing here to decide between.
+        return dict(base, status=_UNDECIDABLE,
+                    reason="answers-describe-different-things")
+
+    graded = [[{"owner": ordered[index], "payload": payloads[index],
+                "effective_rung": base["effective_rungs"][ordered[index]]}
+               for index in cluster] for cluster in clusters]
+    #: Sorted by ladder POSITION and by nothing else, so a tie keeps dispatch
+    #: order. A second key -- cluster size, subject count -- could only break
+    #: ties between equal rungs, and equal rungs never adopt: it would decide
+    #: nothing while looking like a rule.
+    ranked = sorted(graded,
+                    key=lambda cluster: RUNG_ORDER.index(cluster_rung(cluster)))
+    winner = ranked[0]
+    winner_rung = cluster_rung(winner)
+    runner_up_rung = None
+    if len(ranked) > 1:
+        runner_up_rung = cluster_rung(ranked[1])
+    base["winner_rung"] = winner_rung
+    base["runner_up_rung"] = runner_up_rung
+    base["clusters"] = [[member["owner"] for member in cluster]
+                        for cluster in ranked]
+
+    floor = current_floor(str(run_dir))
+    #: BY POSITION, never by value. ``RUNGS[winner] < floor_value`` is the same
+    #: answer today and it is a float comparison between two rungs, which is
+    #: the shape this phase forbids; the floor is reported as a value for the
+    #: human and compared as a position by the code.
+    if RUNG_ORDER.index(winner_rung) > RUNG_ORDER.index(floor["floor_rung"]):
+        return dict(base, status=_ESCALATED, reason="below-floor",
+                    floor_rung=floor["floor_rung"])
+
+    if runner_up_rung is not None:
+        #: NO NUMERIC MARGIN. Strictly higher by ladder position or escalate,
+        #: and the condition is spelled as the negation of the rule itself --
+        #: ``index(winner) < index(runner_up)`` -- so that relaxing it in
+        #: either direction fails the suite. Unanimity has no runner-up, so the
+        #: test is vacuous there and the floor alone governs.
+        if not RUNG_ORDER.index(winner_rung) < RUNG_ORDER.index(runner_up_rung):
+            return dict(base, status=_ESCALATED,
+                        reason="equal-or-inverted-rung")
+
+    decisions_text = _decisions_text(run_dir)
+    #: THE AUDIT TRAIL IS PARSED BEFORE ANY GATE READS IT, and a trail that
+    #: does not parse is a read-only stop here exactly as it is everywhere
+    #: else. Parsed once and handed down, so the contradiction check, the depth
+    #: walk and the record writer cannot read three different files.
+    decisions = parse_decisions(decisions_text)
+    outcome = _apply_adoption_gates(base, winner, winner_rung, decisions)
+    if outcome["status"] != _CHARGED_STATUS:
+        return outcome
+
+    #: THE DRIFT CAP IS ENFORCED WHERE THE CHARGE HAPPENS, AND THAT IS HERE.
+    #: ``open_quorum`` charges NOTHING -- it is an admission check -- so two
+    #: questions raised against one remaining adoption both pass it even
+    #: perfectly serialised, because the first spent nothing. Checked only at
+    #: raise time, the budget bounds how many questions may be ASKED and not
+    #: how many decisions a machine may MAKE, which is the opposite of what it
+    #: is for. An in-flight reservation was considered and refused: it would
+    #: still not protect the cap, and one crashed quorum would leave its phase
+    #: escalating every question for ever.
+    #:
+    #: LAST, after every gate, so that a question which would have been
+    #: rejected for contradicting a human is reported as that and not as a
+    #: budget that happened to be spent. Escalations never reach this line, so
+    #: nothing here charges for asking.
+    budget = quorum_budget(str(run_dir), phase=base["phase"])
+    if not budget["may_raise"]:
+        return dict(base, status=_ESCALATED, reason=budget["reason"],
+                    phase_adoptions=budget["phase_adoptions"],
+                    phase_ceiling=budget["phase_ceiling"],
+                    run_adoptions=budget["run_adoptions"],
+                    run_ceiling=budget["run_ceiling"],
+                    adopted=list(budget["adopted"]))
+
+    #: THE RECORD IS RENDERED AND VALIDATED BEFORE ``final.json`` IS PUBLISHED,
+    #: which is the only order that keeps the run alive. ``decisions.md`` is
+    #: append-only and a record the parser refuses makes every later read of
+    #: this run a read-only stop; an adoption whose record cannot be written is
+    #: therefore not an adoption, and the remedy is the human this stage exists
+    #: to reach.
+    try:
+        _rendered_decisions(outcome, decisions_text, decisions)
+    except TrackerValidationError as exc:
+        return dict(base, status=_ESCALATED, reason="unrecordable-decision",
+                    refusal=str(exc))
+    return outcome
+
+
+def _apply_adoption_gates(base: dict, winner: list, winner_rung: str,
+                          decisions: dict) -> dict:
+    """Everything that can refuse an answer which already cleared the rung bar.
+
+    A quorum may decide an open question. IT MAY NEVER OVERRULE A RECORDED ONE:
+    a candidate contradicting a decision already in effect is rejected at any
+    rung, and the rejection is RECORDED rather than discarded -- a run with
+    several ``rejected-contradicts-*`` events is a run whose brains keep
+    pulling away from what the user asked for, and that count is the earliest
+    drift warning available.
+
+    THE IRREVERSIBLE-AXIS LIST IS CLOSED AND NO CONFIDENCE BUYS PAST IT.
+    ``forecloses`` and ``blast`` exist precisely so that asking what an answer
+    DESTROYS can surface risk that asking what it achieves never does, and the
+    blast radius is taken over the WHOLE winning cluster: one member naming
+    ``external-service`` is the cluster naming it, because the cluster is what
+    is being adopted.
+
+    THE DEPTH IS COMPUTED, NEVER ASSUMED. Writing a placeholder into the
+    record's ``Depth`` would put a number into an append-only audit trail that
+    nothing later can correct, and depth is the one distance the cap measures.
+    ``decision_depth`` raises on an anchor that names no record in effect --
+    ideally that is a re-dispatch of that brain, but a brain whose answer was
+    LEGAL can never be re-asked (``record_brain_response`` refuses the second
+    answer outright), so at this point the only live remedy is the human.
+    """
+    best = _best_member(winner)
+    payload = best["payload"]
+    blast = []
+    for member in winner:
+        for entry in member["payload"]["blast"]:
+            if _member(entry, IRREVERSIBLE_AXES) and entry not in blast:
+                blast.append(entry)
+    if blast:
+        return dict(base, status=_ESCALATED, reason="irreversible-axis",
+                    blast=sorted(blast))
+
+    try:
+        contradicted = check_contradiction(decisions, {
+            "axis": base["decision_axis"],
+            "answer_key": payload["answer_key"],
+            "consequences": payload["consequences"],
+        })
+    except QuorumSchemaInvalid as exc:
+        #: THE CANDIDATE, never the records: every ``QuorumSchemaInvalid``
+        #: ``check_contradiction`` raises is about the answer handed to it -- a
+        #: generic approval, a key that names no option -- while an unreadable
+        #: audit trail is ``TrackerValidationError`` and stays a run stop. An
+        #: answer that cannot be compared against the axis cannot be shown NOT
+        #: to contradict it, and the permissive reading of that is the one that
+        #: adopts; a brain typing ``yes`` must reach a human, not halt the run.
+        return dict(base, status=_ESCALATED, reason="uncomparable-answer",
+                    refusal=str(exc))
+    if contradicted is not None:
+        provenance = decisions["decisions"][contradicted]["provenance"]
+        return dict(
+            base, status=_REJECTED_PREFIX + provenance,
+            contradicted_decision=contradicted,
+            reason=f"the winning answer contradicts {contradicted}, which this "
+                   f"run has already decided with provenance {provenance}")
+
+    try:
+        depth = decision_depth(decisions, payload["consistent_with"])
+    except QuorumSchemaInvalid as exc:
+        return dict(base, status=_ESCALATED, reason="unresolvable-anchor",
+                    refusal=str(exc))
+    if depth > DEPTH_CAP:
+        return dict(base, status=_ESCALATED, reason="depth-exceeded",
+                    depth=depth)
+
+    return dict(base, status=_CHARGED_STATUS, reason=None, depth=depth,
+                decision_id=_QUORUM_PREFIX + base["qid"],
+                winner={"answer_key": payload["answer_key"],
+                        "answer": payload["answer"],
+                        "rung": winner_rung,
+                        "owner": best["owner"],
+                        "consequences": payload["consequences"],
+                        "consistent_with": payload["consistent_with"],
+                        "forecloses": payload["forecloses"],
+                        "blast": payload["blast"]})
+
+
+def finalize_quorum(run_dir: str, *, qid: str) -> dict:
+    """Phase 3 of the record, through the tracker lock as ``quorum-<qid>``.
+
+    A FINALISED RECORD IS NEVER RECOMPUTED. ``final.json`` is a
+    single-assignment cell and the outcome it holds is returned unchanged: a
+    second run of the same three brains gives a different answer about as often
+    as the rung gap is narrow, and there is no principled way to prefer either.
+
+    THE DECISION IS APPENDED AFTER ``final.json`` IS PUBLISHED, and the order
+    is deliberate. An interruption between the two leaves a finalised quorum
+    with no decision record, which the next call REPAIRS -- the append is
+    idempotent. The reverse order leaves a decision record with no finalised
+    quorum, which the next call would double-append, and ``decisions.md`` is
+    append-only.
+
+    BOTH WRITES HAPPEN UNDER THE RUN LOCK, including on the repair path.
+    ``decisions.md`` is one run-global file and ``worker_limit >= 4``, so two
+    finalisations landing at once would each read the trail, each append, and
+    one of the two decisions would simply not be there -- an adoption charged
+    to the budget with nothing in the audit trail to show for it.
+
+    NEVER CALL THIS FROM INSIDE A HELD RUN LOCK, for ``open_quorum``'s reason:
+    ``select_lock_impl`` prefers POSIX ``flock``, which belongs to the open file
+    description rather than to the process, so a nested acquire does not
+    recurse -- it blocks against itself and raises at the timeout.
+    """
+    run_dir = _run_path(run_dir)
+    #: VALIDATED BEFORE ANYTHING ELSE, for ``classify_quorum``'s reason: a
+    #: foreign, missing or malformed run is a read-only stop, and the repair
+    #: path below writes.
+    validate_run(run_dir)
+    qid = _quorum_qid(qid)
+    final_path = _quorum_directory(run_dir, qid) / _FINAL_FILE
+    #: ``lexists`` rather than ``exists``, exactly as ``_open_under_lock`` and
+    #: ``classify_quorum`` spell it: a dangling symlink and a symlink loop are
+    #: names this directory CARRIES, and answering them with "not settled yet"
+    #: recomputes an outcome the run has already recorded.
+    if os.path.lexists(final_path):
+        #: ONE READ FOR BOTH HALVES -- ``_final_event`` validates and hands
+        #: back the record it validated, so the verdict and the outcome cannot
+        #: describe two different readings of a name a human may be restoring.
+        _event, settled = _final_event(final_path, qid)
+        if settled.get("status") == _CHARGED_STATUS:
+            with _exclusive_lock(run_dir):
+                _ensure_decision_recorded(run_dir, settled)
+        return settled
+    holder: dict = {}
+
+    def mutate(tracker):
+        result = _compute_quorum_result(run_dir, qid, tracker)
+        holder["result"] = result
+        publish_immutable(final_path, _dumps(result))
+        _ensure_decision_recorded(run_dir, result)
+        #: The tracker is returned unchanged: this task publishes the outcome
+        #: and the decision, and the ``## Quorum`` and ``## Escalations`` rows
+        #: that mirror it are written by the row writer P03 still owes. What
+        #: the transition buys HERE is its replay key -- the one transition
+        #: that changes run state is recorded as having happened.
+        return tracker
+
+    locked_tracker_update(run_dir, transition_id=_QUORUM_TRANSITION + qid,
+                          mutate=mutate)
+    result = holder.get("result")
+    if result is None:
+        #: The transition replayed without ``mutate`` -- only reachable if this
+        #: exact transition id was the last one applied, which means the
+        #: outcome is on disk. Read rather than recomputed, for the reason the
+        #: guard above exists.
+        _event, result = _final_event(final_path, qid)
+    return result
+
+
+# --- the decision record ---------------------------------------------------
+#
+# ADOPTION SUPERSEDES; IT NEVER APPENDS BESIDE. ``templates/decisions.md`` says
+# an axis holds at most one ``Adopted`` decision and ``parse_decisions``
+# ENFORCES it, so a later adoption on an occupied axis flips the standing
+# record to ``Status: Superseded`` AND appends the successor carrying
+# ``Supersedes: <id>`` -- both halves, in one write.
+#
+# HALF A WRITE IS UNRECOVERABLE. The file is append-only: a second ``Adopted``
+# record on one axis cannot be withdrawn, and a ``Superseded`` record with no
+# successor cannot be completed. Either way the file stops parsing and every
+# later read of the run is a read-only stop. So the whole new text is rendered,
+# PARSED, and checked against what it was meant to say before one byte of it
+# reaches disk.
+
+#: The blank line that separates two records in ``decisions.md``.
+_RECORD_GAP = "\n"
+
+
+def _one_line(value) -> str:
+    """Free text as a single field line, with no casefolding.
+
+    ``_squash`` is the wrong helper: it casefolds, and these strings are an
+    ANSWER and the things it forecloses -- prose a human reads back out of the
+    audit trail. What must go is the NEWLINE: a decision field is one line, and
+    a brain's answer is JSON that may legally hold as many as it likes, so an
+    unfolded answer would end the record at its first line break and leave the
+    rest of it parsed as prose between two decisions.
+    """
+    return " ".join(str(value).split())
+
+
+def _decision_record(result: dict, supersedes) -> str:
+    """One adopted quorum decision, in the grammar ``parse_decisions`` accepts.
+
+    ``Consistent with`` CARRIES DECISION IDS AND NOTHING ELSE.
+    ``_decision_anchors`` refuses anything that is not one, and a response's
+    ``consistent_with`` legally holds ``spec`` and ``repo`` anchors whose ids
+    are a spec line or a ``path:line``; writing those into this field is a
+    record the parser refuses, which -- written first and validated second --
+    would be a permanently unparseable audit trail. The field is omitted
+    entirely when the answer anchored on no decision, because an anchor list
+    that cannot be spelled is not the same fact as one that was empty.
+    """
+    winner = result["winner"]
+    anchors = []
+    for entry in winner["consistent_with"]:
+        if entry.get("kind") != "decision":
+            continue
+        anchor = entry["id"].strip()
+        if anchor not in anchors:
+            #: Deduplicated: ``_decision_anchors`` refuses a repeat, because one
+            #: citation is one claim of grounding and a repeat weights it double.
+            anchors.append(anchor)
+    lines = [
+        "",
+        f"## {result['decision_id']} — quorum answer on {result['decision_axis']}",
+        "",
+        f"- **Question:** {_one_line(result['question'])}",
+        f"- **Axis:** {result['decision_axis']}",
+        f"- **Answer:** {_one_line(winner['answer_key'])} — "
+        f"{_one_line(winner['answer'])}",
+        "- **Decision action:** quorum.adopt",
+        "- **Provenance:** quorum",
+        f"- **Depth:** {result['depth']}",
+        f"- **Grounding rung:** {winner['rung']}",
+        f"- **Runner-up rung:** {result['runner_up_rung'] or '-'}",
+        "- **Consequences:** " + ", ".join(
+            f"{item['kind']}:{_one_line(item['subject'])}"
+            f"={_one_line(item['value'])}" for item in winner["consequences"]),
+    ]
+    if anchors:
+        lines.append(f"- **Consistent with:** {', '.join(anchors)}")
+    lines.extend([
+        "- **Forecloses:** " + "; ".join(
+            _one_line(entry) for entry in winner["forecloses"] if _text(entry)),
+        f"- **Context digest:** {result['context_digest']}",
+        f"- **Scope:** {', '.join(result['blocks'])}",
+    ])
+    if supersedes is not None:
+        lines.append(f"- **Supersedes:** {supersedes}")
+    lines.extend(["- **Status:** Adopted", ""])
+    return "\n".join(lines)
+
+
+def _retired(text: str, did: str) -> str:
+    """``text`` with ``did``'s own ``Status`` flipped to ``Superseded``.
+
+    THE ONE LEGAL IN-PLACE MUTATION, and it is half of a write whose other half
+    is the successor record. Scoped to the target's OWN section rather than
+    applied to the document, for ``_decision_section``'s reason: a status line
+    found anywhere would retire whichever record happened to be read first.
+
+    The line is rebuilt around the value rather than matched as a whole
+    literal, because ``decisions.md`` carries two field spellings -- the
+    emphasised one this phase writes and the plain one the shipped template
+    writes -- and a writer that knew only its own would silently fail to retire
+    a record a human had copied out of the template.
+    """
+    lines = text.splitlines(keepends=True)
+    start = None
+    for index, line in enumerate(lines):
+        if line.startswith("## ") and line[3:].split("—")[0].strip() == did:
+            start = index
+            break
+    if start is None:
+        raise TrackerValidationError(
+            f"{did} stands adopted on this axis and the audit trail holds no "
+            "such section; the retirement and the successor are one write, and "
+            "half of it leaves a file that does not parse")
+    end = start + 1
+    while end < len(lines) and not lines[end].startswith("## "):
+        end += 1
+    flipped = 0
+    for index in range(start, end):
+        parsed = _decision_field(lines[index].rstrip("\n"))
+        if parsed is None or parsed[0] != "status":
+            continue
+        position = lines[index].rindex(parsed[1])
+        lines[index] = (lines[index][:position] + "Superseded"
+                        + lines[index][position + len(parsed[1]):])
+        flipped += 1
+    if flipped != 1:
+        raise TrackerValidationError(
+            f"{did} states its Status {flipped} times; the retirement half of "
+            "the mutation has exactly one line to change, and a record with "
+            "none or with two cannot be retired without guessing which")
+    return "".join(lines)
+
+
+def _rendered_decisions(result: dict, text: str, decisions: dict):
+    """The whole of the new ``decisions.md``, or ``None`` when it is already on file.
+
+    RENDERED AND VALIDATED BEFORE ANYTHING IS WRITTEN. Writing first and
+    parsing afterwards puts a record the parser refuses into an append-only
+    file and raises after the irreversible half has happened; every later read
+    of the run is then a read-only stop, and the remedy the message prescribes
+    -- reword one sentence -- means editing a file the parser will not let lose
+    a record.
+
+    AND THE PARSE IS CHECKED AGAINST WHAT THE RECORD WAS MEANT TO SAY. Parsing
+    proves the file is readable; it does not prove it says the right thing. A
+    consequence whose subject contains a comma, an answer whose key holds an em
+    dash, a scope carrying a separator -- each of those renders a record that
+    parses cleanly and asserts something the quorum never decided. Compared
+    back, every one of them is refused here instead of being discovered by a
+    contradiction check months later.
+    """
+    did = result["decision_id"]
+    if did in decisions["decisions"]:
+        #: Already on file. The append is idempotent because the repair path
+        #: runs on every finalisation of an already-settled quorum, and a
+        #: second append would put two records under one heading -- which
+        #: ``_decision_sections`` refuses outright.
+        return None
+    axis = result["decision_axis"]
+    standing = [other for other in decisions["axis_index"].get(axis, ())
+                if decisions["decisions"][other]["status"] == "Adopted"]
+    supersedes = None
+    if standing:
+        #: ``parse_decisions`` has already refused a file holding two, so this
+        #: list is one long. SUPERSEDE, NEVER APPEND BESIDE: a second Adopted
+        #: record on one axis is a file that stops parsing, and the axis index
+        #: has one Decision column and cannot say which of the two binds.
+        supersedes = standing[0]
+    updated = text
+    if supersedes is not None:
+        updated = _retired(updated, supersedes)
+    if updated and not updated.endswith("\n"):
+        updated += "\n"
+    updated = updated + _RECORD_GAP + _decision_record(result, supersedes)
+    parsed = parse_decisions(updated)
+    _assert_records_what_was_decided(parsed, result, supersedes)
+    return updated
+
+
+def _assert_records_what_was_decided(parsed: dict, result: dict,
+                                     supersedes) -> None:
+    """The rendered record, read back and compared with the outcome it states.
+
+    A round trip rather than a second rendering: the fields this checks are the
+    ones a later reader ROUTES on -- the axis it is bucketed under, the key it
+    answers with, the consequences a contradiction is measured by, the depth
+    the cap is measured by -- and every one of them can be made to parse
+    cleanly while saying something else by a separator inside a value nobody
+    escaped.
+    """
+    did = result["decision_id"]
+    record = parsed["decisions"].get(did)
+    if record is None:
+        raise TrackerValidationError(
+            f"the rendered record for {did} does not read back as a decision; "
+            "a heading the parser does not recognise is a decision written "
+            "into the audit trail that no task can ever cite")
+    winner = result["winner"]
+    expected = {(item["kind"], _one_line(item["subject"])):
+                _one_line(item["value"]) for item in winner["consequences"]}
+    mismatches = []
+    if record["axis"] != result["decision_axis"]:
+        mismatches.append(f"axis {record['axis']!r}")
+    if record["answer_key"] != _one_line(winner["answer_key"]):
+        mismatches.append(f"answer key {record['answer_key']!r}")
+    if record["depth"] != result["depth"]:
+        mismatches.append(f"depth {record['depth']!r}")
+    if record["status"] != "Adopted":
+        mismatches.append(f"status {record['status']!r}")
+    if record["consequences"] != expected:
+        mismatches.append(f"consequences {sorted(record['consequences'])}")
+    if record.get("supersedes", "").strip() != (supersedes or ""):
+        mismatches.append(f"supersedes {record.get('supersedes')!r}")
+    if mismatches:
+        raise TrackerValidationError(
+            f"the rendered record for {did} reads back as {mismatches}, which "
+            "is not what this quorum decided; a separator inside a value -- a "
+            "comma in a subject, an em dash in an answer key -- renders a "
+            "record that parses cleanly and asserts something else, and the "
+            "file is append-only")
+
+
+def _ensure_decision_recorded(run_dir: Path, result: dict) -> None:
+    """Append the adopted decision if it is not already on file. Idempotent.
+
+    Called with the run lock held, on both the finalising path and the repair
+    path: ``decisions.md`` is one run-global file, and two finalisations
+    appending at once lose one of the two decisions while both report success.
+    """
+    if result.get("status") != _CHARGED_STATUS:
+        #: Only an adoption writes. An escalation is the run asking for help
+        #: and a rejection adopted nothing; recording either as a decision
+        #: would put an answer in the trail that nothing decided.
+        return
+    text = _decisions_text(run_dir)
+    decisions = parse_decisions(text)
+    updated = _rendered_decisions(result, text, decisions)
+    if updated is None:
+        return
+    _write_run_file(run_dir / _DECISIONS_FILE, updated,
+                    "the decisions audit trail")

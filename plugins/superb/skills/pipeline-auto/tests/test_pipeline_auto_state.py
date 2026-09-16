@@ -16057,5 +16057,1292 @@ class ClassifyQuorum(unittest.TestCase):
                 self.assertEqual(accepted[where], {repr(text)[:48]
                                                    for text in HOSTILE_JSON})
 
+
+
+# --- clustering, rung strictness, and adoption ----------------------------
+
+#: THREE OWNERS THAT ARE NOT IN ALPHABETICAL ORDER, and whose alphabetical
+#: order is not their dispatch order either. `QUESTION`'s own owners are
+#: `brain-a, brain-b, brain-c`, so against that fixture "dispatch order",
+#: "alphabetical order" and "the first owner" are one sequence and no case can
+#: tell them apart — which is exactly how two mutants that reordered a
+#: load-bearing list survived the whole suite once already.
+#:
+#: Sorted these are `alpha, mm, qq`; dispatched they are `qq, alpha, mm`. So a
+#: winner owned by `mm` is the LAST dispatched and the MIDDLE alphabetically,
+#: and a loser owned by `alpha` is the FIRST alphabetically and the SECOND
+#: dispatched. Every ranking claim below is built so that rung, cluster size,
+#: dispatch position and alphabetical position disagree.
+QUORUM_OWNERS = ("qq", "alpha", "mm")
+assert list(QUORUM_OWNERS) != sorted(QUORUM_OWNERS), (
+    "a fixture whose owners are already sorted cannot tell dispatch order from "
+    "alphabetical order")
+
+#: What each rung must cite to EARN it, against the tree `adoption_repo`
+#: builds. `engineering-judgement` and `speculation` need nothing;
+#: `convention-cited` needs two exemplars, because one occurrence is an
+#: instance and a convention is a repetition.
+GRADED_EVIDENCE = {
+    "specified": ({"kind": "spec", "path": "spec.md", "line": 1,
+                   "quote": "session table"},),
+    "code-evidenced": ({"kind": "repo", "path": "db/engine.py", "line": 1,
+                        "quote": "PostgresEngine"},),
+    "convention-cited": ({"kind": "repo", "path": "db/engine.py", "line": 1,
+                          "quote": "PostgresEngine"},
+                         {"kind": "repo", "path": "db/pool.py", "line": 1,
+                          "quote": "PostgresEngine"}),
+    "engineering-judgement": (),
+    "speculation": (),
+}
+
+SESSION_SUBJECT = "db/session.sql"
+SPEC_MD = "The session table is the run's own store.\n"
+
+#: The human decision every adoption case anchors on, moved OFF the axis the
+#: question is asked on. `response()` anchors on `H-001`, and `decision_depth`
+#: stops on an anchor naming a record the run does not hold — so without this
+#: every adoption case below would escalate on its anchor rather than on the
+#: rule it is about. The axis is changed so the record grounds the answers
+#: without also being a decision on the question under test.
+UNRELATED_HUMAN = DECISION_HUMAN.replace("- **Axis:** storage-engine",
+                                         "- **Axis:** unrelated-axis")
+
+#: A quorum decision one layer out from the human one, on an axis of its own.
+#: An answer anchored on THIS is at depth 2; raise its own `Depth` to 2 and the
+#: answer is at 3, which is past the cap.
+DERIVED_DEPTH_ONE = """
+## Q-cccccccccccc — Cache layer, settled by quorum
+
+- **Question:** Which cache layer fronts the session table?
+- **Axis:** deep-axis
+- **Answer:** redis — a separate Redis process.
+- **Decision action:** quorum.adopt
+- **Provenance:** quorum
+- **Depth:** 1
+- **Consistent with:** H-001
+- **Consequences:** file-exists:cache/redis.conf=present
+- **Scope:** T04
+- **Status:** Adopted
+"""
+
+
+def graded(answer_key, rung, *, subject=SESSION_SUBJECT, value=None,
+           **overrides):
+    """One brain response that really EARNS `rung` against the fixture tree.
+
+    The citation is the point: `effective_rung` reads the file, so a helper
+    that declared a rung without citing anything would demote every response it
+    built and every case below would pass for the same wrong reason.
+    """
+    payload = response(
+        answer_key=answer_key,
+        rung=rung,
+        answer=f"Back the session table with {answer_key}.",
+        evidence=[dict(item) for item in GRADED_EVIDENCE[rung]],
+        consequences=[{"kind": "file-exists", "subject": subject,
+                       "value": answer_key if value is None else value}],
+    )
+    payload.update(overrides)
+    return payload
+
+
+def adoption_repo(case, *, decisions=None):
+    """A repository the fixture citations resolve against, holding a run.
+
+    `repo_with_a_run` writes `db/engine.py`; the second exemplar and the spec
+    are written here, so `convention-cited` and `specified` are reachable and
+    differ from each other by what they cite rather than by what they claim.
+    """
+    root, run_dir = repo_with_a_run(case)
+    write_repo(root, "db/pool.py", POOL_TEXT)
+    write_repo(root, "spec.md", SPEC_MD)
+    (run_dir / "decisions.md").write_text(
+        UNRELATED_HUMAN if decisions is None else decisions, encoding="utf-8")
+    return root, run_dir
+
+
+def open_question(case, run_dir, **overrides):
+    """One dispatched quorum on `QUORUM_OWNERS`, and its qid."""
+    fields = {"owners": ", ".join(QUORUM_OWNERS)}
+    fields.update(overrides)
+    index = len(list(Path(run_dir).glob("question-*.md")))
+    path = Path(run_dir) / f"question-{index}.md"
+    path.write_text(question_text(**fields), encoding="utf-8")
+    opened = pas.open_quorum(str(run_dir), question_record=str(path))
+    case.assertEqual(opened["owners"], list(QUORUM_OWNERS),
+                     "the dispatch order on disk is this fixture's order, or "
+                     "nothing below is about ordering")
+    return opened["qid"]
+
+
+def answer_quorum(run_dir, qid, payloads, owners=QUORUM_OWNERS):
+    for owner, payload in zip(owners, payloads):
+        pas.record_brain_response(str(run_dir), qid=qid, owner=owner,
+                                  payload=dict(payload, qid=qid))
+
+
+def cluster_of(*rungs):
+    return [{"effective_rung": rung} for rung in rungs]
+
+
+class ClusterRungTests(unittest.TestCase):
+    """A cluster's rung is its HIGHEST member's, and that is the whole rule.
+
+    Averaging punishes a correct lone expert — the one brain that read the
+    spec, dragged down by the two that guessed — and a headcount-weighted
+    reading lets two weak agreers manufacture a majority out of nothing either
+    of them could show.
+    """
+
+    def test_a_cluster_takes_its_highest_member_rung_never_the_mean(self):
+        cluster = cluster_of("speculation", "specified")
+        self.assertEqual(pas.cluster_rung(cluster), "specified")
+        #: The two readings this rule exists to exclude, named rather than
+        #: implied: the mean of 0.30 and 0.95 is 0.625, which is nearer
+        #: `engineering-judgement` than either member, and the lower of the two
+        #: is `speculation`.
+        self.assertNotIn(pas.cluster_rung(cluster),
+                         ("engineering-judgement", "speculation",
+                          "convention-cited"))
+
+    def test_the_highest_member_may_sit_anywhere_in_the_cluster(self):
+        """Position is not rank. A reader that took the first member, the last
+        member, or the majority rung would agree with the maximum on one of
+        these three orderings and disagree on the others."""
+        for order in (("specified", "speculation", "speculation"),
+                      ("speculation", "specified", "speculation"),
+                      ("speculation", "speculation", "specified")):
+            with self.subTest(order=order):
+                self.assertEqual(pas.cluster_rung(cluster_of(*order)),
+                                 "specified")
+
+    def test_a_two_member_cluster_does_not_outrank_a_better_one_by_being_bigger(self):
+        bigger = cluster_of("convention-cited", "convention-cited")
+        lonely = cluster_of("specified")
+        self.assertEqual(
+            sorted((pas.cluster_rung(bigger), pas.cluster_rung(lonely)),
+                   key=pas.RUNG_ORDER.index)[0],
+            "specified")
+
+    def test_an_empty_cluster_has_no_rung(self):
+        with self.assertRaises(pas.QuorumError):
+            pas.cluster_rung([])
+
+    def test_a_cluster_that_is_not_a_list_has_no_rung(self):
+        for value in ("", "specified", None, {}, 0, ()):
+            with self.subTest(value=value):
+                with self.assertRaises(pas.QuorumError):
+                    pas.cluster_rung(value)
+
+    def test_a_member_rung_outside_the_enum_is_never_defaulted(self):
+        """`RUNG_ORDER.index` raises `ValueError` — outside `TrackerError` —
+        on anything but the five, and this function is public: the mapping it
+        is handed is assembled by a caller."""
+        for rung in ("high", "", 0.95, None, ["specified"], {"specified": 1},
+                     True):
+            with self.subTest(rung=rung):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.cluster_rung([{"effective_rung": rung}])
+
+    def test_a_member_that_is_not_an_object_is_refused(self):
+        for member in ("specified", None, 1, ["specified"]):
+            with self.subTest(member=member):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.cluster_rung([member])
+
+
+class GroupResponsesTests(unittest.TestCase):
+    """Clustering. WHEN IN DOUBT THEY ARE DIFFERENT ANSWERS.
+
+    Different pushes toward escalation, which is the safe direction: a cluster
+    manufactured out of silence is a majority the brains never formed.
+    """
+
+    def subject(self, name, value):
+        return response(answer_key=f"key-{name}-{value}", consequences=[
+            {"kind": "file-exists", "subject": name, "value": value}])
+
+    def subjects(self, pairs):
+        return response(answer_key="prose", consequences=[
+            {"kind": "file-exists", "subject": name, "value": value}
+            for name, value in pairs])
+
+    def test_named_options_cluster_on_answer_key(self):
+        responses = [response(answer_key="postgres"),
+                     response(answer_key="postgres"),
+                     response(answer_key="sqlite")]
+        clusters, _ = pas.group_responses(responses, options_supplied=True)
+        self.assertEqual(clusters, [[0, 1], [2]])
+
+    def test_prose_answers_cluster_on_non_contradicting_consequences(self):
+        responses = [self.subject("db/session.sql", "present"),
+                     self.subject("db/session.sql", "present"),
+                     self.subject("db/session.sql", "absent")]
+        clusters, _ = pas.group_responses(responses, options_supplied=False)
+        self.assertEqual(clusters, [[0, 1], [2]])
+
+    def test_a_prose_answer_is_never_clustered_by_its_key(self):
+        """The two comparisons are not interchangeable. These three name three
+        different keys and assert the same thing; by key they are three
+        answers, by consequence they are one."""
+        responses = [self.subject("db/session.sql", "present") for _ in range(3)]
+        for index, payload in enumerate(responses):
+            payload["answer_key"] = f"phrasing-{index}"
+        clusters, _ = pas.group_responses(responses, options_supplied=False)
+        self.assertEqual(clusters, [[0, 1, 2]])
+
+    def test_answers_sharing_no_subject_are_neither_agreement_nor_conflict(self):
+        responses = [self.subject("a", "present"), self.subject("b", "present"),
+                     self.subject("c", "present")]
+        clusters, verdicts = pas.group_responses(responses,
+                                                 options_supplied=False)
+        self.assertTrue(all(verdict is None for verdict in verdicts.values()))
+        self.assertEqual(clusters, [[0], [1], [2]])
+
+    def test_a_response_joins_only_a_cluster_it_agrees_with_every_member_of(self):
+        """THE NAMED FAULT: `any` in place of `all`, or a majority of the
+        members. Response 2 agrees with response 1 and shares nothing at all
+        with response 0, so joining their cluster would report agreement
+        between two answers that never touched, reached through a third."""
+        responses = [self.subjects([("x", "1")]),
+                     self.subjects([("x", "1"), ("y", "2")]),
+                     self.subjects([("y", "2")])]
+        clusters, verdicts = pas.group_responses(responses,
+                                                 options_supplied=False)
+        self.assertEqual(verdicts[(0, 1)], True)
+        self.assertIsNone(verdicts[(0, 2)])
+        self.assertEqual(verdicts[(1, 2)], True)
+        self.assertEqual(clusters, [[0, 1], [2]])
+
+    def test_the_clusters_are_indexes_in_dispatch_order(self):
+        responses = [response(answer_key="sqlite"),
+                     response(answer_key="postgres"),
+                     response(answer_key="sqlite")]
+        clusters, _ = pas.group_responses(responses, options_supplied=True)
+        self.assertEqual(clusters, [[0, 2], [1]])
+
+    def test_options_supplied_is_a_bool_and_is_never_truth_tested(self):
+        """THE NAMED FAULT: a truthy string read back off disk. `"no"` is
+        truthy, so a truth test would compare three prose answers by a key none
+        of them was asked to supply."""
+        responses = [self.subject("db/session.sql", "present") for _ in range(2)]
+        for value in ("no", "yes", 1, 0, None, [], "true"):
+            with self.subTest(value=value):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.group_responses(responses, options_supplied=value)
+
+    def test_responses_are_a_list(self):
+        for value in ("", "postgres", None, {}, 7):
+            with self.subTest(value=value):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.group_responses(value, options_supplied=True)
+
+    def test_a_blank_answer_key_names_no_option(self):
+        responses = [response(answer_key=""), response(answer_key="postgres")]
+        with self.assertRaises(pas.QuorumSchemaInvalid):
+            pas.group_responses(responses, options_supplied=True)
+
+    def test_an_answer_key_that_is_not_text_is_refused_rather_than_compared(self):
+        for key in (["postgres"], {"postgres": 1}, 7, None, True):
+            with self.subTest(key=key):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.group_responses(
+                        [response(answer_key=key), response()],
+                        options_supplied=True)
+
+    def test_a_response_that_asserts_one_subject_twice_cannot_be_clustered(self):
+        """A self-contradicting answer agrees with whichever other answer
+        happens to match whichever of its two values the mapping kept."""
+        payload = response(answer_key="prose", consequences=[
+            {"kind": "file-exists", "subject": "x", "value": "present"},
+            {"kind": "file-exists", "subject": "x", "value": "absent"}])
+        with self.assertRaises(pas.QuorumSchemaInvalid):
+            pas.group_responses([payload, payload], options_supplied=False)
+
+    def test_a_response_with_no_consequences_is_refused_in_prose_mode(self):
+        with self.assertRaises(pas.QuorumSchemaInvalid):
+            pas.group_responses([response(consequences=[]), response()],
+                                options_supplied=False)
+
+
+class CurrentFloorTests(unittest.TestCase):
+    """The adoption floor. It RISES on inflation and never falls.
+
+    Individual confidence claims are often unfalsifiable; the distribution is
+    not. A ratchet that could relax is not a ratchet — the run would raise its
+    own bar on the adoptions that inflated it and lower it again on the next
+    honest answer, which is the self-serving move every constant in this
+    section is frozen against.
+    """
+
+    def setUp(self):
+        self.root, self.run_dir = adoption_repo(self)
+
+    def floor(self):
+        return pas.current_floor(str(self.run_dir))
+
+    def persisted(self):
+        return json.loads((self.run_dir / "quorum" / "floor.json")
+                          .read_text(encoding="utf-8"))
+
+    def seed(self, count, rung, *, prefix="a", first=0, status="adopted"):
+        for index in range(first, first + count):
+            qid = budget_qid(prefix, index)
+            seed_final(self.run_dir, qid, status=status, phase="P04",
+                       decision_id=f"Q-{qid}" if status == "adopted" else None,
+                       override={"winner": {"rung": rung,
+                                            "answer_key": "postgres"}})
+
+    def test_a_fresh_run_sits_at_the_schema_floor(self):
+        self.assertEqual(self.floor(),
+                         {"floor_rung": "code-evidenced", "floor_value": 0.85})
+        self.assertFalse((self.run_dir / "quorum" / "floor.json").exists())
+
+    def test_the_floor_rises_once_the_adopted_distribution_inflates(self):
+        self.seed(5, "specified")
+        self.assertEqual(self.floor()["floor_rung"], "specified")
+        self.assertEqual(self.persisted()["floor_rung"], "specified")
+        self.assertEqual(self.persisted()["raised_after"], 5)
+
+    def test_four_adoptions_are_not_yet_a_distribution(self):
+        """Below the sample the bar does not move, however high the four are:
+        one top-rung answer is a sample and not a signal."""
+        self.seed(4, "specified")
+        self.assertEqual(self.floor()["floor_rung"], "code-evidenced")
+        self.assertFalse((self.run_dir / "quorum" / "floor.json").exists())
+
+    def test_a_distribution_that_is_not_inflated_leaves_the_bar_alone(self):
+        self.seed(5, "code-evidenced")
+        self.assertEqual(self.floor()["floor_rung"], "code-evidenced")
+
+    def test_it_never_falls_back_once_raised(self):
+        self.seed(5, "specified")
+        self.assertEqual(self.floor()["floor_rung"], "specified")
+        #: Six further adoptions at the floor drag the mean to 0.905 and then
+        #: below it; the bar stays where the ratchet put it.
+        self.seed(6, "code-evidenced", prefix="b")
+        self.assertEqual(self.floor()["floor_rung"], "specified")
+        self.assertEqual(self.persisted()["floor_rung"], "specified")
+
+    def test_escalations_do_not_inflate_the_floor(self):
+        """Only an adoption is a decision the run made. A run that escalated
+        five questions has decided nothing and has nothing to be graded on."""
+        self.seed(5, "specified", status="escalated")
+        self.assertEqual(self.floor()["floor_rung"], "code-evidenced")
+
+    def test_a_recorded_floor_below_the_schema_floor_is_refused(self):
+        """THE SELF-SERVING MOVE, and the one this file is the whole route
+        for: a machine that can write itself a lower adoption bar has no bar.
+        It is refused rather than clamped, so the file cannot say one thing
+        while the run does another."""
+        path = self.run_dir / "quorum" / "floor.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for rung in ("convention-cited", "engineering-judgement",
+                     "speculation"):
+            with self.subTest(rung=rung):
+                path.write_text(json.dumps({"floor_rung": rung}),
+                                encoding="utf-8")
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    self.floor()
+
+    def test_a_recorded_floor_that_is_not_a_rung_is_refused(self):
+        path = self.run_dir / "quorum" / "floor.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for record in ({"floor_rung": "high"}, {"floor_rung": 0.95},
+                       {"floor_rung": None}, {"floor_rung": ["specified"]},
+                       {}, [], "specified", 7):
+            with self.subTest(record=record):
+                path.write_text(json.dumps(record), encoding="utf-8")
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    self.floor()
+
+    def test_a_floor_record_that_is_not_a_regular_file_is_corruption(self):
+        """THE FAIL-OPEN `exists()` WOULD HAVE TAKEN. A directory, a dangling
+        link and a symlink loop are all names the run directory carries and
+        cannot be read, and answering any of them with "nothing recorded"
+        silently resets the bar to the schema minimum — the one direction this
+        ratchet exists to make impossible."""
+        root = self.run_dir / "quorum"
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / "floor.json"
+        path.mkdir()
+        with self.assertRaises(pas.QuorumSchemaInvalid):
+            self.floor()
+        path.rmdir()
+        path.symlink_to(root / "nothing-here.json")
+        with self.assertRaises(pas.QuorumError):
+            self.floor()
+        path.unlink()
+        path.symlink_to(path)
+        with self.assertRaises(pas.QuorumError):
+            self.floor()
+
+    def test_a_floor_record_that_is_a_fifo_never_blocks_the_read(self):
+        """A FIFO answers `open` by waiting for a writer, and on a name inside
+        a run directory no writer is ever coming. The floor is read from inside
+        the run lock, so that open is a run stopped for ever with the lock held
+        and nothing in any log to say why."""
+        root = self.run_dir / "quorum"
+        root.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(root / "floor.json")
+        outcome = without_hanging(self, self.floor)
+        self.assertIsInstance(outcome.get("error"), pas.QuorumSchemaInvalid)
+
+    def test_an_adoption_that_records_no_rung_is_a_stop(self):
+        """The floor is raised by the distribution of what this run adopted,
+        and an adoption reporting no grounding is one the distribution cannot
+        see — dropping it silently would compute the bar off a set the run does
+        not hold."""
+        for winner in (None, {}, {"rung": "high"}, {"rung": 0.95}, "specified",
+                       {"rung": ["specified"]}):
+            with self.subTest(winner=winner):
+                seed_final(self.run_dir, budget_qid("c", 0), status="adopted",
+                           phase="P04", decision_id=f"Q-{budget_qid('c', 0)}",
+                           override={"winner": winner})
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    self.floor()
+
+    def test_the_floor_is_read_from_the_records_and_not_from_the_budget_projection(self):
+        """`quorum_events` is the BUDGET projection — four cells, and `winner`
+        is not one of them. Reading the rung out of it is a `KeyError`, outside
+        `TrackerError`."""
+        self.seed(5, "specified")
+        events = pas.quorum_events(str(self.run_dir))
+        self.assertTrue(events)
+        for event in events:
+            self.assertNotIn("winner", event)
+        self.assertEqual(self.floor()["floor_rung"], "specified")
+
+
+class FinalizeQuorumTests(unittest.TestCase):
+    """Phase 3: where three answers become a decision, or do not.
+
+    Every fixture here is built so that RUNG, CLUSTER SIZE, DISPATCH POSITION
+    and ALPHABETICAL POSITION disagree. A case in which the winning cluster is
+    also the largest, the first seen and the alphabetically first cannot tell
+    the four apart, and rules 3 and 4 are exactly the claims that would slip
+    through.
+    """
+
+    def setUp(self):
+        self.root, self.run_dir = adoption_repo(self)
+
+    def finalize(self, payloads, **overrides):
+        qid = open_question(self, self.run_dir, **overrides)
+        answer_quorum(self.run_dir, qid, payloads)
+        return pas.finalize_quorum(str(self.run_dir), qid=qid)
+
+    def trail(self):
+        return (self.run_dir / "decisions.md").read_text(encoding="utf-8")
+
+    # --- the rung rules ---------------------------------------------------
+
+    def test_a_strictly_higher_cluster_adopts(self):
+        result = self.finalize([graded("postgres", "specified"),
+                                graded("postgres", "speculation"),
+                                graded("sqlite", "speculation")])
+        self.assertEqual(result["status"], "adopted")
+        self.assertEqual(result["winner"]["answer_key"], "postgres")
+        self.assertEqual(result["winner"]["rung"], "specified")
+        self.assertEqual(result["runner_up_rung"], "speculation")
+
+    def test_one_spec_citation_beats_two_speculations(self):
+        """The retired three-way-split rule would have escalated this and
+        thrown away the only grounded answer in the room. Rung strictness keeps
+        it — and the grounded brain is dispatched FIRST here, so nothing about
+        the result can be read off position."""
+        result = self.finalize([graded("postgres", "specified"),
+                                graded("sqlite", "speculation"),
+                                graded("duckdb", "speculation")])
+        self.assertEqual(result["status"], "adopted")
+        self.assertEqual(result["winner"]["answer_key"], "postgres")
+        self.assertEqual(result["winner"]["owner"], "qq")
+
+    def test_a_lone_higher_cluster_beats_a_larger_earlier_one(self):
+        """THE FIXTURE THE SUITE WAS MISSING. The winning cluster here is the
+        SMALLEST (one member against two), the LAST seen, and owned by neither
+        the first-dispatched owner nor the alphabetically first. An
+        implementation ranking by headcount, by first appearance or by owner
+        name adopts `sqlite`; ranking by rung adopts `postgres`."""
+        result = self.finalize([graded("sqlite", "speculation"),
+                                graded("sqlite", "speculation"),
+                                graded("postgres", "specified")])
+        self.assertEqual(result["status"], "adopted")
+        self.assertEqual(result["winner"]["answer_key"], "postgres")
+        self.assertEqual(result["winner"]["owner"], "mm")
+        self.assertEqual(result["clusters"], [["mm"], ["qq", "alpha"]])
+
+    def test_the_winner_is_recorded_from_the_member_that_earned_the_rung(self):
+        """A cluster's rung is one member's, and the answer recorded must be
+        THAT member's. Taking the first member instead records a
+        `speculation`'s wording and anchors under a `specified` cluster's rung:
+        an audit trail stating the run adopted an answer on grounding the
+        recorded answer never had. `mm` is dispatched LAST and is alphabetically
+        in the middle."""
+        weak = graded("postgres", "speculation")
+        weak["answer"] = "A guess about the session table."
+        strong = graded("postgres", "specified")
+        strong["answer"] = "The specification names the session table."
+        result = self.finalize([weak, graded("sqlite", "speculation"), strong])
+        self.assertEqual(result["status"], "adopted")
+        self.assertEqual(result["winner"]["owner"], "mm")
+        self.assertEqual(result["winner"]["rung"], "specified")
+        self.assertEqual(result["winner"]["answer"],
+                         "The specification names the session table.")
+        #: And the mean would have sunk this cluster below the floor
+        #: altogether: (0.30 + 0.95) / 2 is 0.625.
+        self.assertEqual(result["clusters"], [["qq", "mm"], ["alpha"]])
+
+    def test_two_clusters_at_equal_rung_escalate_even_above_the_floor(self):
+        """Two brains reading the same code and reaching different answers from
+        evidence of the same quality is exactly where a numeric margin would
+        manufacture a winner out of noise. The larger cluster here is the
+        SECOND one, so size cannot be what breaks the tie either."""
+        result = self.finalize([graded("sqlite", "code-evidenced"),
+                                graded("postgres", "code-evidenced"),
+                                graded("postgres", "speculation")])
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "equal-or-inverted-rung")
+        self.assertIsNone(result["winner"])
+        self.assertEqual(result["winner_rung"], "code-evidenced")
+        self.assertEqual(result["runner_up_rung"], "code-evidenced")
+        self.assertEqual(self.trail(), UNRELATED_HUMAN)
+
+    def test_two_of_three_agreement_is_not_sufficient_on_its_own(self):
+        """A majority at `convention-cited` is still imitation. The winning
+        cluster here is the largest AND the first seen, and it is refused."""
+        result = self.finalize([graded("postgres", "convention-cited"),
+                                graded("postgres", "convention-cited"),
+                                graded("sqlite", "speculation")])
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "below-floor")
+        self.assertEqual(result["winner_rung"], "convention-cited")
+
+    def test_a_unanimous_convention_cited_answer_escalates(self):
+        """`convention-cited` sits BELOW the floor on purpose: a machine may
+        decide what the spec or the code entails, and it may not decide by
+        imitation. Unanimity buys nothing here — there is no runner-up, so the
+        strictness test is vacuous and the floor alone governs."""
+        result = self.finalize([graded("postgres", "convention-cited")] * 3)
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "below-floor")
+        self.assertIsNone(result["runner_up_rung"])
+
+    def test_a_unanimous_code_evidenced_answer_adopts_with_no_runner_up(self):
+        result = self.finalize([graded("postgres", "code-evidenced")] * 3)
+        self.assertEqual(result["status"], "adopted")
+        self.assertIsNone(result["runner_up_rung"])
+        self.assertEqual(result["clusters"], [list(QUORUM_OWNERS)])
+
+    def test_the_floor_that_was_applied_is_reported(self):
+        result = self.finalize([graded("postgres", "convention-cited")] * 3)
+        self.assertEqual(result["floor_rung"], "code-evidenced")
+
+    def test_a_raised_floor_refuses_what_the_schema_floor_would_have_adopted(self):
+        """The ratchet is not decorative: once the run has been grading itself
+        generously, `code-evidenced` stops being enough."""
+        for index in range(5):
+            qid = budget_qid("f", index)
+            seed_final(self.run_dir, qid, status="adopted", phase="P09",
+                       decision_id=f"Q-{qid}",
+                       override={"winner": {"rung": "specified",
+                                            "answer_key": "postgres"}})
+        result = self.finalize([graded("postgres", "code-evidenced")] * 3)
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "below-floor")
+        self.assertEqual(result["floor_rung"], "specified")
+
+    # --- the ordering fault -----------------------------------------------
+
+    def test_evidence_is_resolved_before_any_comparison(self):
+        """THE ORDERING FAULT. With resolution run AFTER the comparison the
+        dangling `specified` claim wins at 0.95 on a line that does not exist,
+        and is then recorded at the rung it declared rather than the rung it
+        earned."""
+        dangling = graded("duckdb", "specified")
+        dangling["evidence"] = [{"kind": "spec", "path": "no/such/spec.md",
+                                 "line": 1, "quote": "session table"}]
+        result = self.finalize([dangling,
+                                graded("postgres", "code-evidenced"),
+                                graded("postgres", "speculation")])
+        self.assertEqual(result["status"], "adopted")
+        self.assertEqual(result["winner"]["answer_key"], "postgres")
+        self.assertEqual(result["winner"]["rung"], "code-evidenced")
+        self.assertEqual(result["effective_rungs"]["qq"],
+                         "engineering-judgement")
+
+    def test_the_demotion_reason_is_recorded_beside_the_rung(self):
+        """Recorded rather than re-derived at read time: deriving the name
+        again derives it from a different code path than the one that priced
+        the answer, and the two can disagree with nothing failing."""
+        hollow = graded("postgres", "specified", what_would_change_my_mind="")
+        result = self.finalize([hollow,
+                                graded("postgres", "code-evidenced"),
+                                graded("sqlite", "speculation")])
+        self.assertEqual(result["demotion_reasons"]["qq"], "empty-falsifier")
+        self.assertEqual(result["effective_rungs"]["qq"],
+                         "engineering-judgement")
+        self.assertIsNone(result["demotion_reasons"]["alpha"])
+        stored = json.loads(
+            (self.run_dir / "quorum" / result["qid"] / "final.json")
+            .read_text(encoding="utf-8"))
+        self.assertEqual(stored["demotion_reasons"], result["demotion_reasons"])
+
+    # --- the quorum that cannot be graded ---------------------------------
+
+    def test_a_second_malformed_response_escalates_rather_than_deciding_on_two(self):
+        """A brain may force a human look and must never be able to force an
+        adoption by malforming."""
+        qid = open_question(self, self.run_dir)
+        for attempt in ("high", "higher"):
+            pas.record_brain_response(
+                str(self.run_dir), qid=qid, owner="qq",
+                payload=dict(graded("postgres", "specified"), qid=qid,
+                             rung=attempt))
+        answer_quorum(self.run_dir, qid,
+                      [graded("postgres", "specified")] * 2,
+                      owners=QUORUM_OWNERS[1:])
+        result = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "incomplete-quorum")
+        self.assertEqual(result["invalid_owners"], ["qq"])
+
+    def test_an_owner_owed_its_one_re_dispatch_is_not_finalised(self):
+        """The controller owes a dispatch, and that is not the same fact as a
+        question a human must now settle."""
+        qid = open_question(self, self.run_dir)
+        pas.record_brain_response(
+            str(self.run_dir), qid=qid, owner="qq",
+            payload=dict(graded("postgres", "specified"), qid=qid, rung="high"))
+        answer_quorum(self.run_dir, qid,
+                      [graded("postgres", "specified")] * 2,
+                      owners=QUORUM_OWNERS[1:])
+        with self.assertRaises(pas.QuorumIncomplete):
+            pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertFalse(
+            (self.run_dir / "quorum" / qid / "final.json").exists())
+
+    def test_an_owner_that_has_not_answered_is_not_finalised(self):
+        qid = open_question(self, self.run_dir)
+        answer_quorum(self.run_dir, qid,
+                      [graded("postgres", "specified")] * 2,
+                      owners=QUORUM_OWNERS[:2])
+        with self.assertRaises(pas.QuorumIncomplete):
+            pas.finalize_quorum(str(self.run_dir), qid=qid)
+
+    def test_two_blockers_escalate_and_one_does_not(self):
+        blocked = dict(graded("postgres", "specified"),
+                       blocker="no API key on disk")
+        one = self.finalize([blocked, graded("postgres", "specified"),
+                             graded("sqlite", "speculation")])
+        self.assertEqual(one["status"], "adopted")
+        two = self.finalize([blocked, blocked,
+                             graded("postgres", "specified")],
+                            question="Which store backs the audit log?")
+        self.assertEqual(two["status"], "escalated")
+        self.assertEqual(two["reason"], "blocked")
+        self.assertEqual(two["blocked_owners"], ["qq", "alpha"])
+
+    def test_answers_describing_different_things_are_not_decidable(self):
+        """Not a tie and not a disagreement — there is nothing here to decide
+        between, and saying `escalated` would report a question the quorum
+        could not answer as one it declined to."""
+        payloads = [graded("prose-a", "specified", subject="a"),
+                    graded("prose-b", "specified", subject="b"),
+                    graded("prose-c", "specified", subject="c")]
+        result = self.finalize(payloads, options_supplied="no",
+                               question="What should the session layer do?")
+        self.assertEqual(result["status"], "question-not-decidable")
+        self.assertEqual(result["reason"], "answers-describe-different-things")
+        self.assertIsNone(result["winner"])
+        self.assertEqual(self.trail(), UNRELATED_HUMAN)
+
+    # --- replay -----------------------------------------------------------
+
+    def test_a_finalised_quorum_is_never_recomputed(self):
+        qid = open_question(self, self.run_dir)
+        answer_quorum(self.run_dir, qid, [graded("postgres", "specified"),
+                                          graded("postgres", "speculation"),
+                                          graded("sqlite", "speculation")])
+        first = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        after = self.trail()
+        again = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(again, first)
+        self.assertEqual(self.trail(), after)
+
+    def test_a_final_record_that_is_not_a_regular_file_is_not_an_unsettled_quorum(self):
+        """`exists()` is false for a dangling symlink, for a symlink loop and
+        for a directory, and answering any of them with "not settled yet"
+        RECOMPUTES an outcome the run has already recorded.
+
+        THE QUORUM IS FULLY ANSWERED FIRST, and that is what makes this a test
+        of the guard: with the answers missing, a fall-through would raise
+        `QuorumIncomplete` — also a `QuorumError` — and the case would pass
+        against the very mutant it is written for. Answered, the fall-through
+        reaches `publish_immutable` and fails as a `TrackerWriteError` instead,
+        which is not what a corrupt record is."""
+        for shape in ("dangling", "loop", "directory"):
+            with self.subTest(shape=shape):
+                _root, run_dir = adoption_repo(self)
+                qid = open_question(self, run_dir)
+                answer_quorum(run_dir, qid, [graded("postgres", "specified"),
+                                             graded("postgres", "speculation"),
+                                             graded("sqlite", "speculation")])
+                path = run_dir / "quorum" / qid / "final.json"
+                if shape == "dangling":
+                    path.symlink_to(path.parent / "nothing-here.json")
+                elif shape == "loop":
+                    path.symlink_to(path)
+                else:
+                    path.mkdir()
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.finalize_quorum(str(run_dir), qid=qid)
+
+    def test_a_foreign_run_is_a_read_only_stop(self):
+        qid = open_question(self, self.run_dir)
+        answer_quorum(self.run_dir, qid, [graded("postgres", "specified")] * 3)
+        (self.run_dir / "progress.md").write_text("<!-- pipeline-run/v2 -->\n",
+                                                  encoding="utf-8")
+        with self.assertRaises(pas.TrackerError):
+            pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertFalse(
+            (self.run_dir / "quorum" / qid / "final.json").exists())
+
+    def test_a_qid_no_derivation_produces_is_refused(self):
+        for qid in ("", "  ", None, 7, ["ee1433c675a3"], "../../etc",
+                    "EE1433C675A3", "a\x00b"):
+            with self.subTest(qid=qid):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.finalize_quorum(str(self.run_dir), qid=qid)
+
+
+class QuorumStaleContextTests(unittest.TestCase):
+    """Three good answers to a question the run has moved past.
+
+    `classify_quorum` puts `stale-context` AHEAD of every state that would act
+    on the answers and routes it to this stage; this is the resolution it
+    routes to. Re-deciding on resume is precisely the silent-divergence failure
+    the whole design exists to prevent, so the quorum is neither re-opened nor
+    finalised on the merits.
+    """
+
+    def setUp(self):
+        self.root, self.run_dir = adoption_repo(self)
+
+    def test_a_decision_landing_under_an_in_flight_quorum_escalates_to_stage_11(self):
+        qid = open_question(self, self.run_dir)
+        answer_quorum(self.run_dir, qid, [graded("postgres", "specified"),
+                                          graded("postgres", "speculation"),
+                                          graded("sqlite", "speculation")])
+        (self.run_dir / "decisions.md").write_text(
+            UNRELATED_HUMAN + DECISION_QUORUM_SECOND_AXIS, encoding="utf-8")
+        result = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "stale-context")
+        #: ONLY `decisions`. The projection is rewritten by the next
+        #: `open_quorum` and by nothing else, so a decision that lands under an
+        #: in-flight quorum moves the authority the brains were judged against
+        #: while the file they were told to read still says what it said. That
+        #: is exactly why both digests are compared and why neither subsumes
+        #: the other.
+        self.assertEqual(result["moved"], ["decisions"])
+        self.assertEqual(result["route"], "stage-11")
+        self.assertIsNone(result["winner"])
+
+    def test_the_projection_moving_alone_is_named_alone(self):
+        """`decisions-effective.md` is what the brains were told to READ, and a
+        hand edit of it is a change `decisions.md` cannot see at all."""
+        qid = open_question(self, self.run_dir)
+        answer_quorum(self.run_dir, qid, [graded("postgres", "specified"),
+                                          graded("postgres", "speculation"),
+                                          graded("sqlite", "speculation")])
+        path = self.run_dir / "decisions-effective.md"
+        path.write_text(path.read_text(encoding="utf-8") + "\n<!-- edited -->\n",
+                        encoding="utf-8")
+        result = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(result["reason"], "stale-context")
+        self.assertEqual(result["moved"], ["projection"])
+
+    def test_a_fresh_quorum_is_never_stale(self):
+        """The seam where this stage and `classify_quorum` would disagree: both
+        compare the same two digests, and a quorum raised a moment ago has
+        moved nothing."""
+        qid = open_question(self, self.run_dir)
+        verdict = pas.classify_quorum(str(self.run_dir), qid=qid,
+                                      live_owners=list(QUORUM_OWNERS))
+        self.assertEqual(verdict["state"], "awaiting-responses")
+        answer_quorum(self.run_dir, qid, [graded("postgres", "specified")] * 3)
+        self.assertEqual(
+            pas.finalize_quorum(str(self.run_dir), qid=qid)["status"],
+            "adopted")
+
+
+class AdoptionChargesTheDriftBudgetTests(unittest.TestCase):
+    """The drift cap is enforced WHERE THE CHARGE HAPPENS, and that is here.
+
+    `open_quorum` charges nothing: it is an ADMISSION check, so three quorums
+    can be in flight against one remaining adoption even perfectly serialised —
+    the first two spent nothing. Checked only at raise time, the budget bounds
+    how many questions may be ASKED and not how many decisions a machine may
+    MAKE, which is the opposite of what it is for.
+    """
+
+    def setUp(self):
+        self.root, self.run_dir = adoption_repo(self)
+
+    def spend(self, count, *, phase="P04", status="adopted", prefix="e"):
+        for index in range(count):
+            qid = budget_qid(prefix, index)
+            seed_final(self.run_dir, qid, status=status, phase=phase,
+                       decision_id=f"Q-{qid}" if status == "adopted" else None)
+
+    def answered(self, payloads=None, **overrides):
+        qid = open_question(self, self.run_dir, **overrides)
+        answer_quorum(self.run_dir, qid, payloads or [
+            graded("postgres", "specified"),
+            graded("postgres", "speculation"),
+            graded("sqlite", "speculation")])
+        return qid
+
+    def test_a_quorum_admitted_at_the_raise_is_refused_at_the_charge(self):
+        """THE NAMED FAULT. The question is raised while the phase still has
+        authority and finalised after it has been spent — which is the ordinary
+        shape of a run with more than one question in flight, not a rare one.
+        A cap checked only at `open_quorum` lets this adopt."""
+        qid = self.answered()
+        self.assertTrue(
+            pas.quorum_budget(str(self.run_dir), phase="P04")["may_raise"])
+        self.spend(3)
+        result = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "phase-budget-exhausted")
+        self.assertEqual(result["phase_adoptions"], 3)
+        self.assertEqual(result["phase_ceiling"], 3)
+        self.assertIsNone(result["winner"])
+        self.assertEqual((self.run_dir / "decisions.md")
+                         .read_text(encoding="utf-8"), UNRELATED_HUMAN)
+
+    def test_the_run_ceiling_binds_at_the_charge_too(self):
+        qid = self.answered()
+        self.spend(10, phase="P09")
+        result = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "run-budget-exhausted")
+
+    def test_escalations_never_decrement_the_budget(self):
+        """An escalation is the run asking for help, and charging for it
+        teaches the controller to stop asking."""
+        self.spend(3, status="escalated")
+        qid = self.answered()
+        result = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(result["status"], "adopted")
+        self.assertEqual(
+            pas.quorum_budget(str(self.run_dir), phase="P04")["phase_adoptions"],
+            1)
+
+    def test_the_budget_is_consulted_only_where_an_adoption_would_charge(self):
+        """A question that would have been escalated on its rungs reports THAT,
+        not a budget that happened to be spent: the two are different facts and
+        the terminal report keys off which."""
+        qid = self.answered([graded("postgres", "convention-cited")] * 3)
+        self.spend(3)
+        result = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(result["reason"], "below-floor")
+
+    def test_the_adoption_the_budget_allows_still_lands(self):
+        """The positive control. A cap that refused everything would satisfy
+        every case above and decide nothing."""
+        self.spend(2)
+        qid = self.answered()
+        self.assertEqual(
+            pas.finalize_quorum(str(self.run_dir), qid=qid)["status"],
+            "adopted")
+
+
+class AdoptedDecisionRecordTests(unittest.TestCase):
+    """What an adoption writes into the append-only audit trail.
+
+    ADOPTION SUPERSEDES; IT NEVER APPENDS BESIDE. `parse_decisions` enforces at
+    most one `Adopted` decision per axis, so a later adoption on an occupied
+    axis flips the standing record to `Superseded` AND appends the successor
+    carrying `Supersedes` — both halves, in one write. Half a write is
+    unrecoverable: the file is append-only, so a second `Adopted` record cannot
+    be withdrawn and a `Superseded` record with no successor cannot be
+    completed, and either way the file stops parsing and every later read of
+    the run is a read-only stop.
+    """
+
+    def setUp(self):
+        self.root, self.run_dir = adoption_repo(self)
+
+    def adopt(self, payloads=None, **overrides):
+        qid = open_question(self, self.run_dir, **overrides)
+        answer_quorum(self.run_dir, qid, payloads or [
+            graded("postgres", "specified"),
+            graded("postgres", "speculation"),
+            graded("sqlite", "speculation")])
+        return qid, pas.finalize_quorum(str(self.run_dir), qid=qid)
+
+    def trail(self):
+        return (self.run_dir / "decisions.md").read_text(encoding="utf-8")
+
+    def parsed(self):
+        return pas.parse_decisions(self.trail())
+
+    def test_adoption_appends_one_decision_and_replay_appends_none(self):
+        qid, result = self.adopt()
+        after = self.trail()
+        self.assertIn(f"## Q-{qid}", after)
+        self.assertIn("- **Provenance:** quorum", after)
+        self.assertIn("- **Decision action:** quorum.adopt", after)
+        pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(self.trail(), after)
+        self.assertEqual(result["decision_id"], f"Q-{qid}")
+
+    def test_the_record_states_the_grounding_it_was_adopted_on(self):
+        qid, result = self.adopt()
+        record = self.parsed()["decisions"][f"Q-{qid}"]
+        self.assertEqual(record["axis"], "storage-engine")
+        self.assertEqual(record["answer_key"], "postgres")
+        self.assertEqual(record["provenance"], "quorum")
+        self.assertEqual(record["action"], "quorum.adopt")
+        self.assertEqual(record["depth"], 1)
+        self.assertEqual(record["grounding_rung"], "specified")
+        self.assertEqual(record["runner_up_rung"], "speculation")
+        self.assertEqual(record["context_digest"], result["context_digest"])
+        self.assertEqual(record["consequences"],
+                         {("file-exists", SESSION_SUBJECT): "postgres"})
+        self.assertEqual(record["consistent_with"], ["H-001"])
+        self.assertEqual(record["scope"], "T04")
+
+    def test_consistent_with_carries_decision_ids_and_nothing_else(self):
+        """`_decision_anchors` refuses anything that is not a decision id, and
+        a response's `consistent_with` legally holds `spec` and `repo` anchors
+        whose ids are a spec line or a `path:line`. Written into that field they
+        are a record the parser refuses — and, written before it is validated, a
+        permanently unparseable audit trail."""
+        payload = graded("postgres", "specified", consistent_with=[
+            {"kind": "spec", "id": "spec.md:1"},
+            {"kind": "decision", "id": "H-001"},
+            {"kind": "repo", "id": "db/engine.py:1"}])
+        qid, _result = self.adopt([payload, graded("postgres", "speculation"),
+                                   graded("sqlite", "speculation")])
+        self.assertEqual(self.parsed()["decisions"][f"Q-{qid}"]["consistent_with"],
+                         ["H-001"])
+
+    def test_an_answer_anchored_on_no_decision_omits_the_field(self):
+        payload = graded("postgres", "specified", consistent_with=[
+            {"kind": "spec", "id": "spec.md:1"}])
+        qid, result = self.adopt([payload, graded("postgres", "speculation"),
+                                  graded("sqlite", "speculation")])
+        self.assertEqual(result["status"], "adopted")
+        self.assertNotIn("Consistent with", self.trail())
+        self.assertEqual(self.parsed()["decisions"][f"Q-{qid}"]["consistent_with"],
+                         [])
+
+    def test_a_later_adoption_on_an_occupied_axis_supersedes_the_standing_record(self):
+        """BOTH HALVES, IN ONE WRITE. Writing only the append half leaves two
+        Adopted records on one axis; writing only the retirement half leaves a
+        `Superseded` record nothing supersedes. Neither is recoverable by a
+        later write, because the file is append-only and already unparseable."""
+        first, _ = self.adopt()
+        second, result = self.adopt(
+            question="Which engine stores the session table for good?")
+        self.assertEqual(result["status"], "adopted")
+        decisions = self.parsed()
+        self.assertEqual(decisions["decisions"][f"Q-{first}"]["status"],
+                         "Superseded")
+        self.assertEqual(decisions["decisions"][f"Q-{second}"]["status"],
+                         "Adopted")
+        self.assertEqual(
+            decisions["decisions"][f"Q-{second}"]["supersedes"].strip(),
+            f"Q-{first}")
+        self.assertEqual(decisions["axis_index"]["storage-engine"],
+                         [f"Q-{first}", f"Q-{second}"])
+
+    def test_the_retirement_touches_only_the_record_it_retires(self):
+        """Scoped to the target's OWN section. A status line searched for
+        across the document retires whichever record happens to be read first —
+        the human decision this run is bound by — and one searched to the end
+        of the file retires every record standing after it.
+
+        THE SECOND ADOPTION IS ON ANOTHER AXIS AND SITS BETWEEN THE TWO, which
+        is what makes the scoping observable: without a live record following
+        the one being retired, "this section" and "the rest of the file" are
+        the same range and no input tells them apart."""
+        first, _ = self.adopt()
+        other, _ = self.adopt(
+            axis="cache-layer",
+            question="Which cache layer fronts the session table?")
+        second, result = self.adopt(
+            question="Which engine stores the session table for good?")
+        self.assertEqual(result["status"], "adopted")
+        decisions = self.parsed()
+        self.assertEqual(decisions["decisions"]["H-001"]["status"], "Adopted")
+        self.assertEqual(decisions["decisions"][f"Q-{first}"]["status"],
+                         "Superseded")
+        self.assertEqual(decisions["decisions"][f"Q-{other}"]["status"],
+                         "Adopted")
+        self.assertEqual(decisions["decisions"][f"Q-{second}"]["status"],
+                         "Adopted")
+        self.assertEqual(self.trail().count("- **Status:** Superseded"), 1)
+
+    def test_an_interrupted_write_is_repaired_on_the_next_call(self):
+        """`final.json` is published FIRST and the decision appended second, so
+        an interruption between the two leaves a finalised quorum with no
+        decision record — and the next call repairs it. The reverse order would
+        leave a decision with no finalised quorum, which the next call would
+        double-append into an append-only file.
+
+        The repair is what makes the publish-then-append order safe, so a
+        finalisation that returned the settled record without re-checking the
+        trail would leave the run charged for an adoption the audit trail does
+        not hold."""
+        qid, _result = self.adopt()
+        self.assertIn(f"## Q-{qid}", self.trail())
+        (self.run_dir / "decisions.md").write_text(UNRELATED_HUMAN,
+                                                   encoding="utf-8")
+        again = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(again["status"], "adopted")
+        self.assertIn(f"## Q-{qid}", self.trail())
+        self.assertEqual(sorted(self.parsed()["decisions"]),
+                         ["H-001", f"Q-{qid}"])
+
+    def test_a_superseding_adoption_is_replay_inert(self):
+        first, _ = self.adopt()
+        second, _ = self.adopt(
+            question="Which engine stores the session table for good?")
+        after = self.trail()
+        pas.finalize_quorum(str(self.run_dir), qid=first)
+        pas.finalize_quorum(str(self.run_dir), qid=second)
+        self.assertEqual(self.trail(), after)
+
+    # --- the reserved axis -------------------------------------------------
+
+    def test_a_question_on_the_reserved_axis_adopts_under_its_own_qid(self):
+        """`new` is the placeholder for a question that was never tagged, and
+        it is ADOPTED like any other. `parse_decisions` refuses the literal as
+        a record's axis — two unrelated decisions recorded against it would be
+        compared as though they answered one question — so the record carries
+        the question's own bare qid: reproducible from the question, unique to
+        it, and a bucket shared with nothing."""
+        qid, result = self.adopt(axis="new",
+                                 question="Do we keep a session table at all?")
+        self.assertEqual(result["status"], "adopted")
+        self.assertEqual(result["axis"], "new")
+        self.assertEqual(result["decision_axis"], qid)
+        record = self.parsed()["decisions"][f"Q-{qid}"]
+        self.assertEqual(record["axis"], qid)
+        self.assertEqual(self.parsed()["axis_index"][qid], [f"Q-{qid}"])
+
+    def test_the_axis_is_minted_before_the_contradiction_check_sees_it(self):
+        """`check_contradiction` REFUSES the reserved literal outright, so a
+        candidate arriving on `new` would raise rather than be compared. Minting
+        after the check is the one ordering that cannot work — and this is the
+        input that proves the mint happened first, because the literal never
+        reaches the check."""
+        with self.assertRaises(pas.QuorumSchemaInvalid):
+            pas.check_contradiction(self.parsed(), {
+                "axis": "new", "answer_key": "postgres",
+                "consequences": [{"kind": "file-exists",
+                                  "subject": SESSION_SUBJECT,
+                                  "value": "postgres"}]})
+        _qid, result = self.adopt(axis="new",
+                                  question="Do we keep a session table at all?")
+        self.assertEqual(result["status"], "adopted")
+
+    def test_a_minted_axis_colliding_with_a_stage_03_question_id_is_refused(self):
+        """The fail-FALSE twin of the fail-open the reservation exists to
+        prevent: a minted axis equal to a stage-03 question id would bucket this
+        decision with that axis's decisions and halt the run on a contradiction
+        nobody had."""
+        question = "Do we keep a session table at all?"
+        qid = pas.derive_qid(question, "new")
+        path = self.run_dir / "progress.md"
+        tracker = pas.parse_tracker(path.read_text(encoding="utf-8"))
+        pas.append_row(tracker, "questions",
+                       {"id": qid, "origin": "synthesis", "slot": "1",
+                        "state": "answered", "decision": "H-001"})
+        path.write_text(pas.render_tracker(tracker), encoding="utf-8")
+        opened = open_question(self, self.run_dir, axis="new",
+                               question=question)
+        answer_quorum(self.run_dir, opened,
+                      [graded("postgres", "specified"),
+                       graded("postgres", "speculation"),
+                       graded("sqlite", "speculation")])
+        with self.assertRaises(pas.QuorumSchemaInvalid):
+            pas.finalize_quorum(str(self.run_dir), qid=opened)
+        self.assertEqual(self.trail(), UNRELATED_HUMAN)
+
+    # --- validate before writing ------------------------------------------
+
+    def test_a_record_the_parser_would_refuse_is_never_written(self):
+        """THE IRREVERSIBLE HALF IS THE WRITE. Writing first and parsing second
+        puts a record the parser refuses into an append-only file and raises
+        afterwards: every later read of the run is then a read-only stop, and
+        the remedy the message prescribes — reword one sentence — means editing
+        a file the parser will not let lose a record.
+
+        The ladder in an answer is exactly such a record: `parse_decisions`
+        screens `Answer` for a rung value, because a brain reading "adopted at
+        0.85" treats the decision as soft and reverses it."""
+        leaking = graded("postgres", "specified")
+        leaking["answer"] = "Use postgres; the hit rate is 0.85 of requests."
+        qid = open_question(self, self.run_dir)
+        answer_quorum(self.run_dir, qid,
+                      [leaking, graded("postgres", "speculation"),
+                       graded("sqlite", "speculation")])
+        result = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "unrecordable-decision")
+        self.assertEqual(self.trail(), UNRELATED_HUMAN)
+        #: And the trail still parses, which is the whole point of refusing
+        #: before the write rather than after it.
+        self.assertEqual(sorted(self.parsed()["decisions"]), ["H-001"])
+
+    def test_a_separator_inside_a_value_is_refused_rather_than_mis_recorded(self):
+        """Parsing proves the file is READABLE; it does not prove it says the
+        right thing. `kind:subject=value` is separated by `=`, so a subject
+        holding one renders a record that parses cleanly and asserts something
+        the quorum never decided."""
+        payload = graded("postgres", "specified", subject="db/ses=sion.sql")
+        qid = open_question(self, self.run_dir)
+        answer_quorum(self.run_dir, qid,
+                      [payload, graded("postgres", "speculation"),
+                       graded("sqlite", "speculation")])
+        result = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "unrecordable-decision")
+        self.assertEqual(self.trail(), UNRELATED_HUMAN)
+
+    def test_a_multi_line_answer_is_written_as_one_field(self):
+        """A decision field is one line and a brain's answer is JSON that may
+        legally hold as many as it likes; an unfolded answer ends the record at
+        its first line break and leaves the rest parsed as prose between two
+        decisions."""
+        payload = graded("postgres", "specified")
+        payload["answer"] = "Use postgres.\n- **Status:** Superseded\nReally."
+        qid = open_question(self, self.run_dir)
+        answer_quorum(self.run_dir, qid,
+                      [payload, graded("postgres", "speculation"),
+                       graded("sqlite", "speculation")])
+        result = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(result["status"], "adopted")
+        record = self.parsed()["decisions"][f"Q-{qid}"]
+        self.assertEqual(record["answer"],
+                         "postgres — Use postgres. - **Status:** Superseded Really.")
+        self.assertEqual(record["status"], "Adopted")
+
+    # --- the gates a cleared rung does not buy past -----------------------
+
+    def test_contradicting_a_human_decision_is_rejected_and_records_nothing(self):
+        """A quorum may decide an open question. IT MAY NEVER OVERRULE A
+        RECORDED ONE — at any rung, and the rejection is recorded as an event
+        rather than discarded."""
+        (self.run_dir / "decisions.md").write_text(DECISION_HUMAN,
+                                                   encoding="utf-8")
+        qid = open_question(self, self.run_dir)
+        answer_quorum(self.run_dir, qid, [graded("postgres", "specified"),
+                                          graded("postgres", "speculation"),
+                                          graded("sqlite", "speculation")])
+        result = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(result["status"], "rejected-contradicts-human")
+        self.assertEqual(result["contradicted_decision"], "H-001")
+        self.assertIn("H-001", result["reason"])
+        self.assertEqual(self.trail(), DECISION_HUMAN)
+        self.assertIn("rejected-contradicts-human",
+                      [event["status"] for event
+                       in pas.quorum_events(str(self.run_dir))])
+
+    def test_an_irreversible_blast_escalates_at_the_top_rung(self):
+        """The list is closed and no confidence buys past it. The radius is
+        taken over the WHOLE winning cluster: one member naming an irreversible
+        axis is the cluster naming it, because the cluster is what is adopted —
+        and here it is the SECOND member of the cluster, not the one whose
+        payload is recorded."""
+        weak = dict(graded("postgres", "speculation"),
+                    blast=["external-service"])
+        result = None
+        qid = open_question(self, self.run_dir)
+        answer_quorum(self.run_dir, qid,
+                      [graded("postgres", "specified"), weak,
+                       graded("sqlite", "speculation")])
+        result = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "irreversible-axis")
+        self.assertEqual(result["blast"], ["external-service"])
+        self.assertEqual(self.trail(), UNRELATED_HUMAN)
+
+    def test_a_blast_radius_outside_the_list_adopts(self):
+        """The positive control. A gate that escalated on every stated radius
+        would satisfy the case above and decide nothing."""
+        payload = dict(graded("postgres", "specified"), blast=["storage-engine"])
+        _qid, result = self.adopt([payload, graded("postgres", "speculation"),
+                                   graded("sqlite", "speculation")])
+        self.assertEqual(result["status"], "adopted")
+
+    def test_the_depth_written_down_is_the_depth_it_was_adopted_at(self):
+        """Never a placeholder. `Depth` goes into an append-only file that
+        nothing later can correct, and it is the one distance the cap
+        measures."""
+        (self.run_dir / "decisions.md").write_text(
+            UNRELATED_HUMAN + DERIVED_DEPTH_ONE, encoding="utf-8")
+        payload = graded("postgres", "specified", consistent_with=[
+            {"kind": "decision", "id": "Q-cccccccccccc"}])
+        qid, result = self.adopt([payload, graded("postgres", "speculation"),
+                                  graded("sqlite", "speculation")])
+        self.assertEqual(result["status"], "adopted")
+        self.assertEqual(result["depth"], 2)
+        self.assertEqual(self.parsed()["decisions"][f"Q-{qid}"]["depth"], 2)
+
+    def test_a_depth_past_the_cap_is_not_quorum_eligible(self):
+        """Three layers out is where a run stops building the user's product
+        and starts building its own."""
+        (self.run_dir / "decisions.md").write_text(
+            UNRELATED_HUMAN + DERIVED_DEPTH_ONE.replace(
+                "- **Depth:** 1", "- **Depth:** 2"), encoding="utf-8")
+        payload = graded("postgres", "specified", consistent_with=[
+            {"kind": "decision", "id": "Q-cccccccccccc"}])
+        qid = open_question(self, self.run_dir)
+        answer_quorum(self.run_dir, qid,
+                      [payload, graded("postgres", "speculation"),
+                       graded("sqlite", "speculation")])
+        result = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "depth-exceeded")
+        self.assertEqual(result["depth"], 3)
+
+    def test_an_answer_anchored_on_a_decision_the_run_does_not_hold_escalates(self):
+        """`decision_depth` stops on it rather than resolving it to nothing,
+        because resolving it to nothing prices the claim at the shallowest and
+        most adoptable depth there is. Ideally that is a re-dispatch of the
+        brain — but a brain whose answer was LEGAL can never be re-asked, so at
+        this point the only live remedy is the human."""
+        payload = graded("postgres", "specified", consistent_with=[
+            {"kind": "decision", "id": "H-404"}])
+        qid = open_question(self, self.run_dir)
+        answer_quorum(self.run_dir, qid,
+                      [payload, graded("postgres", "speculation"),
+                       graded("sqlite", "speculation")])
+        result = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "unresolvable-anchor")
+        self.assertEqual(self.trail(), UNRELATED_HUMAN)
+
+    def test_a_generic_approval_escalates_rather_than_halting_the_run(self):
+        """`yes` names no option on an axis, so comparing it as one reports a
+        contradiction with whatever was decided rather than with anything the
+        candidate actually said. `check_contradiction` refuses it — and a brain
+        typing `yes` must reach a human, not stop the run."""
+        qid = open_question(self, self.run_dir,
+                            options="yes, sqlite")
+        answer_quorum(self.run_dir, qid, [graded("yes", "specified"),
+                                          graded("yes", "speculation"),
+                                          graded("sqlite", "speculation")])
+        result = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "uncomparable-answer")
+        self.assertEqual(self.trail(), UNRELATED_HUMAN)
+
 if __name__ == "__main__":
     unittest.main()

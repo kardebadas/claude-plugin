@@ -11817,3 +11817,645 @@ def _path_in_scope(path: str, scope: str) -> bool:
     """
     scope_type, scope_path = _scope_parts(scope)
     return _scope_claims(_safe_relative(path), scope_type, scope_path)
+
+# ---------------------------------------------------------------------------
+# P04 Task 4: the immutable worker-result codec -- fault F5.
+#
+# The VOCABULARY is unchanged from superb:pipeline. The ROUTING is not: there,
+# all three non-DONE statuses meant "block and ask the human". Here
+# NEEDS_CONTEXT and PLAN_CONFLICT raise a QUORUM QUESTION, and a question that
+# names no record has been raised nowhere -- so those two statuses must carry a
+# resolvable, digest-bound question record or the document cannot be rendered
+# at all. Only BLOCKED still halts, because three brains cannot conjure an API
+# key, and a halt must say what it is waiting for.
+#
+# DONE IS EVIDENCE, NOT ACCEPTANCE, and that is a property of this codec rather
+# than a sentence in a template. Three mechanisms make it true:
+#
+#   1. THE STATUS WORD AND THE ROUTING FIELDS ARE TWO INDEPENDENT STATEMENTS OF
+#      ONE FACT, and a document is accepted only where they agree. A DONE
+#      carrying a question record is refused; a NEEDS_CONTEXT carrying none is
+#      refused; a BLOCKED carrying a question record instead of a reason is
+#      refused. No status is believed on the strength of the word alone.
+#   2. A COMPLETION CLAIM MUST CARRY THE MATERIAL AN IMPORTER CHECKS. P02's
+#      ``_validate_tasks`` already refuses a completed row with no result and no
+#      verification, a completed SOURCE row with no source ref or commits, and a
+#      completed ARTIFACT row with no artifacts. The same bar is applied here,
+#      at the codec, so a claim with nothing to check cannot be published and
+#      then have to be refused one layer later on a technicality.
+#   3. THERE IS NO ACCEPTANCE FIELD. The grammar has fourteen fields and not one
+#      of them can say "accepted", "approved" or "verified". Acceptance is a
+#      ``## Tasks`` state and this codec cannot write one; a worker's document
+#      can only ever be an exhibit.
+#
+# AND THE DOCUMENT CARRIES NOTHING THE IMPORTER CANNOT SEE. ``parse`` finishes
+# by re-rendering what it read and demanding the bytes back, so a result file is
+# canonical or it is refused. That is one screen instead of a list of structural
+# ones, and it is the reason a paragraph appended under the table, a second
+# marker, a checkpoint row above the result table, a CRLF copy or an extra space
+# inside a cell cannot ride along unnoticed -- the document's identity is its
+# digest, and two byte sequences that parse to one result would give one result
+# two identities.
+# ---------------------------------------------------------------------------
+
+WORKER_RESULT_MARKER = "<!-- pipeline-auto-worker-result/v1 -->"
+WORKER_RESULT_TITLE = "# Pipeline Auto — Worker Result"
+
+#: The five statuses, PARTITIONED BY ROUTE. The partition is the definition and
+#: ``WORKER_STATUSES`` is its concatenation, so ``_status_route`` is total over
+#: the vocabulary by construction rather than by a default arm somebody has to
+#: remember to keep in step. A sixth status added to one of the three tuples is
+#: routed the moment it is written down; a sixth added to ``WORKER_STATUSES``
+#: alone is impossible, because ``WORKER_STATUSES`` is not written down.
+COMPLETION_STATUSES = ("DONE", "DONE_WITH_CONCERNS")
+QUORUM_STATUSES = ("NEEDS_CONTEXT", "PLAN_CONFLICT")
+HALT_STATUSES = ("BLOCKED",)
+WORKER_STATUSES = COMPLETION_STATUSES + QUORUM_STATUSES + HALT_STATUSES
+
+#: The three routes, named here so the codec's own agreement check and Task 10's
+#: controller-side routing read the same partition. Task 10 publishes
+#: ``QUORUM_ROUTE`` and ``HALT_ROUTE`` for the tracker marker it writes; those
+#: are the CELL SPELLINGS a controller reads back, and they are deliberately not
+#: these, so a change to one is not silently a change to the other.
+_ROUTE_COMPLETION = "completion"
+_ROUTE_QUORUM = "quorum"
+_ROUTE_HALT = "halt"
+
+#: The field order IS the grammar, exactly as the phase-plan comment's key order
+#: is: ``parse_worker_result`` matches the rendered names positionally against
+#: this tuple, so a reordered document fails at the position that should have
+#: held the field, a renamed one fails at its own position, a dropped one shifts
+#: every later field onto the wrong position and an extra one makes the count
+#: wrong. Four defects refused by one comparison.
+WORKER_RESULT_FIELDS = (
+    "run_id", "task_id", "attempt", "owner", "kind", "status", "source_ref",
+    "commits", "artifacts", "tests", "evidence", "concerns",
+    "question_record", "blocking_reason",
+)
+
+#: The fields rendered into ONE comma-separated cell. Their members carry the
+#: ``_cell_list`` comma bar that ``_cell_safe`` deliberately does not -- see
+#: ``_cell_safe``'s own note on why the comma belongs on the writer that knows a
+#: cell is list-valued and not on the value screen that cannot know.
+_WORKER_LIST_FIELDS = ("commits", "artifacts", "tests", "evidence")
+
+_WORKER_CHECKPOINTS = "checkpoints"
+_CHECKPOINT_KEYS = ("id", "status", "evidence")
+_CHECKPOINT_STATES = ("complete", "in_progress", "blocked")
+
+_RESULT_HEADER = ("Field", "Value")
+_CHECKPOINT_HEADER = ("ID", "Status", "Evidence")
+_TABLE_RULE = "---"
+
+#: ``<repository-relative-path>#sha256=<64 lowercase hex>``. The delimiter is
+#: spelled once and the digest grammar is P02's ``_SHA256``, not a second
+#: ``[0-9a-f]{64}`` written beside it: a truncated digest that still looks like
+#: hex is the one failure that reads as a successful binding, and there must be
+#: exactly one statement of what a bound reference looks like in this module.
+_DIGEST_DELIMITER = "#sha256="
+
+_ATTEMPT_PREFIX = "attempt-"
+_ATTEMPT_WIDTH = 3
+#: HOW MANY DIGITS AN ATTEMPT MAY BE SPELLED WITH, and it is a SPELLING ceiling
+#: for the same reason ``_MAX_ORDER_DIGITS`` is: CPython caps integer<->string
+#: conversion at ``sys.int_max_str_digits`` (4300 by default), so ``int(digits)``
+#: over a long run of ordinary ASCII digits raises ``ValueError`` -- not a
+#: ``TrackerError``, so it escapes every handler a controller wrote. The bound
+#: has to be reachable BEFORE the conversion is. Nine digits is a billion
+#: attempts at one task; the ceiling exists to keep the conversion total, not to
+#: express a policy about retries.
+_MAX_ATTEMPT_DIGITS = 9
+
+
+def _attempt_token(attempt) -> str:
+    """``1`` -> ``attempt-001``. THE SINGLE CONVERSION POINT, in both directions.
+
+    Every P04 signature takes an ``int``; every tracker cell, checkpoint marker,
+    worker-result document and evidence record spells the token. Two spellings
+    of that conversion would be two answers to "is this the attempt the row
+    reserved", which is fault F6 arriving through arithmetic.
+    """
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+        raise TrackerValidationError(
+            f"attempt must be a positive integer, not {attempt!r}; a bool is "
+            "excluded on purpose, because True renders as attempt-001 and "
+            "isinstance(True, int) is what would let it")
+    return f"{_ATTEMPT_PREFIX}{attempt:0{_ATTEMPT_WIDTH}d}"
+
+
+def _parse_attempt_token(value) -> int:
+    """``attempt-001`` -> ``1``, and ONLY the canonical spelling.
+
+    THE ORACLE IS THE RENDERER, not a digit-count rule. ``attempt-0001``,
+    ``attempt-1`` and ``attempt-01`` all read as attempt one under any
+    hand-written pattern, and all three would then parse into a document whose
+    re-render is different bytes -- one attempt with several identities, in a
+    record whose identity is its digest. The check is therefore
+    ``_attempt_token(int(digits)) == value`` and nothing else, which also
+    disposes of ``attempt-000`` (zero is not an attempt) without a second rule.
+
+    THE DIGITS ARE SCREENED BEFORE ``int`` SEES THEM, twice over.
+    ``str.isdigit`` is true of ``'٣'`` and ``'³'`` and ``int('٣')`` is 3, so an
+    attempt spelled in Arabic-Indic digits would convert; and 4301 ASCII digits
+    raise ``ValueError`` out of ``int`` itself, outside ``TrackerError``. The
+    round-trip would refuse the first anyway; it never gets the chance at the
+    second, which is why the length bound is not redundant.
+    """
+    if not isinstance(value, str) or not value.startswith(_ATTEMPT_PREFIX):
+        raise TrackerValidationError(
+            f"attempt must be rendered as {_ATTEMPT_PREFIX}NNN; got {value!r}")
+    digits = value[len(_ATTEMPT_PREFIX):]
+    if not digits or not digits.isascii() or not digits.isdigit():
+        raise TrackerValidationError(
+            f"attempt must be rendered as {_ATTEMPT_PREFIX}NNN with ASCII "
+            f"digits; got {value!r}. 'isdigit' alone is true of chr(0x0661) "
+            "and int() accepts it, so the ascii clause is what narrows this to "
+            "the ten characters the renderer writes")
+    if len(digits) > _MAX_ATTEMPT_DIGITS:
+        raise TrackerValidationError(
+            f"attempt {value!r} is spelled with {len(digits)} digits; the "
+            f"ceiling is {_MAX_ATTEMPT_DIGITS}, because int() raises "
+            "ValueError -- which is not a TrackerError -- once the string is "
+            "longer than sys.int_max_str_digits, and the bound has to be "
+            "reachable before the conversion is")
+    attempt = int(digits)
+    if attempt < 1:
+        raise TrackerValidationError(
+            f"{value!r} spells attempt {attempt}; attempts start at one, and "
+            "zero is not the attempt a reservation could have recorded")
+    if _attempt_token(attempt) != value:
+        raise TrackerValidationError(
+            f"{value!r} is not the canonical spelling of attempt {attempt}, "
+            f"which is {_attempt_token(attempt)!r}; a record whose identity is "
+            "the sha256 of its bytes may have exactly one spelling")
+    return attempt
+
+
+class _AttemptToken:
+    """``.fullmatch`` over the canonical attempt spelling, for the callers that
+    only want the yes/no -- Task 5's evidence validator among them.
+
+    It is a thin front on ``_parse_attempt_token`` rather than a fourth grammar
+    object beside ``_CharClass``, ``_Numbered`` and ``_Hex``, because the rule
+    here is not a character class at all: it is "this is what the renderer would
+    have written", and only the renderer can answer that.
+    """
+
+    __slots__ = ()
+
+    def fullmatch(self, value) -> bool:
+        try:
+            _parse_attempt_token(value)
+        except TrackerValidationError:
+            return False
+        return True
+
+
+_ATTEMPT_TOKEN = _AttemptToken()
+
+
+def _table_safe(value, *, field: str, list_valued: bool = False) -> str:
+    """One worker-result cell, screened by ``_cell_safe`` rather than by a list.
+
+    THE SCREEN IS NOT A CLOSED LIST OF POISON CHARACTERS, and this is the fifth
+    task in this build to have to say so. A screen spelled ``"|" in value or
+    "\\n" in value`` passes ``\\x0b``, ``\\x0c``, ``\\x1c``, ``\\x1d``,
+    ``\\x1e``, ``\\x85``, ``\\u2028`` and ``\\u2029`` -- every one of which
+    ``str.splitlines`` breaks on, so the rendered row comes back as two lines,
+    the first of which still parses as a two-cell field row holding HALF the
+    value. Measured: a ``concerns`` of ``"a\\x0bb"`` rendered, parsed back as
+    ``"a"``, and validated clean. ``_cell_safe`` asks the reader
+    (``_splits_the_section``) and asks the encoder (``_survives_the_encoder``)
+    instead of remembering them, and adds the ASCII control characters and the
+    surrounding-whitespace rule that no reader derives.
+
+    THE COMMA BAR IS SEPARATE AND IS THE CALLER'S TO ASK FOR. ``_cell_safe``
+    deliberately admits a comma, because ``concerns`` and ``blocking_reason``
+    are free text a human reads and English has commas. A member of a
+    comma-separated cell is the opposite case: ``tests=("a,b",)`` renders as
+    ``a,b`` and parses back as TWO commands, silently, with the result still
+    valid -- so the bar goes on the writer that knows the cell is list-valued.
+
+    ``-`` IS REFUSED AS A LIST MEMBER for the same round-trip reason.
+    ``tests=("-",)`` renders the empty-cell marker and parses back as no tests
+    at all: a suite of one becomes a suite of none with nothing raised.
+    """
+    if not isinstance(value, str) or not value:
+        raise TrackerValidationError(
+            f"{field} must be a nonempty string; got {value!r}")
+    if not _cell_safe(value):
+        raise TrackerValidationError(
+            f"{field}={value!r} is not table-safe: a cell may not carry '|', "
+            "anything the section reader breaks a line on, an ASCII control "
+            "character, anything the UTF-8 encoder refuses, or surrounding "
+            "whitespace -- each of them parses back as different rows, "
+            "different columns, or not at all")
+    if list_valued:
+        if "," in value:
+            raise TrackerValidationError(
+                f"{field}={value!r} is a member of a comma-separated cell and "
+                "carries a ','; it would parse back as two members, which is "
+                "silent and still valid")
+        if value == _ABSENT_CELL:
+            raise TrackerValidationError(
+                f"{field} names {_ABSENT_CELL!r} as a member; that is the "
+                "empty-cell marker, so a list of one parses back as a list of "
+                "none")
+    return value
+
+
+def _digest_reference(value, *, field: str = "reference") -> tuple[str, str]:
+    """``<repository-relative-path>#sha256=<digest>`` -> ``(path, digest)``.
+
+    A reference is resolvable and BOUND, and both halves are load-bearing. The
+    path goes through ``_safe_relative``, so it is repository-relative,
+    POSIX-spelled, traversal-free, glob-free and admits exactly one spelling;
+    the digest goes through P02's ``_SHA256``, so a truncated one -- the failure
+    that reads as a successful binding -- is refused rather than matched
+    loosely.
+
+    ``#`` IS REFUSED INSIDE THE PATH, which is what makes the split
+    unambiguous. ``_cell_safe`` admits a ``#``, so ``docs/a#sha256=<64 hex>.md``
+    is a legal path and a reference built from it has two plausible readings;
+    counting the delimiter once removes the ambiguity rather than resolving it
+    by picking a side. Task 10's ``_result_identity`` refuses ``#`` in a
+    published result path for the same reason, so the two agree.
+
+    ``PlanMetadataError`` IS WRAPPED. ``_safe_relative`` belongs to the plan
+    grammar and raises the plan grammar's exception; a controller importing a
+    worker result catches ``TrackerValidationError`` and would not see it.
+    """
+    text = _table_safe(value, field=field)
+    path, delimiter, digest = text.partition(_DIGEST_DELIMITER)
+    if not delimiter or "#" in path or not _SHA256.fullmatch(digest):
+        raise TrackerValidationError(
+            f"{field}={value!r} must be <repository-relative-path>"
+            f"{_DIGEST_DELIMITER}<64 lowercase hex>; an unbound path names a "
+            "file whose contents may have changed since, and a short or "
+            "upper-case digest matches nothing while looking exactly like a "
+            "match")
+    try:
+        relative = _safe_relative(path)
+    except PlanMetadataError as exc:
+        raise TrackerValidationError(
+            f"{field}={value!r} does not name a usable repository-relative "
+            f"path: {exc}") from exc
+    return relative.as_posix(), digest
+
+
+def _status_route(status) -> str:
+    """Which of the three routes a status takes. TOTAL over ``WORKER_STATUSES``
+    by construction, because that tuple is the concatenation of the three.
+
+    This is the ONE place the reversal from ``superb:pipeline`` is written down.
+    There, ``NEEDS_CONTEXT`` and ``PLAN_CONFLICT`` sat with ``BLOCKED`` in a
+    single "stop and ask the human" arm; here they are a different route with a
+    different required field, and a controller that re-derived the route from a
+    list of status literals would be writing that reversal a second time.
+    """
+    for statuses, route in ((COMPLETION_STATUSES, _ROUTE_COMPLETION),
+                            (QUORUM_STATUSES, _ROUTE_QUORUM),
+                            (HALT_STATUSES, _ROUTE_HALT)):
+        if status in statuses:
+            return route
+    raise TrackerValidationError(
+        f"unknown worker status {status!r}; the vocabulary is "
+        f"{list(WORKER_STATUSES)!r}")
+
+
+def _result_list(value, *, field: str) -> tuple[str, ...]:
+    """One list-valued field, normalised to a tuple and screened member by member.
+
+    THE TYPE IS REFUSED RATHER THAN COERCED, and the two shapes it refuses are
+    the two that fail OPEN. A bare string is an iterable of characters, so
+    ``commits="abc..."`` would validate forty single characters and render a
+    comma-separated smear. A generator is empty the second time it is read: the
+    validator counts it once, every later reader sees nothing, and a result
+    whose commits were never checked renders with an empty commits cell. Both
+    were reachable in the draft this replaces; neither raises anything.
+    """
+    if not isinstance(value, (tuple, list)):
+        raise TrackerValidationError(
+            f"{field} must be a tuple or a list; got {type(value).__name__} "
+            f"{value!r}. A bare string is an iterable of characters and a "
+            "generator is empty the second time it is read, so neither can be "
+            "validated once and rendered twice")
+    values = tuple(value)
+    for member in values:
+        _table_safe(member, field=field, list_valued=True)
+    if len(set(values)) != len(values):
+        raise TrackerValidationError(
+            f"{field}={list(values)!r} names a member twice; a repeat makes the "
+            "cell's length disagree with the number of things it names")
+    return values
+
+
+def _result_checkpoints(value) -> tuple[dict, ...]:
+    """The checkpoint table, normalised and screened.
+
+    A CHECKPOINT IS A MAPPING, ASKED BY TYPE. ``set(checkpoint) != {...}`` alone
+    admits the list ``["id", "status", "evidence"]``, whose ``set`` is exactly
+    the key set, and the next line indexes it by name -- ``TypeError: list
+    indices must be integers``, outside ``TrackerError``.
+    """
+    if not isinstance(value, (tuple, list)):
+        raise TrackerValidationError(
+            f"{_WORKER_CHECKPOINTS} must be a tuple or a list; got "
+            f"{type(value).__name__} {value!r}")
+    checkpoints = []
+    seen = set()
+    for checkpoint in value:
+        if not isinstance(checkpoint, dict):
+            raise TrackerValidationError(
+                f"a checkpoint is a mapping of {list(_CHECKPOINT_KEYS)!r}; got "
+                f"{type(checkpoint).__name__} {checkpoint!r}")
+        if set(checkpoint) != set(_CHECKPOINT_KEYS):
+            raise TrackerValidationError(
+                f"a checkpoint carries exactly {list(_CHECKPOINT_KEYS)!r}; got "
+                f"{sorted(checkpoint)!r}")
+        identifier = _table_safe(checkpoint["id"], field="checkpoint id")
+        if not _TOKEN.fullmatch(identifier):
+            raise TrackerValidationError(
+                f"checkpoint id {identifier!r} is not an identifier token")
+        if not _member(checkpoint["status"], _CHECKPOINT_STATES):
+            raise TrackerValidationError(
+                f"unknown checkpoint state {checkpoint['status']!r}; the "
+                f"vocabulary is {list(_CHECKPOINT_STATES)!r}")
+        evidence = _table_safe(checkpoint["evidence"], field="checkpoint evidence")
+        _digest_reference(evidence, field="checkpoint evidence")
+        if identifier in seen:
+            raise TrackerValidationError(
+                f"checkpoint {identifier!r} appears twice; a checkpoint whose "
+                "state depends on which copy the scan reaches first is not a "
+                "checkpoint")
+        seen.add(identifier)
+        checkpoints.append({"id": identifier, "status": checkpoint["status"],
+                            "evidence": evidence})
+    return tuple(checkpoints)
+
+
+def _validate_worker_result(result) -> dict:
+    """Screen one worker result and return the NORMALISED copy that renders.
+
+    Called by ``render_worker_result`` and again by ``parse_worker_result``, so
+    the two directions cannot disagree about what a legal result is -- which is
+    what lets the codec promise that a malformed result cannot be published and
+    cannot be imported, rather than only one of the two.
+
+    IT RETURNS A NEW DICT AND THE CALLER RENDERS THAT ONE. Validating the
+    caller's dict and then rendering the caller's dict is how a generator gets
+    counted once and rendered empty; normalising and rendering the normalised
+    copy closes that by construction.
+    """
+    if not isinstance(result, dict):
+        raise TrackerValidationError(
+            f"a worker result is a mapping; got {type(result).__name__} "
+            f"{result!r}")
+    expected = (*WORKER_RESULT_FIELDS, _WORKER_CHECKPOINTS)
+    missing = [field for field in expected if field not in result]
+    if missing:
+        raise TrackerValidationError(
+            f"worker result is missing fields: {missing}")
+    unknown = sorted(set(result) - set(expected))
+    if unknown:
+        raise TrackerValidationError(
+            f"worker result carries unknown fields: {unknown}. Nothing renders "
+            "them, so an importer would never see them and a worker would "
+            "believe it had said something")
+
+    scalars = {}
+    scalars["run_id"] = _table_safe(result["run_id"], field="run_id")
+    if not _RUN_ID.fullmatch(scalars["run_id"]):
+        raise TrackerValidationError(
+            f"run_id {scalars['run_id']!r} is not a run-id token")
+    scalars["task_id"] = _table_safe(result["task_id"], field="task_id")
+    if not _TOKEN.fullmatch(scalars["task_id"]):
+        raise TrackerValidationError(
+            f"task_id {scalars['task_id']!r} is not an identifier token")
+    scalars["owner"] = _table_safe(result["owner"], field="owner")
+    if not _TOKEN.fullmatch(scalars["owner"]):
+        raise TrackerValidationError(
+            f"owner {scalars['owner']!r} is not an identifier token")
+    scalars["attempt"] = result["attempt"]
+    _attempt_token(scalars["attempt"])
+    if not _member(result["kind"], TASK_KINDS):
+        raise TrackerValidationError(
+            f"unknown task kind {result['kind']!r}; the kinds are "
+            f"{list(TASK_KINDS)!r}")
+    scalars["kind"] = result["kind"]
+    route = _status_route(result["status"])
+    scalars["status"] = result["status"]
+
+    lists = {field: _result_list(result[field], field=field)
+             for field in _WORKER_LIST_FIELDS}
+
+    scalars["source_ref"] = _table_safe(result["source_ref"], field="source_ref")
+    if (scalars["source_ref"] != _ABSENT_CELL
+            and not _COMMIT.fullmatch(scalars["source_ref"])):
+        raise TrackerValidationError(
+            f"source_ref {scalars['source_ref']!r} is neither a full 40-hex "
+            f"commit nor {_ABSENT_CELL!r}; the baseline..source-head range is a "
+            "proof only between immutable ends")
+    for commit in lists["commits"]:
+        if not _COMMIT.fullmatch(commit):
+            raise TrackerValidationError(
+                f"commits names {commit!r}; a recorded commit is forty "
+                "lowercase hex characters, and a symbolic name resolves "
+                "somewhere else tomorrow")
+    for reference in lists["evidence"]:
+        _digest_reference(reference, field="evidence")
+
+    scalars["concerns"] = _table_safe(result["concerns"], field="concerns")
+    scalars["question_record"] = _table_safe(result["question_record"],
+                                             field="question_record")
+    scalars["blocking_reason"] = _table_safe(result["blocking_reason"],
+                                             field="blocking_reason")
+    _validate_result_route(scalars, lists, route)
+
+    unwritten = sorted(set(WORKER_RESULT_FIELDS) - set(scalars) - set(lists))
+    if unwritten:
+        raise TrackerValidationError(
+            f"the codec renders {unwritten} but screens nothing into them; a "
+            "field added to WORKER_RESULT_FIELDS without a validator is a cell "
+            "nobody checks")
+    validated = {
+        field: lists[field] if field in lists else scalars[field]
+        for field in WORKER_RESULT_FIELDS
+    }
+    validated[_WORKER_CHECKPOINTS] = _result_checkpoints(
+        result[_WORKER_CHECKPOINTS])
+    return validated
+
+
+def _validate_result_route(scalars: dict, lists: dict, route: str) -> None:
+    """F5, and the whole of "DONE is evidence, not acceptance".
+
+    The status word says which route the controller should take. The routing
+    fields say the same thing a second time, in a form that can be resolved: a
+    question record that can be opened, a blocking reason that can be read. The
+    codec accepts only where the two agree, so no status is acted on because of
+    the word alone.
+    """
+    status = scalars["status"]
+    question_record = scalars["question_record"]
+    blocking_reason = scalars["blocking_reason"]
+    if route == _ROUTE_QUORUM:
+        if question_record == _ABSENT_CELL:
+            raise TrackerValidationError(
+                f"{status} raises a quorum question and must name its question "
+                f"record as <path>{_DIGEST_DELIMITER}<digest>. A worker that "
+                "says 'I need a decision' without naming the record has raised "
+                "nothing, and the controller is left holding a status it cannot "
+                "act on -- which is why this is refused exactly as a result "
+                "with a missing owner is refused")
+        _digest_reference(question_record, field="question_record")
+        if blocking_reason != _ABSENT_CELL:
+            raise TrackerValidationError(
+                f"{status} routes to a quorum, not a halt, so blocking_reason "
+                f"must be {_ABSENT_CELL!r}; a result claiming both routes is "
+                "one a controller cannot dispatch")
+        return
+    if route == _ROUTE_HALT:
+        if blocking_reason == _ABSENT_CELL:
+            raise TrackerValidationError(
+                f"{status} halts the run and must say what it is waiting for; "
+                "three brains cannot conjure an API key, and a halt with no "
+                "stated reason is one nobody can clear")
+        if question_record != _ABSENT_CELL:
+            raise TrackerValidationError(
+                f"{status} halts the run and must not name a question record; "
+                "a halt routed to a quorum would spend three brain slots on a "
+                "question no quorum can answer")
+        return
+    if question_record != _ABSENT_CELL or blocking_reason != _ABSENT_CELL:
+        raise TrackerValidationError(
+            f"{status} is a completion status and carries neither a question "
+            f"record nor a blocking reason; it claims the work is finished, so "
+            "there is nothing left to ask and nothing left to wait for")
+    if not lists["evidence"]:
+        raise TrackerValidationError(
+            f"{status} claims completion and names no evidence; P02 refuses a "
+            "completed task row whose verification cell is empty, and a claim "
+            "with nothing to check cannot be refused by checking it -- it can "
+            "only be believed, which is what this codec exists to prevent")
+    if scalars["kind"] == TASK_KINDS[0]:
+        if scalars["source_ref"] == _ABSENT_CELL or not lists["commits"]:
+            raise TrackerValidationError(
+                f"{status} claims a completed {TASK_KINDS[0]} task and names no "
+                "source ref or no commits; the baseline..source-head range "
+                "proof has no far end without them, and an empty range is fault "
+                "F4 arriving as a completion")
+        if not lists["tests"]:
+            raise TrackerValidationError(
+                f"{status} claims a completed {TASK_KINDS[0]} task and names no "
+                "tests; the approved task suite is never empty, so a completion "
+                "naming none has run something other than the suite it was "
+                "given, or nothing at all")
+    elif not lists["artifacts"]:
+        raise TrackerValidationError(
+            f"{status} claims a completed {TASK_KINDS[1]} task and names no "
+            "artifacts; an artifact task is proved by the documents existing, "
+            "so a completion naming none has produced nothing")
+    if status == COMPLETION_STATUSES[1] and scalars["concerns"] == _ABSENT_CELL:
+        raise TrackerValidationError(
+            f"{status} states a concern in its own name and records none; "
+            f"{COMPLETION_STATUSES[0]} is the status for work with nothing to "
+            "flag, and a concern nobody wrote down is one no reviewer can read")
+
+
+def _result_cell(value) -> str:
+    """One rendered cell. Not ``_cell``, which is P03's two-argument writer for
+    the ``## Quorum`` mirror and is called at eleven sites -- a module-level
+    ``def _cell(value)`` here would rebind the global and turn every one of them
+    into a ``TypeError`` at runtime.
+    """
+    if isinstance(value, tuple):
+        return ",".join(value) or _ABSENT_CELL
+    return str(value)
+
+
+def _split_row(line: str) -> list:
+    """``| a | b |`` -> ``["a", "b"]``. Cells are stripped, which is why
+    ``_cell_safe`` refuses a value with surrounding whitespace: two spellings
+    that strip to one cell would both parse and only one of them re-renders.
+    """
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def render_worker_result(result: dict) -> str:
+    """Render one validated immutable worker result in canonical field order."""
+    validated = _validate_worker_result(result)
+    rows = tuple(
+        (field,
+         _attempt_token(validated[field]) if field == "attempt"
+         else _result_cell(validated[field]))
+        for field in WORKER_RESULT_FIELDS
+    )
+    checkpoints = tuple(
+        tuple(checkpoint[key] for key in _CHECKPOINT_KEYS)
+        for checkpoint in validated[_WORKER_CHECKPOINTS]
+    )
+    lines = [
+        WORKER_RESULT_MARKER,
+        WORKER_RESULT_TITLE,
+        "",
+        "## Result",
+        *_render_table(_RESULT_HEADER, rows),
+        "",
+        "## Checkpoints",
+        *_render_table(_CHECKPOINT_HEADER, checkpoints),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def parse_worker_result(text: str) -> dict:
+    """Parse a canonical worker result; refuse a foreign, reordered or
+    non-canonical document.
+
+    THE LAST SCREEN IS THE RENDERER. Everything above it reads the tables; the
+    final comparison demands that re-rendering what was read gives back the
+    bytes that were handed in. Without it the parse is a SEARCH -- it finds the
+    rows it recognises and is silent about everything else -- and a worker
+    result is an immutable document whose identity is the sha256 of those bytes.
+    A parse that ignores part of the file gives one result two identities, and
+    the half it ignored is exactly where a sentence contradicting the table
+    would sit.
+    """
+    if not isinstance(text, str):
+        raise TrackerValidationError(
+            f"a worker result is text; got {type(text).__name__}")
+    lines = text.splitlines()
+    if not lines or lines[0] != WORKER_RESULT_MARKER:
+        raise TrackerValidationError(
+            "worker result marker is missing or foreign; the two formats do "
+            "not interoperate")
+    rows = [_split_row(line) for line in lines if line.startswith("| ")]
+    field_rows = [row for row in rows
+                  if len(row) == 2
+                  and row[0] not in (_RESULT_HEADER[0], _TABLE_RULE)]
+    names = [row[0] for row in field_rows]
+    if names != list(WORKER_RESULT_FIELDS):
+        raise TrackerValidationError(
+            "worker result fields are missing, unknown, or reordered: expected "
+            f"{list(WORKER_RESULT_FIELDS)}, read {names}")
+    values = {row[0]: row[1] for row in field_rows}
+    result = dict(values)
+    result["attempt"] = _parse_attempt_token(values["attempt"])
+    for field in _WORKER_LIST_FIELDS:
+        raw = values[field]
+        result[field] = () if raw == _ABSENT_CELL else tuple(raw.split(","))
+    result[_WORKER_CHECKPOINTS] = tuple(
+        dict(zip(_CHECKPOINT_KEYS, row))
+        for row in rows
+        if len(row) == 3 and row[0] not in (_CHECKPOINT_HEADER[0], _TABLE_RULE)
+    )
+    validated = _validate_worker_result(result)
+    if render_worker_result(validated) != text:
+        raise TrackerValidationError(
+            "worker result is not canonical: re-rendering what was read does "
+            "not give back the bytes that were handed in. The document's "
+            "identity is the sha256 of those bytes, so anything the parse "
+            "ignored -- a second marker, a paragraph under the table, a "
+            "checkpoint row outside its section, a CRLF copy, an extra space "
+            "inside a cell -- would give one result two identities")
+    return validated

@@ -18,6 +18,7 @@ to match. One path, one module, one exception hierarchy.
 """
 from __future__ import annotations
 
+import ast
 import contextlib
 import itertools
 import json
@@ -3635,3 +3636,1214 @@ class PathInScopeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+# --------------------------------------------------------------------------
+# Task 4 tests -- fault F5
+#
+# F5 is "a quorum-raising result with no question record reference". The
+# brief's own test for it is one `assertRaises` per quorum status over one
+# fixture, which is a rejection-only assertion over two rows: it cannot tell
+# the F5 rule from any other screen that happens to refuse the same fixture,
+# and it says nothing at all about the 38 other (status, routing-field)
+# combinations the vocabulary admits. `RoutingAgreementTests` replaces it with
+# the whole cross product answered against a table oracle, and
+# `QuestionRecordDiagnosisTests` asserts the DIAGNOSIS rather than the refusal.
+# --------------------------------------------------------------------------
+
+DIGEST = "a" * 64
+COMMIT = "b" * 40
+QUESTION_RECORD = f"docs/superpowers/runs/run-1/questions/q1.md#sha256={DIGEST}"
+EVIDENCE_REF = f"docs/superpowers/runs/run-1/evidence/T1.md#sha256={DIGEST}"
+
+
+def worker_result(**overrides) -> dict:
+    result = {
+        "run_id": "run-1",
+        "task_id": "T1",
+        "attempt": 1,
+        "owner": "impl-1",
+        "kind": "source",
+        "status": "DONE",
+        "source_ref": COMMIT,
+        "commits": (COMMIT,),
+        "artifacts": (),
+        "tests": ("python3 -m unittest -k T1",),
+        "evidence": (EVIDENCE_REF,),
+        "concerns": "-",
+        "question_record": "-",
+        "blocking_reason": "-",
+        "checkpoints": (),
+    }
+    result.update(overrides)
+    return result
+
+
+def quorum_result(status: str, **overrides) -> dict:
+    """A quorum-raising result, with the caller's overrides applied LAST.
+
+    THE BRIEF SPELLED THIS AS ``worker_result(question_record=..., **overrides)``
+    AND ITS OWN F5 TEST COULD NOT RUN. ``quorum_result(status,
+    question_record="-")`` -- the flagship
+    ``test_quorum_status_without_a_question_record_is_rejected`` -- raises
+    ``TypeError: got multiple values for keyword argument 'question_record'``
+    from the HELPER, before the codec is ever called. ``assertRaises`` is
+    looking for ``TrackerValidationError``, so the test errors rather than
+    asserting anything, and the one field F5 is about is the one field the
+    helper could not override. Merging into a dict makes the override win,
+    which is what every caller here means.
+    """
+    return worker_result(**{
+        "status": status, "source_ref": "-", "commits": (), "evidence": (),
+        "question_record": QUESTION_RECORD, **overrides,
+    })
+
+
+def artifact_result(**overrides) -> dict:
+    """An artifact-kind completion. Overrides last, for the reason above:
+    ``artifact_result(artifacts=())`` is the whole point of one of the tests."""
+    return worker_result(**{
+        "kind": "artifact", "source_ref": "-", "commits": (), "tests": (),
+        "artifacts": ("docs/superpowers/runs/run-1/brief.md",), **overrides,
+    })
+
+
+def rendered_lines(result: dict) -> list:
+    return state.render_worker_result(result).splitlines()
+
+
+def refuse(case, result: dict) -> str:
+    """Render `result`, require a `TrackerValidationError`, return its text."""
+    with case.assertRaises(state.TrackerValidationError) as caught:
+        state.render_worker_result(result)
+    return str(caught.exception)
+
+
+class WorkerResultCodecTests(unittest.TestCase):
+    """The brief's own thirteen, kept verbatim."""
+
+    def test_round_trips(self):
+        original = worker_result(checkpoints=(
+            {"id": "c1", "status": "complete", "evidence": EVIDENCE_REF},
+        ))
+        text = state.render_worker_result(original)
+        self.assertTrue(text.startswith(state.WORKER_RESULT_MARKER))
+        self.assertEqual(state.parse_worker_result(text), original)
+
+    def test_field_order_is_pinned_in_the_rendered_document(self):
+        text = state.render_worker_result(worker_result())
+        rendered = [
+            line.split("|")[1].strip()
+            for line in text.splitlines()
+            if line.startswith("| ") and line.count("|") == 3
+        ]
+        self.assertEqual(
+            [name for name in rendered if name in state.WORKER_RESULT_FIELDS],
+            list(state.WORKER_RESULT_FIELDS),
+        )
+
+    def test_rejects_a_foreign_marker(self):
+        text = state.render_worker_result(worker_result()).replace(
+            state.WORKER_RESULT_MARKER, "<!-- pipeline-worker-result/v2 -->"
+        )
+        with self.assertRaises(state.TrackerValidationError):
+            state.parse_worker_result(text)
+
+    def test_rejects_reordered_fields(self):
+        lines = state.render_worker_result(worker_result()).splitlines()
+        index = next(i for i, line in enumerate(lines)
+                     if line.startswith("| owner "))
+        lines[index], lines[index - 1] = lines[index - 1], lines[index]
+        with self.assertRaises(state.TrackerValidationError):
+            state.parse_worker_result("\n".join(lines) + "\n")
+
+    def test_quorum_status_without_a_question_record_is_rejected(self):
+        """F5: a quorum-raising result missing its question record is rejected,
+        exactly as a result with a missing owner is rejected."""
+        for status in state.QUORUM_STATUSES:
+            with self.subTest(status=status):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.render_worker_result(
+                        quorum_result(status, question_record="-")
+                    )
+
+    def test_quorum_status_with_a_digest_bound_question_record_is_accepted(self):
+        for status in state.QUORUM_STATUSES:
+            with self.subTest(status=status):
+                result = quorum_result(status)
+                self.assertEqual(
+                    state.parse_worker_result(state.render_worker_result(result)),
+                    result,
+                )
+
+    def test_quorum_question_record_must_be_digest_bound(self):
+        for status in state.QUORUM_STATUSES:
+            with self.subTest(status=status):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.render_worker_result(quorum_result(
+                        status,
+                        question_record="docs/superpowers/runs/run-1/questions/q1.md",
+                    ))
+
+    def test_quorum_status_may_not_also_carry_a_blocking_reason(self):
+        for status in state.QUORUM_STATUSES:
+            with self.subTest(status=status):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.render_worker_result(
+                        quorum_result(status, blocking_reason="also blocked")
+                    )
+
+    def test_blocked_requires_a_blocking_reason_and_no_question_record(self):
+        base = dict(source_ref="-", commits=(), evidence=())
+        with self.assertRaises(state.TrackerValidationError):
+            state.render_worker_result(
+                worker_result(status="BLOCKED", blocking_reason="-", **base)
+            )
+        with self.assertRaises(state.TrackerValidationError):
+            state.render_worker_result(worker_result(
+                status="BLOCKED", blocking_reason="no staging credential",
+                question_record=f"docs/q.md#sha256={DIGEST}", **base,
+            ))
+        accepted = worker_result(
+            status="BLOCKED", blocking_reason="no staging credential", **base
+        )
+        self.assertEqual(
+            state.parse_worker_result(state.render_worker_result(accepted)),
+            accepted,
+        )
+
+    def test_completion_status_carries_neither_routing_field(self):
+        with self.assertRaises(state.TrackerValidationError):
+            state.render_worker_result(
+                worker_result(question_record=f"docs/q.md#sha256={DIGEST}")
+            )
+        with self.assertRaises(state.TrackerValidationError):
+            state.render_worker_result(worker_result(blocking_reason="why"))
+
+    def test_status_vocabulary_is_exactly_five_values(self):
+        self.assertEqual(state.WORKER_STATUSES, (
+            "DONE", "DONE_WITH_CONCERNS", "NEEDS_CONTEXT", "PLAN_CONFLICT",
+            "BLOCKED",
+        ))
+        self.assertEqual(state.QUORUM_STATUSES,
+                         ("NEEDS_CONTEXT", "PLAN_CONFLICT"))
+        self.assertEqual(state.HALT_STATUSES, ("BLOCKED",))
+        with self.assertRaises(state.TrackerValidationError):
+            state.render_worker_result(worker_result(status="OK"))
+
+    def test_rejects_unsafe_scalars(self):
+        for override in ({"owner": "impl|1"}, {"concerns": "a|b"},
+                         {"attempt": 0}, {"attempt": "1"}, {"kind": "binary"},
+                         {"run_id": ""}, {"commits": ("short",)},
+                         {"source_ref": "nope"}):
+            with self.subTest(override=override):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.render_worker_result(worker_result(**override))
+
+    def test_template_matches_the_codec_fields(self):
+        template = (
+            Path(state.__file__).resolve().parents[1] / "templates"
+            / "worker-result.md"
+        ).read_text(encoding="utf-8")
+        self.assertTrue(template.startswith(state.WORKER_RESULT_MARKER))
+        for field in state.WORKER_RESULT_FIELDS:
+            with self.subTest(field=field):
+                self.assertIn(f"| {field} | ", template)
+
+
+class StatusPartitionTests(unittest.TestCase):
+    """The three route tuples ARE the vocabulary, not a commentary on it."""
+
+    def test_the_vocabulary_is_the_concatenation_of_the_three_routes(self):
+        self.assertEqual(
+            state.WORKER_STATUSES,
+            state.COMPLETION_STATUSES + state.QUORUM_STATUSES
+            + state.HALT_STATUSES,
+        )
+
+    def test_the_three_routes_are_pairwise_disjoint(self):
+        groups = (state.COMPLETION_STATUSES, state.QUORUM_STATUSES,
+                  state.HALT_STATUSES)
+        for one, two in itertools.combinations(groups, 2):
+            with self.subTest(one=one, two=two):
+                self.assertEqual(set(one) & set(two), set())
+
+    def test_status_route_is_total_over_the_vocabulary(self):
+        """No default arm and no unrouted status. A sixth status that reached
+        `WORKER_STATUSES` without reaching one of the three tuples would be a
+        status the codec accepts and the controller cannot dispatch."""
+        for status in state.WORKER_STATUSES:
+            with self.subTest(status=status):
+                self.assertIn(
+                    state._status_route(status),
+                    (state._ROUTE_COMPLETION, state._ROUTE_QUORUM,
+                     state._ROUTE_HALT),
+                )
+
+    def test_every_status_has_at_least_one_renderable_result(self):
+        """A vocabulary entry no document can carry is a lie in the template.
+        Measured by CONSTRUCTION -- one body per route -- rather than asserted."""
+        bodies = {
+            state._ROUTE_COMPLETION: lambda status: worker_result(
+                status=status,
+                concerns="-" if status == "DONE" else "a rough edge"),
+            state._ROUTE_QUORUM: quorum_result,
+            state._ROUTE_HALT: lambda status: worker_result(
+                status=status, source_ref="-", commits=(), evidence=(),
+                blocking_reason="no staging credential"),
+        }
+        for status in state.WORKER_STATUSES:
+            with self.subTest(status=status):
+                result = bodies[state._status_route(status)](status)
+                self.assertEqual(
+                    state.parse_worker_result(
+                        state.render_worker_result(result)),
+                    result,
+                )
+
+    def test_an_unrouted_status_is_refused_by_the_route_lookup_itself(self):
+        for status in ("OK", "done", "", "BLOCKED ", None, ["DONE"], 3):
+            with self.subTest(status=status):
+                with self.assertRaises(state.TrackerValidationError):
+                    state._status_route(status)
+
+
+# --------------------------------------------------------------------------
+# F5, answered over the whole cross product instead of one fixture.
+# --------------------------------------------------------------------------
+
+#: The routing half of a result, as the four states the two fields can be in.
+#: This is the ORACLE and it is written as a table, not as a copy of the
+#: implementation: a result's two routing cells say which route the body is on,
+#: the status word says which route the status is on, and a document is legal
+#: exactly when the two say the same thing. Every arm is spelled, including the
+#: "both set" arm that belongs to no route at all.
+def body_route(question_record: str, blocking_reason: str):
+    named_question = question_record != "-"
+    named_reason = blocking_reason != "-"
+    if named_question and named_reason:
+        return None                      # claims two routes; belongs to neither
+    if named_question:
+        return state._ROUTE_QUORUM
+    if named_reason:
+        return state._ROUTE_HALT
+    return state._ROUTE_COMPLETION
+
+
+ROUTING_CELLS = (
+    ("-", "-"),
+    (QUESTION_RECORD, "-"),
+    ("-", "no staging credential"),
+    (QUESTION_RECORD, "no staging credential"),
+)
+
+
+def routed_body(status: str, question_record: str, blocking_reason: str,
+                kind: str = "source") -> dict:
+    """A result whose COMPLETION material is always complete for its kind, so
+    the only thing that can be wrong with it is the routing pair."""
+    base = artifact_result() if kind == "artifact" else worker_result()
+    base.update(status=status, question_record=question_record,
+                blocking_reason=blocking_reason,
+                concerns="a rough edge" if status == "DONE_WITH_CONCERNS"
+                else "-")
+    return base
+
+
+class RoutingAgreementTests(unittest.TestCase):
+    """The status word and the routing cells are two statements of one fact.
+
+    This is what makes "DONE is evidence, not acceptance" mechanical rather
+    than prose: no status is acted on for the strength of the word. Forty
+    combinations -- five statuses, four routing pairs, two kinds -- are each
+    answered against `body_route`, an independently written table. The brief
+    asserted two of the forty.
+    """
+
+    def test_a_result_is_accepted_exactly_when_the_two_agree(self):
+        checked = 0
+        for status, (question_record, blocking_reason), kind in itertools.product(
+            state.WORKER_STATUSES, ROUTING_CELLS, state.TASK_KINDS
+        ):
+            expected = (body_route(question_record, blocking_reason)
+                        == state._status_route(status))
+            with self.subTest(status=status, question_record=question_record,
+                              blocking_reason=blocking_reason, kind=kind):
+                result = routed_body(status, question_record, blocking_reason,
+                                     kind)
+                try:
+                    state.render_worker_result(result)
+                    accepted = True
+                except state.TrackerValidationError:
+                    accepted = False
+                self.assertEqual(accepted, expected)
+                checked += 1
+        self.assertEqual(checked, 40)
+
+    def test_no_body_is_legal_under_two_statuses_from_different_routes(self):
+        """The bodies of the three routes are disjoint, so a worker cannot
+        relabel a result from one route to another and have it still render."""
+        for (question_record, blocking_reason), kind in itertools.product(
+            ROUTING_CELLS, state.TASK_KINDS
+        ):
+            accepting = set()
+            for status in state.WORKER_STATUSES:
+                try:
+                    state.render_worker_result(
+                        routed_body(status, question_record, blocking_reason,
+                                    kind))
+                except state.TrackerValidationError:
+                    continue
+                accepting.add(state._status_route(status))
+            with self.subTest(question_record=question_record,
+                              blocking_reason=blocking_reason, kind=kind):
+                self.assertLessEqual(len(accepting), 1, accepting)
+
+    def test_relabelling_a_quorum_result_as_done_is_refused_both_ways(self):
+        for status in state.QUORUM_STATUSES:
+            with self.subTest(status=status):
+                relabelled = quorum_result(status)
+                relabelled["status"] = "DONE"
+                refuse(self, relabelled)
+                demoted = worker_result()
+                demoted["status"] = status
+                refuse(self, demoted)
+
+
+class QuestionRecordDiagnosisTests(unittest.TestCase):
+    """F5 with the diagnosis asserted, not just the refusal.
+
+    Two screens that refuse the same input are indistinguishable to an
+    `assertRaises`: the quorum fixture has an empty `evidence` and an empty
+    `commits` too, so a codec that had lost the question-record rule entirely
+    and gained a "completion needs evidence" rule would still raise. Every
+    assertion here names the rule that must have fired AND the rules that must
+    not have.
+    """
+
+    OTHER_WORDINGS = ("blocking", "evidence", "commits", "artifacts",
+                      "source ref")
+
+    def test_the_refusal_names_the_question_record_and_the_status(self):
+        for status in state.QUORUM_STATUSES:
+            with self.subTest(status=status):
+                message = refuse(self, quorum_result(status,
+                                                     question_record="-"))
+                self.assertIn("question record", message)
+                self.assertIn(status, message)
+                for wording in self.OTHER_WORDINGS:
+                    self.assertNotIn(wording, message)
+
+    def test_the_rule_survives_every_other_field_being_present(self):
+        """The fixture the brief used has empty commits, evidence and tests, so
+        its refusal is over-determined. This one is a fully populated result
+        whose ONLY defect is the missing question record."""
+        for status in state.QUORUM_STATUSES:
+            with self.subTest(status=status):
+                populated = worker_result(status=status, question_record="-")
+                message = refuse(self, populated)
+                self.assertIn("question record", message)
+                for wording in self.OTHER_WORDINGS:
+                    self.assertNotIn(wording, message)
+
+    def test_an_unbound_question_record_is_a_different_diagnosis(self):
+        """'named no record' and 'named one nobody can resolve' are different
+        facts, and a single message for both would hide whichever the codec
+        stopped checking."""
+        for status in state.QUORUM_STATUSES:
+            with self.subTest(status=status):
+                unbound = refuse(self, quorum_result(
+                    status, question_record="docs/q.md"))
+                self.assertIn("question_record", unbound)
+                self.assertNotIn("raises a quorum question and must name",
+                                 unbound)
+
+    def test_a_question_record_bound_to_a_short_digest_is_refused(self):
+        for length in (0, 1, 63, 65, 128):
+            with self.subTest(length=length):
+                refuse(self, quorum_result(
+                    "NEEDS_CONTEXT",
+                    question_record=f"docs/q.md#sha256={'a' * length}"))
+
+    def test_an_upper_case_digest_is_refused(self):
+        refuse(self, quorum_result("NEEDS_CONTEXT",
+                                   question_record=f"docs/q.md#sha256={'A' * 64}"))
+
+    def test_the_question_record_path_is_held_to_the_plan_path_bar(self):
+        for path in ("/abs/q.md", "../q.md", "docs/./q.md", "docs//q.md",
+                     "docs\\q.md", "docs/q*.md", "docs/", "", "docs/ q.md"):
+            with self.subTest(path=path):
+                refuse(self, quorum_result(
+                    "NEEDS_CONTEXT",
+                    question_record=f"{path}#sha256={DIGEST}"))
+
+    def test_a_plan_metadata_error_is_re_raised_as_a_tracker_error(self):
+        """`_safe_relative` belongs to the plan grammar. A controller importing
+        a worker result catches `TrackerValidationError`, so an unwrapped
+        `PlanMetadataError` is an escape from the family it was promised."""
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._digest_reference(f"../q.md#sha256={DIGEST}", field="q")
+        self.assertIsInstance(caught.exception.__cause__, state.PlanMetadataError)
+        self.assertNotIsInstance(caught.exception, state.PlanMetadataError)
+
+
+class BlockedRouteTests(unittest.TestCase):
+    """BLOCKED is the one status whose meaning did NOT reverse."""
+
+    def test_a_halt_with_no_stated_reason_is_refused_and_says_so(self):
+        message = refuse(self, worker_result(
+            status="BLOCKED", source_ref="-", commits=(), evidence=()))
+        self.assertIn("halts the run", message)
+        self.assertNotIn("question record", message)
+
+    def test_a_halt_naming_a_question_record_is_refused_and_says_so(self):
+        message = refuse(self, worker_result(
+            status="BLOCKED", source_ref="-", commits=(), evidence=(),
+            blocking_reason="no staging credential",
+            question_record=QUESTION_RECORD))
+        self.assertIn("question record", message)
+        self.assertIn("quorum", message)
+
+    def test_a_halt_carries_no_completion_bar(self):
+        """A blocked worker has no evidence to name, and requiring some would
+        make the one status that means 'I could not do the work' unrenderable."""
+        result = worker_result(status="BLOCKED", source_ref="-", commits=(),
+                               evidence=(), tests=(),
+                               blocking_reason="no staging credential")
+        self.assertEqual(
+            state.parse_worker_result(state.render_worker_result(result)),
+            result,
+        )
+
+
+class CompletionIsAClaimTests(unittest.TestCase):
+    """DONE is evidence, not acceptance: a completion must carry the material
+    an importer checks it against, or it can only be believed."""
+
+    def test_a_source_completion_needs_its_range_its_suite_and_its_evidence(self):
+        for override, wording in (
+            ({"evidence": ()}, "names no evidence"),
+            ({"source_ref": "-"}, "no source ref or no commits"),
+            ({"commits": ()}, "no source ref or no commits"),
+            ({"tests": ()}, "names no tests"),
+        ):
+            for status in state.COMPLETION_STATUSES:
+                with self.subTest(override=override, status=status):
+                    result = worker_result(status=status, **override)
+                    if status == "DONE_WITH_CONCERNS":
+                        result["concerns"] = "a rough edge"
+                    self.assertIn(wording, refuse(self, result))
+
+    def test_an_artifact_completion_needs_its_artifacts_and_its_evidence(self):
+        for override, wording in (
+            ({"artifacts": ()}, "names no artifacts"),
+            ({"evidence": ()}, "names no evidence"),
+        ):
+            with self.subTest(override=override):
+                self.assertIn(wording, refuse(self, artifact_result(**override)))
+
+    def test_an_artifact_completion_is_not_held_to_the_source_bar(self):
+        """P02's `_validate_tasks` asks a completed artifact row for its
+        artifacts and nothing about a source range; a codec that asked for
+        commits too would make every artifact task unpublishable."""
+        result = artifact_result()
+        self.assertEqual(
+            state.parse_worker_result(state.render_worker_result(result)),
+            result,
+        )
+
+    def test_done_with_concerns_must_record_the_concern_it_is_named_for(self):
+        message = refuse(self, worker_result(status="DONE_WITH_CONCERNS"))
+        self.assertIn("states a concern in its own name", message)
+        accepted = worker_result(status="DONE_WITH_CONCERNS",
+                                 concerns="the retry loop is untested")
+        self.assertEqual(
+            state.parse_worker_result(state.render_worker_result(accepted)),
+            accepted,
+        )
+
+    def test_the_grammar_has_no_field_that_can_say_accepted(self):
+        """There is nowhere in a worker result to record acceptance, and that is
+        the structural half of the ruling. Acceptance is a `## Tasks` state the
+        controller writes after checking this document."""
+        banned = ("accepted", "approved", "verified", "verdict", "gate",
+                  "reviewed", "signoff", "sign_off")
+        for field in state.WORKER_RESULT_FIELDS:
+            for word in banned:
+                with self.subTest(field=field, word=word):
+                    self.assertNotIn(word, field)
+        self.assertEqual(
+            set(state.parse_worker_result(
+                state.render_worker_result(worker_result()))),
+            set(state.WORKER_RESULT_FIELDS) | {"checkpoints"},
+        )
+
+    def test_a_field_the_codec_does_not_render_is_refused_rather_than_dropped(self):
+        message = refuse(self, worker_result(verdict="accepted"))
+        self.assertIn("unknown fields", message)
+        self.assertIn("verdict", message)
+
+
+# --------------------------------------------------------------------------
+# The cell screen: derived families, not a remembered list.
+# --------------------------------------------------------------------------
+
+#: Every character below U+3000 that `str.splitlines` -- the reader every
+#: section and this codec both use -- treats as a line break. DERIVED by asking
+#: the reader, over a range nobody hand-wrote, which is the only way the corpus
+#: contains the eight characters an earlier closed list of "the newline
+#: characters" did not.
+ROW_BREAKERS = tuple(
+    chr(code) for code in range(0x3000)
+    if len(f"a{chr(code)}b".splitlines()) > 1
+)
+
+#: The ASCII control characters, which break a cell's width and a subprocess
+#: without breaking a line, so no reader derives them.
+CONTROL_CHARACTERS = tuple(chr(code) for code in range(0x20)) + ("\x7f",)
+
+
+class DerivedCellScreenTests(unittest.TestCase):
+    """`_table_safe` is `_cell_safe`'s union, and the union is the rule.
+
+    The failure this replaces has now cost four tasks: a screen written from the
+    defects somebody thought of. The brief's `_table_safe` screened `"|"` and
+    `"\\n"` and nothing else.
+    """
+
+    def test_the_derived_row_break_family_is_larger_than_any_written_list(self):
+        self.assertGreaterEqual(len(ROW_BREAKERS), 8)
+        self.assertIn(chr(0x0A), ROW_BREAKERS)
+        for code in (0x0B, 0x0C, 0x0D, 0x1C, 0x1D, 0x1E, 0x85, 0x2028, 0x2029):
+            with self.subTest(code=code):
+                self.assertIn(chr(code), ROW_BREAKERS)
+
+    def test_a_closed_list_of_pipe_and_newline_would_pass_almost_all_of_them(self):
+        """Measured, so the claim is not rhetorical: of the derived family, a
+        `"|" in value or "\\n" in value` screen refuses exactly one."""
+        survivors = [char for char in ROW_BREAKERS
+                     if "|" not in char and "\n" not in char]
+        self.assertEqual(len(survivors), len(ROW_BREAKERS) - 1)
+
+    def test_every_derived_row_breaker_is_refused_in_every_free_text_field(self):
+        for char, field in itertools.product(ROW_BREAKERS,
+                                             ("concerns", "blocking_reason")):
+            with self.subTest(code=ord(char), field=field):
+                with self.assertRaises(state.TrackerValidationError):
+                    state._table_safe(f"a{char}b", field=field)
+
+    def test_a_row_breaker_would_have_split_the_rendered_row_in_half(self):
+        """Why the screen is load-bearing, shown rather than asserted: the row a
+        codec without it renders comes back as TWO lines, and the first of them
+        still parses as a well-formed two-cell field row holding HALF the value.
+        Nothing raises; the result is simply different."""
+        for char in ROW_BREAKERS:
+            with self.subTest(code=ord(char)):
+                row = state._row(("concerns", f"first{char}second"))
+                halves = row.splitlines()
+                self.assertEqual(len(halves), 2)
+                self.assertEqual(state._split_row(halves[0]),
+                                 ["concerns", "first"])
+
+    def test_every_ascii_control_character_is_refused(self):
+        for char in CONTROL_CHARACTERS:
+            with self.subTest(code=ord(char)):
+                with self.assertRaises(state.TrackerValidationError):
+                    state._table_safe(f"a{char}b", field="concerns")
+
+    def test_a_lone_surrogate_is_refused_by_asking_the_encoder(self):
+        """It is pure ASCII on disk as a JSON escape and cannot be encoded at
+        all. The failure would otherwise be a `UnicodeEncodeError` -- a
+        `ValueError`, outside `TrackerError` -- out of the publish, not the
+        render."""
+        for code in (0xD800, 0xDBFF, 0xDC00, 0xDFFF):
+            with self.subTest(code=code):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.render_worker_result(
+                        worker_result(concerns=f"a{chr(code)}b"))
+
+    def test_surrounding_whitespace_is_refused_because_cells_are_stripped(self):
+        for value in (" a", "a ", "\ta", "a\t", " "):
+            with self.subTest(value=value):
+                with self.assertRaises(state.TrackerValidationError):
+                    state._table_safe(value, field="concerns")
+
+    def test_a_pipe_is_refused_in_every_field_that_takes_free_text(self):
+        for field in ("concerns", "blocking_reason"):
+            with self.subTest(field=field):
+                with self.assertRaises(state.TrackerValidationError):
+                    state._table_safe("a|b", field=field)
+
+    def test_an_empty_or_non_string_cell_is_refused(self):
+        for value in ("", None, 3, True, (), ["a"], b"a"):
+            with self.subTest(value=value):
+                with self.assertRaises(state.TrackerValidationError):
+                    state._table_safe(value, field="concerns")
+
+    def test_a_comma_is_free_text_in_a_scalar_and_poison_in_a_list_member(self):
+        """`_cell_safe` admits a comma on purpose -- English prose has commas
+        and `concerns` is prose. The bar belongs on the writer that KNOWS the
+        cell is comma-separated, which is the list half and nothing else."""
+        self.assertEqual(
+            state._table_safe("slow, but correct", field="concerns"),
+            "slow, but correct",
+        )
+        with self.assertRaises(state.TrackerValidationError):
+            state._table_safe("a,b", field="tests", list_valued=True)
+
+
+class ListCellRoundTripTests(unittest.TestCase):
+    """A list-valued cell is comma-joined, so its members are held to the bar
+    that survives being split back apart. The oracle is the round trip."""
+
+    def test_a_member_carrying_a_comma_is_refused_before_it_can_become_two(self):
+        message = refuse(self, worker_result(
+            tests=("python3 -m unittest -k T1,T2",)))
+        self.assertIn("would parse back as two members", message)
+
+    def test_a_member_spelled_as_the_empty_marker_is_refused(self):
+        for field in state._WORKER_LIST_FIELDS:
+            with self.subTest(field=field):
+                with self.assertRaises(state.TrackerValidationError):
+                    state._table_safe("-", field=field, list_valued=True)
+
+    def test_a_single_dash_member_would_have_parsed_back_as_no_members(self):
+        """Why that rule exists, measured: a one-member list spelled `-`
+        renders the empty-cell marker, and a suite of one becomes a suite of
+        none with nothing raised."""
+        self.assertEqual(state._result_cell(("-",)), "-")
+        self.assertEqual(state._result_cell(()), "-")
+
+    def test_a_duplicate_member_is_refused(self):
+        for field, member in (("commits", COMMIT), ("evidence", EVIDENCE_REF),
+                              ("tests", "python3 -m unittest"),
+                              ("artifacts", "docs/a.md")):
+            with self.subTest(field=field):
+                with self.assertRaises(state.TrackerValidationError):
+                    state._result_list((member, member), field=field)
+
+    def test_a_bare_string_is_refused_rather_than_read_as_characters(self):
+        for field in state._WORKER_LIST_FIELDS:
+            with self.subTest(field=field):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state._result_list(COMMIT, field=field)
+                self.assertIn("iterable of characters", str(caught.exception))
+
+    def test_a_generator_is_refused_rather_than_silently_exhausted(self):
+        """Read once by the validator and empty for every later reader: the
+        commits would be counted, then rendered as an empty cell, and the result
+        would carry a completion claim whose commits nobody ever checked."""
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.render_worker_result(worker_result(commits=iter((COMMIT,))))
+        self.assertIn("generator", str(caught.exception))
+
+    def test_a_list_is_accepted_and_normalised_to_a_tuple(self):
+        result = worker_result(commits=[COMMIT])
+        rendered = state.render_worker_result(result)
+        self.assertEqual(state.parse_worker_result(rendered)["commits"],
+                         (COMMIT,))
+
+    def test_multi_member_cells_round_trip_through_the_comma(self):
+        commits = tuple(f"{index:040x}" for index in range(1, 6))
+        tests = tuple(f"python3 -m unittest -k T{index}" for index in range(5))
+        evidence = tuple(
+            f"docs/superpowers/runs/run-1/evidence/e{index}.md#sha256="
+            f"{index:064x}" for index in range(4)
+        )
+        result = worker_result(commits=commits, tests=tests, evidence=evidence,
+                               source_ref=commits[-1])
+        self.assertEqual(
+            state.parse_worker_result(state.render_worker_result(result)),
+            result,
+        )
+
+    def test_an_empty_list_cell_round_trips_as_an_empty_tuple(self):
+        result = worker_result(status="BLOCKED", source_ref="-", commits=(),
+                               artifacts=(), tests=(), evidence=(),
+                               blocking_reason="no staging credential")
+        parsed = state.parse_worker_result(state.render_worker_result(result))
+        for field in state._WORKER_LIST_FIELDS:
+            with self.subTest(field=field):
+                self.assertEqual(parsed[field], ())
+
+
+class AttemptTokenTests(unittest.TestCase):
+    """`attempt-001` is the tracker's spelling and `1` is every signature's
+    value. One conversion point, and its inverse is the renderer itself."""
+
+    def test_the_token_is_three_digit_zero_padded(self):
+        for attempt, token in ((1, "attempt-001"), (9, "attempt-009"),
+                               (12, "attempt-012"), (100, "attempt-100"),
+                               (1000, "attempt-1000")):
+            with self.subTest(attempt=attempt):
+                self.assertEqual(state._attempt_token(attempt), token)
+
+    def test_the_round_trip_is_the_identity_over_a_wide_range(self):
+        for attempt in itertools.chain(range(1, 40), (99, 100, 999, 1000,
+                                                      10 ** 8)):
+            with self.subTest(attempt=attempt):
+                self.assertEqual(
+                    state._parse_attempt_token(state._attempt_token(attempt)),
+                    attempt,
+                )
+
+    def test_only_the_canonical_spelling_parses(self):
+        """`attempt-1`, `attempt-01` and `attempt-0001` all read as attempt one
+        under a digit-count rule, and all three would give one attempt several
+        documents -- in a record whose identity is the sha256 of its bytes."""
+        for token in ("attempt-1", "attempt-01", "attempt-0001",
+                      "attempt-00001", "attempt-000", "attempt-00",
+                      "attempt-0"):
+            with self.subTest(token=token):
+                self.assertFalse(state._ATTEMPT_TOKEN.fullmatch(token))
+                with self.assertRaises(state.TrackerValidationError):
+                    state._parse_attempt_token(token)
+
+    def test_a_bool_is_not_an_attempt(self):
+        with self.assertRaises(state.TrackerValidationError):
+            state._attempt_token(True)
+
+    def test_a_non_positive_or_non_integer_attempt_is_refused(self):
+        for attempt in (0, -1, 1.0, "1", None, (1,)):
+            with self.subTest(attempt=attempt):
+                with self.assertRaises(state.TrackerValidationError):
+                    state._attempt_token(attempt)
+
+    def test_non_ascii_digits_do_not_convert(self):
+        """`'٣'.isdigit()` is True and `int('٣')` is 3, so the ascii clause is
+        the one that narrows this to the ten characters the renderer writes."""
+        arabic_indic = "".join(chr(0x0660 + digit) for digit in (0, 0, 3))
+        self.assertTrue(arabic_indic.isdigit())
+        self.assertEqual(int(arabic_indic), 3)
+        self.assertFalse(
+            state._ATTEMPT_TOKEN.fullmatch(f"attempt-{arabic_indic}"))
+        self.assertFalse(state._ATTEMPT_TOKEN.fullmatch("attempt-" + chr(0x00B3)))
+
+    def test_a_very_long_run_of_digits_is_refused_before_int_is_reached(self):
+        """`int()` raises `ValueError` -- not a `TrackerError` -- above
+        `sys.int_max_str_digits`. The bound has to be in front of the
+        conversion, which is the escape the P04 Task 2 `order` screen was
+        rewritten for and is repeated here rather than rediscovered."""
+        for digits in (10, 4300, 4301, 9000):
+            with self.subTest(digits=digits):
+                token = "attempt-" + "9" * digits
+                with self.assertRaises(state.TrackerValidationError):
+                    state._parse_attempt_token(token)
+                self.assertFalse(state._ATTEMPT_TOKEN.fullmatch(token))
+
+    def test_the_prefix_is_required(self):
+        for token in ("001", "ATTEMPT-001", "attempt_001", "attempt-001 ",
+                      " attempt-001", "", None, 1):
+            with self.subTest(token=token):
+                self.assertFalse(state._ATTEMPT_TOKEN.fullmatch(token))
+
+    def test_the_document_carries_the_token_and_the_dict_carries_the_int(self):
+        text = state.render_worker_result(worker_result(attempt=7))
+        self.assertIn("| attempt | attempt-007 |", text)
+        self.assertEqual(state.parse_worker_result(text)["attempt"], 7)
+
+
+class DigestReferenceTests(unittest.TestCase):
+
+    def test_a_reference_splits_into_a_normalised_path_and_a_digest(self):
+        self.assertEqual(
+            state._digest_reference(EVIDENCE_REF),
+            ("docs/superpowers/runs/run-1/evidence/T1.md", DIGEST),
+        )
+
+    def test_the_digest_grammar_is_p02s_sha256_and_not_a_second_copy(self):
+        """A rebind proves the screen READS `_SHA256` rather than re-typing
+        `[0-9a-f]{64}` beside it; a grep cannot tell a second copy from the
+        same constant quoted in a docstring."""
+        original = state._SHA256
+        try:
+            state._SHA256 = state._Hex(8)
+            self.assertEqual(
+                state._digest_reference(f"docs/q.md#sha256={'a' * 8}"),
+                ("docs/q.md", "a" * 8),
+            )
+        finally:
+            state._SHA256 = original
+        self.assertEqual(state._digest_reference(f"docs/q.md#sha256={DIGEST}"),
+                         ("docs/q.md", DIGEST))
+
+    def test_a_hash_inside_the_path_is_refused_rather_than_guessed_at(self):
+        """`_cell_safe` admits `#`, so `docs/a#sha256=<64 hex>.md` is a legal
+        path and a reference built from it has two readings. Counting the
+        delimiter removes the ambiguity instead of picking a side."""
+        with self.assertRaises(state.TrackerValidationError):
+            state._digest_reference(f"docs/a#b.md#sha256={DIGEST}")
+
+    def test_a_missing_delimiter_is_refused(self):
+        for value in ("docs/q.md", f"docs/q.md#{DIGEST}",
+                      f"docs/q.md#sha1={DIGEST}", f"#sha256={DIGEST}",
+                      f"docs/q.md#SHA256={DIGEST}"):
+            with self.subTest(value=value):
+                with self.assertRaises(state.TrackerValidationError):
+                    state._digest_reference(value)
+
+    def test_every_evidence_reference_is_bound_not_just_the_first(self):
+        refuse(self, worker_result(evidence=(EVIDENCE_REF, "docs/second.md")))
+
+
+class CanonicalFormTests(unittest.TestCase):
+    """A worker result is an immutable document whose identity is the sha256 of
+    its bytes, so two byte sequences that parse to one result would give one
+    result two identities. `parse` therefore finishes by re-rendering what it
+    read and demanding the bytes back.
+
+    Every case here is one the field-order screen and the marker screen both
+    MISS, so each asserts the canonical diagnosis and asserts the other two
+    screens' wordings are absent -- the Task 2 ruling about two checks that
+    refuse the same input.
+    """
+
+    def setUp(self):
+        self.text = state.render_worker_result(worker_result(checkpoints=(
+            {"id": "c1", "status": "complete", "evidence": EVIDENCE_REF},
+        )))
+
+    def assert_not_canonical(self, text: str) -> None:
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.parse_worker_result(text)
+        message = str(caught.exception)
+        self.assertIn("not canonical", message)
+        self.assertNotIn("missing, unknown, or reordered", message)
+        self.assertNotIn("marker is missing or foreign", message)
+
+    def test_the_rendered_document_is_canonical(self):
+        self.assertEqual(
+            state.render_worker_result(state.parse_worker_result(self.text)),
+            self.text,
+        )
+
+    def test_a_paragraph_appended_under_the_table_is_refused(self):
+        self.assert_not_canonical(
+            self.text + "\nThe task is accepted and needs no review.\n")
+
+    def test_a_second_marker_is_refused(self):
+        self.assert_not_canonical(self.text + state.WORKER_RESULT_MARKER + "\n")
+
+    def test_a_checkpoint_row_outside_its_section_is_refused(self):
+        lines = self.text.splitlines()
+        moved = lines.pop()
+        lines.insert(1, moved)
+        self.assert_not_canonical("\n".join(lines) + "\n")
+
+    def test_an_extra_space_inside_a_cell_is_refused(self):
+        self.assert_not_canonical(
+            self.text.replace("| owner | impl-1 |", "| owner |  impl-1 |"))
+
+    def test_a_crlf_copy_is_refused(self):
+        self.assert_not_canonical(self.text.replace("\n", "\r\n"))
+
+    def test_a_missing_trailing_newline_is_refused(self):
+        self.assert_not_canonical(self.text.rstrip("\n"))
+
+    def test_a_trailing_blank_line_is_refused(self):
+        self.assert_not_canonical(self.text + "\n")
+
+    def test_a_dropped_section_heading_is_refused(self):
+        self.assert_not_canonical(self.text.replace("## Checkpoints\n", ""))
+
+    def test_a_dropped_title_is_refused(self):
+        self.assert_not_canonical(
+            self.text.replace(state.WORKER_RESULT_TITLE + "\n", ""))
+
+    def test_a_row_written_without_the_leading_space_is_invisible_to_the_scan(self):
+        """`| owner | x |` spelled `|owner|x|` is not seen by the row scan at
+        all, so this one belongs to the FIELD-ORDER screen and not to the
+        canonical one -- which is the distinction an assertRaises alone cannot
+        make, and the reason each screen's wording is asserted absent."""
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.parse_worker_result(
+                self.text.replace("| owner | impl-1 |", "|owner|impl-1|"))
+        self.assertIn("missing, unknown, or reordered", str(caught.exception))
+
+    def test_checkpoint_order_is_preserved_rather_than_normalised(self):
+        """Two documents differing only in checkpoint order are two different
+        results, not one result spelled twice -- so this is NOT a canonical
+        violation, and asserting it were would make the canonical screen claim
+        something it does not do."""
+        checkpoints = (
+            {"id": "c1", "status": "complete", "evidence": EVIDENCE_REF},
+            {"id": "c2", "status": "blocked", "evidence": EVIDENCE_REF},
+        )
+        text = state.render_worker_result(worker_result(checkpoints=checkpoints))
+        lines = text.splitlines()
+        lines[-1], lines[-2] = lines[-2], lines[-1]
+        swapped = "\n".join(lines) + "\n"
+        self.assertEqual(
+            state.parse_worker_result(swapped)["checkpoints"],
+            checkpoints[::-1],
+        )
+        self.assertNotEqual(swapped, text)
+
+    def test_the_marker_screen_still_owns_a_foreign_document(self):
+        """Proof the three screens are distinguishable rather than one screen
+        wearing three messages."""
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.parse_worker_result("<!-- pipeline-run/v2 -->\n")
+        self.assertIn("marker is missing or foreign", str(caught.exception))
+        self.assertNotIn("not canonical", str(caught.exception))
+
+    def test_the_field_order_screen_still_owns_a_reordered_table(self):
+        lines = self.text.splitlines()
+        index = next(i for i, line in enumerate(lines)
+                     if line.startswith("| owner "))
+        lines[index], lines[index - 1] = lines[index - 1], lines[index]
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.parse_worker_result("\n".join(lines) + "\n")
+        self.assertIn("missing, unknown, or reordered", str(caught.exception))
+        self.assertNotIn("not canonical", str(caught.exception))
+
+    def test_a_dropped_field_row_is_refused_by_the_field_order_screen(self):
+        for field in state.WORKER_RESULT_FIELDS:
+            with self.subTest(field=field):
+                lines = [line for line in self.text.splitlines()
+                         if not line.startswith(f"| {field} |")]
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state.parse_worker_result("\n".join(lines) + "\n")
+                self.assertIn("missing, unknown, or reordered",
+                              str(caught.exception))
+
+    def test_a_duplicated_field_row_is_refused(self):
+        lines = self.text.splitlines()
+        index = next(i for i, line in enumerate(lines)
+                     if line.startswith("| owner "))
+        lines.insert(index, lines[index])
+        with self.assertRaises(state.TrackerValidationError):
+            state.parse_worker_result("\n".join(lines) + "\n")
+
+    def test_parse_refuses_a_non_string_and_an_empty_document(self):
+        for text in ("", "\n", None, b"", state.WORKER_RESULT_MARKER):
+            with self.subTest(text=text):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.parse_worker_result(text)
+
+
+class CheckpointTableTests(unittest.TestCase):
+
+    def test_checkpoints_round_trip_in_order(self):
+        checkpoints = tuple(
+            {"id": f"c{index}", "status": status, "evidence": EVIDENCE_REF}
+            for index, status in enumerate(state._CHECKPOINT_STATES)
+        )
+        result = worker_result(checkpoints=checkpoints)
+        self.assertEqual(
+            state.parse_worker_result(state.render_worker_result(result)),
+            result,
+        )
+
+    def test_an_unknown_checkpoint_state_is_refused(self):
+        for status in ("done", "complete ", "", None, ["complete"]):
+            with self.subTest(status=status):
+                refuse(self, worker_result(checkpoints=(
+                    {"id": "c1", "status": status, "evidence": EVIDENCE_REF},)))
+
+    def test_a_checkpoint_list_with_the_right_words_is_not_a_checkpoint(self):
+        """`set(["id", "status", "evidence"])` is exactly the key set, so a
+        screen written only as a set comparison admits the LIST and the next
+        line indexes it by name: `TypeError`, outside `TrackerError`."""
+        with self.assertRaises(state.TrackerValidationError):
+            state.render_worker_result(worker_result(
+                checkpoints=(list(state._CHECKPOINT_KEYS),)))
+
+    def test_a_checkpoint_missing_or_carrying_an_extra_key_is_refused(self):
+        for checkpoint in ({"id": "c1", "status": "complete"},
+                           {"id": "c1", "status": "complete",
+                            "evidence": EVIDENCE_REF, "extra": "x"},
+                           {}):
+            with self.subTest(checkpoint=checkpoint):
+                refuse(self, worker_result(checkpoints=(checkpoint,)))
+
+    def test_a_repeated_checkpoint_id_is_refused(self):
+        message = refuse(self, worker_result(checkpoints=(
+            {"id": "c1", "status": "complete", "evidence": EVIDENCE_REF},
+            {"id": "c1", "status": "blocked", "evidence": EVIDENCE_REF},
+        )))
+        self.assertIn("appears twice", message)
+
+    def test_checkpoint_evidence_is_digest_bound(self):
+        refuse(self, worker_result(checkpoints=(
+            {"id": "c1", "status": "complete", "evidence": "docs/e.md"},)))
+
+    def test_the_checkpoints_collection_is_refused_by_type(self):
+        for checkpoints in ("c1", None, {"id": "c1"}, iter(())):
+            with self.subTest(checkpoints=checkpoints):
+                refuse(self, worker_result(checkpoints=checkpoints))
+
+
+class WorkerResultShapeTests(unittest.TestCase):
+
+    def test_a_missing_field_is_named(self):
+        for field in (*state.WORKER_RESULT_FIELDS, "checkpoints"):
+            with self.subTest(field=field):
+                result = worker_result()
+                del result[field]
+                message = refuse(self, result)
+                self.assertIn("missing fields", message)
+                self.assertIn(field, message)
+
+    def test_a_non_mapping_is_refused(self):
+        for result in (None, "DONE", [], ()):
+            with self.subTest(result=result):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.render_worker_result(result)
+
+    def test_the_identity_fields_are_held_to_their_own_grammars(self):
+        for override in ({"run_id": "run 1"}, {"run_id": "run/1"},
+                         {"run_id": "-"}, {"task_id": "-"},
+                         {"task_id": "a b"}, {"owner": "-"},
+                         {"owner": "impl 1"}, {"owner": ""}):
+            with self.subTest(override=override):
+                refuse(self, worker_result(**override))
+
+    def test_source_ref_is_a_full_commit_or_the_empty_marker(self):
+        for value in ("HEAD~1", "b" * 39, "b" * 41, "B" * 40, "main", 5, None):
+            with self.subTest(value=value):
+                refuse(self, worker_result(source_ref=value))
+
+    def test_a_non_string_source_ref_stays_inside_the_tracker_family(self):
+        """`_COMMIT.fullmatch(5)` is an `AttributeError`; the cell screen has to
+        come first or the escape is out of the exception family entirely."""
+        with self.assertRaises(state.TrackerValidationError):
+            state.render_worker_result(worker_result(source_ref=5))
+
+    def test_every_commit_is_checked_not_just_the_first(self):
+        refuse(self, worker_result(commits=(COMMIT, "HEAD")))
+
+    def test_both_kinds_render(self):
+        for kind in state.TASK_KINDS:
+            with self.subTest(kind=kind):
+                result = artifact_result() if kind == "artifact" \
+                    else worker_result()
+                self.assertEqual(result["kind"], kind)
+                state.render_worker_result(result)
+
+
+class WorkerResultTemplateTests(unittest.TestCase):
+
+    def setUp(self):
+        self.template = (
+            Path(state.__file__).resolve().parents[1] / "templates"
+            / "worker-result.md"
+        ).read_text(encoding="utf-8")
+
+    def template_rows(self, width: int) -> list:
+        return [state._split_row(line) for line in self.template.splitlines()
+                if line.startswith("| ")
+                and len(state._split_row(line)) == width]
+
+    def test_the_result_table_names_exactly_the_codec_fields_in_order(self):
+        """`assertIn(f"| {field} | ", template)` -- the brief's check -- is
+        satisfied by a template that also carries three fields the codec does
+        not have, and by one whose rows are in any order at all."""
+        names = [row[0] for row in self.template_rows(2)
+                 if row[0] not in (state._RESULT_HEADER[0], state._TABLE_RULE)]
+        self.assertEqual(names, list(state.WORKER_RESULT_FIELDS))
+
+    def test_the_checkpoint_table_header_matches_the_renderer(self):
+        headers = [row for row in self.template_rows(3)]
+        self.assertIn(list(state._CHECKPOINT_HEADER), headers)
+
+    def test_every_status_and_every_checkpoint_state_is_named(self):
+        for value in (*state.WORKER_STATUSES, *state._CHECKPOINT_STATES,
+                      *state.TASK_KINDS):
+            with self.subTest(value=value):
+                self.assertIn(value, self.template)
+
+    def test_the_reversal_and_the_halt_are_both_stated(self):
+        for phrase in ("question_record", "blocking_reason", "REQUIRED",
+                       "QUORUM QUESTION", "HALTS"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, self.template)
+
+    def test_the_template_is_not_itself_a_parseable_result(self):
+        """A template that validated would be a result claiming a task nobody
+        ran, sitting in the repository with a digest."""
+        with self.assertRaises(state.TrackerValidationError):
+            state.parse_worker_result(self.template)
+
+    def test_the_template_carries_no_absolute_home_path(self):
+        self.assertNotIn("/home/", self.template)
+
+
+class WorkerResultModuleBoundaryTests(unittest.TestCase):
+    """What Task 4 must NOT have done to the module it extends."""
+
+    def test_p03s_two_argument_cell_writer_is_untouched(self):
+        """The brief named `_cell(value) -> str` as a Task 4 product. `_cell`
+        already exists as P03's `_cell(value, what)` and is called at eleven
+        sites; a module-level redefinition rebinds the global and every one of
+        them becomes a `TypeError`."""
+        self.assertEqual(state._cell("run-1", "a qid"), "run-1")
+        with self.assertRaises(state.QuorumSchemaInvalid):
+            state._cell("a|b", "a qid")
+
+    def test_the_commit_grammar_is_still_p02s_fixed_width_hex(self):
+        """`_COMMIT` was named as a Task 4 product too. It is P02's, read at
+        seven sites, and a redefinition would move every one of them."""
+        self.assertIsInstance(state._COMMIT, state._Hex)
+        self.assertTrue(state._COMMIT.fullmatch("b" * 40))
+        self.assertFalse(state._COMMIT.fullmatch("b" * 39))
+        self.assertFalse(state._COMMIT.fullmatch("B" * 40))
+
+    def test_no_name_in_the_module_is_defined_twice(self):
+        """The general form of both defects above, asked of the whole module
+        rather than of the two names that happened to be noticed."""
+        tree = ast.parse(
+            (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+                encoding="utf-8"))
+        defined = []
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+                defined.append(node.name)
+            elif isinstance(node, ast.Assign):
+                defined.extend(target.id for target in node.targets
+                               if isinstance(target, ast.Name))
+        repeated = sorted({name for name in defined
+                           if defined.count(name) > 1})
+        self.assertEqual(repeated, [])
+
+    def test_the_codec_still_states_its_grammars_without_a_regex_engine(self):
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        self.assertNotIn("re.compile(", source)
+        self.assertIsNone(sys.modules["pipeline_auto_state"].__dict__.get("re"))
+
+    def test_the_renderer_uses_p02s_row_and_table_writers(self):
+        """A second `"| " + " | ".join(...)` beside `_row` is a second answer to
+        what a rendered row looks like, and the canonical check compares bytes."""
+        self.assertEqual(state._row(("a", "b")), "| a | b |")
+        self.assertEqual(
+            state._render_table(("Field", "Value"), (("a", "b"),)),
+            ["| Field | Value |", "| --- | --- |", "| a | b |"],
+        )
+
+    def test_the_codec_raises_only_tracker_validation_errors(self):
+        """Every malformed shape this codec can be handed comes back inside the
+        family a controller catches. A `TypeError` or an `AttributeError` here
+        is a run that dies on a worker's typo instead of refusing it."""
+        hostile = (
+            None, [], "DONE", 3,
+            worker_result(commits=COMMIT),
+            worker_result(commits=iter((COMMIT,))),
+            worker_result(checkpoints="c1"),
+            worker_result(checkpoints=(["id", "status", "evidence"],)),
+            worker_result(source_ref=5),
+            worker_result(status=["DONE"]),
+            worker_result(kind=None),
+            worker_result(attempt=1.0),
+            worker_result(concerns=None),
+            worker_result(evidence=(None,)),
+            worker_result(question_record=object()),
+        )
+        for result in hostile:
+            with self.subTest(result=type(result).__name__):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.render_worker_result(result)
+        for text in (None, b"", 7, [], state.WORKER_RESULT_MARKER + "\n| a |\n"):
+            with self.subTest(text=type(text).__name__):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.parse_worker_result(text)

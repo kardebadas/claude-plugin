@@ -19,6 +19,7 @@ to match. One path, one module, one exception hierarchy.
 from __future__ import annotations
 
 import itertools
+import json
 import sys
 import tempfile
 import unittest
@@ -50,7 +51,25 @@ DEFAULT_COMMANDS = '["python3 -m unittest discover -s tests"]'
 
 
 def phase_line(order=None, **overrides) -> str:
-    """The phase metadata comment, with the key order under the caller's control."""
+    """The phase metadata comment, with the key order under the caller's control.
+
+    AN UNKNOWN OVERRIDE IS A ``KeyError``, not a silent no-op.
+    ``dict(PHASE_VALUES, **overrides)`` accepts any keyword and then never
+    reads one that is not a pinned key, so ``phase_line(review_gate="x")``
+    returned the DEFAULT, entirely valid header: a test asserting a rejection
+    would be asserting it about a header with nothing wrong with it, and one
+    asserting an acceptance would go green having exercised nothing. That is
+    the "helper one field short of the fixture" failure this build has already
+    paid for three times. ``suite_line`` raises ``KeyError`` on the same
+    mistake through its ``order`` lookup, so the two halves of the harness now
+    agree. Tasks 2-12 inherit this helper.
+    """
+    unknown = sorted(set(overrides) - set(PHASE_VALUES))
+    if unknown:
+        raise KeyError(
+            f"phase_line has no field {unknown}; the pinned phase keys are "
+            f"{sorted(PHASE_VALUES)} and an override that names none of them "
+            "would be accepted, dropped, and never noticed")
     values = dict(PHASE_VALUES, **overrides)
     keys = tuple(order) if order is not None else state._PHASE_KEYS
     fields = "; ".join(f"{key}={values[key]}" for key in keys)
@@ -346,6 +365,63 @@ class ReviewReasonTests(PlanGrammarTestCase):
             with self.subTest(reason=repr(reason)):
                 self.expect_rejection(phase_header(review_reason=reason))
 
+    def test_rejects_a_reason_carrying_a_row_break_no_ascii_list_contains(self):
+        """`\x85`, `\u2028` and `\u2029` are LINE BREAKS to `str.splitlines`
+        and all three sit outside `range(0x20)`, so a closed ASCII control list
+        accepts them and the rendered `## Phases` row parses back as two rows
+        of the wrong width -- the exact defect `_splits_the_section` exists to
+        end, re-made one layer up.
+
+        The lines are built as a LIST rather than by splitting a document,
+        because splitting the document is the very thing these characters do: a
+        `splitlines()`-built fixture is refused for its SHAPE and would prove
+        nothing about the cell bar.
+        """
+        for character in ("\x85", "\u2028", "\u2029"):
+            with self.subTest(character=repr(character)):
+                self.assertTrue(state._splits_the_section(character))
+                self.assertNotIn(character, state._CONTROL_CHARACTERS)
+                line = phase_line(review_reason=f"why{character}not")
+                self.assertEqual(len(line.splitlines()), 2)
+                lines = ["# Phase 04 plan", "", line, suite_line(), ""]
+                with self.assertRaises(state.PlanMetadataError):
+                    state._parse_phase_header(lines)
+
+    def test_rejects_a_reason_the_utf8_encoder_refuses(self):
+        """A lone surrogate is not writable at all: the `## Phases` render, and
+        every later read of it, raises `UnicodeEncodeError` -- a `ValueError`,
+        outside `TrackerError` -- from one layer past this parser."""
+        for character in ("\ud800", "\udfff"):
+            with self.subTest(character=repr(character)):
+                with self.assertRaises(UnicodeEncodeError):
+                    character.encode("utf-8")
+                lines = ["# Phase 04 plan", "",
+                         phase_line(review_reason=f"why{character}not"),
+                         suite_line(), ""]
+                with self.assertRaises(state.PlanMetadataError):
+                    state._parse_phase_header(lines)
+
+    def test_rejects_a_reason_that_closes_or_reopens_the_comment(self):
+        """One byte string, two readings. An HTML comment ends at the FIRST
+        `-->`, so every markdown reader -- and the human auditor the reason
+        exists for -- sees the comment end early and the rest as document text,
+        while this parser alone reads the whole line as metadata."""
+        for reason in ("a --> b", "a<!--b", "b -->", "<!-- a"):
+            with self.subTest(reason=reason):
+                self.expect_rejection(phase_header(review_reason=reason))
+
+    def test_a_reason_may_carry_a_comma(self):
+        """The ACCEPT half of the ruling that `_cell_safe` does NOT screen `,`.
+        `_CELL_SEPARATORS` names the comma because it re-columns a MULTI-VALUED
+        cell; `review_reason` is one free-text cell a human reads, and ordinary
+        English prose carries commas. The bar belongs on the writer that knows
+        a cell is list-valued, not on a value screen that cannot know."""
+        self.assertIn(",", state._CELL_SEPARATORS)
+        reason = "reserve, resume and integrate all touch the run lock"
+        self.assertEqual(
+            self.parse_lines(phase_header(review_reason=reason))["review_reason"],
+            reason)
+
     def test_rejects_a_reason_carrying_the_field_separator(self):
         """Without this, `review_reason=x; extra=y` reads as a reason of
         'x; extra=y' and a fifth key enters the grammar unnoticed."""
@@ -425,6 +501,25 @@ class PhaseHeaderPlacementTests(PlanGrammarTestCase):
 
     def test_metadata_must_precede_the_first_section(self):
         self.expect_rejection("## Overview\n\n" + phase_header())
+
+    def test_an_indented_first_section_still_precedes_the_metadata(self):
+        """CommonMark allows up to three leading spaces on an ATX heading, so a
+        detector written on the RAW line lets a plan clear the placement bar by
+        adding two spaces -- while `_comment_indexes`, one line above, detects
+        on the STRIPPED line precisely so the trick does not work on the other
+        side of the same comparison. A defence that strips on one side and not
+        the other is not a defence.
+        """
+        for indent in (" ", "  ", "   "):
+            with self.subTest(indent=len(indent)):
+                self.expect_rejection(indent + "## Overview\n\n"
+                                      + phase_header())
+
+    def test_a_section_heading_after_the_metadata_is_fine(self):
+        """The ACCEPT half: the bar is about ORDER, not about headings."""
+        header = self.parse_lines(phase_header(),
+                                  body="  ## Overview\n\nProse.\n")
+        self.assertEqual(header["id"], "P04")
 
     def test_metadata_must_occur_exactly_once(self):
         self.expect_rejection(phase_header() + phase_header())
@@ -547,7 +642,9 @@ class CommandSuiteTests(PlanGrammarTestCase):
         for commands in ("[]", '["a","a"]', '["a",""]', '["a","   "]',
                          '["a|b"]', '"a"', '["a"', "[", "", "null", "{}",
                          '{"a": 1}', "[1]", "[true]", "[null]", '[" a"]',
-                         '["a "]', '["a\\nb"]', '["a\\u0000b"]', "[[]]"):
+                         '["a "]', '["a\\nb"]', '["a\\u0000b"]', "[[]]",
+                         '["a\\u0085b"]', '["a\\u2028b"]', '["a\\u2029b"]',
+                         '["a\\ud800b"]', '["a\\udfffb"]'):
             with self.subTest(commands=commands):
                 self.expect_rejection(phase_header(commands=commands))
 
@@ -573,6 +670,52 @@ class CommandSuiteTests(PlanGrammarTestCase):
                     self.fail(f"{raw!r} escaped as {type(exc).__name__}: {exc}")
                 else:  # pragma: no cover - the failure
                     self.fail(f"{raw!r} was accepted")
+
+    def test_a_json_escape_mints_a_row_break_from_pure_ascii_bytes(self):
+        """The plan file is ASCII on disk; the parsed command is not.
+
+        `\\u0085`, `\\u2028` and `\\u2029` are line breaks to `str.splitlines`
+        and none of them is in `range(0x20)`, so the closed ASCII control list
+        never sees them -- and because the escape is ASCII, the document read
+        that produced these lines could not have split them off either. The
+        command reaches the suite whole and re-columns whatever cell holds it.
+        """
+        for escape, character in (("\\u0085", "\x85"),
+                                  ("\\u2028", "\u2028"),
+                                  ("\\u2029", "\u2029")):
+            raw = f'["make {escape} check"]'
+            with self.subTest(escape=escape):
+                raw.encode("ascii")   # the plan file really is plain ASCII
+                self.assertTrue(state._splits_the_section(character))
+                self.assertNotIn(character, state._CONTROL_CHARACTERS)
+                with self.assertRaises(state.PlanMetadataError):
+                    state._parse_command_suite(raw)
+
+    def test_a_json_escape_mints_a_lone_surrogate_from_pure_ascii_bytes(self):
+        """The escape this grammar's totality promise is defeated by.
+
+        `commands=["make \\ud800 check"]` is a plain-ASCII plan file. The
+        parse succeeds; the FAILURE lands a layer along, when the command is
+        written to a utf-8 file or encoded for the subprocess, as
+        `UnicodeEncodeError` -- a `ValueError`, outside `TrackerError`, exactly
+        the family `_loads` exists to keep out.
+        """
+        for escape in ("\\ud800", "\\udbff", "\\udc00", "\\udfff"):
+            raw = f'["make {escape} check"]'
+            with self.subTest(escape=escape):
+                raw.encode("ascii")
+                with self.assertRaises(UnicodeEncodeError):
+                    json.loads(raw)[0].encode("utf-8")
+                with self.assertRaises(state.PlanMetadataError):
+                    state._parse_command_suite(raw)
+
+    def test_rejects_a_command_that_closes_or_reopens_the_comment(self):
+        """The suite comment is the same byte string with the same two
+        readings; `commands` is the trailing free-text field, so nothing else
+        would have stopped it."""
+        for commands in ('["make --> check"]', '["make <!-- check"]'):
+            with self.subTest(commands=commands):
+                self.expect_rejection(phase_header(commands=commands))
 
     def test_accepts_a_single_command_and_returns_a_tuple(self):
         parsed = state._parse_command_suite('["python3 -m unittest"]')
@@ -601,7 +744,9 @@ class SafeRelativeTests(unittest.TestCase):
                       "a\\b", "src/./a", "a//b", "src/a/", "/", ".", "..",
                       "src/a b/c.py|x", "src/[a].py", "src/{a}.py", "src/a?.py",
                       " src/a.py", "src/a.py ", "src/ a/b.py", "src/a /b.py",
-                      "src/a\nb", "src/a\x00b", "src/a\tb"):
+                      "src/a\nb", "src/a\x00b", "src/a\tb",
+                      "src/a\x85b", "src/a\u2028b", "src/a\u2029b",
+                      "src/a\ud800b", "src/a\udfffb"):
             with self.subTest(value=repr(value)):
                 with self.assertRaises(state.PlanMetadataError):
                     state._safe_relative(value)
@@ -620,6 +765,24 @@ class SafeRelativeTests(unittest.TestCase):
                 with self.assertRaises(state.PlanMetadataError):
                     state._safe_relative(value)
 
+    def test_the_comment_delimiter_bar_is_upstream_and_not_repeated_here(self):
+        """`src/a-->b` is a legal path to this predicate ON PURPOSE.
+
+        A path only ever reaches the module inside a metadata comment's
+        `write_scope=` field, and `_comment_fields` refuses a body carrying
+        `-->` or `<!--` for EVERY field value at once -- which is where the
+        defect actually lives, since the damage is that a markdown reader ends
+        the comment early. Repeating the bar here would be a second copy of one
+        rule; asserting both halves is what keeps the upstream one honest.
+        """
+        self.assertEqual(state._safe_relative("src/a-->b").as_posix(),
+                         "src/a-->b")
+        with self.assertRaises(state.PlanMetadataError):
+            state._comment_fields(
+                "<!-- pipeline-auto-phase-suite: id=P04; "
+                'commands=["cp src/a-->b /tmp"] -->',
+                state._PHASE_SUITE_COMMENT, state._PHASE_SUITE_KEYS, tail=True)
+
     def test_rejects_non_string_arguments_without_leaving_the_family(self):
         for value in (None, 7, 3.5, b"src/a.py", ["src/a.py"], {"a": 1}, {"a"},
                       PurePosixPath("src/a.py")):
@@ -635,6 +798,71 @@ class SafeRelativeTests(unittest.TestCase):
                       "a-b_c/d.py"):
             with self.subTest(value=value):
                 self.assertEqual(state._safe_relative(value).as_posix(), value)
+
+
+class CellSafetyTests(unittest.TestCase):
+    """`_cell_safe`'s rule is a UNION of a derived half and a listed half.
+
+    The whole class exists because the P04 fixtures that preceded it all lay
+    inside `range(0x20)`, where a closed ASCII list and the module's own
+    derived rule give identical answers -- so the suite pinned the weaker of
+    the two by coincidence, and the module re-declared as a written-down list
+    the very thing `_splits_the_section`'s docstring records as having been
+    wrong when it was written down.
+    """
+
+    def test_every_character_the_section_reader_breaks_on_is_refused(self):
+        """Derived from the READER, not from a fixture list.
+
+        `str.splitlines` breaks on ten characters and five of them are outside
+        `range(0x20)`. The corpus is swept out of `_splits_the_section` itself,
+        so a Python that adds an eleventh widens this test the same day it
+        widens the danger -- and restoring a closed ASCII list fails here with
+        the missing characters named.
+        """
+        breakers = [chr(code) for code in range(0x2100)
+                    if state._splits_the_section(chr(code))]
+        self.assertEqual(len(breakers), 10)
+        self.assertTrue(set(breakers) - state._CONTROL_CHARACTERS)
+        for character in breakers:
+            with self.subTest(character=repr(character)):
+                self.assertFalse(state._cell_safe(f"a{character}b"))
+
+    def test_the_listed_half_is_not_derivable_and_is_still_refused(self):
+        """The other direction: `\x00` and `\t` break a subprocess and a
+        cell's width without breaking a LINE, so no reader derives them. A
+        rewrite to `_splits_the_section` ALONE loses both, which is why the fix
+        is a union rather than a replacement."""
+        for character in ("\x00", "\t", "\x7f", "\x01"):
+            with self.subTest(character=repr(character)):
+                self.assertFalse(state._splits_the_section(character))
+                self.assertIn(character, state._CONTROL_CHARACTERS)
+                self.assertFalse(state._cell_safe(f"a{character}b"))
+
+    def test_nothing_the_utf8_encoder_refuses_is_cell_safe(self):
+        for code in (0xD800, 0xDBFF, 0xDC00, 0xDFFF):
+            character = chr(code)
+            with self.subTest(code=hex(code)):
+                self.assertFalse(state._survives_the_encoder(character))
+                self.assertFalse(state._cell_safe(f"a{character}b"))
+
+    def test_ordinary_text_is_still_cell_safe(self):
+        """The ACCEPT half. A screen that refused everything would satisfy
+        every assertion above."""
+        for value in ("a b", "make check", "reserve, resume -- concurrency",
+                      "src/pkg/a.py", "P04", "a\u00e9b", "a\u4e2db", "-"):
+            with self.subTest(value=value):
+                self.assertTrue(state._cell_safe(value))
+
+    def test_the_comma_is_a_ruling_and_not_an_oversight(self):
+        """`,` is named in `_CELL_SEPARATORS` and is deliberately NOT screened
+        here: this predicate is shared by values that are not all multi-valued,
+        and it cannot know which. Asserted so that adding a comma bar is a
+        decision somebody makes on purpose rather than a tidy-up."""
+        self.assertIn(",", state._CELL_SEPARATORS)
+        self.assertTrue(state._cell_safe("a, b"))
+        with self.assertRaises(state.QuorumSchemaInvalid):
+            state._cell("a, b", "a list-valued cell")
 
 
 class ModuleBoundaryTests(unittest.TestCase):
@@ -704,6 +932,31 @@ class HarnessTests(PlanGrammarTestCase):
         plan = write_phase_plan(self.tmp, task_block("T1"), name="bad.md",
                                 header=phase_header(review_class="medium"))
         self.expect_file_rejection(plan)
+
+    def test_phase_line_refuses_an_override_it_would_never_read(self):
+        """`dict(PHASE_VALUES, **overrides)` accepts any keyword and reads only
+        the pinned keys, so a typo produced a VALID header and a green test
+        that exercised nothing. Tasks 2-12 inherit this helper, so the silence
+        would have been inherited too."""
+        for bad in ({"review_gate": "required"}, {"nonsense": "x"},
+                    {"Id": "P04"}, {"reviewclass": "required"},
+                    {"review_class": "required", "nonsense": "x"}):
+            with self.subTest(bad=sorted(bad)):
+                with self.assertRaises(KeyError):
+                    phase_line(**bad)
+
+    def test_suite_line_was_already_loud_about_the_same_mistake(self):
+        """Why the fix is 'make the two halves agree' rather than a new idea."""
+        with self.assertRaises(KeyError):
+            suite_line(order=("id", "commands", "bogus"))
+
+    def test_phase_line_still_honours_every_pinned_override(self):
+        """The ACCEPT half: each real field still reaches the rendered line."""
+        for key, value in (("id", "P07"), ("deps", "P01,P02"),
+                           ("review_class", "final-only"),
+                           ("review_reason", "because")):
+            with self.subTest(key=key):
+                self.assertIn(f"{key}={value}", phase_line(**{key: value}))
 
     def test_each_test_gets_its_own_scratch_directory(self):
         self.assertTrue(self.tmp.is_dir())

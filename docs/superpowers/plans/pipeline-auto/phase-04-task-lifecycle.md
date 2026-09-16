@@ -191,7 +191,7 @@ P05 and P06 cite these rather than re-deriving them:
 | task suite comment | `<!-- pipeline-auto-task-suite: id=…; commands=[…] -->` |
 | `EVIDENCE_PURPOSES` | `("task-test", "task-integration", "phase")` |
 | `QUORUM_ROUTE` / `HALT_ROUTE` | `"quorum"` / `"halt"` |
-| `REVIEW_CLASSES` | `("required", "final-only")` |
+| `REVIEW_CLASSES` | `("final-only", "required")` — P02's `_REVIEW_CLASSES`, ALIASED not re-typed, so the order is P02's and not this table's |
 | `WORKER_STATUSES` | `("DONE", "DONE_WITH_CONCERNS", "NEEDS_CONTEXT", "PLAN_CONFLICT", "BLOCKED")` |
 
 `EVIDENCE_PURPOSES` is **extended by the phase that needs the purpose**, never pre-populated here. P04 ships three; P05 appends `task-review` and `adversarial`; P06 appends `branch-review`, `completeness`, `final`. The validator rejecting an unregistered purpose is the point: a purpose nobody declared is a record nobody validates.

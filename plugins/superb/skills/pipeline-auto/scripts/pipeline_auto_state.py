@@ -10585,7 +10585,40 @@ _FIELD_SEPARATOR = "; "
 #: newline parses back as a different number of ROWS, and a command string
 #: holding a NUL raises ``ValueError: embedded null byte`` from the subprocess
 #: layer -- outside ``TrackerError`` -- when the suite is eventually run.
+#:
+#: THIS LIST IS HALF THE RULE, AND IT IS NOT THE ROW-BREAK HALF. Closed on
+#: purpose: ``\x00`` and ``\t`` break a subprocess and a cell's width without
+#: breaking a LINE, so no reader derives them and they have to be named. The
+#: characters that add a ROW are asked of ``_splits_the_section`` instead --
+#: an earlier ``_cell_safe`` screened on this constant ALONE and let ``\x85``,
+#: ``\u2028`` and ``\u2029`` through, three row breaks no ``range(0x20)`` can
+#: contain. That is the closed-list defect ``_splits_the_section`` was written
+#: to end, re-declared one layer up and paid for twice.
 _CONTROL_CHARACTERS = frozenset(chr(code) for code in range(0x20)) | {"\x7f"}
+
+
+def _survives_the_encoder(value: str) -> bool:
+    """Can ``value`` be written to a UTF-8 file, or handed to a subprocess?
+    ASKED, NOT LISTED, for the reason ``_splits_the_section`` asks.
+
+    A JSON ``\\uXXXX`` escape MINTS A LONE SURROGATE out of bytes that are pure
+    ASCII on disk: ``commands=["make \\ud800 check"]`` is a plain-ASCII plan
+    file whose parsed command cannot be encoded at all. Nothing fails at the
+    parse; it fails one layer along, as ``UnicodeEncodeError`` out of the file
+    write or the subprocess spawn -- and ``UnicodeEncodeError`` is a
+    ``ValueError``, outside ``TrackerError``. That is precisely the escape this
+    grammar's "raises ``PlanMetadataError`` and nothing else" promise exists to
+    close, arriving from the one direction a plan's own bytes look innocent.
+
+    The ENCODER is asked rather than a surrogate range written down, because
+    the question is "will the thing that encodes this refuse it", and the only
+    answer that cannot drift from the encoder is the encoder's own.
+    """
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 #: Shell/glob metacharacters a repository-relative path may not carry. A plan
 #: that declares ``src/*.py`` as a write scope has declared a set whose members
@@ -10597,18 +10630,41 @@ _GLOB_CHARACTERS = "*?[]{}"
 def _cell_safe(value: str) -> bool:
     """A string a pipe-delimited tracker cell carries back out unchanged.
 
-    Three properties, all of them round-trip properties rather than taste:
+    Four properties, all of them round-trip properties rather than taste:
 
     * no ``|``, which would parse back as a different number of COLUMNS;
-    * no control character, which would parse back as a different number of
-      ROWS (or, for NUL, blow up the subprocess that runs the command);
+    * nothing the section reader breaks a LINE on, which would parse back as a
+      different number of ROWS, and no ASCII control character, which would
+      additionally blow up the subprocess that runs the command;
+    * nothing the UTF-8 encoder refuses, which would raise from outside
+      ``TrackerError`` at the write or the spawn that follows;
     * no surrounding whitespace, because a cell's contents are stripped on the
       way in, so ``" a"`` and ``"a"`` are the same cell and only one of them is
       what the plan said.
+
+    THE ROW-BREAK HALF IS ASKED, NOT LISTED, AND THE TWO HALVES ARE A UNION
+    rather than a choice. ``_CONTROL_CHARACTERS`` alone lets ``\x85``,
+    ``\u2028`` and ``\u2029`` past -- three characters ``str.splitlines``
+    breaks on, so a cell holding one comes back as two rows of the wrong width,
+    and ``_parse_phase_header`` would hand a controller a value P03's own
+    ``_cell`` writer refuses. ``_splits_the_section`` alone loses ``\x00`` and
+    ``\t``, which break a subprocess and a cell's width without breaking a
+    line. Neither half is the rule; both together are.
+
+    ``,`` IS DELIBERATELY NOT REFUSED HERE, and that is a ruling rather than an
+    oversight. ``_CELL_SEPARATORS`` names the comma because it re-columns a
+    MULTI-VALUED cell, and this screen is shared by values that are not all
+    multi-valued: ``review_reason`` is one free-text cell a human auditor
+    reads, and ordinary English prose carries commas. The comma bar therefore
+    belongs on the writer that KNOWS a cell is list-valued -- ``_cell_list`` --
+    not on a value screen that cannot know. Whether ``commands`` ever lands in
+    a comma-separated cell is Task 2/6 work; if it does, the bar goes there.
     """
     return (isinstance(value, str)
             and "|" not in value
             and not (_CONTROL_CHARACTERS & set(value))
+            and not any(_splits_the_section(character) for character in value)
+            and _survives_the_encoder(value)
             and value == value.strip())
 
 
@@ -10629,26 +10685,43 @@ def _comment_fields(line, name: str, keys: tuple, *, tail: bool) -> tuple:
     fifth key appended after it cannot be absorbed into the reason silently.
 
     THE TWO ANCHORS DO THE WHITESPACE WORK, and there is deliberately no
-    separate ``line == line.strip()`` clause beside them: ``startswith`` on the
-    full opening refuses an indented comment and ``endswith`` on the full
-    closing refuses a trailing-space one, so a third check would be a screen no
-    input can reach -- and an unreachable screen reads, to the next person, as
-    a guarantee something is being checked here that is not. What makes the
-    indented copy safe is upstream, in ``_comment_indexes``: it DETECTS on the
-    stripped line so an indented copy is counted and then refused here, rather
-    than being invisible to the "exactly once" count.
+    separate ``line == line.strip()`` clause beside them, and no minimum-length
+    clause either: ``startswith`` on the full opening refuses an indented
+    comment, ``endswith`` on the full closing refuses a trailing-space one, and
+    a body too short to hold a field is refused by the field COUNT a line
+    later. Each would be a screen no input can reach, and an unreachable screen
+    reads, to the next person, as a guarantee something is being checked here
+    that is not. What makes the indented copy safe is upstream, in
+    ``_comment_indexes``: it DETECTS on the stripped line so an indented copy
+    is counted and then refused here, rather than being invisible to the
+    "exactly once" count.
+
+    THE BODY MAY NOT ITSELF SPELL A COMMENT DELIMITER. An HTML comment ends at
+    the FIRST ``-->``, so ``review_reason=a --> b`` is one byte string with two
+    readings: every markdown reader -- and the human auditor the reason exists
+    for -- sees the comment end early and the rest of the line as document
+    text, while this parser alone sees the whole value. ``<!--`` is refused for
+    the mirror reason. Two plans that say the same thing are byte-identical
+    here; a value that re-opens or closes the comment breaks that, and it
+    breaks it in the direction where the machine and the human disagree.
     """
     opening = f"<!-- {name}: "
     closing = " -->"
     if (not isinstance(line, str)
             or not line.startswith(opening)
-            or not line.endswith(closing)
-            or len(line) < len(opening) + len(closing) + 1):
+            or not line.endswith(closing)):
         raise PlanMetadataError(
             f"a {name!r} metadata comment must be exactly "
             f"{opening}<fields>{closing} on a line of its own, with no leading "
             f"or trailing whitespace; got {line!r}")
     body = line[len(opening):len(line) - len(closing)]
+    if "-->" in body or "<!--" in body:
+        raise PlanMetadataError(
+            f"a {name!r} metadata comment's fields may not spell a comment "
+            f"delimiter: {body!r} carries '-->' or '<!--', so a markdown "
+            "reader ends the comment at the first one and shows the rest as "
+            "document text, while this parser reads the whole line as "
+            "metadata. One byte string, two readings")
     parts = (body.split(_FIELD_SEPARATOR, len(keys) - 1) if tail
              else body.split(_FIELD_SEPARATOR))
     if len(parts) != len(keys):
@@ -10699,9 +10772,12 @@ def _parse_command_suite(raw: str) -> tuple[str, ...]:
     for value in values:
         if not isinstance(value, str) or not value.strip() or not _cell_safe(value):
             raise PlanMetadataError(
-                "every verification command is a nonempty table-safe string "
-                "carrying no '|', no control character and no surrounding "
-                f"whitespace; got {value!r}")
+                "every verification command is a nonempty table-safe string: "
+                "no '|', nothing the section reader breaks a line on, no "
+                "control character, nothing the UTF-8 encoder refuses -- a "
+                "JSON escape mints a lone surrogate from pure-ASCII bytes and "
+                "the spawn, not the parse, is where it would have raised -- "
+                f"and no surrounding whitespace; got {value!r}")
     if len(values) != len(set(values)):
         raise PlanMetadataError(
             "a verification command suite names each command once; a repeat "
@@ -10726,12 +10802,19 @@ def _safe_relative(value) -> PurePosixPath:
     would escape the repository on the machine that wrote it; a glob character
     is refused because a scope whose membership depends on when it is expanded
     cannot be checked for overlap against another scope.
+
+    AN ABSOLUTE PATH IS REFUSED BY THE SEGMENT LOOP, not by a leading-``/``
+    clause of its own: ``"/abs".split("/")`` is ``["", "abs"]``, so the empty
+    first segment is already the refusal. The separate clause that used to
+    stand here was a screen no input could reach, and an unreachable screen
+    reads as a guarantee that something is being checked here which is not --
+    the same ruling that removed ``line != line.strip()`` from
+    ``_comment_fields``.
     """
     if not isinstance(value, str) or not value:
         raise PlanMetadataError(
             f"a repository-relative path must be a nonempty string: {value!r}")
-    if (value.startswith("/")
-            or "\\" in value
+    if ("\\" in value
             or not _cell_safe(value)
             or any(character in value for character in _GLOB_CHARACTERS)):
         raise PlanMetadataError(
@@ -10802,8 +10885,16 @@ def _parse_phase_header(lines) -> dict:
         raise PlanMetadataError(
             "a phase plan opens with a level-one markdown title before its "
             f"metadata; the first nonempty line is {first_nonempty!r}")
+    #: DETECTED ON THE STRIPPED LINE, exactly as ``_comment_indexes`` detects
+    #: its comments, and for the same reason: CommonMark allows up to three
+    #: leading spaces on an ATX heading, so a raw ``startswith`` here lets a
+    #: plan open ``   ## Overview`` above its metadata and the "metadata
+    #: precedes the first section" bar -- fault F8's placement half -- is
+    #: cleared by adding two spaces. A defence that strips on one side of a
+    #: comparison and not the other is not a defence.
     first_section = next(
-        (index for index, line in enumerate(lines) if line.startswith("## ")),
+        (index for index, line in enumerate(lines)
+         if line.strip().startswith("## ")),
         len(lines))
     if phase_index >= first_section:
         raise PlanMetadataError(

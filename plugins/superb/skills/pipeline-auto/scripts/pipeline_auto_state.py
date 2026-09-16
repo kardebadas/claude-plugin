@@ -14005,3 +14005,247 @@ def reserve_task(run_dir, *, task_id: str, owner: str, attempt: int) -> dict:
 
     return locked_tracker_update(
         run_dir, transition_id=f"reserve-{task_id}-{attempt}", mutate=mutate)
+
+
+# ---------------------------------------------------------------------------
+# P04 Task 7: resuming an answered block.
+#
+# TRANSITION AUTHORITY COMES FROM AN EXPLICIT ADOPTED DECISION, never from the
+# wording of an answer. `templates/decisions.md`: "`task.resume` names the exact
+# blocked task in `Scope`; that task's `Question` cell must hold this decision's
+# id and this decision's `Status` must be `Adopted`. The action never replaces
+# the identity fields; it is granted on top of them."
+#
+# Context compaction and a restarted controller are NOT a blocked-task retry.
+# Neither answers a question, so neither mints an attempt: this transition runs
+# only on a `[?]` row, and a `[~]` row is refused with its own state named.
+#
+# THE PRODUCES BLOCK WAS A CLAIM TO CHECK AND TWO OF ITS FIVE NAMES DID NOT
+# SURVIVE IT.
+#
+# * `_decision_sections` ALREADY EXISTS -- it is P03's, it takes the whole text
+#   of `decisions.md` and returns an ORDERED LIST of `(heading, fields)` pairs,
+#   and `parse_decisions` iterates that list. The brief's version was a `dict`
+#   keyed by heading, which would be a `TypeError` inside `parse_decisions` and
+#   would let a second `## H-001` overwrite the first in an append-only file.
+#   CONSUMED HERE, never re-declared.
+# * `_decision_fields(lines)` IS NOT BUILT. The brief wrote a decision record as
+#   a `| Field | Value |` table and needed a reader for it. That is not this
+#   repository's grammar: `templates/decisions.md` writes `- Field: value`, P03's
+#   record grammar writes `- **Field:** value`, and `_decision_field` already
+#   reads both, with `_decision_sections` assembling them and `parse_decisions`
+#   validating the result. A second field reader would be a second answer to
+#   "what is a decision record" in the one file whose whole job is to be the
+#   audit trail -- and the table spelling is pinned as a REJECTION instead.
+#
+# So `_validate_decision` reads the trail through `_decisions_text`, the ONE
+# door onto `decisions.md`, and through `parse_decisions`, which already refuses
+# a generic approval, an unknown action, a provenance that disagrees with the id
+# and every other thing a record can get wrong. What is left here is the four
+# facts that are specific to THIS grant, and nothing that is already refused
+# upstream -- a duplicate screen is one that can be deleted without a test
+# noticing.
+# ---------------------------------------------------------------------------
+
+#: The one decision action that authorises a task transition. A NEW NAME over an
+#: OLD VALUE: `_DECISION_ACTIONS` is P03's closed set of five and the suite pins
+#: this constant inside it, because a sixth action spelled only here would be an
+#: authority no validator in this run would ever honour.
+RESUME_ACTION = "task.resume"
+
+#: The delimiters a checkpoint entry is built from, and the whole of them:
+#: `started:attempt-001`, `baseline:attempt-001@<sha>` and
+#: `resumed:attempt-001->attempt-002@<decision>`. `->` is listed because it is
+#: the one that carries TWO attempts in a single entry, and a scan that split on
+#: `:` and `@` alone would see `attempt-001->attempt-002` as one unrecognisable
+#: token and spend neither of them.
+#:
+#: `-` IS DELIBERATELY ABSENT even though it is a separator inside the marker,
+#: because it is also a character INSIDE `attempt-001`: splitting on it would
+#: destroy every token this scan exists to find.
+_CHECKPOINT_DELIMITERS = (":", "@", "->")
+
+
+def _recorded_attempts(row: dict) -> set:
+    """Every attempt this task row has already spent, from its own history.
+
+    THE HISTORY, NOT THE `Attempt` CELL. After one resume the cell reads
+    `attempt-002` and `attempt-001` survives only inside `Checkpoints` -- and it
+    is still spent. A screen that compared the cell alone would let a third
+    attempt re-use the first one's token, and the reservation checkpoint, the
+    worker result and the evidence record would then all exist twice under one
+    identity, which is fault F6 arriving through arithmetic rather than through
+    a claim.
+
+    Tokens are recognised by `_ATTEMPT_TOKEN`, which is a front on
+    `_parse_attempt_token` -- so "is this an attempt" is answered by the renderer
+    that writes them and not by a second grammar. Anything else in the history,
+    a commit sha or a decision id included, simply is not one.
+    """
+    candidates = [row["attempt"]]
+    for entry in _csv(row["checkpoints"]):
+        parts = [entry]
+        for delimiter in _CHECKPOINT_DELIMITERS:
+            parts = [piece for part in parts for piece in part.split(delimiter)]
+        candidates.extend(parts)
+    return {value for value in candidates if _ATTEMPT_TOKEN.fullmatch(value)}
+
+
+def _require_fresh_attempt(row: dict, token: str) -> None:
+    """The new attempt is one this task has never had.
+
+    TASK 6 PROVED THIS SCREEN UNREACHABLE FROM `reserve_task` and ruled that it
+    belongs here. Both halves of that closure were the same shape read from
+    opposite ends: `reserve_task` accepts only a `[ ]` row, and P02's
+    `_validate_tasks` refuses a `[ ]` row that carries ANY lifecycle cell -- so
+    there is no attempt history there to compare against. A `[?]` row is the
+    other case entirely: `_validate_tasks` REQUIRES it to carry an owner, an
+    attempt and checkpoints, so the input this screen reads always exists and
+    the screen really does decide something.
+
+    It takes the TOKEN, not the integer, and that is `_validate_assignment`'s
+    ruling applied one function further: `_attempt_token` is the single
+    conversion point, and a screen that re-converted what its caller had already
+    converted would be a screen dominated by the conversion beside it.
+
+    ONE RULE, NOT TWO. `new_attempt == prior_attempt` is not a second check: the
+    prior attempt is in the history by construction, so one screen with one
+    diagnosis answers both. Two would be two refusals of one input differing
+    only in wording, and the second could be deleted with nothing going red.
+    """
+    if _member(token, _recorded_attempts(row)):
+        raise TrackerValidationError(
+            f"attempt {token} has already been used by task {row['id']}; an "
+            "attempt is an identity, not a counter -- the reservation "
+            "checkpoint, the immutable worker result and the evidence record "
+            "are all bound to it, and a re-used token gives two pieces of work "
+            "one identity")
+
+
+def _validate_decision(run_dir, decision_ref: str, task_id: str) -> dict:
+    """The adopted `task.resume` grant for this task, or a stop.
+
+    THE BRIEF'S `tracker` ARGUMENT IS NOT TAKEN, on `_approved_definition`'s
+    precedent one task back: nothing here would read it. `_decisions_text` is
+    the ONE door onto `decisions.md` -- the budget, the projection and
+    `open_quorum` all read the trail through it -- and a second resolver here
+    would be a fourth reader free to spell "this run has decided nothing"
+    differently from the other three. In particular it is what separates a
+    missing file from a name that exists and cannot be read: folding a
+    directory, a dangling link or a FIFO back into "no decisions yet" would make
+    an unreadable audit trail read as an unrestricted grant.
+
+    FOUR SCREENS, AND NOT ONE OF THEM IS A DUPLICATE OF `parse_decisions`. That
+    parser already refuses an unknown action, a generic approval, a provenance
+    that disagrees with the id, an Open record carrying an authority, and a
+    `Superseded` record nothing supersedes. What is specific to this grant is
+    only: it resolves, it is the live record, it carries the resume action, and
+    it names this task.
+
+    The fifth is the absence marker, which `parse_decisions` does NOT refuse:
+    `-` is a non-empty string and is not a rubber stamp, so it passes every
+    upstream screen while recording that a question was asked and nothing that
+    settles it.
+    """
+    records = parse_decisions(_decisions_text(Path(run_dir)))["decisions"]
+    record = records.get(decision_ref)
+    if record is None:
+        raise TrackerValidationError(
+            f"decision {decision_ref} does not resolve in this run's audit "
+            "trail; a grant the trail cannot produce is authority nobody gave, "
+            "and a block is settled by a recorded decision or not at all")
+    if record["status"] != _DECISION_STATUSES[0]:
+        raise TrackerValidationError(
+            f"decision {decision_ref} is {record['status']} and not "
+            f"{_DECISION_STATUSES[0]}; the trail has already replaced it, and "
+            "acting on a retired record applies a grant the run withdrew")
+    if record["action"] != RESUME_ACTION:
+        raise TrackerValidationError(
+            f"decision {decision_ref} carries decision action "
+            f"{record['action']!r} rather than {RESUME_ACTION!r}; authority to "
+            "restart a task is an explicit recorded action, never something "
+            "read out of the prose of a decision that settled something else")
+    scope = _csv(record.get("scope", _ABSENT_CELL))
+    if not _member(task_id, scope):
+        raise TrackerValidationError(
+            f"decision {decision_ref} is not scoped to task {task_id}; its "
+            f"Scope names {list(scope)}, and a grant written for one task is "
+            "not a grant for whichever task happens to cite it")
+    if record["answer"] == _ABSENT_CELL:
+        raise TrackerValidationError(
+            f"decision {decision_ref} records {_ABSENT_CELL!r} where its answer "
+            "belongs; that is this schema's empty cell, so an adopted record "
+            "carrying it has written down that a question was asked and "
+            "nothing at all that settles it")
+    return record
+
+
+def resume_task(run_dir, *, task_id: str, prior_attempt: int, new_owner: str,
+                new_attempt: int, decision_ref: str) -> dict:
+    """Persist an answered ``[?] -> [~]`` assignment before redispatch.
+
+    A FRESH BASELINE IS RECORDED FOR A SOURCE TASK, re-derived rather than
+    carried forward. The target branch moves while a task is blocked -- other
+    tasks integrate -- and re-using attempt one's baseline would charge every
+    commit that landed in between to this attempt's range. The prior baseline is
+    APPENDED BESIDE, never replaced: it is still one end of the range proof for
+    the work attempt one actually did.
+
+    THE CAP IS ASKED AGAIN, and an answered block buys no capacity. A run whose
+    brains are still in flight waits rather than over-subscribing the three
+    slots the next quorum needs -- which is the deadlock F2 names, reached the
+    long way round. So are the dependency and scope rules: a dependency can
+    regress between the block and the answer, and the answer may be exactly
+    "that task was wrong, redo it", so the reservation's old verdict is not
+    evidence about the state the resume runs in.
+
+    `decision_ref` IS SCREENED BEFORE THE LOCK IS EVER TAKEN, and by the same
+    `_decision_id` grammar `_validate_tasks` holds a task's `Decisions` cell to.
+    It is interpolated into the replay key, so an unscreened one would come back
+    from `locked_tracker_update` as `invalid transition identity` -- a diagnosis
+    about a transition name, handed to a caller that named a decision wrongly.
+    """
+    token = _validate_assignment(task_id, new_owner, new_attempt)
+    prior_token = _attempt_token(prior_attempt)
+    if not isinstance(decision_ref, str) or not _decision_id(decision_ref):
+        raise TrackerValidationError(
+            f"invalid decision reference {decision_ref!r}: a resume names an "
+            "'H-<n>' or 'Q-<qid>' decision, because the id is what says whether "
+            "a human or a quorum granted it and it is written into both the "
+            "task's Question cell and this transition's replay key")
+    marker = f"resumed:{prior_token}->{token}@{decision_ref}"
+
+    def mutate(tracker: dict) -> dict:
+        row = _task_row(tracker, task_id)
+        if row["state"] != "[?]" or row["attempt"] != prior_token:
+            raise TrackerValidationError(
+                f"resume_task answers a blocked attempt; task {task_id} is "
+                f"{row['state']!r} at {row['attempt']!r} and this resume names "
+                f"{prior_token!r}. A compaction or a restarted controller is "
+                "not a blocked-task retry and mints no attempt")
+        _require_fresh_attempt(row, token)
+        _validate_decision(run_dir, decision_ref, task_id)
+        definition = _approved_definition(tracker, task_id)
+        _require_dependencies_complete(tracker, definition)
+        _require_no_scope_conflict(tracker, definition)
+        _require_capacity(tracker, new_owner)
+        checkpoint = marker
+        if definition["kind"] == TASK_KINDS[0]:
+            baseline = _resolved_commit(
+                _repo_dir(tracker), _run_field(tracker, "target_branch"))
+            checkpoint = f"{checkpoint},baseline:{token}@{baseline}"
+        updated = dict(row)
+        updated.update({
+            _key("State"): "[~]",
+            _key("Owner"): new_owner,
+            _key("Attempt"): token,
+            _key("Checkpoints"): _append_history(row["checkpoints"], checkpoint),
+            _key("Question"): f"resolved:{decision_ref}",
+        })
+        return _replace_task(tracker, updated)
+
+    return locked_tracker_update(
+        run_dir,
+        transition_id=f"resume-{task_id}-{prior_attempt}-{new_attempt}"
+                      f"-{decision_ref}",
+        mutate=mutate)

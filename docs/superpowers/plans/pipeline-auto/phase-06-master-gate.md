@@ -459,7 +459,7 @@ def new_run(stack, tracker_fixture: str = "master-gate-progress.md"):
     """
     root = Path(stack.enter_context(tempfile.TemporaryDirectory()))
     run_dir = root / "run"
-    (run_dir / "results").mkdir(parents=True)
+    (run_dir / "agent-output").mkdir(parents=True)
     (run_dir / "scratch").mkdir()
     (run_dir / "progress.md").write_text(fixture(tracker_fixture), encoding="utf-8")
     (run_dir / "decisions.md").write_text(fixture("master-gate-decisions.md"), encoding="utf-8")
@@ -485,11 +485,19 @@ def opened_gate(run_dir, a="reviewer-a", b="reviewer-b") -> dict:
 
 def write_result(run_dir, name: str, owner: str) -> Path:
     """A superseded-attempt worker result: the owner is released and the tracker
-    no longer names it anywhere."""
-    path = Path(run_dir) / "results" / name
+    no longer names it anywhere.
+
+    The owner line is built with P04's own `_owner_line`, NOT hand-spelled. A
+    fixture that writes the grammar it wants to read is the fixture-coincidence
+    defect this build keeps finding: it would pass against a scan that looked
+    for anything at all, and it is how the wrong-directory break survived four
+    tasks with a green suite.
+    """
+    path = Path(run_dir) / "agent-output" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "<!-- pipeline-auto-worker-result/v1 -->\n\n"
-        f"- **Owner:** {owner}\n- **Status:** SUPERSEDED\n", encoding="utf-8")
+        f"{pas._owner_line(owner)}\n- **Status:** SUPERSEDED\n", encoding="utf-8")
     return path
 
 
@@ -577,28 +585,55 @@ def suite_results(run_dir, *, third="", fourth="", order=None):
 > supersedes. Neither is recoverable by a later write, because the file is
 > append-only and already unparseable.
 
-> **CROSS-PHASE CONTRACT BREAK, found by the P04 Task 4 review — this must be
-> settled before Task 9 writes a path.** P06's reviewer-independence check
-> (`owner_history`, `phase-06-master-gate.md:1255`) scans
-> `run_dir / "results"` and matches `^-\s+\*\*Owner:\*\*\s*(\S+)$`.
-> Task 9's plan writes results to `run_dir / "agent-output" / …`
-> (`phase-04-task-lifecycle.md:2996`), and `render_worker_result` emits the
-> owner as a **table cell**, not as that line.
+> **CROSS-PHASE CONTRACT, raised by the P04 Task 4 review and SETTLED HERE.**
+> P06's reviewer-independence check (`owner_history`) scans the tree of
+> immutable worker results for owners the tracker no longer names. It was
+> written against `run_dir / "results"` with a regex. Two of the three things
+> the raising note claimed are true; one is not, and it is corrected here so
+> nobody re-fixes a working part.
 >
-> So the check is broken twice over — wrong directory AND wrong grammar — and
-> both failures are **silent**: `owner_history` returns the owners it already
-> had from tracker rows, and the results-tree scan contributes the empty set.
-> Its stated purpose is that "the surviving record of a superseded attempt is
-> its immutable result file", so the fail-open direction is exactly the
-> property P06 names: **a worker released after finishing a task can be
-> assigned to review it.**
+> **1. The directory was wrong. `agent-output/` wins; P06 moves.** P04 writes
+> `run_dir / "agent-output"`, and that is also the tree **P07 publishes in
+> `SKILL.md`** as the run layout a user reads. `results/` appears nowhere but
+> `owner_history` and its own test helper. The reader moves, not the published
+> layout. The failure was silent in the fail-open direction — the scan
+> contributed the empty set and `owner_history` returned only the owners it
+> already had from tracker rows — so **a worker released after finishing a
+> task could be drawn to review its own work**, which is the one property this
+> check exists to enforce.
 >
-> The master plan (`:326`) pins the owner grammar as binding and assigns the
-> template to P04, so P04 owns the grammar half. **The directory half is
-> unowned and must be decided, not inherited**: either Task 9 writes to
-> `results/`, or P06 scans `agent-output/`. Whichever moves, the other plan
-> changes in the same commit — a contract that exists in two documents with
-> two different answers is how this was missed for four tasks.
+> **2. The grammar was NOT wrong. Do not "fix" it.** The raising note said
+> `render_worker_result` emits the owner as a table cell rather than as
+> `- **Owner:** <id>`. It emits **both**: the table carries an `owner` field
+> and the document also carries the pinned line, produced by `_owner_line`,
+> which P04 documents as "THE SINGLE CONVERSION POINT for the owner grammar
+> P06 parses, in both directions" and which names this very pattern. The
+> reverse direction is `_screen_owner_line`, and both share the pinned
+> constant `_OWNER_LINE_PREFIX = "- **Owner:** "`. The master plan's pin
+> (`:354`) is honoured. The note was checking `render_worker_result`'s own body
+> rather than its call tree — the mistake Rule 10 exists to prevent.
+>
+> **3. The regex cannot be written at all, grammar notwithstanding.** `re` is
+> **not in `ALLOWED_IMPORTS`** (`__future__, contextlib, copy, errno, fcntl,
+> hashlib, json, msvcrt, os, pathlib, time, types`), so `_OWNER_LINE =
+> re.compile(...)` is refused by the import guard before it ever runs. Because
+> the grammar is already pinned as a **prefix constant**, the fix is smaller
+> than a regex, not larger: `line.startswith(_OWNER_LINE_PREFIX)` and take the
+> remainder. That keeps P04's single conversion point single — a second
+> spelling of the grammar here would be exactly the two-answers defect
+> `_owner_line` was written to prevent.
+>
+> **Do not reach for `parse_worker_result` instead.** It refuses anything not
+> byte-for-byte canonical, so one unrelated `.md` under the tree would stop the
+> master gate. The prefix scan reads the one field this check needs.
+>
+> **4. The scan has the Rule 11 hazard.** `read_text` over `rglob("*.md")` with
+> no regular-file door: a FIFO under `agent-output/` blocks the master gate
+> forever, holding the run lock — the same defect as P04 Task 5's C1. The scan
+> below uses `_require_regular_file`.
+>
+> `_SPEC_TRACE` at Task 5 is the **second** `re` site in this phase and is
+> corrected the same way; see the note there.
 
 ## Tasks
 
@@ -1249,7 +1284,6 @@ Expected: FAIL — `AttributeError: module 'pipeline_auto_state' has no attribut
 - [ ] **Step 3: Write the implementation**
 
 ```python
-_OWNER_LINE = re.compile(r"^-\s+\*\*Owner:\*\*\s*(\S+)\s*$", re.MULTILINE)
 _NON_OWNERS = frozenset({"-", "reconciled"})
 
 
@@ -1261,6 +1295,13 @@ def owner_history(run_dir: str) -> frozenset[str]:
     attempt-002 is reserved, and it is precisely that released worker who is
     free when master reviewers are drawn. The surviving record of a superseded
     attempt is its immutable result file, so the result tree is scanned too.
+
+    That tree is `agent-output/` — P04 writes it and P07 publishes it as the
+    run layout. The owner is read through P04's pinned `_OWNER_LINE_PREFIX`
+    rather than a second spelling of the grammar, because `_owner_line` is the
+    single conversion point and two spellings would be two answers to "who
+    owned this attempt". `_require_regular_file` guards the read: a FIFO here
+    would block the master gate forever under the run lock.
     """
     directory = Path(run_dir)
     tracker = parse_tracker((directory / "progress.md").read_text(encoding="utf-8"))
@@ -1275,10 +1316,13 @@ def owner_history(run_dir: str) -> frozenset[str]:
         owners.update(_csv(row["fixer"]))
     for row in tracker["quorum"]:
         owners.update(_csv(row["owners"]))
-    results = directory / "results"
-    if results.is_dir():
-        for path in sorted(results.rglob("*.md")):
-            owners.update(_OWNER_LINE.findall(path.read_text(encoding="utf-8")))
+    published = directory / "agent-output"
+    if published.is_dir():
+        for path in sorted(published.rglob("*.md")):
+            _require_regular_file(path, f"worker result {path.name!r}")
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line.startswith(_OWNER_LINE_PREFIX):
+                    owners.add(line[len(_OWNER_LINE_PREFIX):].strip())
     return frozenset(owners - _NON_OWNERS)
 
 
@@ -1643,7 +1687,7 @@ git commit -m "feat(pipeline-auto): show reviewers every quorum decision with it
 
 **Interfaces:**
 - Consumes: `GateError`, `MASTER_GATE_ID`, the sealed `assignments.json`, P02's `publish_immutable`, `TrackerValidationError`, `_csv`, `_load_json`
-- Produces: `SEVERITIES`, `VERDICT_PARTS`, `MASTER_REPORT_MARKER`, `_SPEC_TRACE`, `_pipe_cells`, `_gate_row`, `parse_findings`, `render_findings`, `upsert_finding`, `open_findings`, `parse_master_report`, `record_master_report`
+- Produces: `SEVERITIES`, `VERDICT_PARTS`, `MASTER_REPORT_MARKER`, `_is_spec_trace`, `_pipe_cells`, `_gate_row`, `parse_findings`, `render_findings`, `upsert_finding`, `open_findings`, `parse_master_report`, `record_master_report`
 
 **Named fault this task catches:** a report whose `head` is not the gate's head. Two
 reviewers over "the same complete edge" is the whole basis of the two-reviewer gate, and a
@@ -1796,7 +1840,36 @@ _FINDING_STATUSES = ("open", "resolved")
 _REPORT_FIELDS = ("gate", "assignment", "reviewer", "base", "head", "findings", "outcomes")
 _FINDING_TABLE_HEADER = ("| Finding | Severity | Verdict Part | Traces To | "
                          "Requires Reversal Of | Claim |")
-_SPEC_TRACE = re.compile(r"^[A-Za-z0-9_./-]+\.md:\d+$")
+#: `re` is not in ALLOWED_IMPORTS, so this screen is hand-rolled like the
+#: module's other spelling screens. A spec trace is `<path>.md:<line>`: the
+#: path is non-empty and drawn from the portable set, and the line is a
+#: non-empty run of digits. `str.isdigit()` is NOT enough on its own — it is
+#: True for superscripts and other Unicode digit forms, which `int()` would
+#: then accept and a reader would not recognise, so the tail is checked
+#: against ASCII digits explicitly.
+_TRACE_PATH_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./-")
+_ASCII_DIGITS = frozenset("0123456789")
+
+
+def _is_spec_trace(value: str) -> bool:
+    """`docs/x.md:12` -> True. The one shape a finding may trace to.
+
+    MEASURED against the regex this replaces, over a 33-case corpus plus a
+    200,000-string random sweep: **two** disagreements, both deliberate.
+    `re`'s `\d` matches Unicode decimal digits, so the old screen accepted
+    `x.md:\u0661\u0662` — a trace whose line number no grep and no editor
+    "go to line" can resolve, and a second spelling of "line 12" (`int()`
+    reads it as 12). Everything else agrees exactly, in both directions.
+    """
+    if not isinstance(value, str) or ":" not in value:
+        return False
+    path, _, line = value.rpartition(":")
+    if not path.endswith(".md") or len(path) <= len(".md"):
+        return False
+    if not path or not set(path) <= _TRACE_PATH_CHARS:
+        return False
+    return bool(line) and set(line) <= _ASCII_DIGITS
 
 
 def _pipe_cells(line: str) -> list[str]:
@@ -1927,7 +2000,7 @@ def parse_master_report(text: str) -> dict:
                 f"{finding['id']}: verdict part is spec-compliance, quality or "
                 "verification-evidence — every routing decision at this gate reads it")
         trace = finding["traces_to"]
-        if trace != "none" and not _SPEC_TRACE.fullmatch(trace):
+        if trace != "none" and not _is_spec_trace(trace):
             raise GateError(f"{finding['id']}: traces_to is <path>.md:<line> or none")
         findings.append(finding)
 
@@ -2877,7 +2950,7 @@ git commit -m "feat(pipeline-auto): reconcile decision disputes without burning 
 - Modify: `plugins/superb/skills/pipeline-auto/tests/test_pipeline_auto_state.py`
 
 **Interfaces:**
-- Consumes: `upsert_finding`, `create_phase`, `PhaseSetFrozen`, `_SPEC_TRACE`, `GateError`, P03's `check_admissible` and `open_quorum`
+- Consumes: `upsert_finding`, `create_phase`, `PhaseSetFrozen`, `_is_spec_trace`, `GateError`, P03's `check_admissible` and `open_quorum`
 - Produces: `CRITIC_CLASSES`, `PROPOSALS_MARKER`, `classify_completeness_item(item) -> str`, `record_completeness(run_dir, *, items) -> dict`, `completeness_proposals(run_dir) -> list[dict]`
 
 **Named fault this task catches:** the critic's two classes collapsing into one.
@@ -3082,7 +3155,7 @@ def classify_completeness_item(item: dict) -> str:
         raise GateError("every completeness item states traces_to: <spec-path>.md:<line> "
                         "or the literal none")
     if label == "SPEC-NOT-MET":
-        if trace == "none" or not _SPEC_TRACE.fullmatch(trace):
+        if trace == "none" or not _is_spec_trace(trace):
             raise GateError(
                 "SPEC-NOT-MET means an approved requirement is unmet, so it must name the "
                 "spec line it fails to meet; an item tracing to nothing is a proposal "
@@ -4222,8 +4295,10 @@ oscillation. `repo_root` as a `## Run` field is in both fixtures and is read thr
 being *applied* rather than recorded is Task 6's `RaisedBarIsApplied`, which drives P03's
 real adoption path and carries a control case — a test that inspected only the re-open
 record would pass against a complete no-op. The worker-result owner grammar
-`- **Owner:** <id>` is Task 2's `_OWNER_LINE`, and the independence check parses history
-rather than current owners so a released worker cannot review its own task.
+`- **Owner:** <id>` is P04's, emitted by `_owner_line` and read here through the same
+pinned `_OWNER_LINE_PREFIX` — one conversion point, not a second spelling — and the
+independence check parses history rather than current owners so a released worker
+cannot review its own task.
 
 **On the two commands that must print nothing.** Both `git diff --name-only` and
 `git status --short` exit `0` while printing, so an exit-code assertion passes on a run that
@@ -4367,8 +4442,9 @@ deleted, so a reader can see what was asked and what was answered.**
     worker-result template's owner grammar as `- **Owner:** <id>`, owned by P04, and states
     that independence is checked against every owner appearing in any task's history —
     including released and superseded attempts — rather than against current owners. That is
-    exactly what `owner_history`'s `_OWNER_LINE` scan of `<run_dir>/results/**/*.md` does,
-    and Task 2's released-worker test is the assertion.
+    exactly what `owner_history`'s prefix scan of `<run_dir>/agent-output/**/*.md` does,
+    and Task 2's released-worker test is the assertion. The tree is `agent-output/`, not
+    `results/`: see the settled cross-phase note at Task 2.
 
 11. **Escalation blast radius for a halted challenge.** *Derived.* `_queue_escalation` uses
     `blast="run"` because the spec makes the freeze on raising run-wide and because a

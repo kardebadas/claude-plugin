@@ -254,6 +254,37 @@ previously could not?"** If yes, justify the capability or find another way. If
 no, the cost is a name in a list and the benefit is usually a rule stated once
 instead of twice.
 
+**`re` is the standing exception to "check the plan, not your memory": the phase
+plans use it and the module may not.** Every phase plan from P01 to P07 was
+written with `re.compile` screens — `_TOKEN`, `_COMMIT`, `_SHA256`, `_QID`,
+`_ATTEMPT_TOKEN`, `_DIGEST_REFERENCE`, `_OWNER_LINE`, `_SPEC_TRACE` and more —
+and **not one of them survives into the module**, because `re` is not in
+`ALLOWED_IMPORTS` and the import guard refuses it. P02, P03 and P04 each
+hand-rolled their own, so an implementer meeting a regex in a brief is meeting
+the normal case, not a plan defect: translate it, do not import `re`, and do not
+raise it as a blocker.
+
+Two things make the translation a task in its own right rather than a
+transcription. First, **`\d` and `\w` are Unicode by default**: `\d` matches
+Arabic-Indic and other decimal digits, so a `\d`-derived screen accepts strings
+a `frozenset("0123456789")` screen refuses — and `str.isdigit()` is wider still.
+Nearly always the ASCII-only reading is the one intended, so the hand-rolled
+form is a **deliberate tightening**, and the divergence must be measured and
+written down rather than discovered by a reviewer. Second, `fullmatch` and
+`search` are different questions, and a `^…$` pattern under `re.MULTILINE`
+anchors to *lines*, not to the string — three distinct behaviours that one
+`in`-test or `startswith` cannot express at once.
+
+**Measure the replacement against the pattern over a corpus, in both
+directions**, and record every disagreement with its reason. The P06 `_SPEC_TRACE`
+translation did exactly this: 33 hand-built cases plus a 200,000-string random
+sweep, two disagreements, both the Unicode-digit tightening, both intended.
+
+Where the grammar is already pinned as a **constant** rather than a pattern —
+P04's `_OWNER_LINE_PREFIX = "- **Owner:** "` — the translation is not a screen at
+all but a `startswith` against that same constant, which is strictly better than
+a regex: it keeps one definition of the grammar instead of two.
+
 ## The plugin gate's real baseline is ONE failure, not three
 
 `./tools/check-plugin.sh` reports three failures in this working tree and
@@ -312,7 +343,7 @@ halt — the lock and the atomic replace rest on POSIX semantics that not every
 filesystem honours, so a run that cannot classify its filesystem does not start.
 
 Probing macOS needs `subprocess` and `plistlib`; Windows needs `ctypes`.
-**`ALLOWED_IMPORTS` stays at eleven and these are refused.** `subprocess` grants
+**`ALLOWED_IMPORTS` stays at twelve and these are refused.** `subprocess` grants
 arbitrary command execution, which is the single capability this boundary most
 exists to withhold, and platform detection is not worth it. The failure is in the
 safe direction: the skill refuses to run rather than running with its

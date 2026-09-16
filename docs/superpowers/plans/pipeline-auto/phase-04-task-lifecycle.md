@@ -2896,28 +2896,55 @@ git commit -m "feat(pipeline-auto): prove source ranges against the reserved bas
 
 ### Task 9: `publish_worker_result`
 
-> **CROSS-PHASE CONTRACT BREAK, found by the P04 Task 4 review — this must be
-> settled before Task 9 writes a path.** P06's reviewer-independence check
-> (`owner_history`, `phase-06-master-gate.md:1255`) scans
-> `run_dir / "results"` and matches `^-\s+\*\*Owner:\*\*\s*(\S+)$`.
-> Task 9's plan writes results to `run_dir / "agent-output" / …`
-> (`phase-04-task-lifecycle.md:2996`), and `render_worker_result` emits the
-> owner as a **table cell**, not as that line.
+> **CROSS-PHASE CONTRACT, raised by the P04 Task 4 review and SETTLED HERE.**
+> P06's reviewer-independence check (`owner_history`) scans the tree of
+> immutable worker results for owners the tracker no longer names. It was
+> written against `run_dir / "results"` with a regex. Two of the three things
+> the raising note claimed are true; one is not, and it is corrected here so
+> nobody re-fixes a working part.
 >
-> So the check is broken twice over — wrong directory AND wrong grammar — and
-> both failures are **silent**: `owner_history` returns the owners it already
-> had from tracker rows, and the results-tree scan contributes the empty set.
-> Its stated purpose is that "the surviving record of a superseded attempt is
-> its immutable result file", so the fail-open direction is exactly the
-> property P06 names: **a worker released after finishing a task can be
-> assigned to review it.**
+> **1. The directory was wrong. `agent-output/` wins; P06 moves.** P04 writes
+> `run_dir / "agent-output"`, and that is also the tree **P07 publishes in
+> `SKILL.md`** as the run layout a user reads. `results/` appears nowhere but
+> `owner_history` and its own test helper. The reader moves, not the published
+> layout. The failure was silent in the fail-open direction — the scan
+> contributed the empty set and `owner_history` returned only the owners it
+> already had from tracker rows — so **a worker released after finishing a
+> task could be drawn to review its own work**, which is the one property this
+> check exists to enforce.
 >
-> The master plan (`:326`) pins the owner grammar as binding and assigns the
-> template to P04, so P04 owns the grammar half. **The directory half is
-> unowned and must be decided, not inherited**: either Task 9 writes to
-> `results/`, or P06 scans `agent-output/`. Whichever moves, the other plan
-> changes in the same commit — a contract that exists in two documents with
-> two different answers is how this was missed for four tasks.
+> **2. The grammar was NOT wrong. Do not "fix" it.** The raising note said
+> `render_worker_result` emits the owner as a table cell rather than as
+> `- **Owner:** <id>`. It emits **both**: the table carries an `owner` field
+> and the document also carries the pinned line, produced by `_owner_line`,
+> which P04 documents as "THE SINGLE CONVERSION POINT for the owner grammar
+> P06 parses, in both directions" and which names this very pattern. The
+> reverse direction is `_screen_owner_line`, and both share the pinned
+> constant `_OWNER_LINE_PREFIX = "- **Owner:** "`. The master plan's pin
+> (`:354`) is honoured. The note was checking `render_worker_result`'s own body
+> rather than its call tree — the mistake Rule 10 exists to prevent.
+>
+> **3. The regex cannot be written at all, grammar notwithstanding.** `re` is
+> **not in `ALLOWED_IMPORTS`** (`__future__, contextlib, copy, errno, fcntl,
+> hashlib, json, msvcrt, os, pathlib, time, types`), so `_OWNER_LINE =
+> re.compile(...)` is refused by the import guard before it ever runs. Because
+> the grammar is already pinned as a **prefix constant**, the fix is smaller
+> than a regex, not larger: `line.startswith(_OWNER_LINE_PREFIX)` and take the
+> remainder. That keeps P04's single conversion point single — a second
+> spelling of the grammar here would be exactly the two-answers defect
+> `_owner_line` was written to prevent.
+>
+> **Do not reach for `parse_worker_result` instead.** It refuses anything not
+> byte-for-byte canonical, so one unrelated `.md` under the tree would stop the
+> master gate. The prefix scan reads the one field this check needs.
+>
+> **4. The scan has the Rule 11 hazard.** `read_text` over `rglob("*.md")` with
+> no regular-file door: a FIFO under `agent-output/` blocks the master gate
+> forever, holding the run lock — the same defect as P04 Task 5's C1. The scan
+> below uses `_require_regular_file`.
+>
+> `_SPEC_TRACE` at Task 5 is the **second** `re` site in this phase and is
+> corrected the same way; see the note there.
 
 
 A worker publishes its own immutable result and nothing else. Publication is atomic and no-clobber: republishing byte-identical content is an idempotent no-op, and any other content at the same path is conflicting evidence, not an update. `publish_immutable` returns the sha256 hex digest, so `publish_worker_result` computes the repository-relative path itself and checks the returned digest against the content it rendered.
@@ -2929,6 +2956,17 @@ A worker publishes its own immutable result and nothing else. Publication is ato
 **Interfaces:**
 - Consumes: P02's `publish_immutable` (returns a digest), `validate_run`, `repo_root`; `render_worker_result`.
 - Produces: `worker_result_path(run_dir, *, task_id, attempt) -> Path`; `publish_worker_result(run_dir, *, result: dict) -> str`.
+
+> **This tree has a consumer outside P04.** P06's `owner_history` scans
+> `<run_dir>/agent-output/**/*.md` for owners the tracker no longer names, and
+> decides master-reviewer independence on what it finds. Two things are
+> therefore binding and may not be changed by a later task without changing
+> `phase-06-master-gate.md` in the same commit: the **directory name**
+> `agent-output/`, and the **owner line** `_owner_line` emits. P06 reads that
+> line through P04's own `_OWNER_LINE_PREFIX` rather than re-spelling it, so
+> the grammar has exactly one definition — but that also means a change here
+> silently changes the independence check there. The published result is not
+> only a record; it is the evidence a released worker existed.
 
 - [ ] **Step 1: Write the failing test**
 

@@ -4230,7 +4230,74 @@ guessed at in code beyond the minimum noted; each needs a ruling.
     the batching UI on this section**; until it does, any P06 batching code has
     to read `final.json` per row and must say so.
 
-Items 1, 2, 8 and 13 are closed by coordinator ruling. Items 3–7, 9 and 12
+15. **THE FIRST BUDGET TRIP IN A PHASE WITH NO PRIOR ADOPTION MAKES THAT
+    QUESTION PERMANENTLY UNASKABLE FOR THE LIFE OF THE RUN.** This is a
+    run-stopping hole and it **needs an owner**, not a line in a report.
+
+    The three facts compose and each is right on its own. The **re-raise door
+    is the only door** for a question the budget refused — Task 13's fix binds
+    it to a terminal `final.json` at the original qid whose reason is one of
+    `_BUDGET_REASONS`, and the challenge door is unavailable because nothing
+    was measured and there is no bar to raise. That door **needs a grant**. A
+    grant **needs a non-empty `Granted against`**, which `_live_grant` checks
+    against the set of decisions this run has actually adopted — the
+    anti-reflex mechanism, and the whole of what stops a bare "continue"
+    becoming an extension.
+
+    So a phase that exhausts its ceiling by the **run** ceiling rather than by
+    its own adoptions — or any phase whose first question trips a ceiling
+    before that phase has adopted anything a human could be shown — cannot be
+    granted an extension at all, and its refused question can never be
+    re-asked. The run must be restarted or the question answered by hand
+    outside the machinery.
+
+    **Reporting it rather than working around it was the right call and the
+    workaround is the thing that must not be built:** the only way to grant
+    against nothing is to relax `Granted against`, which is the anti-reflex
+    mechanism itself. What is owed is a ruling — most likely a distinct human
+    record shape that unblocks a question without raising a ceiling, so that
+    "let this one question through" and "raise this phase's drift budget" stop
+    being the same authority.
+
+16. **A `specified` decision has no working door, and a worker will discover
+    that by spending the allowance.** `_reopen_authority` reads the raised bar
+    off the challenged record's own grounding rung, and adoption must clear it
+    **strictly** — so a decision adopted at `specified`, the top of the ladder,
+    can be challenged but can never be re-decided: every answer, however good,
+    escalates on `raised-bar-not-cleared`, and that escalation **spends the
+    lineage's one re-open**, closing the axis for the rest of the run.
+
+    The behaviour is correct — there is no evidence better than `specified`,
+    and re-deciding at the same quality is the dice rolled again — but it is
+    correct in a way nothing tells anybody. A challenge to a `specified`
+    record should be refused **at the door**, where a raiser fault is refused
+    today and nothing has been spent, or the human should be told at the
+    escalation that the allowance is gone and why. Left as it is, the first
+    worker to try it burns the axis to learn a rule the module already knows
+    before it dispatches a brain.
+
+17. **The `challenge` field's fourth clause — the earlier answer's DISTANCE
+    FROM THE FLOOR, stated in words — is an ACCEPTED RESIDUAL of the content
+    screen.** Three of the contract's four clauses are screened: the rung
+    name and the rung value by `_rung_leak` in `parse_question`, and the
+    earlier answer's OWNER by `_screen_challenge`, which reads the challenged
+    quorum's `open.json` (Task 13 fix). The fourth is not, and is not believed
+    screenable: `the earlier answer barely cleared the bar`, `it was adopted
+    at the floor exactly` and `the previous answer was only just above the
+    line` reach all three brains verbatim, and nothing in the text
+    distinguishes any of them from a legitimate description of thin evidence.
+    A heuristic here would be a heuristic exactly where the screen is relied
+    on to be total.
+
+    **What bounds the cost is the raised bar**: a brain told the last answer
+    was close still has to clear that rung STRICTLY, so the leak moves no
+    threshold. `test_the_margin_in_words_is_an_accepted_residual_of_the_screen`
+    records both halves — the leak and the bar that survives it — so the
+    residual is a pinned fact rather than an omission.
+
+Items 1, 2, 8 and 13 are closed by coordinator ruling. Items 3–7, 9, 12 and 17
 remain reported; item 14 is a prerequisite for P06 rather than a question, item
-12 is the only one that leaves a reachable hang, and none blocks execution of
-this phase.
+12 is the only one that leaves a reachable hang, item 17 is an accepted
+residual rather than an open question — and **item 15 is the only one that can
+stop a run**, so it is the one that needs an owner before P05 executes. Item 16
+costs an axis rather than a run.

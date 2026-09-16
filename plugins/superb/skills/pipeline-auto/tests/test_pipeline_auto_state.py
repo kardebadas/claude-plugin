@@ -18704,27 +18704,44 @@ class ReopenRaisedBar(unittest.TestCase):
         return result
 
     def open_reopen(self, challenged, *, challenge=CHALLENGE_EVIDENCE,
-                    owners=REOPEN_OWNERS, axis=None):
+                    owners=REOPEN_OWNERS, axis=None, phase=REOPEN_PHASE):
         extra = [f"- **Reopen of:** {challenged}"]
         if challenge is not None:
             extra.append(f"- **Challenge:** {challenge}")
         return self.raise_question(
             axis=QUESTION["axis"] if axis is None else axis,
-            phase=REOPEN_PHASE, owners=", ".join(owners), extra=tuple(extra))
+            phase=phase, owners=", ".join(owners), extra=tuple(extra))
 
-    def grant_extension(self):
+    def refuse_on_budget(self, *, axis=CONTROL_AXIS, phase=REOPEN_PHASE):
+        """A question REFUSED BEFORE A BRAIN WAS DISPATCHED, and its qid.
+
+        THE ONLY REFUSAL THE RE-RAISE DOOR ADMITS, and the fixture has to
+        produce a real one: the phase is filled to its ceiling and the question
+        is then raised into it, so `open_quorum` writes the terminal record
+        itself rather than a case fabricating the shape it is testing.
+        """
+        seeded = seed_adoptions(self.run_dir, phase, pas.BUDGET_PER_PHASE,
+                                prefix="e")
+        refused = self.raise_question(axis=axis, phase=phase,
+                                      owners=", ".join(ORIGINAL_OWNERS))
+        self.assertEqual(refused["status"], "escalated", refused)
+        self.assertEqual(refused["reason"], "phase-budget-exhausted")
+        self.assertFalse(refused["dispatched"])
+        return seeded, refused
+
+    def grant_extension(self, granted, *, scope=REOPEN_PHASE, through="6",
+                        axis="drift-budget-p05"):
         """A human drift-budget grant on record, signed against what this run
         has actually adopted. `_live_grant` requires a non-empty `Granted
-        against` matching the adopted set exactly, so the grant is written
-        AFTER an adoption and names it — a grant naming nothing is a human on
-        record as having reviewed something else.
+        against` matching the adopted set exactly, so the grant names it — a
+        grant naming nothing is a human on record as having reviewed something
+        else.
         """
-        original = self.settle("code-evidenced")
         path = self.run_dir / "decisions.md"
         path.write_text(
             path.read_text(encoding="utf-8")
-            + budget_grant(scope=REOPEN_PHASE, axis="drift-budget-p05",
-                           granted=(original["decision_id"],)),
+            + budget_grant(scope=scope, axis=axis,
+                           through=through, granted=tuple(granted)),
             encoding="utf-8")
         return "H-900"
 
@@ -18928,7 +18945,19 @@ class ReopenRaisedBar(unittest.TestCase):
         self.assertEqual(second["reason"], "second-challenge")
         self.assertFalse(second["dispatched"])
         self.assertEqual(second["lineage_root"], original["qid"])
-        self.assertEqual(second["already_reopened_by"], [first["qid"]])
+        #: THE HALT RECORD CARRIES NO SECOND COPY OF WHAT IT CAN DERIVE.
+        #: `already_reopened_by` was written here and read by nothing — the
+        #: same silent shape as the `lineage_root` a mutant could blank with
+        #: the whole suite still green. What the record holds is the lineage;
+        #: the qids sharing it are recomputed from the same files on demand,
+        #: so a stale copy cannot exist.
+        self.assertNotIn("already_reopened_by", second)
+        #: BOTH, and the halt's own qid is the second of them: the halt record
+        #: carries the lineage too, so a third attempt finds two and halts the
+        #: same way rather than walking past a record that dispatched nothing.
+        self.assertEqual(
+            set(pas._prior_reopens(self.run_dir, second["lineage_root"])),
+            {first["qid"], second["qid"]})
         directory = self.run_dir / "quorum" / second["qid"]
         self.assertEqual(list(directory.glob("payload-*.json")), [])
         self.assertFalse((directory / "open.json").exists())
@@ -19070,15 +19099,17 @@ class ReopenRaisedBar(unittest.TestCase):
         ordering the case above pins.
         """
         original = self.settle("code-evidenced")
+        asked = pas.parse_question(question_text())
+        self.assertEqual(asked["axis"], original["axis"])
         self.assertEqual(
-            pas._reopen_authority(self.run_dir, original["decision_id"]),
+            pas._reopen_authority(self.run_dir, original["decision_id"], asked),
             ("challenge", "code-evidenced"))
         self.reopen(original["decision_id"],
                     [reopen_answer("sqlite", "specified"),
                      reopen_answer("sqlite", "specified"),
                      reopen_answer("duckdb", "speculation")])
         with self.assertRaises(pas.QuorumError) as caught:
-            pas._reopen_authority(self.run_dir, original["decision_id"])
+            pas._reopen_authority(self.run_dir, original["decision_id"], asked)
         self.assertIn("Superseded", str(caught.exception))
 
     def test_a_challenge_carrying_no_evidence_is_the_same_question_twice(self):
@@ -19120,10 +19151,13 @@ class ReopenRaisedBar(unittest.TestCase):
         NO raised bar: there is no earlier measurement to be better than, and
         inventing one would refuse a question nobody has answered.
         """
-        grant = self.grant_extension()
+        _seeded, refused = self.refuse_on_budget()
+        grant = self.grant_extension(_seeded)
         opened = self.open_reopen(grant, challenge=None, axis=CONTROL_AXIS)
         self.assertEqual(opened["status"], "in_flight")
         self.assertEqual(opened["reopen_of"], grant)
+        self.assertEqual(refused["qid"],
+                         pas.derive_qid(QUESTION["question"], CONTROL_AXIS))
         self.assertIsNone(opened["raised_bar_rung"])
         self.assertNotEqual(opened["qid"],
                             pas.derive_qid(QUESTION["question"], CONTROL_AXIS))
@@ -19139,11 +19173,319 @@ class ReopenRaisedBar(unittest.TestCase):
         only thing a raiser has to write there is why the budget moved, which
         travels verbatim into all three payloads.
         """
-        grant = self.grant_extension()
+        seeded, _refused = self.refuse_on_budget()
+        grant = self.grant_extension(seeded)
         with self.assertRaises(pas.QuorumError) as caught:
             self.open_reopen(grant, challenge="the ceiling was raised",
                              axis=CONTROL_AXIS)
         self.assertIn("nothing to challenge", str(caught.exception))
+
+    def test_a_refusal_by_the_evidence_is_not_re_raisable_through_a_grant(self):
+        """THE LAUNDERING THIS DOOR WAS BUILT TO REFUSE, ARRIVING THROUGH IT.
+
+        The re-raise door exists for ONE shape: a question refused before a
+        brain was dispatched, whose headroom a human then restored. Read off
+        the grant alone it admitted any question at all — so a question the
+        three brains DID answer and the EVIDENCE refused was re-askable
+        against a grant on an unrelated axis, with an empty `Challenge`, three
+        fresh brains, a brand-new identity and NO RAISED BAR, judged at the
+        standing floor exactly as if it had never been asked. Measured before
+        the fix: `escalated below-floor` in, `adopted` out. That is a run
+        laundering a refusal into an adoption, and only the one-re-open cap
+        bounded it — one free roll per question.
+
+        The remedy is not a bar on this door: nothing was measured, so there
+        is nothing to be better than. It is that this door is not for this
+        question. A refusal by the evidence is re-asked through the CHALLENGE
+        door, which owes evidence and clears the rung strictly.
+        """
+        first = self.raise_question(axis=CONTROL_AXIS,
+                                    owners=", ".join(ORIGINAL_OWNERS))
+        refused = self.answer(first, ORIGINAL_OWNERS,
+                              [graded("postgres", "convention-cited")] * 3)
+        self.assertEqual(refused["status"], "escalated")
+        self.assertEqual(refused["reason"], "below-floor")
+        original = self.settle("code-evidenced")
+        grant = self.grant_extension([original["decision_id"]])
+        with self.assertRaises(pas.QuorumError) as caught:
+            self.open_reopen(grant, challenge=None, axis=CONTROL_AXIS)
+        self.assertIn("below-floor", str(caught.exception))
+        #: AND NOTHING WAS SPENT ON IT. The refusal stands as it was and the
+        #: re-ask minted no directory, so the question's one allowance is
+        #: still there for a challenge that carries evidence.
+        self.assertEqual(
+            json.loads((self.run_dir / "quorum" / refused["qid"] /
+                        "final.json").read_text(encoding="utf-8"))["reason"],
+            "below-floor")
+        self.assertFalse((self.run_dir / "quorum" / pas.derive_reopen_qid(
+            QUESTION["question"], CONTROL_AXIS, grant)).exists())
+
+    def test_a_question_this_run_never_asked_is_not_re_raisable(self):
+        """A grant restores headroom for a question the budget REFUSED, and a
+        question nobody asked was never refused — so the grant names no fact
+        about it at all. This is the shape the door admitted most freely: a
+        valid grant plus any question text mints an identity and three brains.
+        """
+        original = self.settle("code-evidenced")
+        grant = self.grant_extension([original["decision_id"]])
+        with self.assertRaises(pas.QuorumError) as caught:
+            self.open_reopen(grant, challenge=None, axis=CONTROL_AXIS)
+        self.assertIn("no outcome", str(caught.exception))
+
+    def test_the_budget_refusal_records_the_trail_it_was_refused_against(self):
+        """The cell the ordering rule is read from, and it is on disk."""
+        _seeded, refused = self.refuse_on_budget()
+        trail = pas.parse_decisions(
+            (self.run_dir / "decisions.md").read_text(encoding="utf-8"))
+        self.assertEqual(refused["trail_at_refusal"], sorted(trail["decisions"]))
+        self.assertTrue(refused["trail_at_refusal"])
+        settled = json.loads((self.run_dir / "quorum" / refused["qid"] /
+                              "final.json").read_text(encoding="utf-8"))
+        self.assertEqual(settled["trail_at_refusal"], refused["trail_at_refusal"])
+
+    def _ordering_case(self, *, grant_first):
+        """One budget refusal in P05 and one grant, differing ONLY in whether
+        the grant was on the trail before the refusal or after it.
+
+        The re-raise is raised in P06 — a phase with headroom — because the
+        lineage carries no phase, and that is exactly what makes a stale grant
+        usable: re-raising into the exhausted phase would be refused by the
+        budget again and the ordering rule would never be reached.
+        """
+        register_phases(self.run_dir, "P06")
+        seeded = seed_adoptions(self.run_dir, REOPEN_PHASE,
+                                pas.BUDGET_PER_PHASE, prefix="e")
+        if grant_first:
+            self.grant_extension(seeded, scope="P06", axis="drift-budget-p06")
+        refused = self.raise_question(axis=CONTROL_AXIS, phase=REOPEN_PHASE,
+                                      owners=", ".join(ORIGINAL_OWNERS))
+        self.assertEqual(refused["reason"], "phase-budget-exhausted")
+        if not grant_first:
+            self.grant_extension(seeded, scope="P06", axis="drift-budget-p06")
+        self.assertEqual("H-900" in refused["trail_at_refusal"], grant_first)
+        return refused
+
+    def test_a_grant_already_on_the_trail_when_the_question_was_refused(self):
+        """THE ORDERING PROPERTY, which nothing enforced.
+
+        The design's defining sentence is that a re-ask names A FACT THAT WAS
+        NOT THERE when the first answer was recorded. A grant written BEFORE
+        the question was ever raised is not one: the run held that authority
+        at the moment it was refused and was refused anyway, so re-asking
+        against it says nothing new. The only thing standing in the way was
+        that the re-ask derives the original qid and meets the replay guard —
+        an identity accident, not a check.
+        """
+        self._ordering_case(grant_first=True)
+        with self.assertRaises(pas.QuorumError) as caught:
+            self.open_reopen("H-900", challenge=None, axis=CONTROL_AXIS,
+                             phase="P06")
+        self.assertIn("already on the audit trail", str(caught.exception))
+
+    def test_a_grant_appended_after_the_refusal_opens_the_same_re_raise(self):
+        """The positive control the case above needs: same seeding, same
+        phases, same grant — appended one moment later, and admitted."""
+        self._ordering_case(grant_first=False)
+        opened = self.open_reopen("H-900", challenge=None, axis=CONTROL_AXIS,
+                                  phase="P06")
+        self.assertEqual(opened["status"], "in_flight")
+        self.assertIsNone(opened["raised_bar_rung"])
+        self.assertEqual(opened["reopen_of"], "H-900")
+
+    def test_a_refusal_that_cannot_be_ordered_is_a_stop_and_not_a_pass(self):
+        """`trail_at_refusal` arrives from a file a human may have edited, so
+        every shape a JSON value can take has to come back inside the family —
+        and an absent or unreadable one must REFUSE the re-ask rather than
+        wave it through, or the ordering rule is optional exactly when the
+        record is damaged."""
+        seeded, refused = self.refuse_on_budget()
+        self.grant_extension(seeded)
+        path = self.run_dir / "quorum" / refused["qid"] / "final.json"
+        record = json.loads(path.read_text(encoding="utf-8"))
+        #: DERIVED FROM THE GUARD, NOT RETYPED (standing rule 10). The corpus
+        #: is every hostile value that is NOT already a legal trail — `[]` and
+        #: `["modern"]` are lists of strings, so they state a trail this grant
+        #: is not on and the re-ask is admitted, which is correct and would
+        #: make this case pass for the wrong reason — plus the two shapes a
+        #: list can take that the element check exists for.
+        corpus = tuple(value for value in HOSTILE_VALUES
+                       if not (isinstance(value, list)
+                               and all(isinstance(item, str) for item in value)))
+        self.assertTrue(corpus)
+        for hostile in corpus + (["H-900", 7], [None]):
+            with self.subTest(trail_at_refusal=hostile):
+                path.write_text(json.dumps(dict(record,
+                                                trail_at_refusal=hostile)),
+                                encoding="utf-8")
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    self.open_reopen("H-900", challenge=None, axis=CONTROL_AXIS)
+        del record["trail_at_refusal"]
+        path.write_text(json.dumps(record), encoding="utf-8")
+        with self.assertRaises(pas.QuorumSchemaInvalid):
+            self.open_reopen("H-900", challenge=None, axis=CONTROL_AXIS)
+
+    def test_the_re_raise_door_admits_exactly_the_budget_refusals(self):
+        """The two tokens `_BUDGET_REASONS` holds, pinned to the two reasons
+        `quorum_budget` actually returns.
+
+        They are spelled twice on purpose — the suite derives this phase's
+        reason vocabulary from assignments to a name called `reason`, so the
+        budget cannot reference the frozenset without deleting both tokens
+        from that vocabulary. This is the seam where the two spellings meet.
+        """
+        self.assertEqual(pas._BUDGET_REASONS,
+                         {"phase-budget-exhausted", "run-budget-exhausted"})
+        seed_adoptions(self.run_dir, REOPEN_PHASE, pas.BUDGET_PER_PHASE,
+                       prefix="e")
+        seen = {pas.quorum_budget(str(self.run_dir), phase=REOPEN_PHASE)["reason"]}
+        for prefix, phase, count in (("b", "P04", 3), ("c", "P06", 3),
+                                     ("d", "P07", 1)):
+            seed_adoptions(self.run_dir, phase, count, prefix=prefix)
+        spent = pas.quorum_budget(str(self.run_dir), phase="P08")
+        self.assertLess(spent["phase_adoptions"], spent["phase_ceiling"])
+        seen.add(spent["reason"])
+        self.assertEqual(seen, pas._BUDGET_REASONS)
+        self.assertTrue(all(reason in pas._ESCALATION_BLAST
+                            for reason in pas._BUDGET_REASONS))
+
+    # --- a challenge aims at ONE decision, on ITS OWN axis -----------------
+
+    def test_a_reopen_may_not_challenge_a_decision_on_another_axis(self):
+        """Supersession is derived from the AXIS, so a cross-axis challenge
+        never touches the record it names: measured before the fix, the
+        challenged decision was still `Adopted` after the re-open adopted, and
+        both `final.json` and `decisions.md` carried a `Reopen Of` naming a
+        decision nobody had challenged — on a third axis, having spent the
+        real lineage's single allowance on borrowed authority.
+        """
+        original = self.settle("code-evidenced")
+        self.assertNotEqual(original["axis"], CONTROL_AXIS)
+        with self.assertRaises(pas.QuorumError) as caught:
+            self.open_reopen(original["decision_id"], axis=CONTROL_AXIS)
+        self.assertIn(CONTROL_AXIS, str(caught.exception))
+        self.assertIn(original["axis"], str(caught.exception))
+        trail = pas.parse_decisions(
+            (self.run_dir / "decisions.md").read_text(encoding="utf-8"))
+        self.assertEqual(trail["decisions"][original["decision_id"]]["status"],
+                         "Adopted")
+        self.assertFalse((self.run_dir / "quorum" / pas.derive_reopen_qid(
+            QUESTION["question"], CONTROL_AXIS,
+            original["decision_id"])).exists())
+        #: AND THE SAME CHALLENGE ON THE RIGHT AXIS STILL OPENS. Without this
+        #: a `_reopen_authority` that refused every challenge would pass.
+        self.assertEqual(
+            self.open_reopen(original["decision_id"])["status"], "in_flight")
+
+    # --- the cap is per LINEAGE, and two lineages prove it ------------------
+
+    def test_two_lineages_each_get_their_own_single_re_open(self):
+        """THE CAP IS PER LINEAGE AND EVERY FIXTURE HAD ONLY ONE.
+
+        `_prior_reopens` filters on `lineage_root`, and no case ever had two
+        re-opens on two different lineages alive in one run — so a mutant that
+        dropped the filter, making the cap GLOBAL, passed the whole suite. The
+        real code was right and untested, which is the same as untested.
+
+        The second re-open must OPEN. A global cap would escalate it as a
+        `second-challenge` against a lineage it has nothing to do with, and the
+        axis would be closed for the rest of the run by an answer to a
+        different question.
+        """
+        storage = self.settle("code-evidenced")
+        logging = self.settle("code-evidenced", axis=CONTROL_AXIS)
+        self.assertNotEqual(storage["decision_id"], logging["decision_id"])
+        first = self.open_reopen(storage["decision_id"])
+        second = self.open_reopen(logging["decision_id"], axis=CONTROL_AXIS)
+        self.assertEqual(first["status"], "in_flight", first)
+        self.assertEqual(second["status"], "in_flight", second)
+        self.assertNotEqual(first["lineage_root"], second["lineage_root"])
+        self.assertEqual(first["lineage_root"], storage["qid"])
+        self.assertEqual(second["lineage_root"], logging["qid"])
+        #: THE CAP STILL BINDING WITHIN EACH LINEAGE is the other half of this
+        #: claim, and it is pinned next door by
+        #: `test_a_second_challenge_in_one_lineage_halts_without_dispatch` —
+        #: which is what stops this case passing against a `_prior_reopens`
+        #: that returned nothing at all. Re-stating it here is not possible in
+        #: one run of the fixture: a second challenge to the SAME decision
+        #: derives the same qid and meets the compaction-replay guard first.
+        self.assertEqual(pas._prior_reopens(self.run_dir, first["lineage_root"]),
+                         [first["qid"]])
+        self.assertEqual(pas._prior_reopens(self.run_dir, second["lineage_root"]),
+                         [second["qid"]])
+
+    # --- rule 9 at the authority reader ------------------------------------
+
+    def test_the_authority_reader_never_hashes_an_agent_supplied_id(self):
+        """`decisions["decisions"].get(x)` HASHES `x`, and `reopen_of` is
+        agent-authored: a list or an object there raised `TypeError`, outside
+        `TrackerError` and outside every handler a controller has written.
+        Unreachable through `open_quorum` only because `parse_question` yields
+        a `str` — which is precisely the accident rule 9 names.
+        `derive_reopen_qid` guards the same argument and this did not.
+        """
+        self.settle("code-evidenced")
+        asked = pas.parse_question(question_text())
+        for hostile in HOSTILE_VALUES:
+            with self.subTest(reopen_of=hostile):
+                with self.assertRaises(pas.TrackerError):
+                    pas._reopen_authority(self.run_dir, hostile, asked)
+
+    # --- the challenge contract, the half a screen can reach ---------------
+
+    def test_a_challenge_may_not_name_the_brains_it_is_challenging(self):
+        """A brain told WHO gave the earlier answer prices the answer by its
+        author, and the re-open stops being an independent measurement. The
+        owner is the one clause of the contract that needs the run to screen:
+        the names are in the challenged quorum's `open.json` and no reader of
+        the question record alone can know them.
+        """
+        original = self.settle("code-evidenced")
+        for leak in ("brain-orig-one chose it and cited only one file",
+                     "BRAIN-ORIG-TWO read the wrong file",
+                     "db/pool.py contradicts brain-orig-three",
+                     "(brain-orig-one) missed it"):
+            with self.subTest(challenge=leak):
+                with self.assertRaises(pas.QuorumError) as caught:
+                    self.open_reopen(original["decision_id"], challenge=leak)
+                self.assertIn("one of the brains", str(caught.exception))
+
+    def test_the_owner_screen_is_a_whole_word_and_not_a_substring(self):
+        """The control the case above needs. A substring test would refuse
+        honest prose that merely contains an owner's letters, and a screen
+        that refuses everything is a screen no case can tell from a correct
+        one.
+        """
+        original = self.settle("code-evidenced")
+        opened = self.open_reopen(
+            original["decision_id"],
+            challenge="brain-orig-oneness is not a word anyone wrote")
+        self.assertEqual(opened["status"], "in_flight")
+        self.assertEqual(opened["raised_bar_rung"], "code-evidenced")
+
+    def test_the_margin_in_words_is_an_accepted_residual_of_the_screen(self):
+        """RECORDED, NOT CLOSED, and recorded in the plan's `## Unresolved`
+        rather than only in a report.
+
+        The contract's fourth clause — the earlier answer's DISTANCE FROM THE
+        FLOOR — is stated in ordinary words, and nothing in the text
+        distinguishes "it barely cleared the bar" from a legitimate
+        description of thin evidence. A heuristic here would be a heuristic
+        exactly where the screen is relied on to be total. What bounds the
+        cost is the raised bar: a brain that knows the last answer was close
+        still has to clear that rung STRICTLY, which is the one guarantee this
+        case pins beside the leak.
+        """
+        original = self.settle("code-evidenced")
+        leak = "the earlier answer barely cleared the bar"
+        opened = self.open_reopen(original["decision_id"], challenge=leak)
+        self.assertEqual(opened["status"], "in_flight")
+        self.assertIn(leak, json.dumps(pas.build_payload(
+            opened["qid"], 0, run_dir=str(self.run_dir))))
+        self.assertEqual(opened["raised_bar_rung"], "code-evidenced")
+        result = self.answer(opened, REOPEN_OWNERS,
+                             [reopen_answer("sqlite", "code-evidenced")] * 3)
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "raised-bar-not-cleared")
 
 
 if __name__ == "__main__":

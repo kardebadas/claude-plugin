@@ -12567,3 +12567,441 @@ def parse_worker_result(text: str) -> dict:
             "checkpoint row outside its section, a CRLF copy, an extra space "
             "inside a cell -- would give one result two identities")
     return validated
+
+
+# ---------------------------------------------------------------------------
+# P04 Task 5: the digest-bound typed PASS record
+#
+# Evidence is the ONLY acceptable proof that a suite ran, so the codec is built
+# the way Task 4's worker-result codec is: ONE validator, called by the renderer
+# and again by the parser, and a final byte comparison against a re-render.
+#
+# THE BRIEF SHIPPED A PARSER AND NO RENDERER, and a parser without one is a
+# SEARCH: it finds the rows it recognises and is silent about everything else.
+# What "everything else" means here is a paragraph under the table reading "the
+# suite actually failed; recorded PASS to unblock the run". Every field the
+# table carries is screened; that paragraph is the one place a forged PASS can
+# hide, and a search cannot see it. The renderer is also the only way the two
+# directions can be SWEPT against each other -- Task 4 had no round-trip family
+# and shipped two shapes ``render`` accepted and ``parse`` refused, published
+# immutably into files the run can never read and can never correct.
+#
+# `import hashlib` AND `import re` WERE BOTH IN THE BRIEF AND BOTH ARE ABSENT
+# HERE. ``hashlib`` is imported once at the top of this module and a second
+# module-level ``import hashlib`` is a second binding of the name, which the
+# committed AST guard counts; ``re`` is not among the twelve allowed imports at
+# all, and ``_ATTEMPT_TOKEN`` -- which the brief re-declared as a compiled
+# pattern -- already exists as Task 4's round-trip front on ``_attempt_token``.
+# Rebinding it would have replaced "this is what the renderer would have
+# written" with "three or more digits", which accepts ``attempt-0001``: a second
+# spelling of attempt one, in a record whose identity is the sha256 of its bytes.
+# ---------------------------------------------------------------------------
+
+EVIDENCE_MARKER = "<!-- pipeline-auto-verification-evidence/v1 -->"
+EVIDENCE_TITLE = "# Pipeline Auto — Verification Evidence"
+
+#: EXTENDED BY THE PHASE THAT NEEDS THE PURPOSE, never pre-populated here. P05
+#: appends ``task-review`` and ``adversarial``; P06 appends ``branch-review``,
+#: ``completeness`` and ``final``. The validator refusing an unregistered
+#: purpose is the point: a purpose nobody declared is a record nobody validates.
+EVIDENCE_PURPOSES = ("task-test", "task-integration", "phase")
+
+#: The two things a suite can be run ABOUT. The template says
+#: ``<task_or_phase>/<stable-id>`` and a template that states a rule the codec
+#: does not check is a claim nobody enforces, so the kinds are written down here
+#: and screened. They are deliberately NOT cross-checked against ``purpose``:
+#: the mapping is derivable for the three purposes this phase ships
+#: (``task-test`` and ``task-integration`` are about a task, ``phase`` about a
+#: phase) and is NOT derivable for ``adversarial``, ``completeness`` or
+#: ``final``, so a rule written here would be one P05 and P06 have to remember
+#: to extend in a second place -- and a rule that is silently wrong for the
+#: purposes added after it is worse than no rule.
+EVIDENCE_SUBJECT_KINDS = ("task", "phase")
+
+#: ``outcome`` HAS EXACTLY ONE LEGAL VALUE. A record that is not a PASS is not
+#: evidence, and is never written; the field exists so that a reader never has
+#: to ask what a record without it would have meant.
+EVIDENCE_OUTCOME = "PASS"
+
+#: The attempt cell for a record no attempt owns -- a phase suite belongs to the
+#: phase, not to an attempt at a task. Spelled here rather than inline because
+#: the renderer writes it and the parser reads it back.
+EVIDENCE_NO_ATTEMPT = "N/A"
+
+#: THE FIELD ORDER IS THE GRAMMAR, exactly as ``WORKER_RESULT_FIELDS`` is:
+#: ``parse_verification_evidence`` matches the rendered names positionally
+#: against this tuple, so a reordered record fails at the position that should
+#: have held the field, a renamed one at its own position, a dropped one shifts
+#: every later field onto the wrong position, and an extra one makes the count
+#: wrong. Four defects refused by one comparison.
+EVIDENCE_FIELDS = (
+    "purpose", "run_id", "subject", "attempt", "code_state", "outcome",
+    "commands", "environment", "inputs",
+)
+
+#: The fields rendered as a JSON array rather than as a bare cell. ``commands``
+#: has to be one because a shell command legitimately carries the comma that
+#: ``_cell_list`` uses as its separator, and ``inputs`` follows it so that the
+#: two array cells have one spelling between them.
+_EVIDENCE_ARRAY_FIELDS = ("commands", "inputs")
+
+
+def _json_array_cell(values: tuple) -> str:
+    """THE one spelling of a JSON-array cell, for ``commands`` and ``inputs``.
+
+    NO SCREEN IS APPLIED TO THE RESULT, and that is a ruling rather than an
+    omission. ``json.dumps`` defaults to ``ensure_ascii``, so every character
+    outside ``\\x20``-``\\x7e`` comes back as a ``\\uXXXX`` escape: the rendered
+    cell cannot carry a line break, a control character, a lone surrogate or a
+    leading or trailing space whatever the members hold. The one character it
+    CAN pass through is ``|``, and every member has already been through
+    ``_cell_safe``, which refuses it. A ``_table_safe`` call here would
+    therefore be a screen no input can reach, and an unreachable screen reads,
+    to the next person, as a guarantee that something is being checked here
+    which is not.
+    """
+    return json.dumps(list(values))
+
+
+def _evidence_subject(value) -> tuple[str, str]:
+    """``task/T1`` -> ``("task", "T1")``. Both halves are screened.
+
+    THE BRIEF'S CHECK WAS ``"/" not in subject or not subject.split("/", 1)[1]``
+    and it accepts ``"/T1"``: the delimiter is present and the tail is nonempty,
+    so a subject with NO KIND AT ALL is a legal subject. It equally accepts
+    ``"phasse/P04"`` and ``"anything/x"``, which is how a record about a typo'd
+    kind gets filed under a kind nothing will ever look for -- the failure is
+    not that the record is refused later, it is that it is never found.
+    """
+    text = _table_safe(value, field="subject")
+    kind, delimiter, identifier = text.partition("/")
+    if not delimiter or not _member(kind, EVIDENCE_SUBJECT_KINDS):
+        raise TrackerValidationError(
+            f"subject={value!r} must be <kind>/<stable-id> with the kind one "
+            f"of {list(EVIDENCE_SUBJECT_KINDS)!r}; a subject with no kind, or "
+            "with a kind nothing registers, names a record no reader looking "
+            "for this subject will ever find")
+    if not _TOKEN.fullmatch(identifier):
+        raise TrackerValidationError(
+            f"subject={value!r} names {identifier!r} as its stable id, which "
+            "is not an identifier token; the id is what a later phase joins "
+            "this record to a task or a phase row on")
+    return kind, identifier
+
+
+def _evidence_commands(value) -> tuple[str, ...]:
+    """The exact ordered command tuple, SCREENED BY THE READER THAT READS IT BACK.
+
+    ``_parse_command_suite`` is this module's one statement of what a command
+    suite is. A second member screen written here would be a second statement,
+    and two statements drift in exactly the direction Task 4 already shipped
+    twice: a value the renderer accepts and the parser refuses, published
+    immutably into a file the run can never read and can never correct. So the
+    screen is the ROUND TRIP -- render the cell, hand it to the reader, and
+    return the reader's own answer. The renderer and the parser then cannot
+    disagree about a command suite, because they are the same call.
+
+    ``PlanMetadataError`` IS WRAPPED, for ``_digest_reference``'s reason.
+    ``_parse_command_suite`` belongs to the phase-plan grammar and raises the
+    plan grammar's exception, which is a SIBLING of ``TrackerValidationError``
+    and not a subclass: the brief's own ``{"commands": "[]"}`` and
+    ``{"commands": "not-json"}`` cases assert ``TrackerValidationError`` and
+    both would have failed. A controller resolving evidence catches the tracker
+    family and would not have seen a malformed suite at all.
+    """
+    if not isinstance(value, (tuple, list)):
+        raise TrackerValidationError(
+            f"commands must be a tuple or a list; got {type(value).__name__} "
+            f"{value!r}. A bare string is an iterable of characters, so "
+            "'make check' would validate as ten commands and render as a "
+            "smear, and a generator is empty the second time it is read")
+    try:
+        cell = _json_array_cell(tuple(value))
+    except (TypeError, ValueError) as exc:
+        raise TrackerValidationError(
+            f"commands={list(value)!r} does not serialise to JSON "
+            f"({type(exc).__name__}: {exc}); the cell a record carries is the "
+            "array, so a suite that cannot be written is not a suite") from exc
+    try:
+        return _parse_command_suite(cell)
+    except PlanMetadataError as exc:
+        raise TrackerValidationError(
+            f"commands={list(value)!r} is not a usable verification command "
+            f"suite: {exc}") from exc
+
+
+def _evidence_inputs(value) -> tuple[str, ...]:
+    """The artifacts the suite consumed, each BOUND to its content digest.
+
+    THE BRIEF NEVER LOOKED AT THIS FIELD. Its template declares ``inputs`` as an
+    ``artifact_JSON_path_sha256_array_or_dash`` and its parser reads the cell
+    and hands it back as whatever text was in it -- so the one field that says
+    "and these are the exact bytes the suite was run against" was the only field
+    in a digest-bound proof record that was not bound to anything. An unbound
+    path names a file whose contents may have changed since, which is the
+    failure ``_digest_reference`` exists for, arriving through the field whose
+    whole job is to prevent it.
+    """
+    if not isinstance(value, (tuple, list)):
+        raise TrackerValidationError(
+            f"inputs must be a tuple or a list; got {type(value).__name__} "
+            f"{value!r}")
+    values = tuple(value)
+    for member in values:
+        _digest_reference(member, field="inputs member")
+    if len(set(values)) != len(values):
+        raise TrackerValidationError(
+            f"inputs={list(values)!r} names a reference twice; a repeat makes "
+            "the array's length disagree with the number of artifacts it binds")
+    return values
+
+
+def _evidence_inputs_cell(cell: str) -> tuple[str, ...]:
+    """The ``inputs`` CELL -> the tuple ``_evidence_inputs`` screens.
+
+    ``[]`` IS REFUSED AND ``-`` IS NOT. Both say "this suite consumed nothing"
+    and only one of them re-renders, so accepting the pair would give one record
+    two spellings -- and this record's identity is the sha256 of its bytes.
+    """
+    if cell == _ABSENT_CELL:
+        return ()
+    try:
+        values = _loads(cell, "an evidence inputs array")
+    except TrackerError as exc:
+        raise TrackerValidationError(
+            f"inputs must be {_ABSENT_CELL!r} or a JSON array of "
+            f"<path>{_DIGEST_DELIMITER}<digest> references; {cell!r} is not "
+            f"readable JSON ({exc})") from exc
+    if not isinstance(values, list) or not values:
+        raise TrackerValidationError(
+            f"inputs must be {_ABSENT_CELL!r} or a NONEMPTY JSON array; "
+            f"{cell!r} is neither. An empty array and {_ABSENT_CELL!r} say the "
+            "same thing and only one of them re-renders, so a record that "
+            "accepted both would have two spellings and two digests")
+    return tuple(values)
+
+
+def _validate_verification_evidence(record) -> dict:
+    """Screen one evidence record and return the NORMALISED copy that renders.
+
+    Called by ``render_verification_evidence`` and again by
+    ``parse_verification_evidence``, so the two directions cannot disagree about
+    what a legal record is -- which is what lets this codec promise that a
+    forged record can neither be written nor read, rather than only one of the
+    two. It returns a NEW dict and the caller renders that one, so a value
+    validated once cannot be rendered from a different object.
+
+    THE ATTEMPT IS A TOKEN HERE AND AN ``int`` IN A WORKER RESULT, and the
+    difference is deliberate rather than an oversight P05 should tidy up.
+    Evidence for a phase suite belongs to no attempt at all, and an ``int``
+    field carrying the sentinel ``N/A`` is a field with two types. The token is
+    still ``_attempt_token``'s own output -- ``_ATTEMPT_TOKEN`` is a round trip
+    through the renderer, not a digit-count pattern -- so there is exactly one
+    spelling of any given attempt across both documents.
+    """
+    if not isinstance(record, dict):
+        raise TrackerValidationError(
+            f"a verification evidence record is a mapping; got "
+            f"{type(record).__name__} {record!r}")
+    missing = [field for field in EVIDENCE_FIELDS if field not in record]
+    if missing:
+        raise TrackerValidationError(
+            f"verification evidence is missing fields: {missing}")
+    unknown = sorted(set(record) - set(EVIDENCE_FIELDS))
+    if unknown:
+        raise TrackerValidationError(
+            f"verification evidence carries unknown fields: {unknown}. Nothing "
+            "renders them, so a reader would never see them and a worker would "
+            "believe it had said something")
+
+    values = {}
+    values["purpose"] = _table_safe(record["purpose"], field="purpose")
+    if not _member(values["purpose"], EVIDENCE_PURPOSES):
+        raise TrackerValidationError(
+            f"unknown evidence purpose {values['purpose']!r}; the registered "
+            f"purposes are {list(EVIDENCE_PURPOSES)!r} and each phase adds the "
+            "one it needs, because a purpose nobody declared is a record "
+            "nobody validates")
+    values["run_id"] = _table_safe(record["run_id"], field="run_id")
+    if not _RUN_ID.fullmatch(values["run_id"]):
+        raise TrackerValidationError(
+            f"run_id {values['run_id']!r} is not a run-id token; evidence that "
+            "cannot name its run is evidence for no run")
+    kind, identifier = _evidence_subject(record["subject"])
+    values["subject"] = f"{kind}/{identifier}"
+    values["attempt"] = _table_safe(record["attempt"], field="attempt")
+    if (values["attempt"] != EVIDENCE_NO_ATTEMPT
+            and not _ATTEMPT_TOKEN.fullmatch(values["attempt"])):
+        raise TrackerValidationError(
+            f"attempt {values['attempt']!r} is neither {EVIDENCE_NO_ATTEMPT!r} "
+            f"nor the canonical spelling {_attempt_token(1)!r} of an attempt. "
+            "The spelling is the renderer's own, so 'attempt-0001' is refused "
+            "as hard as 'later': a record whose identity is the sha256 of its "
+            "bytes may name its attempt exactly one way")
+    values["code_state"] = _table_safe(record["code_state"], field="code_state")
+    if not _COMMIT.fullmatch(values["code_state"]):
+        raise TrackerValidationError(
+            f"code_state {values['code_state']!r} must be a full 40-character "
+            "lowercase hex commit. A symbolic name resolves somewhere else "
+            "tomorrow, so a record bound to one proves a suite passed at no "
+            "particular state; for a task-integration record it is the --no-ff "
+            "merge commit, never the task branch tip")
+    values["outcome"] = _table_safe(record["outcome"], field="outcome")
+    if values["outcome"] != EVIDENCE_OUTCOME:
+        raise TrackerValidationError(
+            f"outcome {values['outcome']!r} is not {EVIDENCE_OUTCOME!r}; a "
+            "record that is not a PASS is not evidence and is never written, "
+            "so this field has exactly one legal value and 'pass' is not it")
+    values["commands"] = _evidence_commands(record["commands"])
+    values["environment"] = _table_safe(record["environment"],
+                                        field="environment")
+    if values["environment"] == _ABSENT_CELL:
+        raise TrackerValidationError(
+            f"environment is {_ABSENT_CELL!r}, which is the empty-cell marker; "
+            "a PASS that does not say what it passed on is a PASS nobody can "
+            "reproduce, and the field exists to stop exactly that")
+    values["inputs"] = _evidence_inputs(record["inputs"])
+    return {field: values[field] for field in EVIDENCE_FIELDS}
+
+
+def _evidence_cell(field: str, value) -> str:
+    """One rendered evidence cell. The two array fields render as JSON; an empty
+    ``inputs`` renders the empty-cell marker, and ``commands`` can never be
+    empty because ``_parse_command_suite`` refuses an empty suite."""
+    if field in _EVIDENCE_ARRAY_FIELDS:
+        return _json_array_cell(value) if value else _ABSENT_CELL
+    return value
+
+
+def render_verification_evidence(record: dict) -> str:
+    """Render one validated typed PASS record in canonical field order.
+
+    THE ONLY WRITER. ``parse_verification_evidence``'s last screen is a byte
+    comparison against this function's output, so a record that this did not
+    write cannot be read back -- which is the whole of the guarantee that the
+    bytes a digest binds are the bytes a validator saw.
+    """
+    validated = _validate_verification_evidence(record)
+    rows = tuple((field, _evidence_cell(field, validated[field]))
+                 for field in EVIDENCE_FIELDS)
+    lines = [
+        EVIDENCE_MARKER,
+        EVIDENCE_TITLE,
+        "",
+        *_render_table(_RESULT_HEADER, rows),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def parse_verification_evidence(text: str) -> dict:
+    """Parse one typed PASS record; refuse a foreign, reordered, or
+    non-canonical document.
+
+    THE LAST SCREEN IS THE RENDERER, for ``parse_worker_result``'s reason and
+    for one more that is specific to evidence. Everything above it reads the
+    table; the final comparison demands that re-rendering what was read gives
+    back the bytes that were handed in. Without it the parse is a SEARCH, and
+    the half it ignores is where a sentence contradicting the table would sit --
+    "the suite actually failed, recorded PASS to unblock the run". Every field
+    in the table is screened; prose is the only place a forged PASS can hide,
+    and this record is the ONLY acceptable proof that a suite ran.
+    """
+    if not isinstance(text, str):
+        raise TrackerValidationError(
+            f"a verification evidence record is text; got {type(text).__name__}")
+    lines = text.splitlines()
+    if not lines or lines[0] != EVIDENCE_MARKER:
+        raise TrackerValidationError(
+            f"verification evidence marker is missing or foreign; this codec "
+            f"reads {EVIDENCE_MARKER!r} and nothing else, and the formats do "
+            "not interoperate")
+    rows = [_split_row(line) for line in lines if line.startswith("| ")]
+    field_rows = [row for row in rows
+                  if len(row) == 2
+                  and row[0] not in (_RESULT_HEADER[0], _TABLE_RULE)]
+    names = [row[0] for row in field_rows]
+    if names != list(EVIDENCE_FIELDS):
+        raise TrackerValidationError(
+            "verification evidence fields are missing, unknown, or reordered: "
+            f"expected {list(EVIDENCE_FIELDS)}, read {names}")
+    cells = {row[0]: row[1] for row in field_rows}
+    record = dict(cells)
+    try:
+        record["commands"] = _parse_command_suite(cells["commands"])
+    except PlanMetadataError as exc:
+        raise TrackerValidationError(
+            f"the commands cell {cells['commands']!r} is not a verification "
+            f"command suite: {exc}") from exc
+    record["inputs"] = _evidence_inputs_cell(cells["inputs"])
+    validated = _validate_verification_evidence(record)
+    if render_verification_evidence(validated) != text:
+        raise TrackerValidationError(
+            "verification evidence is not canonical: re-rendering what was "
+            "read does not give back the bytes that were handed in. The "
+            "record's identity is the sha256 of those bytes, so anything the "
+            "parse ignored -- a paragraph under the table claiming the suite "
+            "actually failed, a second marker, a CRLF copy, an extra space "
+            "inside a cell -- would be carried by a document nobody checked")
+    return validated
+
+
+def _evidence_directory(value, *, field: str) -> Path:
+    """One of ``resolve_evidence``'s two search roots, type-checked before
+    ``Path`` sees it. ``Path(None)`` is a ``TypeError`` from outside this
+    module's exception family, and a controller that caught ``TrackerError``
+    around an evidence read would not catch it."""
+    if not isinstance(value, (str, Path)):
+        raise TrackerValidationError(
+            f"{field} must be a path; got {type(value).__name__} {value!r}")
+    return Path(value)
+
+
+def resolve_evidence(run_dir, repo_dir, reference: str) -> dict:
+    """Resolve a digest-bound evidence reference and verify its content digest.
+
+    THE RUN DIRECTORY IS SEARCHED FIRST AND A DIGEST MISMATCH STOPS THERE. The
+    obvious alternative -- treat a mismatch as "not the file I meant" and keep
+    looking -- reads as trying harder and is a fail-open: one reference would
+    then resolve to whichever of two files happened to hash right, so anyone
+    who can write the repository copy chooses which record a mismatching run
+    copy is replaced by. One reference names one document.
+
+    THE FILE IS READ RATHER THAN STATTED FIRST. ``is_file()`` followed by
+    ``read_bytes()`` is a time-of-check/time-of-use gap whose loser is a
+    ``FileNotFoundError`` out of the read -- an ``OSError``, outside this
+    module's exception family. Asking for the bytes answers "is there a
+    readable regular file here" and "what is in it" in one syscall sequence, so
+    a directory, a vanished file and an unreadable one all arrive as the same
+    "keep looking".
+
+    THE DECODE IS WRAPPED for the same reason. A file whose digest matches and
+    whose bytes are not UTF-8 raises ``UnicodeDecodeError``, which is a
+    ``ValueError``; the brief decoded it bare.
+    """
+    relative, digest = _digest_reference(reference, field="evidence reference")
+    roots = (_evidence_directory(run_dir, field="run_dir"),
+             _evidence_directory(repo_dir, field="repo_dir"))
+    for root in roots:
+        try:
+            content = (root / relative).read_bytes()
+        except OSError:
+            continue
+        if hashlib.sha256(content).hexdigest() != digest:
+            raise TrackerValidationError(
+                f"evidence digest does not match its content: {reference!r} "
+                f"resolved to {relative!r} under {str(root)!r}, whose sha256 "
+                "is something else. A reference names one document, so a "
+                "mismatch stops here rather than looking for a copy that "
+                "happens to hash right")
+        try:
+            decoded = content.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise TrackerValidationError(
+                f"evidence {reference!r} matches its digest and is not UTF-8 "
+                f"({exc}); a record this module cannot read is not a record it "
+                "can have checked") from exc
+        return parse_verification_evidence(decoded)
+    raise TrackerValidationError(
+        f"evidence is missing: {reference!r} names {relative!r}, which is not "
+        "a readable file under the run directory or the repository root. A "
+        "reference nothing resolves is a PASS nobody can inspect")

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import hashlib
 import itertools
 import json
 import os
@@ -5313,6 +5314,807 @@ class WorkerResultModuleBoundaryTests(unittest.TestCase):
             with self.subTest(text=type(text).__name__):
                 with self.assertRaises(state.TrackerValidationError):
                     state.parse_worker_result(text)
+
+
+# --------------------------------------------------------------------------
+# Task 5 tests: the digest-bound typed PASS record.
+#
+# THE BRIEF SHIPPED SIX TESTS AND NO RENDERER TO TEST AGAINST. Five of the six
+# are kept below, corrected where they asserted something the module does not
+# do; the rest of this block is the two families the brief had no way to write.
+#
+# The first is the ROUND-TRIP SWEEP. Task 4 shipped a codec with no
+# render->parse family and two shapes escaped in which the renderer accepted
+# what the parser refused -- and because a result is published immutably, that
+# is a file the run can never read and can never correct. The sweep below is a
+# cartesian product over generated legal values, answered against a builder
+# written IN THIS FILE that calls neither `render_verification_evidence` nor
+# `parse_verification_evidence`: the table layout, the field order and the JSON
+# escaping are all spelled out here a second time, so a mutation inside the
+# module moves one side of every comparison and not both. Task 3 and Task 4
+# each shipped an oracle that asked the implementation for half its answer.
+#
+# The second is the AGREEMENT EQUIVALENCE. "render and parse agree" is not
+# "a legal record round-trips"; it is "the renderer accepts a value if and only
+# if the parser accepts that value's canonical cell", asserted over candidates
+# per field rather than over one fixture. That is the shape the two Task 4
+# escapes would have been caught by.
+# --------------------------------------------------------------------------
+
+EVIDENCE_COMMAND = "python3 -m unittest -k T1"
+INPUT_REF = f"docs/superpowers/runs/run-1/artifacts/brief.md#sha256={DIGEST}"
+SECOND_INPUT_REF = f"src/a.py#sha256={'1' * 64}"
+
+
+#: Python's `json` encoder uses a SHORT escape for seven characters and
+#: `\uXXXX` for everything else outside `\x20`-`\x7e`. Spelled out here
+#: because the oracle below is only an independent answer while it is a correct
+#: one, and `"a\tb"` renders as `"a\\tb"` and never as `"a\\u0009b"`.
+JSON_SHORT_ESCAPES = {
+    '"': '\\"', "\\": "\\\\", "\n": "\\n", "\r": "\\r", "\t": "\\t",
+    "\b": "\\b", "\f": "\\f",
+}
+
+
+def json_string(value: str) -> str:
+    r"""`json.dumps` of ONE string, written out rather than called.
+
+    This is the half of the independent oracle that would otherwise have been
+    `json.dumps` on both sides of the comparison. Python's encoder escapes `"`
+    and `\` and everything outside `\x20`-`\x7e` as `\uXXXX`, and puts `", "`
+    between array members; all three are restated here so a change to the
+    module's cell writer shows up as a difference rather than as two sides
+    moving together. Sweep data stays inside the BMP: a non-BMP character is a
+    surrogate pair in `\uXXXX` form and this does not spell that.
+    """
+    out = ['"']
+    for character in value:
+        if character in JSON_SHORT_ESCAPES:
+            out.append(JSON_SHORT_ESCAPES[character])
+        elif not 0x20 <= ord(character) <= 0x7E:
+            out.append(f"\\u{ord(character):04x}")
+        else:
+            out.append(character)
+    return "".join(out) + '"'
+
+
+def json_array(values) -> str:
+    return "[" + ", ".join(json_string(value) for value in values) + "]"
+
+
+def evidence_cell(field: str, value) -> str:
+    """The canonical CELL for one field's in-memory value. `-` for an empty
+    array is the module's rule and is restated here, not imported."""
+    if field in ("commands", "inputs"):
+        return json_array(value) if value else "-"
+    return value
+
+
+#: The nine in-memory field values of one legal record.
+EVIDENCE_VALUES = {
+    "purpose": "task-test",
+    "run_id": "run-1",
+    "subject": "task/T1",
+    "attempt": "attempt-001",
+    "code_state": COMMIT,
+    "outcome": "PASS",
+    "commands": (EVIDENCE_COMMAND,),
+    "environment": "python3.11-linux",
+    "inputs": (),
+}
+
+
+def _known(overrides) -> None:
+    """An unknown override is a `KeyError`, for `phase_line`'s reason: a helper
+    that accepts `evidence_record(purposes=...)` and returns the untouched
+    default makes a rejection test assert a rejection of nothing."""
+    unknown = sorted(set(overrides) - set(EVIDENCE_VALUES))
+    if unknown:
+        raise KeyError(
+            f"an evidence record has no field {unknown}; the fields are "
+            f"{sorted(EVIDENCE_VALUES)}")
+
+
+def evidence_record(**overrides) -> dict:
+    """The in-memory record `render_verification_evidence` takes."""
+    _known(overrides)
+    return dict(EVIDENCE_VALUES, **overrides)
+
+
+def evidence_text(order=None, **overrides) -> str:
+    """The canonical DOCUMENT, built here rather than by the renderer.
+
+    Overrides are CELLS, so a test can write a cell no in-memory value renders
+    to -- ` task-test`, `[]`, `attempt-0001` -- which is most of what the
+    rejection half is about.
+    """
+    _known(overrides)
+    cells = {field: evidence_cell(field, value)
+             for field, value in EVIDENCE_VALUES.items()}
+    cells.update(overrides)
+    keys = tuple(order) if order is not None else tuple(EVIDENCE_VALUES)
+    rows = "\n".join(f"| {key} | {cells[key]} |" for key in keys)
+    return (f"{state.EVIDENCE_MARKER}\n{state.EVIDENCE_TITLE}\n\n"
+            f"| Field | Value |\n| --- | --- |\n{rows}\n")
+
+
+def write_evidence(directory, name: str = "T1.md", **overrides) -> str:
+    """Write one evidence file and return its sha256 hex digest."""
+    path = Path(directory) / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = evidence_text(**overrides)
+    path.write_text(content, encoding="utf-8")
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def refuse_evidence(case, text) -> str:
+    """Parse `text`, require a `TrackerValidationError`, return its message."""
+    with case.assertRaises(state.TrackerValidationError) as caught:
+        state.parse_verification_evidence(text)
+    return str(caught.exception)
+
+
+class VerificationEvidenceCodecTests(TempDirTestCase):
+    """The brief's six, corrected where the brief asserted something else."""
+
+    def test_round_trips(self):
+        record = state.parse_verification_evidence(evidence_text())
+        self.assertEqual(record["purpose"], "task-test")
+        self.assertEqual(record["subject"], "task/T1")
+        self.assertEqual(record["attempt"], "attempt-001")
+        self.assertEqual(record["code_state"], COMMIT)
+        self.assertEqual(record["commands"], (EVIDENCE_COMMAND,))
+
+    def test_rejects_a_foreign_marker(self):
+        text = evidence_text().replace(
+            state.EVIDENCE_MARKER, "<!-- pipeline-verification-evidence/v2 -->"
+        )
+        with self.assertRaises(state.TrackerValidationError):
+            state.parse_verification_evidence(text)
+
+    def test_rejects_invalid_records(self):
+        """The brief's twelve cases, as CELLS.
+
+        `{"commands": "[]"}` and `{"commands": "not-json"}` were the two the
+        brief's own implementation could not pass: `_parse_command_suite`
+        raises `PlanMetadataError`, which is a SIBLING of
+        `TrackerValidationError` and not a subclass, so both cases escaped the
+        family the test asserts and the family a controller catches.
+        """
+        cases = (
+            {"outcome": "FAIL"}, {"outcome": "pass"}, {"purpose": "remediation"},
+            {"purpose": "anything"}, {"code_state": "short"}, {"commands": "[]"},
+            {"commands": "not-json"}, {"environment": "-"}, {"subject": "T1"},
+            {"attempt": "0"}, {"attempt": "later"}, {"attempt": "1"},
+        )
+        for override in cases:
+            with self.subTest(override=override):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.parse_verification_evidence(evidence_text(**override))
+
+    def test_rejects_reordered_fields(self):
+        order = list(state.EVIDENCE_FIELDS)
+        index = order.index("outcome")
+        order[index], order[index - 1] = order[index - 1], order[index]
+        with self.assertRaises(state.TrackerValidationError):
+            state.parse_verification_evidence(evidence_text(order=order))
+
+    def test_resolve_evidence_verifies_the_digest(self):
+        run_dir = self.tmp / "run"
+        digest = write_evidence(run_dir / "evidence")
+        record = state.resolve_evidence(
+            run_dir, self.tmp, f"evidence/T1.md#sha256={digest}"
+        )
+        self.assertEqual(record["subject"], "task/T1")
+        with self.assertRaises(state.TrackerValidationError):
+            state.resolve_evidence(
+                run_dir, self.tmp, f"evidence/T1.md#sha256={'c' * 64}"
+            )
+        with self.assertRaises(state.TrackerValidationError):
+            state.resolve_evidence(
+                run_dir, self.tmp, f"evidence/absent.md#sha256={digest}"
+            )
+
+    def test_template_matches_the_codec_fields(self):
+        template = (
+            Path(state.__file__).resolve().parents[1]
+            / "templates" / "verification-evidence.md"
+        ).read_text(encoding="utf-8")
+        self.assertTrue(template.startswith(state.EVIDENCE_MARKER))
+        for field in state.EVIDENCE_FIELDS:
+            with self.subTest(field=field):
+                self.assertIn(f"| {field} | ", template)
+
+
+#: Attempt cells SPELLED OUT rather than produced by `_attempt_token`. A sweep
+#: whose data came from the module's own converter would accept whatever the
+#: converter did, including a converter that stopped zero-padding.
+#: `test_the_swept_attempt_cells_are_the_renderers_own_spelling` pins the list
+#: back to the conversion point, so the two cannot drift apart silently.
+SWEEP_ATTEMPTS = (
+    "N/A", "attempt-001", "attempt-009", "attempt-010", "attempt-099",
+    "attempt-100", "attempt-999", "attempt-1000", "attempt-123456",
+)
+
+#: Command suites chosen to exercise the cell writer rather than the happy
+#: path: a quote, a backslash, a comma, a `#`, a `:`, a `+`, a non-ASCII
+#: character and a two- and three-member suite. `chr(0x…)` rather than a
+#: `\uXXXX` escape, because an escape in a tool argument is decoded before it
+#: reaches disk and the file would then hold the character itself.
+SWEEP_COMMANDS = (
+    ("make check",),
+    ("python3 -m unittest discover -s tests", "git status --short"),
+    ("printf 'a,b' > out", "make check", "./tools/check-plugin.sh"),
+    ('grep -n "a b" src', "echo a#b", "echo a:b+c"),
+    ("echo back\\slash",),
+    (f"echo {chr(0x00E9)}{chr(0x4E2D)}",),
+)
+
+SWEEP_INPUTS = ((), (INPUT_REF,), (INPUT_REF, SECOND_INPUT_REF))
+
+
+class EvidenceRoundTripSweepTests(unittest.TestCase):
+    """`render` and `parse` agree, asked of generated values and not fixtures."""
+
+    def test_the_swept_attempt_cells_are_the_renderers_own_spelling(self):
+        """The hand-written list above, pinned to `_attempt_token` -- THE single
+        conversion point. Without this the sweep would go green against a
+        renderer that had stopped agreeing with the worker-result codec, and
+        the two documents would spell one attempt two ways."""
+        self.assertEqual(
+            [cell for cell in SWEEP_ATTEMPTS if cell != state.EVIDENCE_NO_ATTEMPT],
+            [state._attempt_token(number)
+             for number in (1, 9, 10, 99, 100, 999, 1000, 123456)])
+
+    def test_the_hand_written_json_encoder_agrees_with_the_library(self):
+        """The oracle, audited. It is only an independent answer while it is a
+        CORRECT one, and every difference from `json.dumps` would otherwise
+        show up as a module defect."""
+        corpus = [command for suite in SWEEP_COMMANDS for command in suite]
+        corpus += ['a"b', "a\\b", "a,b", "-", "", "a b", "a\tb", "a\nb",
+                   "a\rb", "a\bb", "a\fb", chr(0x00), chr(0x1F), chr(0x7F),
+                   chr(0x2028), chr(0x2029), chr(0x0085), chr(0x00E9),
+                   chr(0x4E2D), chr(0xFFFD), chr(0x0661)]
+        for value in corpus:
+            with self.subTest(value=value):
+                self.assertEqual(json_string(value), json.dumps(value))
+        self.assertEqual(json_array(corpus), json.dumps(corpus))
+
+    def test_render_and_parse_agree_over_every_generated_legal_record(self):
+        """The cartesian product, both directions, against this file's builder.
+
+        Neither side of either assertion calls the other function: the expected
+        document comes from `evidence_text` and the expected record from
+        `evidence_record`, both written here. A mutation in the module moves
+        exactly one side.
+        """
+        identifiers = {"task": "T1", "phase": "P04"}
+        for purpose, kind, attempt, commands, inputs in itertools.product(
+                state.EVIDENCE_PURPOSES, state.EVIDENCE_SUBJECT_KINDS,
+                SWEEP_ATTEMPTS, SWEEP_COMMANDS, SWEEP_INPUTS):
+            subject = f"{kind}/{identifiers[kind]}"
+            record = evidence_record(purpose=purpose, subject=subject,
+                                     attempt=attempt, commands=commands,
+                                     inputs=inputs)
+            text = evidence_text(
+                purpose=purpose, subject=subject, attempt=attempt,
+                commands=evidence_cell("commands", commands),
+                inputs=evidence_cell("inputs", inputs))
+            with self.subTest(purpose=purpose, subject=subject,
+                              attempt=attempt, commands=commands,
+                              inputs=len(inputs)):
+                self.assertEqual(
+                    state.render_verification_evidence(record), text)
+                self.assertEqual(
+                    state.parse_verification_evidence(text), record)
+
+    def test_a_parsed_record_renders_back_to_the_bytes_it_was_read_from(self):
+        """The third leg. `parse(render(r)) == r` and `render(parse(t)) == t`
+        are different claims, and only the second is what makes a published
+        digest the digest of a record a validator saw."""
+        for inputs in SWEEP_INPUTS:
+            for commands in SWEEP_COMMANDS:
+                text = evidence_text(
+                    commands=evidence_cell("commands", commands),
+                    inputs=evidence_cell("inputs", inputs))
+                with self.subTest(commands=commands, inputs=len(inputs)):
+                    record = state.parse_verification_evidence(text)
+                    self.assertEqual(
+                        state.render_verification_evidence(record), text)
+
+
+#: THE TWO ARMS, SPLIT AND EACH GIVEN ITS VERDICT.
+#:
+#: They were one table and the only assertion over it was "render and parse
+#: agree". That relation is SYMMETRIC: a screen deleted from the validator is
+#: gone from both directions at once, so the two sides still agree and the
+#: sweep stays green. Measured -- three mutants survived it: a subject whose
+#: stable id is not a token, an unchecked `run_id`, and an `inputs` array that
+#: names one artifact twice. The equivalence is still asserted below, because
+#: it is the property Task 4 shipped two violations of; it is simply not
+#: sufficient on its own, and a sweep that cannot fail is not a sweep.
+EVIDENCE_LEGAL = {
+    "purpose": ("task-test", "task-integration", "phase"),
+    "run_id": ("run-1", "run.1", "run_1", "RUN-1", "1run"),
+    "subject": ("task/T1", "phase/P04", "task/T1/a"),
+    "attempt": ("attempt-001", "attempt-999", "N/A"),
+    "code_state": (COMMIT,),
+    "outcome": ("PASS",),
+    "commands": ((EVIDENCE_COMMAND,), ("a", "b")),
+    "environment": ("python3.11-linux", "python 3.11 linux"),
+    "inputs": ((), (INPUT_REF,), (INPUT_REF, SECOND_INPUT_REF)),
+}
+
+EVIDENCE_ILLEGAL = {
+    "purpose": ("remediation", "task-review", "TASK-TEST", "", "-",
+                " task-test", "task-test ", "task test"),
+    "run_id": ("", "-", "run 1", "run/1", "run@1"),
+    "subject": ("T1", "/T1", "task/", "anything/x", "TASK/T1", "task/T 1",
+                "task/-T1", "task//T1", "", "-"),
+    "attempt": ("attempt-0001", "attempt-1", "attempt-01", "attempt-000",
+                "0", "1", "later", "n/a", "", "-",
+                "attempt-" + chr(0x0661) * 3),
+    "code_state": ("short", "b" * 39, "b" * 41, "B" * 40, "HEAD~1", "main",
+                   "", "-"),
+    "outcome": ("FAIL", "pass", "Pass", "PASSED", "", "-"),
+    "commands": ((), ("a", "a"), ("",), ("a|b",), (" a",), ("a\tb",),
+                 ("a" + chr(0x2028) + "b",)),
+    "environment": ("-", "", "a|b", "a\tb"),
+    "inputs": ((INPUT_REF, INPUT_REF), ("docs/a.md",), ("",),
+               (f"../a.md#sha256={DIGEST}",), (f"docs/a.md#sha256={'a' * 8}",),
+               (f"docs/a.md#sha256={'A' * 64}",)),
+}
+
+
+class EvidenceAgreementEquivalenceTests(unittest.TestCase):
+    """Each candidate gets its verdict, and the two directions agree on it.
+
+    `render` accepting a value the parser refuses is the failure Task 4 shipped
+    twice, and it is published immutably -- a file the run can never read and
+    can never correct. `render` and `parse` both accepting something neither
+    should is the failure the equivalence alone cannot see.
+    """
+
+    def accepted_by_render(self, field, value) -> bool:
+        try:
+            state.render_verification_evidence(evidence_record(**{field: value}))
+        except state.TrackerValidationError:
+            return False
+        return True
+
+    def accepted_by_parse(self, field, value) -> bool:
+        try:
+            state.parse_verification_evidence(
+                evidence_text(**{field: evidence_cell(field, value)}))
+        except state.TrackerValidationError:
+            return False
+        return True
+
+    def test_every_legal_candidate_is_accepted_in_both_directions(self):
+        for field, candidates in EVIDENCE_LEGAL.items():
+            for value in candidates:
+                with self.subTest(field=field, value=value):
+                    self.assertTrue(self.accepted_by_render(field, value))
+                    self.assertTrue(self.accepted_by_parse(field, value))
+
+    def test_every_illegal_candidate_is_refused_in_both_directions(self):
+        for field, candidates in EVIDENCE_ILLEGAL.items():
+            for value in candidates:
+                with self.subTest(field=field, value=value):
+                    self.assertFalse(self.accepted_by_render(field, value))
+                    self.assertFalse(self.accepted_by_parse(field, value))
+
+    def test_the_two_directions_agree_on_every_candidate(self):
+        for table in (EVIDENCE_LEGAL, EVIDENCE_ILLEGAL):
+            for field, candidates in table.items():
+                for value in candidates:
+                    with self.subTest(field=field, value=value):
+                        self.assertEqual(self.accepted_by_render(field, value),
+                                         self.accepted_by_parse(field, value))
+
+    def test_every_field_has_both_arms(self):
+        """A field with an empty illegal arm has no screen this suite pins, and
+        a field with an empty legal arm would be satisfied by one that refuses
+        everything."""
+        for field in state.EVIDENCE_FIELDS:
+            with self.subTest(field=field):
+                self.assertTrue(EVIDENCE_LEGAL[field])
+                self.assertTrue(EVIDENCE_ILLEGAL[field])
+
+
+def module_function_source(name: str) -> str:
+    """The source text of one module-level function, by name."""
+    source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+        encoding="utf-8")
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return ast.get_source_segment(source, node)
+    raise AssertionError(f"pipeline_auto_state has no function {name!r}")
+
+
+#: THE SIGNATURE PHRASE OF EACH STRUCTURAL SCREEN, not a bare word out of it.
+#: The first version of the tests below asserted `assertNotIn("canonical", ...)`
+#: and `assertNotIn("marker", ...)`, and both fired on diagnoses that were
+#: entirely correct: the canonical screen's own message lists "a second marker"
+#: among the things it catches, and the attempt screen says "the canonical
+#: spelling". A discriminator that appears inside the message it is supposed to
+#: rule out discriminates nothing.
+CANONICAL_DIAGNOSIS = "is not canonical"
+REORDER_DIAGNOSIS = "missing, unknown, or reordered"
+MARKER_DIAGNOSIS = "marker is missing or foreign"
+
+
+class EvidenceDiagnosisTests(unittest.TestCase):
+    """Two screens that refuse the same document are indistinguishable to an
+    `assertRaises`. Each test below names the screen it means and asserts the
+    other screen's signature phrase is ABSENT."""
+
+    def test_each_signature_phrase_belongs_to_exactly_one_screen(self):
+        """The discriminators, audited against the source of the function that
+        raises them. A phrase two screens share cannot tell them apart, and a
+        phrase no screen carries makes every `assertNotIn` below vacuously
+        true. The counts are taken inside `parse_verification_evidence` rather
+        than over the module, because Task 4's worker-result codec says the
+        same three things about its own document and a module-wide count would
+        be measuring that codec too.
+        """
+        parser = module_function_source("parse_verification_evidence")
+        validator = module_function_source("_validate_verification_evidence")
+        for phrase in (CANONICAL_DIAGNOSIS, REORDER_DIAGNOSIS,
+                       MARKER_DIAGNOSIS):
+            with self.subTest(phrase=phrase):
+                self.assertEqual(parser.count(phrase), 1)
+                self.assertNotIn(phrase, validator)
+        self.assertEqual(
+            len({CANONICAL_DIAGNOSIS, REORDER_DIAGNOSIS, MARKER_DIAGNOSIS}), 3)
+
+    def test_a_reordered_document_is_diagnosed_as_reordered_not_as_bytes(self):
+        """The field-order screen and the canonical screen both refuse a
+        reordered record, and the canonical one names bytes rather than the
+        rule that was broken. `test_rejects_reordered_fields` above cannot tell
+        them apart; deleting the field-order screen leaves it green."""
+        order = list(state.EVIDENCE_FIELDS)
+        order[0], order[1] = order[1], order[0]
+        message = refuse_evidence(self, evidence_text(order=order))
+        self.assertIn(REORDER_DIAGNOSIS, message)
+        self.assertNotIn(CANONICAL_DIAGNOSIS, message)
+
+    def test_a_foreign_marker_is_diagnosed_as_the_marker_not_as_bytes(self):
+        message = refuse_evidence(self, evidence_text().replace(
+            state.EVIDENCE_MARKER, "<!-- pipeline-auto-worker-result/v1 -->"))
+        self.assertIn(MARKER_DIAGNOSIS, message)
+        self.assertNotIn(CANONICAL_DIAGNOSIS, message)
+
+    def test_a_paragraph_contradicting_the_table_is_refused_as_not_canonical(self):
+        """THE DEFECT THE BRIEF'S PARSER HAD NO SCREEN FOR, stated as the thing
+        it lets through rather than as an abstraction.
+
+        Every one of the nine fields reads back clean -- the field-order screen
+        is satisfied, every value validates, the record says PASS -- and the
+        document also says, in prose a search never looks at, that the suite
+        failed. The diagnosis must be the canonical one, because that is the
+        only screen standing between this file and a digest.
+        """
+        text = evidence_text() + (
+            "\nThe suite actually failed. PASS was recorded to unblock the "
+            "run.\n")
+        message = refuse_evidence(self, text)
+        self.assertIn(CANONICAL_DIAGNOSIS, message)
+        self.assertNotIn(REORDER_DIAGNOSIS, message)
+        self.assertNotIn(MARKER_DIAGNOSIS, message)
+
+    def test_an_unknown_purpose_names_the_registered_purposes(self):
+        """`remediation` and `anything` are refused by one screen, so the
+        brief's two cases are one case. What distinguishes the purpose screen
+        from every other is what it SAYS."""
+        message = refuse_evidence(self, evidence_text(purpose="remediation"))
+        self.assertIn("remediation", message)
+        for purpose in state.EVIDENCE_PURPOSES:
+            with self.subTest(purpose=purpose):
+                self.assertIn(purpose, message)
+
+    def test_a_non_pass_outcome_is_diagnosed_as_the_outcome_rule(self):
+        for outcome in ("FAIL", "pass", "PASSED"):
+            with self.subTest(outcome=outcome):
+                message = refuse_evidence(self, evidence_text(outcome=outcome))
+                self.assertIn("PASS", message)
+                self.assertNotIn(CANONICAL_DIAGNOSIS, message)
+
+    def test_a_subject_with_no_kind_is_diagnosed_as_the_kind_rule(self):
+        """`/T1` satisfies the brief's check -- the delimiter is there and the
+        tail is nonempty -- so a subject with no kind at all was legal."""
+        message = refuse_evidence(self, evidence_text(subject="/T1"))
+        self.assertIn("kind", message)
+        for kind in state.EVIDENCE_SUBJECT_KINDS:
+            with self.subTest(kind=kind):
+                self.assertIn(kind, message)
+
+    def test_a_second_spelling_of_an_attempt_is_diagnosed_as_the_spelling(self):
+        """`attempt-0001` matches the brief's `attempt-[0-9]{3,}` and is a
+        second spelling of attempt one, in a record whose identity is the
+        sha256 of its bytes."""
+        message = refuse_evidence(self, evidence_text(attempt="attempt-0001"))
+        self.assertIn("attempt-0001", message)
+        self.assertNotIn(CANONICAL_DIAGNOSIS, message)
+
+    def test_an_unbound_input_is_diagnosed_as_the_binding_rule(self):
+        message = refuse_evidence(self, evidence_text(
+            inputs=json_array(["docs/a.md"])))
+        self.assertIn("inputs", message)
+        self.assertIn(state._DIGEST_DELIMITER, message)
+
+    def test_an_empty_inputs_array_is_refused_as_a_second_spelling_of_dash(self):
+        message = refuse_evidence(self, evidence_text(inputs="[]"))
+        self.assertIn("NONEMPTY", message)
+
+    def test_a_malformed_command_suite_stays_inside_the_tracker_family(self):
+        """`_parse_command_suite` raises `PlanMetadataError`, a SIBLING of
+        `TrackerValidationError`. Unwrapped, a controller catching the tracker
+        family around an evidence read sees nothing at all."""
+        for cell in ("[]", "not-json", '["a", "a"]', '[1]', '{"a": 1}', '"a"'):
+            with self.subTest(cell=cell):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.parse_verification_evidence(evidence_text(commands=cell))
+                with self.assertRaises(state.TrackerValidationError):
+                    state.parse_verification_evidence(evidence_text(inputs=cell))
+
+
+class EvidenceResolutionTests(TempDirTestCase):
+    """`resolve_evidence`: one reference, one document, inside one family."""
+
+    def setUp(self):
+        super().setUp()
+        self.run_dir = self.tmp / "run"
+        self.repo_dir = self.tmp / "repo"
+        self.repo_dir.mkdir()
+
+    def resolve(self, reference):
+        return state.resolve_evidence(self.run_dir, self.repo_dir, reference)
+
+    def refusal(self, reference):
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            self.resolve(reference)
+        return caught.exception
+
+    def test_the_run_directory_is_searched_before_the_repository(self):
+        run_digest = write_evidence(self.run_dir / "evidence", subject="task/T1")
+        write_evidence(self.repo_dir / "evidence", subject="task/T2")
+        record = self.resolve(f"evidence/T1.md#sha256={run_digest}")
+        self.assertEqual(record["subject"], "task/T1")
+
+    def test_the_repository_copy_is_used_when_the_run_has_none(self):
+        digest = write_evidence(self.repo_dir / "evidence", subject="task/T2")
+        self.assertEqual(
+            self.resolve(f"evidence/T1.md#sha256={digest}")["subject"],
+            "task/T2")
+
+    def test_a_mismatching_run_copy_is_not_rescued_by_a_matching_repo_copy(self):
+        """THE FAIL-OPEN A `continue` ON MISMATCH WOULD OPEN. Treating a digest
+        mismatch as "not the file I meant" reads as trying harder, and it lets
+        whoever can write the repository copy choose which record replaces a
+        run copy that does not hash right. One reference names one document."""
+        write_evidence(self.run_dir / "evidence", subject="task/T1")
+        digest = write_evidence(self.repo_dir / "evidence", subject="task/T2")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            self.resolve(f"evidence/T1.md#sha256={digest}")
+        self.assertIn("digest", str(caught.exception))
+
+    def test_a_digest_mismatch_names_the_reference_and_changes_nothing(self):
+        write_evidence(self.run_dir / "evidence")
+        path = self.run_dir / "evidence" / "T1.md"
+        before = path.read_bytes()
+        with self.assertRaises(state.TrackerValidationError):
+            self.resolve(f"evidence/T1.md#sha256={'c' * 64}")
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_a_directory_where_the_file_should_be_is_not_an_os_error(self):
+        """`is_file()` then `read_bytes()` is a check and a use; asking for the
+        bytes answers both at once, so a directory, a vanished file and an
+        unreadable one all arrive as the same 'keep looking'."""
+        (self.run_dir / "evidence" / "T1.md").mkdir(parents=True)
+        digest = write_evidence(self.repo_dir / "evidence")
+        self.assertEqual(
+            self.resolve(f"evidence/T1.md#sha256={digest}")["subject"],
+            "task/T1")
+
+    def test_a_matching_file_that_is_not_utf8_stays_inside_the_family(self):
+        """`UnicodeDecodeError` is a `ValueError`, outside `TrackerError`. The
+        brief decoded the bytes bare."""
+        path = self.run_dir / "evidence" / "T1.md"
+        path.parent.mkdir(parents=True)
+        content = state.EVIDENCE_MARKER.encode("utf-8") + b"\n\xff\xfe\n"
+        path.write_bytes(content)
+        digest = hashlib.sha256(content).hexdigest()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            self.resolve(f"evidence/T1.md#sha256={digest}")
+        self.assertIn("UTF-8", str(caught.exception))
+
+    def test_a_missing_file_names_what_it_looked_for(self):
+        digest = write_evidence(self.run_dir / "evidence")
+        message = str(self.refusal(
+            f"evidence/absent.md#sha256={digest}"))
+        self.assertIn("evidence/absent.md", message)
+
+    def test_an_unbound_or_short_reference_is_refused_before_any_read(self):
+        write_evidence(self.run_dir / "evidence")
+        for reference in ("evidence/T1.md", f"evidence/T1.md#sha256={'a' * 8}",
+                          f"evidence/T1.md#sha256={'A' * 64}",
+                          f"../T1.md#sha256={DIGEST}",
+                          f"/abs/T1.md#sha256={DIGEST}",
+                          f"evidence/../T1.md#sha256={DIGEST}", "", 5, None):
+            with self.subTest(reference=reference):
+                with self.assertRaises(state.TrackerValidationError):
+                    self.resolve(reference)
+
+    def test_a_search_root_that_is_not_a_path_stays_inside_the_family(self):
+        """`Path(None)` is a `TypeError`, and a controller that wrapped an
+        evidence read in `except TrackerError` would not catch it."""
+        for run_dir, repo_dir in ((None, self.repo_dir), (self.run_dir, 5),
+                                  (object(), self.repo_dir)):
+            with self.subTest(run_dir=type(run_dir).__name__,
+                              repo_dir=type(repo_dir).__name__):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.resolve_evidence(
+                        run_dir, repo_dir, f"evidence/T1.md#sha256={DIGEST}")
+
+    def test_a_resolved_record_is_the_whole_validated_record(self):
+        digest = write_evidence(self.run_dir / "evidence")
+        record = self.resolve(f"evidence/T1.md#sha256={digest}")
+        self.assertEqual(sorted(record), sorted(state.EVIDENCE_FIELDS))
+        self.assertEqual(record, evidence_record())
+
+    def test_a_file_that_hashes_right_and_is_not_canonical_is_still_refused(self):
+        """The digest binds the bytes; it says nothing about what they mean. A
+        forged PASS with a paragraph under the table hashes perfectly."""
+        path = self.run_dir / "evidence" / "T1.md"
+        path.parent.mkdir(parents=True)
+        content = evidence_text() + "\nThe suite actually failed.\n"
+        path.write_text(content, encoding="utf-8")
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        message = str(self.refusal(
+            f"evidence/T1.md#sha256={digest}"))
+        self.assertIn("canonical", message)
+
+
+class VerificationEvidenceTemplateTests(unittest.TestCase):
+
+    def setUp(self):
+        self.template = (
+            Path(state.__file__).resolve().parents[1] / "templates"
+            / "verification-evidence.md"
+        ).read_text(encoding="utf-8")
+
+    def template_rows(self) -> list:
+        return [state._split_row(line) for line in self.template.splitlines()
+                if line.startswith("| ")
+                and len(state._split_row(line)) == 2]
+
+    def test_the_table_names_exactly_the_codec_fields_in_order(self):
+        """`assertIn(f"| {field} | ", template)` -- the brief's check -- is
+        satisfied by a template carrying three fields the codec does not have,
+        and by one whose rows are in any order at all."""
+        names = [row[0] for row in self.template_rows()
+                 if row[0] not in (state._RESULT_HEADER[0], state._TABLE_RULE)]
+        self.assertEqual(names, list(state.EVIDENCE_FIELDS))
+
+    def test_the_first_two_lines_are_the_marker_and_the_title(self):
+        self.assertEqual(self.template.splitlines()[:2],
+                         [state.EVIDENCE_MARKER, state.EVIDENCE_TITLE])
+
+    def test_the_marker_appears_exactly_once(self):
+        self.assertEqual(self.template.count(state.EVIDENCE_MARKER), 1)
+
+    def test_every_purpose_and_every_subject_kind_is_named(self):
+        for value in (*state.EVIDENCE_PURPOSES, *state.EVIDENCE_SUBJECT_KINDS,
+                      state.EVIDENCE_OUTCOME, state.EVIDENCE_NO_ATTEMPT):
+            with self.subTest(value=value):
+                self.assertIn(value, self.template)
+
+    def test_the_one_legal_outcome_and_the_binding_rule_are_both_stated(self):
+        for phrase in ("exactly one legal value", "sha256", "--no-ff",
+                       "REGISTERED"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, self.template)
+
+    def test_the_template_is_not_itself_a_parseable_record(self):
+        """A template that validated would be a PASS for a suite nobody ran,
+        sitting in the repository with a digest anything could cite."""
+        with self.assertRaises(state.TrackerValidationError):
+            state.parse_verification_evidence(self.template)
+
+    def test_the_template_carries_no_absolute_home_path(self):
+        self.assertNotIn("/home/", self.template)
+
+
+class EvidenceModuleBoundaryTests(unittest.TestCase):
+    """What Task 5 must NOT have done to the module it extends."""
+
+    def test_the_attempt_grammar_is_still_task_fours_round_trip(self):
+        """The brief redefined `_ATTEMPT_TOKEN` as `re.compile(r"attempt-[0-9]
+        {3,}\\Z")`. It already exists, so the module-level assignment would have
+        rebound the global for every existing caller -- and the pattern is
+        WEAKER: it accepts `attempt-0001`, a second spelling of attempt one."""
+        self.assertIsInstance(state._ATTEMPT_TOKEN, state._AttemptToken)
+        self.assertTrue(state._ATTEMPT_TOKEN.fullmatch("attempt-001"))
+        for token in ("attempt-0001", "attempt-000", "attempt-01",
+                      "attempt-" + "9" * 5000):
+            with self.subTest(token=token):
+                self.assertFalse(state._ATTEMPT_TOKEN.fullmatch(token))
+
+    def test_hashlib_is_imported_once_and_nothing_new_was_imported(self):
+        """The brief appended `import hashlib` beside the new code. It is
+        already imported at the top of the module, and a second module-level
+        `import` is a second binding of the name."""
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        counts = module_bindings(ast.parse(source).body)
+        self.assertEqual(counts["hashlib"], 1)
+        self.assertEqual(
+            sorted(name for name, count in counts.items() if count > 1), [])
+        self.assertNotIn("re.compile(", source)
+        self.assertIsNone(sys.modules["pipeline_auto_state"].__dict__.get("re"))
+
+    def test_the_pinned_constants_are_the_master_plans_own(self):
+        self.assertEqual(state.EVIDENCE_MARKER,
+                         "<!-- pipeline-auto-verification-evidence/v1 -->")
+        self.assertEqual(state.EVIDENCE_PURPOSES,
+                         ("task-test", "task-integration", "phase"))
+        self.assertEqual(state.EVIDENCE_FIELDS, (
+            "purpose", "run_id", "subject", "attempt", "code_state", "outcome",
+            "commands", "environment", "inputs"))
+
+    def test_the_two_record_codecs_do_not_share_a_marker(self):
+        """A worker result and an evidence record are both `| Field | Value |`
+        tables. The marker is the whole of what tells them apart, so each codec
+        must refuse the other's document."""
+        result_text = state.render_worker_result(worker_result())
+        with self.assertRaises(state.TrackerValidationError):
+            state.parse_verification_evidence(result_text)
+        with self.assertRaises(state.TrackerValidationError):
+            state.parse_worker_result(evidence_text())
+
+    def test_the_renderer_uses_p02s_table_writer(self):
+        """A second `"| " + " | ".join(...)` beside `_render_table` is a second
+        answer to what a rendered row looks like, and the canonical screen
+        compares bytes."""
+        self.assertEqual(
+            state.render_verification_evidence(evidence_record()).splitlines()[3:5],
+            state._render_table(state._RESULT_HEADER, ())[:2])
+
+    def test_the_codec_raises_only_tracker_validation_errors(self):
+        """Every malformed shape this codec can be handed comes back inside the
+        family a controller catches. A `TypeError` or an `AttributeError` here
+        is a run that dies on a worker's typo instead of refusing it."""
+        hostile = (
+            None, [], "PASS", 3, (),
+            evidence_record(commands=EVIDENCE_COMMAND),
+            evidence_record(commands=iter((EVIDENCE_COMMAND,))),
+            evidence_record(commands=(1,)),
+            evidence_record(commands=({"a": 1},)),
+            evidence_record(inputs=INPUT_REF),
+            evidence_record(inputs=(5,)),
+            evidence_record(inputs=([INPUT_REF],)),
+            evidence_record(code_state=5),
+            evidence_record(purpose=None),
+            evidence_record(subject=object()),
+            evidence_record(attempt=1),
+            evidence_record(outcome=True),
+            evidence_record(run_id=b"run-1"),
+            evidence_record(environment=None),
+            dict(evidence_record(), extra="x"),
+            {field: EVIDENCE_VALUES[field]
+             for field in state.EVIDENCE_FIELDS[:-1]},
+        )
+        for record in hostile:
+            with self.subTest(record=type(record).__name__):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.render_verification_evidence(record)
+        for text in (None, b"", 7, [], "", state.EVIDENCE_MARKER,
+                     state.EVIDENCE_MARKER + "\n| a |\n",
+                     state.EVIDENCE_MARKER + "\n| purpose | task-test |\n"):
+            with self.subTest(text=repr(text)[:40]):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.parse_verification_evidence(text)
 
 
 # THE RUNNER GOES LAST, and it has to. `unittest.main()` calls `sys.exit()`, so

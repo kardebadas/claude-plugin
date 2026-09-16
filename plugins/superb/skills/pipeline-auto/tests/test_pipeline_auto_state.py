@@ -7228,6 +7228,53 @@ class EffectiveRungTests(unittest.TestCase):
                                       "quote": "PostgresEngine"}])
         self.assertEqual(self.rung(payload), "engineering-judgement")
 
+    def test_a_fifo_cited_as_a_file_demotes_without_being_opened(self):
+        """THE ONE CITED SHAPE WHOSE SYMPTOM IS NOT AN ERROR, and the path is
+        BRAIN-SUPPLIED.
+
+        A directory, a dangling link and a symlink loop all fail the read
+        loudly and demote. A FIFO does not: ``open`` on one BLOCKS until a
+        writer arrives, and on a name inside the repository under grading no
+        writer is coming. This is the function that prices a brain's claim
+        about its own evidence, so a brain that names a FIFO chooses where the
+        run stops — for ever, with no diagnostic and nothing in any log.
+
+        The shape is asked before the open, and it costs nothing in meaning: an
+        unreadable citation already demotes, so the verdict here is the one the
+        blocked read would have reached if it could ever return. Both halves
+        are asserted — the demotion, and the SAME citation keeping its rung
+        once the name is an ordinary file again.
+
+        THE SYMLINK LOOP IS HERE FOR A SECOND REASON. It never hung; it raised
+        `RuntimeError("Symlink loop from ...")` out of `Path.resolve` — not out
+        of the read — which is outside `TrackerError` and outside the
+        `(OSError, UnicodeError, ValueError)` this function was written for. A
+        brain citing a looped symlink killed the run from inside the function
+        whose whole job is to price that citation.
+        """
+        cited = self.root / CITED_PATH
+        keep = cited.read_bytes()
+        shapes = (("a fifo", lambda path: os.mkfifo(path)),
+                  ("a dangling symlink",
+                   lambda path: path.symlink_to("nowhere-at-all")),
+                  ("a symlink loop", lambda path: path.symlink_to(path)))
+        for shape, build in shapes:
+            with self.subTest(shape=shape):
+                if os.path.lexists(cited):
+                    cited.unlink()
+                build(cited)
+                outcome = without_hanging(self, lambda: self.rung(response()))
+                self.assertIsNone(outcome.get("error"))
+                self.assertEqual(outcome.get("value"), "engineering-judgement")
+                self.assertLess(pas.RUNGS[outcome["value"]], pas.ADOPTION_FLOOR)
+        if os.path.lexists(cited):
+            cited.unlink()
+        cited.write_bytes(keep)
+        self.assertEqual(self.rung(response()), "code-evidenced",
+                         "and the citation is the one that resolves, so the "
+                         "demotions above were the file's shape and nothing "
+                         "about the response")
+
     def test_a_citation_outside_the_repository_root_demotes(self):
         """An absolute citation, or one that climbs out with ``..``, resolves
         identically against EVERY root — which is precisely the property the
@@ -13268,6 +13315,101 @@ class OpenQuorum(unittest.TestCase):
         self.assertEqual(second["status"], "in_flight")
         self.assertEqual(second["payload_digest"], first["payload_digest"])
 
+    def test_a_settled_record_this_directory_merely_carries_still_blocks_the_raise(self):
+        """THE COMPACTION-REPLAY GUARD, REACHED THROUGH A SYMLINK.
+
+        `Path.exists()` FOLLOWS the link and answers False for a dangling
+        symlink and for a symlink loop — names the directory carries and cannot
+        read. So a `final.json` of either shape walked past this guard while
+        `classify_quorum` and `_open_record`, which spell the same read
+        `os.path.lexists`, stopped on it: two readers of one directory
+        disagreeing about whether it holds an outcome.
+
+        BOTH SHAPES THE RUN CAN BE IN ARE CONSTRUCTED, because they fail
+        differently and only the second is the whole failure.
+
+        With `open.json` beside it the raise replayed the OPEN record and
+        reported a settled question in flight. On the shape a BUDGET TRIP
+        leaves — `final.json` and NOTHING else, because nothing was ever
+        dispatched — it walked past both guards into the budget check and, with
+        the ceiling since raised by a human's extension, published a question
+        record, three payloads and an `open.json`: three brains dispatched at a
+        question this run had already escalated. That is the run re-asking
+        until it likes the answer, which is the one failure this phase exists
+        to prevent, and it is asserted here by the FILES, not by the verdict.
+        """
+        shapes = (("a dangling symlink",
+                   lambda path: path.symlink_to("nowhere-at-all")),
+                  ("a symlink loop", lambda path: path.symlink_to(path)))
+        for shape, build in shapes:
+            with self.subTest(shape=shape, record="in flight"):
+                root, run_dir = repo_with_a_run(self)
+                record = run_dir / "question-T04.md"
+                record.write_text(question_text(), encoding="utf-8")
+                self.open(run_dir=run_dir, record=record)
+                directory = run_dir / "quorum" / self.qid
+                final = directory / "final.json"
+                build(final)
+                before = self.names(directory)
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    self.open(run_dir=run_dir, record=record)
+                self.assertEqual(self.names(directory), before,
+                                 "a stop writes nothing")
+
+            with self.subTest(shape=shape, record="the budget trip"):
+                root, run_dir = repo_with_a_run(self)
+                register_phases(run_dir, *BUDGET_PHASES)
+                ids = seed_adoptions(run_dir, QUESTION["phase"],
+                                     pas.BUDGET_PER_PHASE)
+                record = run_dir / "question-T04.md"
+                record.write_text(question_text(), encoding="utf-8")
+                trip = self.open(run_dir=run_dir, record=record)
+                self.assertEqual(trip["status"], "escalated")
+                directory = run_dir / "quorum" / self.qid
+                self.assertEqual(self.names(directory), ["final.json"],
+                                 "a budget trip leaves exactly one file, or "
+                                 "this is not the shape this half names")
+                #: The human grants the extension, so the budget would now let
+                #: the question through. Only the settled record stands between
+                #: this run and re-asking it.
+                (run_dir / "decisions.md").write_text(
+                    DECISION_HUMAN + budget_grant(granted=ids), encoding="utf-8")
+                self.assertTrue(
+                    pas.quorum_budget(run_dir, phase=QUESTION["phase"])["may_raise"],
+                    "the ceiling must really have moved, or the guard below "
+                    "is not the thing refusing the raise")
+                (directory / "final.json").unlink()
+                build(directory / "final.json")
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    self.open(run_dir=run_dir, record=record)
+                self.assertEqual(self.names(directory), ["final.json"],
+                                 "nothing was dispatched: no question record, "
+                                 "no payloads and no open record")
+
+    def test_an_open_record_this_directory_merely_carries_is_never_a_second_raise(self):
+        """The same `exists`/`lexists` split at the in-flight guard.
+
+        A dangling `open.json` answered "never dispatched" would fall through
+        to the budget check and re-raise a question that is already in flight —
+        charging it again and sending three brains a second copy.
+        """
+        for shape, build in (("a dangling symlink",
+                              lambda path: path.symlink_to("nowhere-at-all")),
+                             ("a symlink loop",
+                              lambda path: path.symlink_to(path))):
+            with self.subTest(shape=shape):
+                root, run_dir = repo_with_a_run(self)
+                record = run_dir / "question-T04.md"
+                record.write_text(question_text(), encoding="utf-8")
+                self.open(run_dir=run_dir, record=record)
+                directory = run_dir / "quorum" / self.qid
+                (directory / "open.json").unlink()
+                build(directory / "open.json")
+                before = self.names(directory)
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    self.open(run_dir=run_dir, record=record)
+                self.assertEqual(self.names(directory), before)
+
     def test_a_re_raise_keeps_its_qid_when_decisions_have_moved_on(self):
         """`derive_qid` takes no context, deliberately: a qid that moved when
         anything else was decided would make every re-raise a new question and
@@ -13793,6 +13935,40 @@ class OpenQuorum(unittest.TestCase):
 # --- phase 2: recording the responses --------------------------------------
 
 
+def run_with_owners(case, owners) -> Path:
+    """A second run holding one dispatched quorum whose `Owners:` line is `owners`.
+
+    THE FIXTURE EVERY CASE IN THIS FILE WAS MISSING. `QUESTION`'s owners are
+    `brain-a, brain-b, brain-c`, so ALPHABETICAL ORDER, DISPATCH ORDER and
+    "the first owner" are one sequence and a case cannot tell them apart. Every
+    ordering claim in this module — `quorum_needs_redispatch`'s, `_live_owners`'
+    and `classify_quorum`'s `owners` — says the order is `open.json`'s, which
+    is the brain-index order `build_payload` was called in, because a caller
+    reads brain n's index out of the position it finds the name in. Against an
+    alphabetical fixture a `sorted()` is indistinguishable from all of it, and
+    a wrong order re-sends the wrong brain's bytes.
+
+    IT NEEDS A RUN OF ITS OWN. The qid is derived from the question and the
+    axis alone, so a different owners line leaves it unchanged — which is what
+    makes this drop straight into a case keyed off `QID`, and also why a second
+    `open_quorum` inside one run would find `open.json` already there and
+    replay the first record, owners and all.
+    """
+    owners = list(owners)
+    _, run_dir = repo_with_a_run(case)
+    path = run_dir / "question-T04.md"
+    path.write_text(question_text(owners=", ".join(owners)), encoding="utf-8")
+    opened = pas.open_quorum(str(run_dir), question_record=str(path))
+    case.assertEqual(opened["owners"], owners,
+                     "the dispatch order on disk is the order this fixture "
+                     "names, or nothing below is about ordering")
+    case.assertNotEqual(owners, sorted(owners),
+                        "a fixture whose owners are already sorted cannot tell "
+                        "dispatch order from alphabetical order, which is the "
+                        "whole reason this helper exists")
+    return run_dir
+
+
 def without_hanging(case, call, seconds=20):
     """`call`'s outcome, or a failed assertion — never a hung suite.
 
@@ -14183,15 +14359,31 @@ class RecordBrainResponse(unittest.TestCase):
 
         The order is `open.json`'s, which is the brain-index order
         `build_payload` was called in, so a caller re-dispatching owner n reads
-        the index it needs out of the position it found the name in. Asserted
-        against a fixture whose invalid owners are NOT in alphabetical order of
-        discovery, so a sorted list would be a different answer.
+        the index it needs out of the position it found the name in.
+
+        TWO FIXTURES, AND THE SECOND IS THE ONE THAT PINS THE CLAIM. This
+        class's owners are `brain-a, brain-b, brain-c`, so the ANSWERING order
+        can be scrambled all it likes and the result is still alphabetical:
+        `sorted()` returns the same list, and the ordering claim goes unpinned
+        while looking pinned. A run whose `Owners:` line is not in alphabetical
+        order is what tells the two apart.
         """
         self.record("brain-c", self.answer(rung="high"))
         self.record("brain-b", self.answer())
         self.record("brain-a", self.answer(alternatives=[]))
         self.assertEqual(self.opened["owners"], ["brain-a", "brain-b", "brain-c"])
-        self.assertEqual(self.owed(), ["brain-a", "brain-c"])
+        self.assertEqual(self.owed(), ["brain-a", "brain-c"],
+                         "answered c, b, a — the debt is named in DISPATCH "
+                         "order, not in the order the answers arrived")
+
+        run_dir = run_with_owners(self, ["brain-c", "brain-a", "brain-b"])
+        for owner in ("brain-a", "brain-c"):
+            pas.record_brain_response(str(run_dir), qid=self.qid, owner=owner,
+                                      payload=response(qid=self.qid, rung="high"))
+        self.assertEqual(pas.quorum_needs_redispatch(str(run_dir), qid=self.qid),
+                         ["brain-c", "brain-a"],
+                         "and a sorted list IS a different answer here, which "
+                         "it never was against an alphabetical fixture")
 
     def test_a_valid_second_attempt_clears_the_debt_without_erasing_the_first(self):
         """The re-dispatch that must still work — and the invalid answer it
@@ -15018,6 +15210,83 @@ class ClassifyQuorum(unittest.TestCase):
         self.assertEqual(self.classify(["brain-b", "brain-c"]),
                          {"state": "awaiting-responses", "qid": self.qid,
                           "owners": ["brain-b", "brain-c"]})
+        #: AND THE REPORT IS NARROWED BY THE RECORD IN THIS DIRECTION TOO. A
+        #: report naming all three is stale in the other sense now: brain-a has
+        #: DELIVERED, and waiting on a brain that is finished is a controller
+        #: told to poll for an answer that is already on disk — a quorum that
+        #: never computes its outcome and never escalates either. `owners` here
+        #: is the live report INTERSECTED with what is still unanswered, not
+        #: the live report.
+        self.assertEqual(self.classify(QUESTION["owners"]),
+                         {"state": "awaiting-responses", "qid": self.qid,
+                          "owners": ["brain-b", "brain-c"]})
+
+    def test_a_redispatch_is_rebuilt_in_dispatch_order_never_by_debt_or_by_name(self):
+        """THE POSITION IS THE BRAIN INDEX, so the order IS the payload.
+
+        `quorum_needs_redispatch` and `_live_owners` both state it and this
+        verdict restates it: a caller re-dispatching owner n reads the index it
+        needs out of the POSITION it found the name in, and each brain's bytes
+        are already on disk as `payload-<owner>.json`. A verdict in the wrong
+        order therefore re-sends the wrong brain's question, and the answer
+        comes back looking like an answer to the right one.
+
+        Two fixtures, because the class's own `brain-a, brain-b, brain-c` can
+        distinguish neither mutation. Concatenating the debt in front of the
+        rest survives any fixture whose owed brain is FIRST, and sorting
+        survives any fixture that is alphabetical — which is every other case
+        in this class.
+        """
+        #: (1) The owed brain in the MIDDLE. Concatenation puts it first.
+        self.record("brain-b", self.answer(rung="high"))
+        self.assertFalse(self.stored("brain-b", 1)["valid"],
+                         "the middle owner's answer must be schema-invalid, "
+                         "or nothing is owed and the order below is trivial")
+        verdict = self.classify()
+        self.assertEqual(verdict["state"], "redispatch")
+        self.assertEqual(verdict["owed"], ["brain-b"])
+        self.assertEqual(verdict["owners"], QUESTION["owners"],
+                         "the debt is rebuilt INTO the dispatch order, never "
+                         "concatenated in front of it")
+        self.assertEqual(verdict["unanswered"], ["brain-a", "brain-c"])
+
+        #: (2) A dispatch order that is not alphabetical. Sorting changes it.
+        owners = ["brain-c", "brain-a", "brain-b"]
+        run_dir = run_with_owners(self, owners)
+        on_disk = json.loads(
+            (run_dir / "quorum" / self.qid / "open.json").read_text(
+                encoding="utf-8"))["owners"]
+        self.assertEqual(on_disk, owners,
+                         "the verdicts below are asserted against `open.json` "
+                         "itself, not against the list this case typed")
+        nobody_live = pas.classify_quorum(str(run_dir), qid=self.qid,
+                                          live_owners=[])
+        self.assertEqual(nobody_live["state"], "redispatch")
+        self.assertEqual(nobody_live["owners"], on_disk)
+        self.assertEqual(nobody_live["unanswered"], on_disk)
+        #: `awaiting-responses` reads its order out of the same record and not
+        #: out of the report, which arrives here sorted.
+        self.assertEqual(
+            pas.classify_quorum(str(run_dir), qid=self.qid,
+                                live_owners=sorted(owners))["owners"], on_disk)
+        #: And the debt function is the same reading of the same record: two
+        #: owed brains, named in dispatch order rather than in either the order
+        #: they answered in or the order their names sort in.
+        for owner in ("brain-b", "brain-c"):
+            pas.record_brain_response(str(run_dir), qid=self.qid, owner=owner,
+                                      payload=response(qid=self.qid, rung="high"))
+        owed = [owner for owner in on_disk if owner in ("brain-b", "brain-c")]
+        self.assertNotEqual(owed, sorted(owed),
+                            "the owed brains must sit in `open.json` in an "
+                            "order sorting would change, or this proves "
+                            "nothing about sorting")
+        self.assertNotEqual(owed, ["brain-b", "brain-c"],
+                            "nor in the order they answered in")
+        self.assertEqual(pas.quorum_needs_redispatch(str(run_dir), qid=self.qid),
+                         owed)
+        after = pas.classify_quorum(str(run_dir), qid=self.qid, live_owners=[])
+        self.assertEqual(after["owners"], on_disk)
+        self.assertEqual(after["owed"], owed)
 
     # --- ready to finalise -------------------------------------------------
 
@@ -15085,6 +15354,68 @@ class ClassifyQuorum(unittest.TestCase):
         self.assertEqual(verdict["decision_id"], "Q-" + self.qid)
         self.assertEqual(verdict["result"]["winner"], winner)
         self.assertEqual(verdict["qid"], self.qid)
+
+    def test_the_outcome_handed_back_is_the_record_that_was_validated(self):
+        """ONE READ, OR THE VERDICT DESCRIBES TWO DIFFERENT FILES.
+
+        `status` and `decision_id` are the cells `_final_event` validated;
+        `result` is the whole record the caller is handed because it needs the
+        winner it is being told not to re-litigate. Reading `final.json` twice
+        for those two halves means the verdict is validated against one set of
+        bytes and reports another — on a name a human may be editing or
+        restoring from a backup, which is the only reason any of these records
+        are validated rather than trusted.
+
+        The file is MOVED between the reads, which is the only way to tell one
+        read from two: a second read would pick up an `escalated` record naming
+        a different winner while the verdict still said `adopted`, and the
+        caller would be told never to look again at an outcome that is not the
+        one on disk. The read count is asserted as well, so the case still
+        names the mechanism if the swap ever stops being observable.
+
+        Both callers of `_final_event` that want the record are covered, since
+        `open_quorum`'s compaction-replay guard hands back the same record for
+        the same reason.
+        """
+        winner = {"rung": "code-evidenced", "answer_key": "postgres"}
+        self.seed_final(status="adopted", decision_id="Q-" + self.qid,
+                        winner=winner)
+        final = self.directory / "final.json"
+        real = pas._read_json
+        reads = []
+
+        def swapping(path, what):
+            record = real(path, what)
+            if path == final:
+                reads.append(what)
+                final.write_text(json.dumps(
+                    {"qid": self.qid, "status": "escalated",
+                     "phase": QUESTION["phase"], "decision_id": None,
+                     "winner": {"answer_key": "sqlite"}},
+                    indent=2, sort_keys=True), encoding="utf-8")
+            return record
+
+        for label, call in (
+                ("classify_quorum",
+                 lambda: self.classify(QUESTION["owners"])),
+                ("open_quorum",
+                 lambda: pas.open_quorum(str(self.run_dir),
+                                         question_record=str(self.record_path)))):
+            with self.subTest(entry=label):
+                self.seed_final(status="adopted", decision_id="Q-" + self.qid,
+                                winner=winner)
+                reads.clear()
+                with mock.patch.object(pas, "_read_json", swapping):
+                    outcome = call()
+                self.assertEqual(len(reads), 1,
+                                 f"{label} read the final record {len(reads)} "
+                                 "times; the record it validated and the record "
+                                 "it reports must be one read")
+                result = outcome["result"] if label == "classify_quorum" else outcome
+                self.assertEqual(outcome["status"], "adopted")
+                self.assertEqual(result["status"], outcome["status"])
+                self.assertEqual(result["decision_id"], "Q-" + self.qid)
+                self.assertEqual(result["winner"], winner)
 
     def test_a_final_record_filed_under_another_question_is_a_stop_not_an_outcome(self):
         """`finalised` is the one verdict that forbids ever looking again, so
@@ -15298,29 +15629,111 @@ class ClassifyQuorum(unittest.TestCase):
             self.classify(qid=never)
         self.assertNotIsInstance(caught.exception, pas.QuorumSchemaInvalid)
 
-        shapes = (("a directory", lambda path: path.mkdir()),
-                  ("a dangling symlink",
-                   lambda path: path.symlink_to("nowhere-at-all")),
-                  ("a symlink loop", lambda path: path.symlink_to(path)))
-        for name in ("open.json", "final.json"):
+        def remove(path):
+            if not os.path.lexists(path):
+                return
+            if path.is_dir() and not path.is_symlink():
+                path.rmdir()
+            else:
+                path.unlink()
+
+        a_directory = ("a directory", lambda path: path.mkdir())
+        a_file = ("a regular file",
+                  lambda path: path.write_text("not a directory\n",
+                                               encoding="utf-8"))
+        dangling = ("a dangling symlink",
+                    lambda path: path.symlink_to("nowhere-at-all"))
+        a_loop = ("a symlink loop", lambda path: path.symlink_to(path))
+        #: THE CORPUS IS PER NAME, because what counts as corruption is not the
+        #: same at each. A `final.json` that is a DIRECTORY is corruption; a
+        #: `responses/` that is one is the ordinary case, and what is corruption
+        #: there is the REGULAR FILE and the link — the shapes that make
+        #: `lexists` of every attempt of every owner `False`, so a quorum whose
+        #: brains have all answered reads as a quorum nobody has answered.
+        #: `responses/` was missing from this corpus entirely, which is how a
+        #: whole directory went unguarded while every file inside it was held.
+        for name, corpus in (("open.json", (a_directory, dangling, a_loop)),
+                             ("final.json", (a_directory, dangling, a_loop)),
+                             ("responses", (a_file, dangling, a_loop))):
             path = self.directory / name
             keep = path.read_bytes() if path.is_file() else None
-            for shape, build in shapes:
+            restore_directory = path.is_dir() and not path.is_symlink()
+            for shape, build in corpus:
                 with self.subTest(name=name, shape=shape):
-                    if os.path.lexists(path):
-                        path.unlink()
+                    remove(path)
                     build(path)
                     with self.assertRaises(pas.QuorumSchemaInvalid):
                         self.classify(QUESTION["owners"])
-                if path.is_dir() and not path.is_symlink():
-                    path.rmdir()
-                else:
-                    path.unlink()
+            remove(path)
             if keep is not None:
                 path.write_bytes(keep)
+            if restore_directory:
+                path.mkdir()
         self.assertEqual(self.classify()["state"], "redispatch",
                          "and the fixture is back to what it was, or the "
                          "cases above proved nothing in order")
+
+    def test_a_responses_directory_that_is_not_one_is_corruption_not_an_empty_one(self):
+        """RULE 11 ONE LEVEL UP, and the level where it fails SILENTLY.
+
+        Every response FILE is held to its shape as it is read. The directory
+        those names are joined onto was not, and `os.path.lexists` of
+        `<responses>/brain-a__1.json` is False for every shape `responses/`
+        can be corrupted into — a regular file, a dangling link, a loop, a
+        FIFO. So the whole family reads as "no brain has answered", and it
+        reads that way to the one function whose entire return value is who to
+        dispatch.
+
+        THE CONSEQUENCE IS ASSERTED, not the exception alone. Two brains have
+        answered LEGALLY here, and `classify_quorum`'s own docstring calls
+        naming such a brain in a `redispatch` impossible by construction: a
+        second answer from a brain whose first was legal is REFUSED, so the
+        dispatch it orders can never be recorded. Before the guard the verdict
+        named all three and the run found out at a write error three dispatches
+        later. The intact verdict is taken first, so "raises" is measured
+        against the answer the same record gives when it is readable.
+
+        AND THE FIFO IS BOUNDED even though this is the one rule-11 shape that
+        does NOT hang: nothing ever opens the directory. That is exactly why it
+        had to be asked about rather than discovered — the fail-open has no
+        symptom at all, not even a stall.
+        """
+        for owner in QUESTION["owners"][:2]:
+            self.record(owner)
+        intact = self.classify()
+        self.assertEqual(intact["owners"], ["brain-c"],
+                         "the readable record names only the brain that has "
+                         "not answered, or the shapes below prove nothing")
+        moved = self.directory / "responses-moved"
+        shapes = (("a regular file",
+                   lambda path: path.write_text("not a directory\n",
+                                                encoding="utf-8")),
+                  ("a dangling symlink",
+                   lambda path: path.symlink_to("nowhere-at-all")),
+                  ("a symlink loop", lambda path: path.symlink_to(path)),
+                  ("a symlink to a file",
+                   lambda path: path.symlink_to(self.directory / "open.json")),
+                  ("a fifo", lambda path: os.mkfifo(path)))
+        for shape, build in shapes:
+            with self.subTest(shape=shape):
+                self.responses.rename(moved)
+                build(self.responses)
+                for label, call in (
+                        ("classify_quorum", lambda: self.classify()),
+                        ("quorum_needs_redispatch",
+                         lambda: pas.quorum_needs_redispatch(
+                             str(self.run_dir), qid=self.qid)),
+                        ("record_brain_response",
+                         lambda: self.record("brain-c"))):
+                    with self.subTest(entry=label):
+                        outcome = without_hanging(self, call)
+                        self.assertIsInstance(outcome.get("error"),
+                                              pas.QuorumSchemaInvalid)
+                self.responses.unlink()
+                moved.rename(self.responses)
+        self.assertEqual(self.classify(), intact,
+                         "and the record is back to what it was, so the stop "
+                         "above was the directory's shape and nothing else")
 
     def test_an_open_record_that_binds_no_digest_can_be_judged_neither_stale_nor_fresh(self):
         """`opened["context_digest"]` raises `KeyError` on a record that lost

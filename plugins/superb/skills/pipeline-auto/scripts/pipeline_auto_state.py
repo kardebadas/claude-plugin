@@ -3598,6 +3598,16 @@ def _cited_file(item: dict, root: Path) -> str | None:
     is exactly the property the recorded root exists to deny: such a citation
     would be graded against a file this run does not contain and would resolve
     identically no matter which repository the run was started against.
+
+    THE SHAPE IS ASKED BEFORE THE OPEN, for ``_require_regular_file``'s reason
+    and with this path's own aggravation: ``path`` is BRAIN-SUPPLIED. A
+    directory, a dangling link and a symlink loop all fail the open loudly and
+    demote; a FIFO does not, and ``open`` on one blocks until a writer that
+    never comes. Grading a brain's evidence is not a place a run may stop for
+    ever with no diagnostic, and a brain naming a FIFO is a brain choosing
+    where the run stops. It costs nothing in meaning: an unreadable citation
+    already demotes, so ``None`` here is the same verdict the blocked read
+    would have reached if it could ever return.
     """
     path = item.get("path")
     if not isinstance(path, str) or not path.strip():
@@ -3606,12 +3616,23 @@ def _cited_file(item: dict, root: Path) -> str | None:
         target = (root / path).resolve()
         if target != root and root not in target.parents:
             return None
+        if not target.is_file():
+            return None
         return target.read_text(encoding="utf-8")
-    except (OSError, UnicodeError, ValueError):
+    except (OSError, UnicodeError, ValueError, RuntimeError):
         #: ``OSError`` covers the missing file, the directory cited as a file,
         #: and the unreadable one; ``UnicodeError`` the binary one;
         #: ``ValueError`` an embedded NUL. Each is a demotion, and none of them
         #: may leave this module as an exception outside ``TrackerError``.
+        #:
+        #: ``RuntimeError`` IS THE SYMLINK LOOP, and it is raised by
+        #: ``resolve`` rather than by the read: CPython's non-strict resolver
+        #: reports ELOOP as ``RuntimeError("Symlink loop from ...")`` on the
+        #: interpreters this module targets, which is outside ``TrackerError``
+        #: and outside every other name in this tuple. So a brain citing a
+        #: looped symlink -- the path is BRAIN-SUPPLIED -- would kill the run
+        #: from inside the function whose whole job is to price that citation
+        #: at what it turned out to be worth.
         return None
 
 
@@ -6049,8 +6070,21 @@ def _dumps(value) -> str:
             "cannot be written") from exc
 
 
-def _final_event(path: Path, qid: str) -> dict:
+def _final_event(path: Path, qid: str) -> tuple[dict, dict]:
     """One ``final.json``, validated down to the three fields the budget reads.
+
+    RETURNS THE EVENT AND THE RECORD IT WAS PROJECTED OUT OF, FROM ONE READ,
+    and the pair is why the signature is a tuple rather than the event alone.
+    Two callers want both halves -- ``classify_quorum`` reports the ``status``
+    and ``decision_id`` this validated beside the whole ``result`` the caller
+    is told not to re-litigate, and ``_open_under_lock`` hands back the same
+    record as a ``replay``. Each of them used to read the file a SECOND time
+    for the record, which means the fields the verdict was validated against
+    and the fields it hands over came from two different reads of a name a
+    human may be editing or restoring: the verdict could report ``adopted``
+    about bytes that no longer say so, or an outcome could be handed back under
+    a qid the second read no longer agrees with. One read, one record, one
+    verdict about it.
 
     THE QID IS RE-DERIVED FROM THE DIRECTORY AND COMPARED, for the reason
     ``_question_record`` compares it: a record is addressed by the directory it
@@ -6133,7 +6167,7 @@ def _final_event(path: Path, qid: str) -> dict:
         "status": status,
         "phase": phase.strip(),
         "decision_id": decision_id.strip() if named else None,
-    }
+    }, record
 
 
 def quorum_events(run_dir: str) -> list[dict]:
@@ -6190,7 +6224,7 @@ def quorum_events(run_dir: str) -> list[dict]:
         #: guard could skip is a ``final.json`` that is a DIRECTORY -- which is
         #: corruption, not an undecided quorum, and is a stop rather than a
         #: record silently missing from the run's own count of itself.
-        event = _final_event(final, final.parent.name)
+        event, _ = _final_event(final, final.parent.name)
         did = event["decision_id"]
         if did is not None:
             if did in seen:
@@ -6983,7 +7017,20 @@ def _open_under_lock(run_dir: Path, qid: str, record: dict, text: str) -> dict:
     #: path, not in this one function.
     directory = run_dir / _QUORUM_DIRNAME / qid
     final_path = directory / _FINAL_FILE
-    if final_path.exists():
+    #: ``lexists`` RATHER THAN ``exists``, AND THE GUARD BELOW IS WHAT IT
+    #: PROTECTS. ``exists`` follows the link and answers ``False`` for a
+    #: dangling symlink and for a symlink loop -- names this directory carries
+    #: -- so a ``final.json`` of either shape walks straight past the
+    #: compaction-replay guard. With ``open.json`` beside it the run replays the
+    #: OPEN record and calls a settled question in flight; on the shape a BUDGET
+    #: TRIP leaves, ``final.json`` and nothing else, it walks past both guards
+    #: into the budget check and dispatches three brains at a question this run
+    #: has already escalated. That is the run re-asking until it likes the
+    #: answer, reached through a symlink, and it is the single failure this
+    #: whole phase exists to prevent. ``classify_quorum`` and ``_open_record``
+    #: already read the same names with ``lexists`` and stop; the two readers of
+    #: one directory must not disagree about whether it holds an outcome.
+    if os.path.lexists(final_path):
         #: THE COMPACTION-REPLAY GUARD. One outcome per qid per run: the
         #: outcome is returned and NOTHING is written, because a second quorum
         #: on a question this run has already settled is the run re-asking
@@ -6999,11 +7046,17 @@ def _open_under_lock(run_dir: Path, qid: str, record: dict, text: str) -> dict:
         #: not only the ones a first raise can produce -- and ``replay`` is the
         #: discriminator that says so. See ``open_quorum`` for why projecting it
         #: down to those was refused.
-        _final_event(final_path, qid)
-        settled = _read_json(final_path, f"the final record for {qid}")
+        #:
+        #: ONE READ FOR BOTH HALVES, for ``_final_event``'s reason: the record
+        #: handed back is the record that was validated, not a second reading
+        #: of the same name.
+        _, settled = _final_event(final_path, qid)
         return dict(settled, replay=True, qid=qid)
     open_path = directory / _OPEN_FILE
-    if open_path.exists():
+    #: ``lexists`` for the reason above, and ``_open_record`` spells it the same
+    #: way: a dangling ``open.json`` answered "never dispatched" here would
+    #: re-enter the budget and re-raise a question already in flight.
+    if os.path.lexists(open_path):
         #: Already dispatched and not yet finalised. The controller owes
         #: responses, not a second dispatch -- and re-publishing the payloads
         #: would be inert anyway, which is exactly why the guard cannot be left
@@ -7513,8 +7566,34 @@ def _owner_attempts(run_dir: Path, qid: str, owner: str) -> list[tuple[str, dict
     A GAP IS CORRUPTION AND IS A STOP. Attempts are numbered from one without
     holes, so anything else is a record whose first answer is missing, and
     pricing the second as the first is the same spend-it-twice fault.
+
+    AND THE DIRECTORY IS ASKED ABOUT BEFORE THE NAMES INSIDE IT ARE, which is
+    ``_require_regular_file``'s rule one level up. Every response FILE is held
+    to its shape when it is read; the directory those names are joined onto was
+    not held to anything, and ``lexists`` of a name under a REGULAR FILE, a
+    dangling link, a symlink loop or a FIFO is ``False`` for every attempt of
+    every owner. So a ``responses/`` that is any of those read as "no brain has
+    answered" -- and this function feeds the one verdict whose entire value is
+    who to dispatch. The run would order a fresh dispatch of brains whose legal
+    answers are on record, which ``classify_quorum`` calls impossible by
+    construction, and would find out three dispatches later when
+    ``record_brain_response`` refused the reply with a write error. A FIFO here
+    does not even hang -- nothing opens the directory -- so the whole family
+    fails OPEN, silently, which is why it is asked about rather than discovered.
+
+    ABSENCE IS STILL NOT ANSWERED HERE, exactly as ``_require_regular_file``
+    leaves it: a name that is not there is the caller's own question, and
+    ``record_brain_response`` reaches this before it has created the directory
+    the first answer will live in.
     """
     directory = _quorum_directory(run_dir, qid) / _RESPONSES_DIRNAME
+    if not directory.is_dir() and os.path.lexists(directory):
+        raise QuorumSchemaInvalid(
+            f"the responses directory for {qid} at {str(directory)!r} is a name "
+            "this run directory carries and is not a directory; every attempt "
+            "of every owner then reads as absent, so a quorum whose brains have "
+            "answered reports that nobody has and orders their answers to be "
+            "collected again")
     present = [attempt for attempt in range(1, _MAX_ATTEMPTS + 1)
                if os.path.lexists(directory / _response_name(owner, attempt))]
     if present != list(range(1, len(present) + 1)):
@@ -7889,11 +7968,16 @@ def classify_quorum(run_dir: str, *, qid: str, live_owners: list) -> dict:
     #: and answering them with "not settled yet" tells the controller a
     #: finalised quorum still owes its owners a dispatch.
     if os.path.lexists(final_path):
-        what = f"the final record for {qid}"
         #: Validated rather than merely found: a record restored under the
         #: wrong qid would hand back an outcome for a question nobody asked,
         #: and hand it back as the one verdict that forbids ever looking again.
-        event = _final_event(final_path, qid)
+        #:
+        #: ONE READ FOR BOTH HALVES. ``status`` and ``decision_id`` are the
+        #: cells this verdict was validated against and ``result`` is the whole
+        #: record it reports; reading the file twice would let the two describe
+        #: different bytes on a name a human may be restoring, so the verdict
+        #: could say ``adopted`` about a record that no longer does.
+        event, record = _final_event(final_path, qid)
         return {
             "state": "finalised",
             "qid": qid,
@@ -7902,7 +7986,7 @@ def classify_quorum(run_dir: str, *, qid: str, live_owners: list) -> dict:
             "decision_id": event["decision_id"],
             #: The whole record, not the budget's four cells: the caller needs
             #: the winner it is being told not to re-litigate.
-            "result": _read_json(final_path, what),
+            "result": record,
         }
 
     opened = _open_record(run_dir, qid)

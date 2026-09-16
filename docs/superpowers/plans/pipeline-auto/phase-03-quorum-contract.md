@@ -4106,5 +4106,23 @@ guessed at in code beyond the minimum noted; each needs a ruling.
     outside `TrackerError` onto the one argument a brain controls entirely.
     The master plan's block still says `dict`; this line is the reconciliation.
 
-Items 1, 2 and 8 are closed by coordinator ruling. Items 3–7 and 9 remain
-reported; none blocks execution of this phase.
+12. **`open_quorum`'s `question_record` argument has no shape contract, and a
+    FIFO there hangs the call.** `_record_path` calls `question_record` the one
+    argument a controller assembles from whatever the raising worker published,
+    and `open_quorum` reads it with a bare `read_text` before taking the run
+    lock. A FIFO at that path blocks for ever: measured, and measured to leave
+    no lock file, because the read is ahead of `_exclusive_lock`. Standing rule
+    11 was applied to every name *inside* the run directory in Task 10; this one
+    was deliberately left, and the reason it is reported rather than guessed is
+    that the right answer is a contract decision nobody has made. A
+    non-regular-file `question_record` is either CORRUPTION of a record the run
+    is entitled to find — `QuorumSchemaInvalid`, the spelling every run-internal
+    name uses — or the CALLER'S OWN MISTAKE about an argument it supplied, which
+    is a plain `QuorumError` and reads quite differently in a controller's logs.
+    Picking one silently would freeze that distinction for the whole module.
+    What must not survive the ruling is the hang: whichever class is chosen, the
+    shape is asked before the open.
+
+Items 1, 2 and 8 are closed by coordinator ruling. Items 3–7, 9 and 12 remain
+reported; item 12 is the only one that leaves a reachable hang, and none blocks
+execution of this phase.

@@ -5635,9 +5635,25 @@ def _question_record(run_dir, qid: str) -> dict:
             f"qid {qid!r} is not a question id; a payload keyed by nothing is a "
             "payload no response can be matched back to")
     path = _run_path(run_dir) / _QUORUM_DIRNAME / qid.strip() / _QUESTION_FILE
+    #: THE SHAPE IS ASKED BEFORE THE OPEN, for ``_require_regular_file``'s
+    #: reason: this read is reached from ``_open_under_lock`` through
+    #: ``build_payload`` and ``payload_digest``, so it runs WITH THE RUN LOCK
+    #: HELD, and a FIFO under this name answers the open by waiting for a
+    #: writer that never comes -- an unattended run wedged for ever, holding
+    #: the lock, with nothing in any log to say why.
+    _require_regular_file(path, f"the question record for {qid}")
     try:
         text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
+    except (OSError, UnicodeError, ValueError) as exc:
+        #: ``ValueError`` IS THE EMBEDDED NUL, and it is the spelling
+        #: ``_cited_file`` and ``open_quorum`` already carry and this one did
+        #: not. ``qid`` reaches here from ``payload_digest`` and
+        #: ``build_payload``, both public and both taking any string a caller
+        #: reassembled from a tracker cell; ``Path`` accepts ``"a\x00b"`` and
+        #: ``open`` then refuses it with ``ValueError``, which is outside
+        #: ``TrackerError`` and outside the ``(OSError, UnicodeError)`` a read
+        #: is usually written for, so it escaped every handler a controller
+        #: has written.
         raise QuorumError(
             f"no readable question record for {qid}: {exc}; a payload cannot be "
             "built from a question nobody wrote down") from exc
@@ -5808,6 +5824,14 @@ def payload_digest(qid: str, *, run_dir: str) -> str:
     different context, and the responses on disk were answers to the old one.
     """
     projection = _run_path(run_dir) / _PROJECTION_FILE
+    #: ASKED BEFORE THE OPEN, and the branch below is exactly why it has to be.
+    #: A missing projection is answered with ``""`` two lines down, so without
+    #: this the four names that are NOT a readable file would have to be told
+    #: apart by the open itself -- and a FIFO tells nobody anything: it BLOCKS,
+    #: and this read is reached from ``_open_under_lock`` with the run lock
+    #: held. ``_require_regular_file`` is silent for a name that is not there,
+    #: which leaves the empty-projection branch exactly as it was.
+    _require_regular_file(projection, f"the decisions projection for {qid}")
     try:
         text = projection.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -7343,6 +7367,31 @@ def _record_owners(opened: dict, qid: str) -> list[str]:
     return list(owners)
 
 
+def _bound_digest(opened: dict, qid: str, field: str, cost: str) -> str:
+    """One sha256 an open record BINDS, read back and held to the grammar.
+
+    ``opened[field]`` is the spelling this replaces and it is not a shorter
+    version of this one: a record that omits the key raises ``KeyError``, which
+    is outside ``TrackerError`` and so escapes every handler a controller has
+    written -- and ``open.json`` is a file in a directory a human may have
+    edited or restored from a backup, where a key going missing is the ordinary
+    damage. ``_opened_record`` validates the two fields an open record is
+    CLASSIFIED by, its status and its qid, and the digests it BINDS are a
+    different question asked here.
+
+    The value is checked against ``_SHA256`` rather than merely found, because
+    a field holding ``true``, ``[]`` or ``"pending"`` compares unequal to every
+    real digest and would therefore read as drift -- a quorum reported stale,
+    routed to a human, on a record that had simply lost a field.
+    """
+    digest = opened.get(field)
+    if not _text(digest) or not _SHA256.fullmatch(digest.strip()):
+        raise QuorumSchemaInvalid(
+            f"the open record for {qid} binds {field} {digest!r}, which is not "
+            f"a digest; {cost}")
+    return digest.strip()
+
+
 def _dispatched_digest(opened: dict, qid: str) -> str:
     """The payload digest ``open.json`` bound AT DISPATCH, never a fresh one.
 
@@ -7363,13 +7412,10 @@ def _dispatched_digest(opened: dict, qid: str) -> str:
     comparing these two digests, which is only possible while this one is the
     recorded one.
     """
-    digest = opened.get("payload_digest")
-    if not _text(digest) or not _SHA256.fullmatch(digest.strip()):
-        raise QuorumSchemaInvalid(
-            f"the open record for {qid} binds payload_digest {digest!r}, which "
-            "is not a digest; a response recorded against it would cite a "
-            "dispatch nothing can be checked against")
-    return digest.strip()
+    return _bound_digest(
+        opened, qid, "payload_digest",
+        "a response recorded against it would cite a dispatch nothing can be "
+        "checked against")
 
 
 def _response_name(owner: str, attempt: int) -> str:
@@ -7682,3 +7728,253 @@ def quorum_needs_redispatch(run_dir: str, *, qid: str) -> list[str]:
         if len(attempts) == 1 and not attempts[0][1]["valid"]:
             owed.append(owner)
     return owed
+
+
+#: Every verdict ``classify_quorum`` may return, and the whole of them. Named
+#: so the suite can assert TOTALITY -- that each one is reachable by a run that
+#: is in it for a reason no other shares -- because a classifier is exactly the
+#: shape where a case can assert the state it expects while the function
+#: arrives at it by falling through to a default.
+_CLASSIFICATIONS = ("finalised", "ready-to-finalise", "awaiting-responses",
+                    "redispatch", "stale-context")
+
+#: Where a stale quorum goes, and it is not back to the brains.
+_STALE_ROUTE = "stage-11"
+
+
+def _context_digest(run_dir: Path) -> str:
+    """The digest ``open.json`` records as ``context_digest``, spelled once.
+
+    THE AUTHORITY, NOT THE PROJECTION, and the difference is the whole reason
+    both are compared. ``open_quorum`` takes this digest over ``decisions.md``
+    -- what the run had DECIDED when the brains were dispatched -- while
+    ``payload_digest`` separately binds ``decisions-effective.md``, which is
+    what the brains were shown.
+
+    The two move at different moments. ``decisions.md`` moves the instant a
+    decision lands; the projection is only rewritten by the NEXT
+    ``open_quorum``, and ``project_decisions`` is deterministic, so a second
+    raise that follows no decision rewrites it BYTE-IDENTICALLY and moves
+    nothing at all. A classifier watching the projection alone therefore calls
+    a quorum fresh for exactly as long as no other question happens to be
+    raised, on a run that has already decided the thing under it -- and then
+    reports the drift late, at a moment chosen by an unrelated question.
+
+    ``_open_under_lock`` does not call this and must not: it reads
+    ``decisions.md`` ONCE and digests the same text it projected, so its digest
+    and its projection cannot describe two different moments. That the two
+    spellings agree is asserted in the suite against a quorum raised a moment
+    earlier -- a fresh quorum is never stale, which is the seam where a
+    disagreement would surface.
+    """
+    return _digest(_decisions_text(run_dir))
+
+
+def _live_owners(live_owners, owners: list, qid: str) -> list[str]:
+    """The owners of THIS quorum a caller reports still working, in dispatch order.
+
+    A LIVENESS REPORT IS A HINT AND THE FILES ARE THE AUTHORITY -- spec
+    invariant 4 -- so this narrows and never widens. A name that is not one of
+    this quorum's three is DROPPED rather than believed: believing it would
+    hold a quorum open waiting for an agent no dispatch ever created, which is
+    a run that never re-dispatches and never escalates either.
+
+    THE CONTAINER IS CHECKED BEFORE IT IS ITERATED, and the two shapes it
+    guards against are both things a controller reassembling state after a
+    compaction really produces. ``None`` is the lost list, and ``for owner in
+    None`` raises ``TypeError``, outside ``TrackerError``. A BARE STRING is the
+    single-owner spelling, and it is worse than a crash: ``"brain-a" in
+    "brain-abc"`` is a substring test, so one brain is reported live because
+    another brain's name contains its own.
+
+    ``_member`` IS NOT THE GUARD HERE AND THE POSITION IS WHY. The standing
+    rule is about an agent-supplied VALUE being hashed by a bare ``in`` against
+    a set; here the value is ``owner``, which ``_record_owners`` has already
+    held to ``_OWNER``, and the agent-supplied side is the CONTAINER. A list
+    membership test compares by equality and hashes nothing, so junk inside
+    ``live_owners`` -- a list, a dict, ``None`` -- is answered ``False`` rather
+    than raised on. The guard the container needed is the one above it.
+
+    The order is ``open.json``'s owner order, which is ``build_payload``'s
+    index order, for ``quorum_needs_redispatch``'s reason: a caller reads the
+    index it needs out of the position it found the name in.
+    """
+    if not isinstance(live_owners, (list, tuple)):
+        raise QuorumError(
+            f"live_owners for {qid} is {type(live_owners).__name__}, not a "
+            "list of owner ids; a bare string reports one brain live because "
+            "another brain's name contains its own, and None leaves this "
+            "module's exception family altogether")
+    claimed = list(live_owners)
+    return [owner for owner in owners if owner in claimed]
+
+
+def classify_quorum(run_dir: str, *, qid: str, live_owners: list) -> dict:
+    """What an interrupted quorum needs next. One state per interruption point.
+
+    The three-phase record exists so that EVERY interruption point is
+    classifiable from disk, and this is the function that proves it. Five
+    states, each a different instruction to the controller, and the order they
+    are asked in is the design rather than a convenience.
+
+    ``finalised`` FIRST, AND A FINALISED RECORD IS NEVER RECOMPUTED. A second
+    run with different brains gives a different answer about as often as the
+    rung gap is narrow, and the controller has no principled way to prefer
+    either. ``final.json`` is also the ONE file a budget trip leaves behind --
+    no ``open.json``, no payloads, nothing dispatched -- so reading the open
+    record first would report that shape as corruption.
+
+    ``stale-context`` SECOND, ahead of every state that would act on the
+    answers. Waiting, re-dispatching and computing an outcome are all acts on
+    behalf of a question the run has since moved past, and re-deciding on
+    resume is precisely the silent-divergence failure this design exists to
+    prevent. So the quorum is NOT re-opened and NOT finalised; it is flagged to
+    stage 11 and a human sees it. A mismatch is NOT evidence of a crash -- see
+    ``_context_digest`` -- it is the ordinary consequence of a decision landing
+    under a quorum that was already in flight, which is the normal shape of any
+    run with more than one question in it.
+
+    TWO DIGESTS ARE COMPARED, because they catch two different facts at two
+    different moments and neither subsumes the other. ``context_digest``
+    against ``decisions.md`` catches a decision landing, at the instant it
+    lands. ``payload_digest`` against a fresh computation catches the file the
+    brains were told to READ being rewritten under them -- including by a hand
+    edit of ``decisions-effective.md``, which ``decisions.md`` cannot see at
+    all. ``moved`` names which.
+
+    Then the record on disk decides between the last three. Each owner is in
+    exactly one of three conditions and the conditions are not headcount:
+
+    * TERMINAL -- its last answer was legal, or it has spent both attempts. A
+      second invalid answer is a NON-RESPONSE, so an owner that spent its one
+      re-dispatch is terminal too: the quorum is incomplete and escalates, and
+      the escalation is the remedy. So ``ready-to-finalise`` means "no dispatch
+      is owed, compute the outcome", and the outcome it computes may well be an
+      escalation.
+    * OWED -- exactly one answer and it was SCHEMA-INVALID. That is the single
+      permitted re-dispatch, and it is owed WHATEVER the liveness report says,
+      because a brain that has already delivered is not working on this
+      question: a report naming it is stale, and the file is the authority.
+    * UNANSWERED -- nothing on record. Live, that is ``awaiting-responses`` and
+      the controller waits. Not live, the brain died before answering and its
+      payload must be re-sent.
+
+    A BRAIN THAT ANSWERED LEGALLY IS NEVER NAMED IN A ``redispatch``, and this
+    is not a preference. ``record_brain_response`` REFUSES a second answer from
+    a brain whose first was legal -- that is the run collecting answers until
+    it likes one -- so naming it would order a dispatch whose answer can never
+    be recorded: three brains spent, one reply refused outright, and a quorum
+    no further forward. "Discard the partials and re-send" is impossible here
+    by construction: every response file is a single-assignment cell.
+
+    THE BYTES A RE-DISPATCH SENDS ARE THE DISPATCHED ONES. ``payload_digest``
+    in the verdict is read out of ``open.json``, never recomputed, so it proves
+    the identity of what is already on disk as ``payload-<owner>.json``; a
+    fresh digest would attest to a question the brain was never asked.
+
+    THE RUN IS VALIDATED FIRST even though nothing here writes. A foreign,
+    missing, malformed or unknown schema is a read-only stop that preserves the
+    directory, changes no files and DISPATCHES NOTHING -- and this function's
+    return value is an instruction to dispatch, so honouring only the
+    file-system half of that sentence breaks it by the one route it was written
+    for.
+    """
+    run_dir = _run_path(run_dir)
+    validate_run(run_dir)
+    qid = _quorum_qid(qid)
+    directory = _quorum_directory(run_dir, qid)
+    final_path = directory / _FINAL_FILE
+    #: ``lexists`` rather than ``exists``, for ``_open_record``'s reason: a
+    #: dangling symlink and a symlink loop are names this directory CARRIES,
+    #: and answering them with "not settled yet" tells the controller a
+    #: finalised quorum still owes its owners a dispatch.
+    if os.path.lexists(final_path):
+        what = f"the final record for {qid}"
+        #: Validated rather than merely found: a record restored under the
+        #: wrong qid would hand back an outcome for a question nobody asked,
+        #: and hand it back as the one verdict that forbids ever looking again.
+        event = _final_event(final_path, qid)
+        return {
+            "state": "finalised",
+            "qid": qid,
+            "recompute": False,
+            "status": event["status"],
+            "decision_id": event["decision_id"],
+            #: The whole record, not the budget's four cells: the caller needs
+            #: the winner it is being told not to re-litigate.
+            "result": _read_json(final_path, what),
+        }
+
+    opened = _open_record(run_dir, qid)
+    owners = _record_owners(opened, qid)
+    #: Screened before the digests, so a lost liveness list is refused for what
+    #: it is rather than after a page of file reads.
+    live = _live_owners(live_owners, owners, qid)
+    recorded_context = _bound_digest(
+        opened, qid, "context_digest",
+        "the drift a resumed quorum is judged by is the distance between that "
+        "value and the audit trail as it stands, and a record binding no such "
+        "value cannot be judged stale or fresh")
+    dispatched = _dispatched_digest(opened, qid)
+
+    current_context = _context_digest(run_dir)
+    current_payload = payload_digest(qid, run_dir=run_dir)
+    moved = []
+    if recorded_context != current_context:
+        moved.append("decisions")
+    if dispatched != current_payload:
+        moved.append("projection")
+    if moved:
+        return {
+            "state": "stale-context",
+            "qid": qid,
+            "reopen": False,
+            "route": _STALE_ROUTE,
+            "moved": moved,
+            "recorded_context": recorded_context,
+            "current_context": current_context,
+            "recorded_payload": dispatched,
+            "current_payload": current_payload,
+        }
+
+    owed, unanswered, terminal = [], [], []
+    for owner in owners:
+        attempts = _owner_attempts(run_dir, qid, owner)
+        if not attempts:
+            unanswered.append(owner)
+        elif attempts[-1][1]["valid"] or len(attempts) >= _MAX_ATTEMPTS:
+            terminal.append(owner)
+        else:
+            owed.append(owner)
+
+    if len(terminal) == len(owners):
+        return {"state": "ready-to-finalise", "qid": qid,
+                "owners": list(terminal)}
+    #: Rebuilt in ``open.json``'s order rather than concatenated, so the
+    #: position a caller reads brain n's index out of is the dispatch order in
+    #: every verdict.
+    pending = [owner for owner in owners
+               if owner in owed or (owner in unanswered and owner not in live)]
+    if pending:
+        return {
+            "state": "redispatch",
+            "qid": qid,
+            "owners": pending,
+            #: The two debts kept apart, because they are owed for different
+            #: reasons and a later stage prices them differently: ``owed`` is
+            #: the single permitted re-dispatch a SCHEMA-INVALID answer bought,
+            #: and it is exactly what ``quorum_needs_redispatch`` returns.
+            "owed": list(owed),
+            "unanswered": [owner for owner in pending if owner in unanswered],
+            "payload_digest": dispatched,
+        }
+    #: Nothing is pending only if nothing is owed and every unanswered owner is
+    #: live, and something is unanswered because not every owner was terminal.
+    #: So this is reached by one state of the record and is not a fall-through.
+    #:
+    #: Ordered by ``live`` rather than by ``unanswered``, which is the one
+    #: place ``_live_owners``' ordering is load-bearing: the two agree only
+    #: because that helper rebuilt the report in ``open.json``'s order, and a
+    #: caller reads brain n's index out of the position it found the name in.
+    return {"state": "awaiting-responses", "qid": qid,
+            "owners": [owner for owner in live if owner in unanswered]}

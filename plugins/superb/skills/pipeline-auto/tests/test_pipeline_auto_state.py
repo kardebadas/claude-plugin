@@ -13793,6 +13793,36 @@ class OpenQuorum(unittest.TestCase):
 # --- phase 2: recording the responses --------------------------------------
 
 
+def without_hanging(case, call, seconds=20):
+    """`call`'s outcome, or a failed assertion — never a hung suite.
+
+    THE ONE FAULT WHOSE SYMPTOM IS NOT AN ERROR. A FIFO in the run directory
+    answers `open` by waiting for a writer, and on a name inside a run
+    directory no writer ever comes. A case that simply called the function
+    would therefore not FAIL when the guard is missing, it would block for
+    ever — the same thing the run does, and no way to find out about it. So
+    the call runs on a daemon thread that the interpreter abandons at exit,
+    and the timeout is the assertion.
+    """
+    outcome = {}
+
+    def run():
+        try:
+            outcome["value"] = call()
+        except BaseException as exc:              # noqa: BLE001 - reported
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    case.assertFalse(
+        thread.is_alive(),
+        f"the call had not returned after {seconds}s: the open blocked on "
+        "a FIFO, which under the run lock is a run that stops for ever "
+        "with no diagnostic, no timeout and the lock still held")
+    return outcome
+
+
 class RecordBrainResponse(unittest.TestCase):
     """Phase 2 of the record, and the one place a brain's answer enters the run.
 
@@ -13851,33 +13881,8 @@ class RecordBrainResponse(unittest.TestCase):
         return sorted(path.name for path in self.responses.iterdir())
 
     def without_hanging(self, call, seconds=20):
-        """`call`'s outcome, or a failed assertion — never a hung suite.
-
-        THE ONE FAULT WHOSE SYMPTOM IS NOT AN ERROR. A FIFO in the run
-        directory answers `open` by waiting for a writer, and on a name inside
-        a run directory no writer ever comes. A case that simply called the
-        function would therefore not FAIL when the guard is missing, it would
-        block for ever — the same thing the run does, and no way to find out
-        about it. So the call runs on a daemon thread that the interpreter
-        abandons at exit, and the timeout is the assertion.
-        """
-        outcome = {}
-
-        def run():
-            try:
-                outcome["value"] = call()
-            except BaseException as exc:          # noqa: BLE001 - reported
-                outcome["error"] = exc
-
-        thread = threading.Thread(target=run, daemon=True)
-        thread.start()
-        thread.join(seconds)
-        self.assertFalse(
-            thread.is_alive(),
-            f"the call had not returned after {seconds}s: the open blocked on "
-            "a FIFO, which under the run lock is a run that stops for ever "
-            "with no diagnostic, no timeout and the lock still held")
-        return outcome
+        """This class's spelling of the module-level helper below."""
+        return without_hanging(self, call, seconds)
 
     def seed_final(self, status="escalated", decision_id=None):
         """A `final.json` this quorum's directory, valid to `_final_event`."""
@@ -14808,6 +14813,836 @@ class RecordBrainResponse(unittest.TestCase):
         self.assertEqual(set(accepted), {"payload"})
         self.assertEqual(accepted["payload"], storable)
 
+
+# --- classifying an interrupted quorum -------------------------------------
+
+
+class ClassifyQuorum(unittest.TestCase):
+    """Every interruption point, classified from disk alone.
+
+    The three-phase record exists so that a crash at ANY moment leaves
+    something a controller can read a next step out of, and this is the
+    function that proves it. Five states and five different instructions:
+    never look again, compute, wait, re-send, ask a human.
+
+    A classifier is exactly the shape where a case asserts the state it
+    expects while the function reaches it by falling through to a default, so
+    every case below puts the run in its state for a reason the other four do
+    not share — a stale liveness report against a complete record, an owed
+    brain beside two live ones, a decision landing under an untouched
+    projection — and the transitions are asserted in both directions wherever
+    one state outranks another.
+    """
+
+    def setUp(self):
+        self.root, self.run_dir = repo_with_a_run(self)
+        self.record_path = self.run_dir / "question-T04.md"
+        self.record_path.write_text(question_text(), encoding="utf-8")
+        self.qid = pas.derive_qid(QUESTION["question"], QUESTION["axis"])
+        self.assertEqual(self.qid, QID,
+                         "these cases key every path off the fixture's qid")
+        self.opened = pas.open_quorum(str(self.run_dir),
+                                      question_record=str(self.record_path))
+        self.assertEqual(self.opened["status"], "in_flight")
+        self.directory = self.run_dir / "quorum" / self.qid
+        self.responses = self.directory / "responses"
+        self.projection = self.run_dir / "decisions-effective.md"
+        self.decisions = self.run_dir / "decisions.md"
+        self.assertFalse(self.decisions.exists(),
+                         "the fixture must start with an undecided run, or "
+                         "'a decision lands' below is not a change")
+
+    # --- helpers ----------------------------------------------------------
+
+    def classify(self, live_owners=(), qid=None):
+        return pas.classify_quorum(str(self.run_dir),
+                                   qid=self.qid if qid is None else qid,
+                                   live_owners=list(live_owners))
+
+    def answer(self, **overrides):
+        """A response to THIS quorum; override exactly the field under test."""
+        return response(qid=self.qid, **overrides)
+
+    def record(self, owner, payload=None):
+        return pas.record_brain_response(
+            str(self.run_dir), qid=self.qid, owner=owner,
+            payload=self.answer() if payload is None else payload)
+
+    def stored(self, owner, attempt):
+        return json.loads((self.responses / f"{owner}__{attempt}.json")
+                          .read_text(encoding="utf-8"))
+
+    def bound(self):
+        """The digests `open.json` bound at dispatch, read off disk."""
+        return json.loads((self.directory / "open.json")
+                          .read_text(encoding="utf-8"))
+
+    def seed_final(self, status="escalated", decision_id=None, **extra):
+        """A `final.json` for this quorum, valid to `_final_event`."""
+        record = {"qid": self.qid, "status": status, "phase": QUESTION["phase"],
+                  "decision_id": decision_id, **extra}
+        (self.directory / "final.json").write_text(
+            json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return record
+
+    def raise_another(self, name, question, axis):
+        path = self.run_dir / name
+        path.write_text(question_text(question=question, axis=axis),
+                        encoding="utf-8")
+        return pas.open_quorum(str(self.run_dir), question_record=str(path))
+
+    def decide(self):
+        self.decisions.write_text(DECISION_HUMAN, encoding="utf-8")
+
+    def snapshot(self):
+        return {str(path.relative_to(self.run_dir)): path.read_bytes()
+                for path in sorted(self.run_dir.rglob("*")) if path.is_file()}
+
+    # --- awaiting responses -----------------------------------------------
+
+    def test_a_dispatched_quorum_with_every_brain_live_is_awaiting_responses(self):
+        """Nothing on disk, three agents still running: wait.
+
+        This case also pins the SEAM between the two spellings of the context
+        digest. `_open_under_lock` reads `decisions.md` once and digests the
+        same text it projected; `_context_digest` reads it again a moment
+        later. If those two ever disagree, every quorum in every run is stale
+        the instant it is raised, the controller re-routes all of them to a
+        human and nothing is ever dispatched again — a total failure whose
+        only visible symptom is a suspiciously helpful run.
+        """
+        self.assertEqual(list(self.responses.iterdir()), [],
+                         "no brain has answered, or this is not the state "
+                         "this case names")
+        verdict = self.classify(QUESTION["owners"])
+        self.assertEqual(verdict, {"state": "awaiting-responses",
+                                   "qid": self.qid,
+                                   "owners": QUESTION["owners"]})
+        self.assertEqual(pas._context_digest(self.run_dir),
+                         self.bound()["context_digest"])
+        self.assertEqual(pas.payload_digest(self.qid, run_dir=str(self.run_dir)),
+                         self.bound()["payload_digest"])
+
+    # --- redispatch --------------------------------------------------------
+
+    def test_no_answer_and_no_live_owner_is_a_redispatch_of_the_dispatched_bytes(self):
+        """Three brains died before answering. The identical payload is
+        re-sent, and the digest in the verdict is the one `open.json` bound at
+        dispatch — which is what proves the bytes still on disk as
+        `payload-<owner>.json` are the bytes brain n first received."""
+        before = {owner: (self.directory / f"payload-{owner}.json").read_bytes()
+                  for owner in QUESTION["owners"]}
+        verdict = self.classify()
+        self.assertEqual(verdict["state"], "redispatch")
+        self.assertEqual(verdict["owners"], QUESTION["owners"])
+        self.assertEqual(verdict["unanswered"], QUESTION["owners"])
+        self.assertEqual(verdict["owed"], [])
+        self.assertEqual(verdict["payload_digest"], self.bound()["payload_digest"])
+        self.assertEqual(
+            {owner: (self.directory / f"payload-{owner}.json").read_bytes()
+             for owner in QUESTION["owners"]}, before,
+            "a classification writes nothing: the bytes the digest names must "
+            "still be the bytes on disk")
+
+    def test_a_redispatch_names_only_the_brains_that_still_owe_an_answer(self):
+        """"Discard the partials and re-send" is impossible here, and the
+        reason is structural rather than a preference.
+
+        `record_brain_response` REFUSES a second answer from a brain whose
+        first was legal — that is the run collecting answers until it likes
+        one — and every response file is a single-assignment cell, so nothing
+        can discard a partial. A verdict naming brain-a and brain-b would
+        therefore order a dispatch whose answer can never be recorded: three
+        agents spent, two replies refused outright, and the quorum no further
+        forward.
+
+        Both halves are asserted: the two that answered are absent from the
+        verdict, and the delivery a verdict naming them would have produced is
+        shown being refused.
+        """
+        for owner in QUESTION["owners"][:2]:
+            self.record(owner)
+        verdict = self.classify()
+        self.assertEqual(verdict["state"], "redispatch")
+        self.assertEqual(verdict["owners"], ["brain-c"])
+        for owner in QUESTION["owners"][:2]:
+            with self.subTest(already_answered=owner):
+                self.assertNotIn(owner, verdict["owners"])
+                with self.assertRaises(pas.QuorumError):
+                    self.record(owner, self.answer(answer_key="sqlite"))
+        #: And the brain that IS named can still answer, which completes the
+        #: quorum — the stricter bar paired with the case it must accept.
+        self.record("brain-c")
+        self.assertEqual(self.classify()["state"], "ready-to-finalise")
+
+    def test_an_owner_owed_a_retry_is_named_and_agrees_with_the_debt_function(self):
+        """One schema-invalid answer buys exactly one re-dispatch, and the
+        classifier and `quorum_needs_redispatch` are two readings of one
+        record. They are asserted equal rather than each asserted alone,
+        because a controller that polled one and dispatched from the other
+        would otherwise be free to disagree with itself."""
+        self.record("brain-a", self.answer(rung="high"))
+        self.assertFalse(self.stored("brain-a", 1)["valid"],
+                         "the fixture's first answer must be schema-invalid, "
+                         "or nothing here is owed and the case passes empty")
+        verdict = self.classify()
+        self.assertEqual(verdict["state"], "redispatch")
+        self.assertEqual(verdict["owed"], ["brain-a"])
+        self.assertEqual(verdict["owed"],
+                         pas.quorum_needs_redispatch(str(self.run_dir), qid=self.qid))
+        self.assertEqual(verdict["owners"], QUESTION["owners"])
+        self.assertEqual(verdict["unanswered"], ["brain-b", "brain-c"])
+
+    def test_a_brain_still_working_is_left_alone_while_one_owed_a_retry_is_named(self):
+        """The case that tells `redispatch` from `awaiting-responses` by a
+        reason neither shares with the other three, and the one an ordering
+        that asked "are any owners live?" first gets backwards.
+
+        Brain-a has delivered a malformed answer; brain-b and brain-c are
+        still working. The debt is real and the two live agents must not be
+        re-sent anything — dispatching them would produce a second answer from
+        a brain whose first is still in flight. A liveness report that names
+        brain-a as well is STALE and does not cancel the debt: brain-a
+        delivered, and the file is the authority.
+        """
+        self.record("brain-a", self.answer(rung="high"))
+        verdict = self.classify(["brain-b", "brain-c"])
+        self.assertEqual(verdict["state"], "redispatch")
+        self.assertEqual(verdict["owners"], ["brain-a"])
+        self.assertEqual(verdict["unanswered"], [])
+        self.assertEqual(self.classify(QUESTION["owners"])["owners"], ["brain-a"],
+                         "a report naming the brain that already delivered is "
+                         "stale; the record on disk decides")
+        #: Once it answers, the two that are still working are simply awaited.
+        self.record("brain-a")
+        self.assertEqual(self.classify(["brain-b", "brain-c"]),
+                         {"state": "awaiting-responses", "qid": self.qid,
+                          "owners": ["brain-b", "brain-c"]})
+
+    # --- ready to finalise -------------------------------------------------
+
+    def test_three_terminal_answers_are_ready_to_finalise_whatever_the_report_says(self):
+        """A complete record outranks a liveness report in the other
+        direction too: all three answered, all three still reported live, and
+        the instruction is still "compute". Files are the authority."""
+        for owner in QUESTION["owners"]:
+            self.record(owner)
+        self.assertEqual(self.classify(QUESTION["owners"]),
+                         {"state": "ready-to-finalise", "qid": self.qid,
+                          "owners": QUESTION["owners"]})
+        self.assertEqual(self.classify()["state"], "ready-to-finalise")
+        self.assertEqual(pas.quorum_needs_redispatch(str(self.run_dir), qid=self.qid), [])
+
+    def test_a_brain_that_spent_its_one_retry_is_terminal_and_never_asked_again(self):
+        """A second invalid answer is a NON-RESPONSE, not a third dispatch.
+
+        So `ready-to-finalise` means "no dispatch is owed, compute the
+        outcome" and NOT "three legal answers": the outcome this record
+        computes is an escalation, and the escalation is the remedy. A
+        classifier that counted valid answers instead of terminal ones would
+        keep asking a brain that has nothing left to spend.
+
+        Paired with the case that must still be ACCEPTED: after the FIRST
+        invalid answer the same owner is owed exactly one retry.
+        """
+        self.record("brain-a", self.answer(rung="high"))
+        self.assertEqual(self.classify()["owed"], ["brain-a"])
+        self.record("brain-a", self.answer(rung="higher"))
+        self.assertFalse(self.stored("brain-a", 2)["valid"],
+                         "the second answer must also be schema-invalid, or "
+                         "this owner is terminal for the ordinary reason and "
+                         "the case proves nothing about a spent retry")
+        for owner in QUESTION["owners"][1:]:
+            self.record(owner)
+        self.assertEqual(self.classify(QUESTION["owners"]),
+                         {"state": "ready-to-finalise", "qid": self.qid,
+                          "owners": QUESTION["owners"]})
+        self.assertEqual(pas.quorum_needs_redispatch(str(self.run_dir), qid=self.qid), [])
+
+    # --- finalised ---------------------------------------------------------
+
+    def test_a_finalised_record_is_never_recomputed(self):
+        """A second run with different brains gives a different answer about
+        as often as the rung gap is narrow, and the controller has no
+        principled way to prefer either. So the outcome is handed back whole —
+        the caller needs the winner it is being told not to re-litigate — and
+        `recompute` is False.
+
+        The same directory is asserted to classify as something ELSE first, or
+        `finalised` would be indistinguishable from a default.
+        """
+        for owner in QUESTION["owners"]:
+            self.record(owner)
+        self.assertEqual(self.classify(QUESTION["owners"])["state"],
+                         "ready-to-finalise")
+        winner = {"rung": "code-evidenced", "answer_key": "postgres"}
+        self.seed_final(status="adopted", decision_id="Q-" + self.qid,
+                        winner=winner)
+        verdict = self.classify(QUESTION["owners"])
+        self.assertEqual(verdict["state"], "finalised")
+        self.assertIs(verdict["recompute"], False)
+        self.assertEqual(verdict["status"], "adopted")
+        self.assertEqual(verdict["decision_id"], "Q-" + self.qid)
+        self.assertEqual(verdict["result"]["winner"], winner)
+        self.assertEqual(verdict["qid"], self.qid)
+
+    def test_a_final_record_filed_under_another_question_is_a_stop_not_an_outcome(self):
+        """`finalised` is the one verdict that forbids ever looking again, so
+        the record it hands back is validated rather than trusted. A directory
+        copied or half-restored from a backup carries a `final.json` that
+        answers for a question nobody asked — and answering with it closes the
+        question permanently."""
+        self.seed_final(status="adopted", decision_id="Q-" + self.qid)
+        for label, edit in (("another question's qid", {"qid": "0" * 12}),
+                            ("an unknown status", {"status": "settled"}),
+                            ("no phase", {"phase": None}),
+                            ("another decision's id", {"decision_id": "H-900"}),
+                            ("an adoption naming nothing", {"decision_id": None})):
+            with self.subTest(record=label):
+                record = self.seed_final(status="adopted",
+                                         decision_id="Q-" + self.qid)
+                record.update(edit)
+                (self.directory / "final.json").write_text(
+                    json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    self.classify()
+        self.seed_final(status="adopted", decision_id="Q-" + self.qid)
+        self.assertEqual(self.classify()["state"], "finalised")
+
+    def test_a_quorum_the_budget_refused_to_raise_classifies_with_no_open_record(self):
+        """THE SHAPE `open.json` IS ABSENT FROM BY DESIGN.
+
+        A budget trip writes `final.json` and nothing else, because nothing
+        was dispatched. Reading the open record first would report that as
+        corruption, and a controller polling for work would see a quorum it
+        can neither complete nor abandon.
+        """
+        root, run_dir = repo_with_a_run(self)
+        register_phases(run_dir, *BUDGET_PHASES)
+        seed_adoptions(run_dir, QUESTION["phase"], pas.BUDGET_PER_PHASE)
+        path = run_dir / "question-T04.md"
+        path.write_text(question_text(), encoding="utf-8")
+        outcome = pas.open_quorum(str(run_dir), question_record=str(path))
+        self.assertEqual(outcome["status"], "escalated")
+        directory = run_dir / "quorum" / self.qid
+        self.assertEqual(sorted(p.name for p in directory.iterdir()),
+                         ["final.json"],
+                         "a budget trip must leave exactly one file, or this "
+                         "case is not testing the shape it names")
+        verdict = pas.classify_quorum(str(run_dir), qid=self.qid,
+                                      live_owners=list(QUESTION["owners"]))
+        self.assertEqual(verdict["state"], "finalised")
+        self.assertIs(verdict["recompute"], False)
+        self.assertEqual(verdict["status"], "escalated")
+        self.assertIsNone(verdict["decision_id"])
+
+    # --- stale context -----------------------------------------------------
+
+    def test_a_decision_landing_under_an_in_flight_quorum_is_stale_context(self):
+        """The ordinary interruption, and the one the two digests are needed
+        for separately.
+
+        `context_digest` is taken over `decisions.md` and `payload_digest`
+        over `decisions-effective.md`, and at this moment only the first has
+        moved: the projection is rewritten by the NEXT `open_quorum`, not by
+        the decision. So a classifier watching the projection alone calls this
+        quorum fresh — and keeps calling it fresh for as long as no unrelated
+        question happens to be raised, on a run that has already decided the
+        thing under it. Both facts are asserted, in that order.
+
+        A mismatch is not evidence of a crash and the quorum is not re-opened:
+        re-deciding on resume is precisely the silent divergence this design
+        exists to prevent, so it goes to a human.
+        """
+        before = self.projection.read_bytes()
+        bound = self.bound()
+        self.decide()
+        self.assertEqual(self.projection.read_bytes(), before,
+                         "nothing has rewritten the projection yet, so this "
+                         "case is about `decisions.md` and nothing else")
+        self.assertEqual(pas.payload_digest(self.qid, run_dir=str(self.run_dir)),
+                         bound["payload_digest"],
+                         "and the projection digest still matches, which is "
+                         "the whole reason both digests are compared")
+        verdict = self.classify(QUESTION["owners"])
+        self.assertEqual(verdict["state"], "stale-context")
+        self.assertIs(verdict["reopen"], False)
+        self.assertEqual(verdict["route"], "stage-11")
+        self.assertEqual(verdict["moved"], ["decisions"])
+        self.assertEqual(verdict["recorded_context"], bound["context_digest"])
+        self.assertEqual(verdict["current_context"],
+                         pas._context_digest(self.run_dir))
+        self.assertNotEqual(verdict["current_context"], verdict["recorded_context"])
+
+    def test_a_second_raise_that_follows_no_decision_is_not_stale_context(self):
+        """MEASURED, against the claim that a digest mismatch is the ordinary
+        consequence of a SECOND RAISE. It is not.
+
+        `project_decisions(parse_decisions(text))` is deterministic, so a
+        raise that follows no decision rewrites `decisions-effective.md`
+        BYTE-IDENTICALLY and moves neither digest. What moves them is a
+        DECISION LANDING — `decisions.md` at once, the projection only at the
+        next raise after that.
+
+        Both failure directions are asserted in order. Treating a bare second
+        raise as stale would route every multi-question run to a human, which
+        is the failure that makes the classifier useless; missing a landed
+        decision until some unrelated question is raised is the failure on the
+        other side, and is the one a projection-only reading has.
+        """
+        before = self.projection.read_bytes()
+        self.raise_another("question-T05.md",
+                           "Which cache backend serves the session cache?",
+                           "cache-backend")
+        self.assertEqual(self.projection.read_bytes(), before,
+                         "a raise that follows no decision must rewrite the "
+                         "projection byte-identically, or this case is not "
+                         "about the claim it names")
+        self.assertEqual(self.classify(QUESTION["owners"])["state"],
+                         "awaiting-responses")
+
+        self.decide()
+        self.assertEqual(self.classify(QUESTION["owners"])["moved"], ["decisions"])
+        self.raise_another("question-T06.md", "Which queue backs the outbox?",
+                           "outbox-queue")
+        self.assertNotEqual(self.projection.read_bytes(), before,
+                            "the third raise must actually move the one file "
+                            "every quorum's brains read")
+        self.assertEqual(self.classify(QUESTION["owners"])["moved"],
+                         ["decisions", "projection"])
+
+    def test_a_projection_rewritten_under_the_brains_is_stale_even_if_nothing_was_decided(self):
+        """The half `decisions.md` cannot see at all.
+
+        `decisions-effective.md` is the file brain n was told to READ, and a
+        hand edit of it changes what the brains are being shown without
+        touching the audit trail. `context_digest` is blind to that by
+        construction, which is why the recorded `payload_digest` is compared
+        against a fresh one as well.
+        """
+        self.projection.write_text(
+            self.projection.read_text(encoding="utf-8") + "\n- injected\n",
+            encoding="utf-8")
+        self.assertEqual(pas._context_digest(self.run_dir),
+                         self.bound()["context_digest"],
+                         "the audit trail must be untouched, or this case is "
+                         "the previous one over again")
+        verdict = self.classify(QUESTION["owners"])
+        self.assertEqual(verdict["state"], "stale-context")
+        self.assertEqual(verdict["moved"], ["projection"])
+        self.assertEqual(verdict["recorded_payload"], self.bound()["payload_digest"])
+        self.assertNotEqual(verdict["current_payload"], verdict["recorded_payload"])
+
+    def test_stale_context_outranks_every_state_that_would_act_on_the_answers(self):
+        """Waiting, re-dispatching and computing are all acts on behalf of a
+        question the run has since moved past, so each gives way.
+
+        A finalised record does NOT give way: it is never recomputed, and a
+        context that moved after the outcome was computed changes nothing
+        about an outcome nobody may revisit. Asserting only the first half
+        would pass against a function that answered `stale-context` to
+        everything.
+        """
+        for live, expected in ((QUESTION["owners"], "awaiting-responses"),
+                               ((), "redispatch")):
+            with self.subTest(gives_way=expected):
+                self.assertEqual(self.classify(live)["state"], expected)
+                self.decide()
+                self.assertEqual(self.classify(live)["state"], "stale-context")
+                self.decisions.unlink()
+                self.assertEqual(self.classify(live)["state"], expected)
+        for owner in QUESTION["owners"]:
+            self.record(owner)
+        self.assertEqual(self.classify()["state"], "ready-to-finalise")
+        self.decide()
+        self.assertEqual(self.classify()["state"], "stale-context")
+        self.seed_final()
+        self.assertEqual(self.classify()["state"], "finalised",
+                         "a finalised quorum is never recomputed, whatever "
+                         "the run has decided since")
+
+    # --- the enum ----------------------------------------------------------
+
+    def test_every_classification_is_reachable_by_a_run_no_other_state_shares(self):
+        """The five states, each produced by a distinct shape of record, and
+        the set of them asserted to be the whole enum — so a sixth spelling,
+        or a silent default swallowing one of the five, shows up here."""
+        seen = {}
+        seen[self.classify(QUESTION["owners"])["state"]] = "no answers, all live"
+        seen[self.classify()["state"]] = "no answers, nobody live"
+        for owner in QUESTION["owners"]:
+            self.record(owner)
+        seen[self.classify(QUESTION["owners"])["state"]] = "three terminal answers"
+        self.decide()
+        seen[self.classify()["state"]] = "a decision landed underneath"
+        self.seed_final()
+        seen[self.classify()["state"]] = "an outcome on disk"
+        self.assertEqual(len(seen), 5,
+                         f"five shapes produced {sorted(seen)}")
+        self.assertEqual(sorted(seen), sorted(pas._CLASSIFICATIONS))
+
+    # --- the records this reads back ---------------------------------------
+
+    def test_a_quorum_nobody_opened_is_a_different_stop_from_one_that_cannot_be_read(self):
+        """`_open_record`'s split, at this entry point, with the CLASS as the
+        discriminator.
+
+        "Was never opened" is a bare `QuorumError`; a name that is there and
+        cannot be read is `QuorumSchemaInvalid`. A caller that could only see
+        the family cannot tell them apart, and that difference decides whether
+        the controller raises a question that is already in flight.
+        """
+        never = "0" * 12
+        (self.run_dir / "quorum" / never).mkdir(parents=True)
+        with self.assertRaises(pas.QuorumError) as caught:
+            self.classify(qid=never)
+        self.assertNotIsInstance(caught.exception, pas.QuorumSchemaInvalid)
+
+        shapes = (("a directory", lambda path: path.mkdir()),
+                  ("a dangling symlink",
+                   lambda path: path.symlink_to("nowhere-at-all")),
+                  ("a symlink loop", lambda path: path.symlink_to(path)))
+        for name in ("open.json", "final.json"):
+            path = self.directory / name
+            keep = path.read_bytes() if path.is_file() else None
+            for shape, build in shapes:
+                with self.subTest(name=name, shape=shape):
+                    if os.path.lexists(path):
+                        path.unlink()
+                    build(path)
+                    with self.assertRaises(pas.QuorumSchemaInvalid):
+                        self.classify(QUESTION["owners"])
+                if path.is_dir() and not path.is_symlink():
+                    path.rmdir()
+                else:
+                    path.unlink()
+            if keep is not None:
+                path.write_bytes(keep)
+        self.assertEqual(self.classify()["state"], "redispatch",
+                         "and the fixture is back to what it was, or the "
+                         "cases above proved nothing in order")
+
+    def test_an_open_record_that_binds_no_digest_can_be_judged_neither_stale_nor_fresh(self):
+        """`opened["context_digest"]` raises `KeyError` on a record that lost
+        the key, which is outside `TrackerError` and escapes every handler a
+        controller has written — and `open.json` sits in a directory a human
+        may have edited or restored from a backup, where a key going missing
+        is the ordinary damage.
+
+        A field holding `true`, `[]` or `"pending"` is worse than a crash: it
+        compares unequal to every real digest, so the quorum is reported
+        stale and a human is called out, on a record that had simply lost a
+        field.
+        """
+        open_path = self.directory / "open.json"
+        good = json.loads(open_path.read_text(encoding="utf-8"))
+
+        def rewrite(record):
+            open_path.write_text(json.dumps(record, indent=2, sort_keys=True),
+                                 encoding="utf-8")
+
+        for field in ("context_digest", "payload_digest"):
+            probes = [None, "", "   ", [], {}, True, "pending", "0" * 63,
+                      "0" * 65, "Z" * 64, good[field].upper()]
+            for digest in probes:
+                with self.subTest(field=field, digest=repr(digest)[:20]):
+                    rewrite(dict(good, **{field: digest}))
+                    with self.assertRaises(pas.QuorumSchemaInvalid):
+                        self.classify(QUESTION["owners"])
+            with self.subTest(field=field, digest="the key is gone"):
+                rewrite({key: value for key, value in good.items()
+                         if key != field})
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    self.classify(QUESTION["owners"])
+        rewrite(good)
+        self.assertEqual(self.classify(QUESTION["owners"])["state"],
+                         "awaiting-responses")
+
+    def test_an_open_record_naming_any_other_count_of_owners_is_a_stop(self):
+        """Exactly three brains per quorum, and a count is never reduced to
+        fit capacity. A record naming two would let a two-brain quorum report
+        itself ready to finalise; one naming four would put a fourth vote into
+        a count that admits three."""
+        open_path = self.directory / "open.json"
+        good = json.loads(open_path.read_text(encoding="utf-8"))
+        for owners in ([], ["brain-a"], ["brain-a", "brain-b"],
+                       ["brain-a", "brain-b", "brain-c", "brain-d"],
+                       ["brain-a", "brain-a", "brain-b"],
+                       ["brain-a", "brain-b", "../../../evil"],
+                       ["brain-a", "brain-b", []], "brain-a", None):
+            with self.subTest(owners=repr(owners)[:40]):
+                open_path.write_text(
+                    json.dumps(dict(good, owners=owners), indent=2,
+                               sort_keys=True), encoding="utf-8")
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    self.classify(QUESTION["owners"])
+        open_path.write_text(json.dumps(good, indent=2, sort_keys=True),
+                             encoding="utf-8")
+        self.assertEqual(self.classify(QUESTION["owners"])["owners"],
+                         QUESTION["owners"])
+
+    # --- the liveness report -----------------------------------------------
+
+    def test_a_liveness_report_is_narrowed_to_this_quorums_owners_never_widened(self):
+        """A report is a hint and the files are the authority, so a name no
+        dispatch created is DROPPED rather than believed. Believing it holds
+        the quorum open waiting for an agent that does not exist — a run that
+        never re-dispatches and never escalates either.
+
+        Junk inside the list is answered rather than raised on, because a
+        controller reassembling this across a compaction produces exactly
+        that. The hash hazard is on the VALUE side and the value here is an
+        owner id `_record_owners` has already held to `_OWNER`; what needed
+        the guard was the CONTAINER, and it has one.
+        """
+        verdict = self.classify(["brain-z", [], {}, None, 7, "brain-a"])
+        self.assertEqual(verdict["state"], "redispatch")
+        self.assertEqual(verdict["owners"], ["brain-b", "brain-c"],
+                         "brain-a is live and is waited for; brain-z was never "
+                         "dispatched and is not waited for")
+        self.assertEqual(
+            self.classify(["brain-a", "brain-b", "brain-c", "brain-z"]),
+            {"state": "awaiting-responses", "qid": self.qid,
+             "owners": QUESTION["owners"]})
+        self.assertEqual(self.classify(["brain-z"])["owners"], QUESTION["owners"])
+        #: AND THE ORDER IS THE DISPATCH ORDER, never the order the report
+        #: happened to arrive in. It is `open.json`'s owner order, which is the
+        #: index order `build_payload` was called in, so a caller rebuilds
+        #: brain n's payload from the position it found the name in. This is
+        #: also what makes the narrowing above load-bearing rather than
+        #: defence in depth: every other use of the report is a membership
+        #: test, and only this one can carry a caller's ordering through.
+        self.assertEqual(self.classify(["brain-c", "brain-b", "brain-a"]),
+                         {"state": "awaiting-responses", "qid": self.qid,
+                          "owners": QUESTION["owners"]})
+
+    def test_a_liveness_report_that_is_not_a_list_is_refused_rather_than_iterated(self):
+        """`for owner in None` raises `TypeError`, outside `TrackerError`.
+
+        A BARE STRING is worse than a crash and is the reason the check is
+        `isinstance` rather than "is it iterable": `"brain-a" in "brain-abc"`
+        is a SUBSTRING test, so every brain is reported live because the
+        others' names contain its own — a quorum that waits for ever on three
+        agents that are all dead.
+        """
+        joined = "".join(QUESTION["owners"])
+        self.assertTrue(all(owner in joined for owner in QUESTION["owners"]),
+                        "the probe must be a string every owner is a substring "
+                        "of, or the refusal below refuses nothing")
+        for report in (None, "brain-a", joined, 7, True,
+                       {"brain-a": True}, {"brain-a"}, object()):
+            with self.subTest(report=repr(report)[:40]):
+                with self.assertRaises(pas.QuorumError):
+                    pas.classify_quorum(str(self.run_dir), qid=self.qid,
+                                        live_owners=report)
+        #: A TUPLE is accepted: what is refused is the shapes that MISLEAD,
+        #: not every container that is not a list.
+        self.assertEqual(
+            pas.classify_quorum(str(self.run_dir), qid=self.qid,
+                                live_owners=tuple(QUESTION["owners"]))["state"],
+            "awaiting-responses")
+
+    # --- the read-only stop -------------------------------------------------
+
+    def test_a_foreign_run_names_no_brain_and_leaves_the_directory_untouched(self):
+        """"Dispatch nothing" is not "write nothing", and this is the function
+        the distinction was written for: its entire return value IS who to
+        dispatch.
+
+        THE CHECK IS ASSERTED BY ITS POSITION, not by the fact that something
+        raised. A quorum record is unreadable in the same run, and the stop
+        that comes back must be the FOREIGN one: a foreign, missing or
+        malformed schema means this module does not read that directory's
+        quorum state at all — not even to diagnose it. A version that
+        validated late would still raise, because `payload_digest` resolves
+        the repository root through `validate_run` on its way past, and it
+        would raise about somebody else's `open.json` after having read it.
+
+        The directory is byte-identical afterwards, lock file included: a
+        run-directory function that took the lock first would leave one behind
+        inside another tool's directory.
+        """
+        before = self.snapshot()
+        progress = self.run_dir / "progress.md"
+        good = progress.read_bytes()
+        open_path = self.directory / "open.json"
+        intact = open_path.read_bytes()
+        open_path.write_text("{ not a record at all", encoding="utf-8")
+        #: The positive control: with an intact tracker this run's own record
+        #: really is unreadable, so the stop below is the tracker's and not a
+        #: quorum stop wearing the tracker's name.
+        with self.assertRaises(pas.QuorumSchemaInvalid):
+            self.classify(QUESTION["owners"])
+        for label, text in (
+                ("a foreign schema",
+                 good.decode("utf-8").replace(pas.MARKER, "<!-- pipeline-run/v2 -->")),
+                ("no marker at all", good.decode("utf-8").replace(pas.MARKER, "")),
+                ("not a tracker", "nothing to see here\n")):
+            with self.subTest(tracker=label):
+                progress.write_text(text, encoding="utf-8")
+                with self.assertRaises(pas.ForeignSchemaError):
+                    self.classify(QUESTION["owners"])
+                progress.write_bytes(good)
+        open_path.write_bytes(intact)
+        self.assertEqual(self.snapshot(), before)
+
+        empty = Path(tempfile.mkdtemp(prefix="pipeline-auto-not-a-run-"))
+        self.addCleanup(shutil.rmtree, empty, ignore_errors=True)
+        with self.assertRaises(pas.ForeignSchemaError):
+            pas.classify_quorum(str(empty), qid=self.qid,
+                                live_owners=list(QUESTION["owners"]))
+        self.assertEqual(sorted(path.name for path in empty.iterdir()), [],
+                         "a read-only stop preserves the directory it was "
+                         "handed, lock file included")
+        self.assertEqual(self.classify(QUESTION["owners"])["state"],
+                         "awaiting-responses")
+
+    # --- the fault whose symptom is a hang ----------------------------------
+
+    def test_a_fifo_anywhere_on_the_read_path_is_refused_without_being_opened(self):
+        """THE FAULT WHOSE SYMPTOM IS NOT AN ERROR, at six names.
+
+        A directory, a dangling link and a symlink loop all fail an open
+        loudly. A FIFO does not: `open` on one BLOCKS until a writer arrives,
+        and inside a run directory no writer is coming.
+
+        Two of these names had no guard before this task. `payload_digest`
+        reached `decisions-effective.md` and `_question_record` reached
+        `quorum/<qid>/question.md` through a bare `read_text`, and BOTH are
+        also reached from `_open_under_lock` — WITH THE RUN LOCK HELD. So the
+        consequence was never a failed call: it was an unattended run wedged
+        for ever, holding the lock, with nothing in any log to say why.
+        Measured at `a65b39b`, `payload_digest` on a run with a FIFO under
+        either name never returned.
+        """
+        self.record("brain-a", self.answer(rung="high"))
+        before = self.snapshot()
+        names = (("the open record", self.directory / "open.json"),
+                 ("the final record", self.directory / "final.json"),
+                 ("the question record", self.directory / "question.md"),
+                 ("the decisions projection", self.projection),
+                 ("the audit trail", self.decisions),
+                 ("a response", self.responses / "brain-a__1.json"))
+        for label, path in names:
+            with self.subTest(name=label):
+                keep = path.read_bytes() if path.is_file() else None
+                if os.path.lexists(path):
+                    path.unlink()
+                os.mkfifo(path)
+                #: The probe is asserted to be a WRITERLESS fifo without
+                #: waiting for a writer, so a case that passed because the
+                #: name was an ordinary file cannot happen.
+                os.close(os.open(path, os.O_RDONLY | os.O_NONBLOCK))
+                outcome = without_hanging(
+                    self, lambda: self.classify(QUESTION["owners"]))
+                self.assertIsInstance(outcome.get("error"), pas.TrackerError)
+                path.unlink()
+                if keep is not None:
+                    path.write_bytes(keep)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.classify()["owed"], ["brain-a"])
+
+    def test_a_qid_carrying_a_nul_never_leaves_the_tracker_error_family(self):
+        """`Path` accepts `"a\\x00b"` and `open` then refuses it with
+        `ValueError`, which is outside `TrackerError` AND outside the
+        `(OSError, UnicodeError)` a read is usually written for. `_cited_file`
+        and `open_quorum` both spell the triple; `_question_record` did not,
+        so the two public functions that reach it — both taking a qid a
+        controller reassembles from a tracker cell — escaped the family."""
+        for entry in (lambda qid: pas.payload_digest(qid, run_dir=str(self.run_dir)),
+                      lambda qid: pas.build_payload(qid, 0, run_dir=str(self.run_dir))):
+            for qid in ("\x00", "a\x00b", self.qid[:-1] + "\x00"):
+                with self.subTest(entry=entry.__qualname__, qid=repr(qid)):
+                    with self.assertRaises(pas.TrackerError):
+                        entry(qid)
+        self.assertEqual(pas.payload_digest(self.qid, run_dir=str(self.run_dir)),
+                         self.bound()["payload_digest"])
+
+    # --- totality -----------------------------------------------------------
+
+    def test_nothing_outside_the_tracker_error_family_escapes_the_classifier(self):
+        """Every input this function reads, varied over the shapes each can
+        legally arrive in, with the case list derived from the CALL TREE.
+
+        Three arguments and six files. `run_dir` and `qid` both become path
+        components, so their corpus is `HOSTILE_PATHS` — the field corpus plus
+        the embedded NUL, which a path argument needs and a JSON-field corpus
+        does not carry. `live_owners` is a container a controller reassembles
+        across a compaction, so its corpus is the field corpus plus lists
+        holding unhashable junk. The files are `open.json`, `final.json`, a
+        response, `question.md`, `decisions.md` and `decisions-effective.md`,
+        every one of them agent-written or hand-editable.
+
+        The ACCEPTED set is asserted rather than discarded, per input: a sweep
+        that only counted escapes would pass just as well against a function
+        that refused everything, including the quorum a real run depends on.
+        And two of the six files have an accepted set that is the WHOLE
+        corpus, which is a claim rather than a leak — arbitrary bytes under
+        either context file are not corruption, they are DRIFT, and drift is a
+        classification and not a stop.
+        """
+        escaped, accepted = [], {}
+
+        def sweep(where, value, call):
+            try:
+                result = call()
+            except pas.TrackerError:
+                return
+            except Exception as exc:  # noqa: BLE001 - the thing under test
+                escaped.append((where, repr(value)[:48],
+                                type(exc).__name__, str(exc)[:70]))
+                return
+            accepted.setdefault(where, set()).add(repr(value)[:48])
+            self.assertIsInstance(result, dict)
+            self.assertIn(result["state"], pas._CLASSIFICATIONS)
+
+        for value in HOSTILE_PATHS:
+            sweep("run_dir", value, lambda value=value: pas.classify_quorum(
+                value, qid=self.qid, live_owners=[]))
+            sweep("qid", value, lambda value=value: pas.classify_quorum(
+                str(self.run_dir), qid=value, live_owners=[]))
+        reports = list(HOSTILE_VALUES) + [
+            [[]], [{}], [None], [["brain-a"]], ["brain-a", []],
+            (), ("brain-a",), ["brain-a", "brain-a"], [""], ["\x00"]]
+        for value in reports:
+            sweep("live_owners", value, lambda value=value: pas.classify_quorum(
+                str(self.run_dir), qid=self.qid, live_owners=value))
+
+        files = (("open.json", self.directory / "open.json"),
+                 ("final.json", self.directory / "final.json"),
+                 ("question.md", self.directory / "question.md"),
+                 ("responses/brain-a__1.json", self.responses / "brain-a__1.json"),
+                 ("decisions.md", self.decisions),
+                 ("decisions-effective.md", self.projection))
+        for where, path in files:
+            keep = path.read_bytes() if path.is_file() else None
+            for text in HOSTILE_JSON:
+                def call(text=text, path=path, keep=keep):
+                    path.write_text(text, encoding="utf-8")
+                    try:
+                        return pas.classify_quorum(
+                            str(self.run_dir), qid=self.qid,
+                            live_owners=list(QUESTION["owners"]))
+                    finally:
+                        if keep is None:
+                            path.unlink()
+                        else:
+                            path.write_bytes(keep)
+                sweep(where, text, call)
+
+        self.assertEqual(escaped, [])
+        self.assertEqual(
+            set(accepted),
+            {"live_owners", "decisions.md", "decisions-effective.md"},
+            "a path argument, an owner id and a record this module wrote have "
+            "no hostile spelling that is legal")
+        self.assertEqual(accepted["live_owners"],
+                         {repr(value)[:48] for value in reports
+                          if isinstance(value, (list, tuple))})
+        for where in ("decisions.md", "decisions-effective.md"):
+            with self.subTest(drift=where):
+                self.assertEqual(accepted[where], {repr(text)[:48]
+                                                   for text in HOSTILE_JSON})
 
 if __name__ == "__main__":
     unittest.main()

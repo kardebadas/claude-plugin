@@ -170,7 +170,8 @@ def parse_plan_metadata(path: str) -> dict: ...
 def import_phase_plan(run_dir: str, *, phase_plan: str) -> dict: ...
 def publish_worker_result(run_dir: str, *, result: dict) -> str: ...
 def import_worker_result(run_dir: str, *, result_path: str) -> dict: ...
-def verify_source_range(repo: str, *, baseline: str, head: str, scopes: list) -> dict: ...
+def verify_source_range(repo: str, *, baseline: str, head: str, scopes: list,
+                        transcript: str) -> dict: ...
 def integrate_task(run_dir: str, *, task_id: str, merge_commit: str) -> dict: ...
 def reconcile_run(run_dir: str) -> dict: ...
 ```
@@ -2151,6 +2152,29 @@ def _repo_dir(tracker: dict) -> Path:
     return Path(repo_root(tracker)).resolve()
 
 
+# =====================================================================
+# DO NOT IMPLEMENT `_git` OR `_git_out`. THEY CANNOT EXIST.
+#
+# They are `subprocess.run` wrappers. `subprocess` is not in
+# ALLOWED_IMPORTS and the master plan refuses it BY NAME, calling
+# arbitrary command execution "the single capability this boundary most
+# exists to withhold". The import guard refuses it; an exact-set test
+# pins the twelve.
+#
+# They survive here only because the 13 call sites below them, in Tasks
+# 8 and 11, still read the way they were first drafted. Under the quorum
+# decision ("the module never executes git", master plan) every one of
+# those becomes a read of the CONTROLLER-SUPPLIED TRANSCRIPT, with both
+# endpoints re-derived in-module by `_resolved_commit`. Task 6 already
+# set the precedent: it replaced `git rev-parse` with a 227-line ref-store
+# reader rather than shelling out.
+#
+# `os.popen`/`os.system`/`os.exec*` are NOT a loophole. They are the same
+# capability by another name and are screened by name; see the master
+# plan's "the subprocess ban is nominal" section.
+# =====================================================================
+
+
 def _git(repo, *args: str) -> bool:
     return subprocess.run(
         ("git", "-C", str(repo), *args),
@@ -2655,6 +2679,17 @@ git commit -m "feat(pipeline-auto): gate task resume on an explicit task.resume 
 
 ---
 
+> **AMENDED BY QUORUM DECISION — read the master plan's "the module never
+> executes git" section before starting.** This task's brief was written around
+> `_git`/`_git_out`, which are `subprocess.run` wrappers and **cannot exist**:
+> `subprocess` is refused by name. The signature gains `transcript`, the module
+> emits the argv via `source_range_commands` and validates what the controller
+> ran, and `_commit_parents` is not built. Both endpoints stay module-derived
+> (`_resolved_commit` and the reservation checkpoint), so a transcript rooted
+> elsewhere fails at the first link. **Every changed-path command must use
+> `--no-renames`** — without it a task can delete another task's file by moving
+> it into its own scope and pass this very check.
+
 ### Task 8: `verify_source_range` — the baseline-anchored range proof (faults F3, F4)
 
 A source task completes implementation only when its resolved source head contains exactly the complete, ordered, nonempty `baseline..source-head` range, every changed path is inside its approved typed write scope, and no commit in the range is empty. The baseline is the one persisted at reservation. `HEAD~1` is the wrong baseline: it silently truncates a multi-commit task to its last commit, and every earlier commit escapes the scope check entirely.
@@ -2667,7 +2702,11 @@ The implementation range is linear by construction — one worktree per implemen
 
 **Interfaces:**
 - Consumes: `_git`, `_git_out`, `_resolved_commit`, `_path_in_scope`, `_scope_parts`.
-- Produces: `_commit_parents(repo, commit) -> tuple`; `verify_source_range(repo, *, baseline, head, scopes) -> dict` returning `{"baseline", "head", "commits", "changed_paths"}`.
+- Produces: `source_range_commands(repo, *, baseline, head) -> tuple`;
+  `_parse_range_transcript(text) -> tuple`;
+  `verify_source_range(repo, *, baseline, head, scopes, transcript) -> dict` returning
+  `{"baseline", "head", "commits", "changed_paths", "proof_mode"}`.
+  `_commit_parents` is NOT produced — parents come from the transcript, not from an object read.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2823,7 +2862,7 @@ def _commit_parents(repo, commit: str) -> tuple:
     return tuple(_git_out(repo, "rev-list", "--parents", "-n", "1", commit).split()[1:])
 
 
-def verify_source_range(repo, *, baseline: str, head: str, scopes) -> dict:
+def verify_source_range(repo, *, baseline: str, head: str, scopes, transcript: str) -> dict:
     """Prove one task's implementation range against its persisted baseline."""
     repo = Path(repo)
     scopes = tuple(scopes)
@@ -2859,10 +2898,16 @@ def verify_source_range(repo, *, baseline: str, head: str, scopes) -> dict:
             raise TrackerValidationError(
                 f"source range contains an empty commit: {commit}"
             )
-    changed = tuple(
-        line for line in
-        _git_out(repo, "diff", "--name-only", base, tip).splitlines() if line
-    )
+    # `--no-renames` is LOAD-BEARING, not a style choice. With rename detection
+    # on -- the DEFAULT -- git reports only a rename's destination. Measured:
+    # a task whose declared scope is `mine/` runs `git mv theirs/victim.py
+    # mine/victim.py`; `git diff --name-only` then prints only `mine/victim.py`,
+    # every path is inside the declared scope, and THIS CHECK PASSES while the
+    # task has deleted another task's file. `--no-renames` prints both paths and
+    # the check refuses. The pathspec-limited guard in the Global Constraints is
+    # NOT affected -- limiting by path makes git report the source side -- so do
+    # not "fix" that one to match.
+    changed = tuple(line for line in _parse_range_transcript(transcript).paths if line)
     if not changed:
         raise TrackerValidationError("source range changed no repository path")
     outside = tuple(
@@ -3838,10 +3883,11 @@ def integrate_task(run_dir, *, task_id: str, merge_commit: str) -> dict:
                 other_scope = _approved_definition(
                     run_dir, tracker, other_id
                 )["write_scope"]
-            _git(repo, "merge", "--abort")
             raise TrackerValidationError(
                 "HARD STOP: the integration merge conflicted, which proves a "
-                "write scope declaration was wrong. Not redoing the task alone "
+                "write scope declaration was wrong. THE CONTROLLER MUST RUN "
+                "`git merge --abort`; this module does not write to the "
+                "repository. Not redoing the task alone "
                 "-- that papers over the broken declaration and the next task "
                 f"collides again. Colliding paths: {', '.join(unmerged)} "
                 f"(first: {path}). Task {task_id} declared "

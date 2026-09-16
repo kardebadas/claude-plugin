@@ -183,7 +183,8 @@ def scopes_overlap(a: str, b: str) -> bool: ...   # file:/tree: with ancestor ru
 def parse_plan_metadata(path: str) -> dict: ...   # strict comment grammar, pinned key order; raises PlanMetadataError
 def publish_worker_result(run_dir: str, *, result: dict) -> str: ...
 def import_worker_result(run_dir: str, *, result_path: str) -> dict: ...
-def verify_source_range(repo: str, *, baseline: str, head: str, scopes: list) -> dict: ...
+def verify_source_range(repo: str, *, baseline: str, head: str, scopes: list,
+                        transcript: str) -> dict: ...
 def reconcile_run(run_dir: str) -> dict: ...
 def render_verification_evidence(record: dict) -> str: ...        # THE only writer
 def parse_verification_evidence(text: str) -> dict: ...           # last screen is the renderer
@@ -352,6 +353,117 @@ single-writer and atomic-write guarantees quietly false.
 
 P07 must state this as a platform requirement in `SKILL.md` rather than leaving a
 macOS user to discover it as an unexplained halt.
+
+## QUORUM DECISION — the module never executes git
+
+Raised by P04 Task 6, which found that `_git`/`_git_out` — named all through the
+P04 plan — are `subprocess.run` wrappers and **cannot exist**. Asked to three
+brains with decorrelated reading assignments (design intent / threat model /
+implementation cost). All three converged; the adopted answer is the
+`code-evidenced` one, which meets the adoption floor. Convergence is
+corroboration, not a vote.
+
+**Tasks 8 and 11 emit the exact argv; the controller runs it; the module
+validates the transcript and records it.**
+
+This is not a new pattern — **P06 already does it.** `final_suite_commands`
+/ `record_final_verification` (`phase-06-master-gate.md:3973-4010`) need
+`git diff` and `git status` to gate the terminal transition and do not shell
+out: the module emits the commands, pinned to `repo_root(tracker)` so "a clean
+status obtained somewhere else cannot supply the proof", and then asserts the
+results came from *those* commands by exact tuple equality. The committed module
+applies the same shape to test results through `resolve_evidence` and the
+evidence record. **The skill's entire verification story already rests on
+attested external execution; independence is bought by a non-claimant re-running,
+never by the module executing.**
+
+**What the module still derives itself, on nobody's word:** `baseline` from the
+`baseline:<attempt>@<sha>` checkpoint `reserve_task` persisted, and `head` and
+the branch tip from `_resolved_commit` reading the ref store. Both endpoints are
+module-established, so a transcript rooted anywhere else fails at the first link.
+The chain is then checked from the transcript's own internal structure — first
+parent equals the baseline, each parent equals the previous, exactly one parent
+each, last equals head, no entry with an empty path list — rather than read off
+it as an assertion. Scope membership goes through the existing `_path_in_scope`.
+
+**Why not `subprocess`** (cheapest, ~310 lines, correct by construction): beyond
+this plan's own refusal, running git inside a repository the worker can write
+**is** worker-controlled code execution. `core.fsmonitor`, `core.sshCommand`,
+`include.path` in `.git/config`, and `diff.external`/`textconv` via
+`.gitattributes` are all "run this program" knobs that `rev-list` and `diff`
+honour. It would hand the withheld capability to the party it was withheld from.
+
+**Why not `zlib`** (admissible under the stated rule — it opens nothing and execs
+nothing): cost and silence. ~1,270 commented lines, and the decisive objection is
+testability. `make_repo` is `git init` plus three commits — **100% loose objects,
+zero packs** — while this repo is 5,181 loose + 81 packed and a fresh clone is
+entirely packed. **The dominant production path is the never-exercised test
+path.** `REF_DELTA` appears only in thin packs from a fetch and is unreachable by
+fixture; the `OFS_DELTA` base-offset varint written naively is off by one and
+silently resolves a *different base object*. Its failure mode is a confidently
+wrong answer in the one component whose job is to be right. (Both tempting
+shortcuts are refuted by measurement: `objects/info/commit-graph` is optional —
+absent in this repo — and always stale for the freshest commits; and
+`core.loosecompression=0` does emit stored blocks, but the default is Huffman,
+`git gc` erases the loose store, and it is config in a repo this skill does not
+control.)
+
+**Why not narrowing the contract:** it abandons F3 and F4, the two faults this
+phase's own table assigns to Task 8. Kept only as the degraded mode — **refuse,
+naming the missing evidence, rather than pass a weaker check silently.**
+
+**Record `proof_mode`.** The returned dict and the tracker carry `attested` with
+the transcript digest, and the terminal report lists attested-only completions
+the way it lists quorum-adopted decisions. *Appearing to verify is the failure
+mode to avoid.*
+
+**Residual risk, stated plainly.** A controller that fabricates a transcript
+defeats this — and defeats every other option too, because it owns the tracker
+file: `progress.md` is markdown and `locked_tracker_update` is a library in the
+controller's own process. There is no privilege separation to exploit. What this
+design *does* defeat mechanically is the worker who edits outside its scope,
+truncates its range, names commits that do not exist, or reports a head off an
+unrelated history — which is who these two functions were written for. Task 10's
+check survives intact: `import_worker_result` compares the **worker's** `commits`
+claim against the **controller's** evidence, two independent parties with the
+module adjudicating.
+
+## `git diff --name-only` hides a rename, and that is a scope-check bypass
+
+Found while costing the decision above; it is a live defect in this plan's own
+reference implementation, independent of which option had been chosen.
+
+**Rename detection is ON by default, and git then reports only the
+destination.** Measured:
+
+```
+declared write scope: mine/
+$ git mv theirs/victim.py mine/victim.py
+$ git diff --name-only BASE..HEAD
+mine/victim.py                      <- every path inside the declared scope; CHECK PASSES
+$ git diff --no-renames --name-only BASE..HEAD
+mine/victim.py
+theirs/victim.py                    <- CHECK REFUSES
+```
+
+So a task can **delete another task's file** by moving it into its own scope and
+pass F4. Every changed-path computation must use **`git diff --no-renames
+--name-only`**.
+
+**The Global Constraints guard is NOT affected and must not be "fixed" to
+match.** `git diff --name-only <base>..HEAD -- plugins/superb/skills/pipeline/`
+is pathspec-limited, and limiting by path makes git report the *source* side of a
+rename. Measured: moving a file out of `skills/pipeline/` prints
+`skills/pipeline/SKILL.md` with or without `--no-renames`. The guard holds.
+
+## The `subprocess` ban is nominal and must be made real
+
+`os` is on the allowlist and carries `os.popen`, `os.system`, `os.execv`,
+`os.execve`, `os.posix_spawn`, `os.spawnv` and `os.fork`. **No committed test
+forbids any of them.** A worker could satisfy any of the above with
+`os.popen("git ...")` and pass every check while violating the rule this boundary
+exists to state. The screen must refuse the whole family **by name**, enumerated
+from `dir(os)` rather than from a remembered list.
 
 ## Cross-phase clarifications
 

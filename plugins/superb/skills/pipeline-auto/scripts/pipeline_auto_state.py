@@ -11007,6 +11007,26 @@ _WRITE_SCOPE_TYPES = ("file", "tree")
 #: plan that needs more than twelve is two phases that were not split.
 MAX_TASKS_PER_PHASE = 12
 
+#: HOW MANY DIGITS AN ORDER MAY BE SPELLED WITH, and it is a SPELLING ceiling
+#: rather than a value rule. CPython caps integer<->string conversion at
+#: ``sys.int_max_str_digits`` (4300 by default), so ``int(raw_order)`` on a
+#: long run of ordinary ASCII digits raises ``ValueError`` -- which is not a
+#: ``TrackerError``, and a plan grammar that throws ``ValueError`` at a
+#: controller has crashed on the plan rather than refused it. The screen has to
+#: bound the string BEFORE the conversion is reachable.
+#:
+#: TWO DIGITS BECAUSE A PHASE HOLDS AT MOST ``MAX_TASKS_PER_PHASE`` TASKS, so
+#: no order in a legal plan needs more digits than the largest task count does.
+#: The slack it leaves -- ``order=99`` is accepted and ``order=100`` is not --
+#: is deliberate, and the reason it is not tightened into ``order <=
+#: MAX_TASKS_PER_PHASE`` is that the value rule would make the task-count
+#: ceiling UNREACHABLE: thirteen tasks cannot carry thirteen strictly
+#: increasing orders all at most twelve, so the count check would become dead
+#: code and the ceiling would be enforced by the wrong diagnosis. Orders are
+#: also deliberately allowed to be non-contiguous, so a value rule would be a
+#: second, contradicting statement about what an order means.
+_MAX_ORDER_DIGITS = len(str(MAX_TASKS_PER_PHASE))
+
 
 def _declared_members(raw: str, what: str) -> tuple[str, ...]:
     """A comma-separated metadata field, or the literal ``none`` meaning empty.
@@ -11065,6 +11085,20 @@ def _validate_acyclic_dependencies(dependencies, *, error_type, subject) -> None
     ``error_type`` and ``subject`` rather than a hard-wired
     ``PlanMetadataError``: the same walk answers "do these tasks deadlock" and
     "do these phases deadlock", and the two stop the run under different names.
+
+    WHAT IT IS TOTAL FOR IS NARROWER THAN "ANY GRAPH", and the limit is stated
+    rather than left to be discovered by the reuser this helper is
+    parameterised for. It is total for a MAPPING whose edge values are
+    iterables of HASHABLE ids and whose longest path is shorter than the
+    interpreter's recursion limit. Measured outside that: a non-mapping raises
+    ``AttributeError``, a list-valued edge raises ``TypeError: unhashable
+    type``, and a chain of a few thousand nodes raises ``RecursionError`` --
+    none of them a ``TrackerError``. The closure check above is what makes the
+    open graph, the one case a caller really does hand it, land inside the
+    family; the three above are caller shapes this module never builds, since
+    every caller's ids are ``_TOKEN`` strings and every caller's graph is
+    bounded by ``MAX_TASKS_PER_PHASE``. A later caller that cannot promise the
+    same owes itself a screen before the call, not a claim from this one.
     """
     unknown = sorted({dependency for edges in dependencies.values()
                       for dependency in edges if dependency not in dependencies})
@@ -11150,6 +11184,16 @@ def _within_scope(output: PurePosixPath, parsed_scopes) -> bool:
     A ``tree:`` scope does not contain ITSELF: the scope is a directory and an
     output is a file the task promises to produce, so ``tree:docs`` with
     ``outputs=docs`` is a task promising to produce a directory.
+
+    AND THAT LAST PARAGRAPH IS WHY TASK 3 MUST NOT CALL THIS FUNCTION.
+    ``scopes_overlap`` asks a different question -- "may these two tasks run
+    concurrently" -- and for it ``tree:docs`` obviously collides with
+    ``tree:docs``. Measured: ``_within_scope(PurePosixPath("docs"), [("tree",
+    PurePosixPath("docs"))])`` is ``False``, which is the right answer for an
+    output and the wrong answer for an overlap. What Task 3 inherits is the
+    SHAPE of the containment test -- ``.parents`` and never a string prefix --
+    and ``_WRITE_SCOPE_TYPES`` as the vocabulary; it does not inherit this
+    predicate, whose asymmetry is deliberate and belongs to outputs alone.
     """
     return any(
         (scope_type == "file" and output == scope)
@@ -11232,14 +11276,26 @@ def _parse_task_metadata(lines, index: int) -> dict:
     #: wrote. ``isascii() and isdigit()`` is the ten characters intended.
     #: The round trip through ``str`` then refuses ``order=01``, which is a
     #: second spelling of a number the plan already has one spelling for.
+    #:
+    #: THE LENGTH CLAUSE COMES BEFORE THE ROUND TRIP, and the position is the
+    #: whole point: ``or`` short-circuits left to right, and ``isascii()`` and
+    #: ``isdigit()`` are both TRUE of a four-thousand-digit run, so without a
+    #: bound in front of it the ``int(raw_order)`` written INTO this screen is
+    #: itself the call that escapes -- CPython caps integer<->string conversion
+    #: at ``sys.int_max_str_digits`` and raises ``ValueError``, which is not a
+    #: ``TrackerError``. See ``_MAX_ORDER_DIGITS`` for why the bound is a
+    #: spelling ceiling and not ``order <= MAX_TASKS_PER_PHASE``.
     if (not raw_order.isascii() or not raw_order.isdigit()
+            or len(raw_order) > _MAX_ORDER_DIGITS
             or raw_order != str(int(raw_order))):
         raise PlanMetadataError(
-            f"task {task_id!r} declares order={raw_order!r}: an order is ASCII "
-            "digits with no sign, no separator and no leading zero. "
-            "'isdigit' alone is true of chr(0x0661) and 'int' accepts '1_0', "
-            "so "
-            "either would record a number the plan does not say")
+            f"task {task_id!r} declares order={raw_order!r}: an order is at "
+            f"most {_MAX_ORDER_DIGITS} ASCII digits with no sign, no separator "
+            "and no leading zero. 'isdigit' alone is true of chr(0x0661) and "
+            "'int' accepts '1_0', so either would record a number the plan "
+            "does not say -- and an UNBOUNDED run of ordinary digits passes "
+            "both, then raises ValueError out of the very int() this screen "
+            "was written to replace")
     order = int(raw_order)
     if order <= 0:
         raise PlanMetadataError(
@@ -11445,4 +11501,40 @@ def parse_plan_metadata(path) -> dict:
     _validate_acyclic_dependencies(
         {task["id"]: task["deps"] for task in tasks},
         error_type=PlanMetadataError, subject="task")
+
+    #: THE TWO ORDERINGS MUST BE THE SAME ORDERING. Strictly increasing orders
+    #: and an acyclic, closed dependency graph are each satisfiable while
+    #: CONTRADICTING each other: ``T1 order=1 deps=T2`` beside ``T2 order=2``
+    #: is acyclic, closed and increasing, and it says T1 is integrated first
+    #: and that T1 waits on T2. Worktrees merge ``--no-ff`` IN TASK ORDER, so
+    #: that plan has two answers to "which is integrated first" -- the same
+    #: defect the strictly-increasing rule closed, arriving by the one route
+    #: that rule does not watch.
+    #:
+    #: RUN AFTER THE GRAPH WALK, because the walk is what proves the graph is
+    #: CLOSED: an edge to an id no task declares would otherwise index this
+    #: mapping and raise ``KeyError``, from outside the family. Stating it as
+    #: "a dependency is strictly earlier" subsumes the self-dependency and the
+    #: in-plan cycle, which keep their own checks so that each refusal still
+    #: names the thing the plan actually got wrong.
+    #:
+    #: ``>=`` RATHER THAN ``>`` IS THE STATEMENT AND NOT A REACHABLE BRANCH.
+    #: The equal half cannot be spelled: a dependency sharing its dependent's
+    #: order is either a different task, and two distinct tasks with equal
+    #: orders are already refused above, or the task itself, refused by the
+    #: self-dependency check. The comparison says what the rule means; the two
+    #: earlier checks are what make the equality unreachable, and
+    #: ``test_an_equal_order_dependency_is_unreachable_and_here_is_what_closes_it``
+    #: asserts both of them so the claim is measured rather than assumed.
+    order_of = {task["id"]: task["order"] for task in tasks}
+    for task in tasks:
+        for dependency in task["deps"]:
+            if order_of[dependency] >= task["order"]:
+                raise PlanMetadataError(
+                    f"task {task['id']!r} has order={task['order']} and depends "
+                    f"on {dependency!r}, whose order is {order_of[dependency]}: "
+                    "a dependency is integrated BEFORE the task that waits on "
+                    "it, and worktrees are merged --no-ff in task order, so a "
+                    "dependency at an equal or later order is a plan that "
+                    "integrates work before the work it is built on")
     return {"phase": phase, "tasks": tasks}

@@ -1139,20 +1139,43 @@ class TaskMetadataGrammarTests(PlanFileTestCase):
         self._expect_rejection("## Task T1\n\n" + task_line() + "\n")
 
     def test_artifact_task_may_not_carry_a_source_task_suite(self):
-        self._expect_rejection(
+        """TWO CHECKS REFUSE THIS, so the assertion has to name one of them.
+        The per-task rule at the artifact branch and the document-wide suite
+        accounting both fire -- the accounting expects suites on the lines of
+        the source tasks and there are none -- so deleting the per-task rule
+        left every rejection intact and the suite green. What differs is the
+        DIAGNOSIS: the per-task rule says a suite beside approved outputs is a
+        second definition of done, while the accounting says only that the
+        line numbers do not match, which sends the plan's author to count
+        lines instead of to the contradiction."""
+        exception = self._expect_rejection(
             "## Task T1\n\n"
             + task_line(kind="artifact", write_scope="tree:docs",
                         outputs="docs/a.md")
             + "\n" + task_suite_line() + "\n")
+        self.assertIn("second definition of done", str(exception))
+        self.assertNotIn("expected them on lines", str(exception))
 
     def test_duplicate_task_ids_are_rejected(self):
         self._expect_rejection(task_block("T1") + task_block("T1", order=2))
 
     def test_unknown_and_self_dependencies_are_rejected(self):
-        for deps in ("T9", "T1"):
+        """The two refusals are asserted BY DIAGNOSIS, because a self-loop is
+        also a cycle: deleting the per-task self-dependency check leaves the
+        graph walk refusing the same plan, so a rejection-only assertion could
+        not tell the two apart and the check could be removed unnoticed. 'A
+        task waiting on itself' is the thing the plan got wrong; 'the graph
+        contains a cycle through T1' is true and unhelpfully general."""
+        for deps, anchor in (("T9", "is depended on and never declared"),
+                             ("T1", "lists itself")):
             with self.subTest(deps=deps):
-                self._expect_rejection(task_block("T1", deps=deps),
-                                       name=f"dep-{deps}.md")
+                exception = self._expect_rejection(
+                    task_block("T1", deps=deps), name=f"dep-{deps}.md")
+                self.assertIn(anchor, str(exception))
+        self.assertNotIn(
+            "contains a cycle",
+            str(self._expect_rejection(task_block("T1", deps="T1"),
+                                       name="dep-self.md")))
 
     def test_cyclic_dependencies_are_rejected(self):
         self._expect_rejection(
@@ -1386,22 +1409,137 @@ class TaskFieldValueTests(PlanFileTestCase):
                     "## Task T1\n\n" + task_line(kind=kind) + "\n"
                     + task_suite_line() + "\n", name="kind.md")
 
+    def test_an_unknown_kind_is_refused_by_the_vocabulary_and_not_by_luck(self):
+        """WHAT THE CORPUS ABOVE CANNOT SEE. Every fixture there is rendered in
+        the SOURCE shape -- ``outputs=none`` and a suite on the next line -- so
+        the kind/outputs equivalence refuses all of them on its own, and a
+        rejection-only assertion cannot tell the vocabulary check from the
+        equivalence check. Deleting the vocabulary check left the whole suite
+        green while ``kind='banana'`` parsed through.
+
+        The ARTIFACT shape is what discriminates: outputs declared and no
+        suite satisfies BOTH halves of the equivalence, so nothing else in the
+        function has a reason to refuse it. The kind is the plan's claim about
+        what proves the task, and this is the only test holding that claim.
+        """
+        exception = self._expect_rejection(
+            "## Task T1\n\n" + task_line(kind="banana", write_scope="tree:docs",
+                                         outputs="docs/a.md") + "\n",
+            name="kind-art.md")
+        #: The diagnosis must name the VOCABULARY, not the equivalence: the
+        #: two refusals are indistinguishable to an assertRaises alone.
+        self.assertIn("banana", str(exception))
+        for known in state.TASK_KINDS:
+            self.assertIn(known, str(exception))
+        self.assertNotIn("proved by them existing", str(exception))
+        #: The fixture's own property: with a KNOWN kind, this exact shape is
+        #: accepted -- so the rejection above is about the kind and nothing
+        #: else in the line.
+        task = self.parse(
+            "## Task T1\n\n" + task_line(kind="artifact",
+                                         write_scope="tree:docs",
+                                         outputs="docs/a.md") + "\n",
+            name="kind-art-ok.md")["tasks"][0]
+        self.assertEqual((task["kind"], task["outputs"], task["commands"]),
+                         ("artifact", ("docs/a.md",), ()))
+
     def test_order_is_ascii_digits_and_not_whatever_int_accepts(self):
         """The defect a bare ``int(raw)`` leaves, and the module has written it
         down once already in ``_Numbered``: ``int(chr(0x0661))`` is 1 and
         ``int('1_0')`` is 10, so a plan can spell an order in Arabic-Indic
         digits or with a separator and the tracker records a number nobody
         wrote. Each is asserted to be a number Python WOULD have accepted, so
-        the test says what it is discriminating against."""
+        the test says what it is discriminating against.
+
+        AND THE CORPUS CARRIES A LENGTH FAMILY, because the twelve spellings
+        above are every one of them one to three characters long -- they were
+        drawn from "spellings ``int()`` mis-accepts", and the family that
+        escapes is the opposite shape: a LONG run of perfectly ordinary ASCII
+        digits, which ``isascii()`` and ``isdigit()`` both wave through. See
+        ``test_a_long_run_of_ordinary_digits_never_reaches_int`` for the
+        boundary and for what it used to escape as.
+        """
+        cap = sys.get_int_max_str_digits()
+        long_family = ("1" * 3, "9" * 12, "1" * cap, "9" * (cap + 1))
         for order in (chr(0x0661), "1_0", "+1", " 1", "1 ", "01", "1.0", "",
-                      "one", "-1", "0", chr(0x00B3)):
-            with self.subTest(order=order):
+                      "one", "-1", "0", chr(0x00B3)) + long_family:
+            with self.subTest(order=order[:8], length=len(order)):
                 self._expect_rejection(
                     "## Task T1\n\n" + task_line(order=order) + "\n"
                     + task_suite_line() + "\n", name="order.md")
         self.assertEqual([int(spelling) for spelling in
                           (chr(0x0661), "+1", " 1", "1 ", "01")], [1, 1, 1, 1, 1])
         self.assertEqual(int("1_0"), 10)
+        #: The discriminating property of the length family: unlike every
+        #: other member of the corpus, these are pure ASCII digits, so the
+        #: isascii/isdigit pair is TRUE of them and only the length clause
+        #: stands between the plan and ``int()``.
+        for spelling in long_family:
+            self.assertTrue(spelling.isascii() and spelling.isdigit())
+        #: And the last of them is the one that used to escape as a bare
+        #: ValueError out of the screen's own int() call.
+        with self.assertRaises(ValueError):
+            int(long_family[-1])
+
+    def test_a_long_run_of_ordinary_digits_never_reaches_int(self):
+        """C1. ``int(raw_order)`` WAS EVALUATED INSIDE THE SCREEN written to
+        replace a bare ``int()``, and CPython caps integer<->string conversion
+        at ``sys.int_max_str_digits`` -- so at 4301 digits the screen itself
+        raised ``ValueError``, which is not an ``OSError``, not a
+        ``UnicodeError`` and not a ``TrackerError``. Agent-authored plan
+        content reached the controller as a raw ``ValueError``: the run died
+        rather than stopping, against this function's own docstring.
+
+        The fix is positional as much as it is a new clause -- ``or``
+        short-circuits left to right, so the length bound must sit BEFORE the
+        round trip. The assertions below are therefore about the BOUNDARY and
+        about the exception TYPE, not merely that something was refused.
+        """
+        self.assertEqual(state._MAX_ORDER_DIGITS,
+                         len(str(state.MAX_TASKS_PER_PHASE)))
+        cap = sys.get_int_max_str_digits()
+        self.assertLess(state._MAX_ORDER_DIGITS, cap)
+        #: What used to escape, still escaping when asked directly: the raw
+        #: conversion this screen now stands in front of.
+        with self.assertRaises(ValueError) as caught:
+            int("9" * (cap + 1))
+        self.assertNotIsInstance(caught.exception, state.TrackerError)
+        #: The boundary: one digit over the ceiling is refused, the ceiling
+        #: itself is accepted, and neither answer is a ValueError escaping.
+        over = "9" * (state._MAX_ORDER_DIGITS + 1)
+        exception = self._expect_rejection(
+            "## Task T1\n\n" + task_line(order=over) + "\n"
+            + task_suite_line() + "\n", name="long-order.md")
+        self.assertIn("ASCII digits", str(exception))
+        task = self.parse(
+            "## Task T1\n\n"
+            + task_line(order="9" * state._MAX_ORDER_DIGITS) + "\n"
+            + task_suite_line() + "\n", name="max-order.md")["tasks"][0]
+        self.assertEqual(task["order"], int("9" * state._MAX_ORDER_DIGITS))
+
+    def test_the_order_ceiling_is_a_spelling_bound_and_not_a_value_rule(self):
+        """THE RULING, asserted rather than only written down. The bound could
+        have been ``order <= MAX_TASKS_PER_PHASE``, and that would have made
+        the task-count ceiling UNREACHABLE: thirteen tasks cannot carry
+        thirteen strictly increasing orders all at most twelve, so the count
+        check would become dead code and the ceiling would be enforced by the
+        wrong diagnosis. The two assertions below are the two things the
+        weaker, deliberate reading buys."""
+        #: Orders above the task ceiling are still legal, so the count check
+        #: keeps a fixture that reaches it.
+        overfull = "".join(
+            task_block(f"T{index}", order=index,
+                       write_scope=f"file:src/a{index}.py")
+            for index in range(1, state.MAX_TASKS_PER_PHASE + 2))
+        self.assertIn(f"order={state.MAX_TASKS_PER_PHASE + 1}", overfull)
+        exception = self._expect_rejection(overfull, name="ruling.md")
+        self.assertIn("declares between 1 and", str(exception))
+        #: And a single task may still be numbered above the ceiling, which is
+        #: the status quo this fix deliberately did not change.
+        task = self.parse(
+            task_block("T1", order=state.MAX_TASKS_PER_PHASE + 1),
+            name="thirteen.md")["tasks"][0]
+        self.assertEqual(task["order"], state.MAX_TASKS_PER_PHASE + 1)
 
     def test_an_ordinary_order_is_still_an_int_in_the_result(self):
         task = self.parse(task_block("T1", order=7))["tasks"][0]
@@ -1452,6 +1590,22 @@ class TaskFieldValueTests(PlanFileTestCase):
                     + task_block("T2", order=2, write_scope="file:src/b.py")
                     + task_block("T3", order=3, write_scope="file:src/c.py"),
                     name="deps.md")
+
+    def test_a_malformed_dependency_is_refused_as_malformed_not_as_unknown(self):
+        """The ``_TOKEN`` check on each dependency has an overlap the corpus
+        above hides: ``'T2 T3'`` is not a declared id EITHER, so the closure
+        check in the graph walk refuses the same plan and deleting the token
+        check changes no verdict. The diagnosis is the difference -- 'invalid
+        task dependency id' points at the deps field's spelling, while 'is
+        depended on and never declared' tells the author to go and add a task
+        called ``T2 T3``, which is not something this grammar can express."""
+        exception = self._expect_rejection(
+            task_block("T1", deps="T2 T3", order=1)
+            + task_block("T2", order=2, write_scope="file:src/b.py")
+            + task_block("T3", order=3, write_scope="file:src/c.py"),
+            name="dep-token.md")
+        self.assertIn("invalid task dependency id", str(exception))
+        self.assertNotIn("never declared", str(exception))
 
     def test_none_is_a_whole_value_and_never_a_member(self):
         """Task 1 wrote this guard for phase ``deps``; the task grammar needs it
@@ -1899,6 +2053,93 @@ class TaskDependencyTests(PlanFileTestCase):
             self._plan(("T1", "T9"), ("T2", "none")), name="unk.md")
         self.assertIn("T9", str(exception))
 
+    def test_a_dependency_may_not_be_integrated_after_the_task_that_waits(self):
+        """THE ROUTE THE STRICTLY-INCREASING RULE DOES NOT WATCH. Orders that
+        strictly increase and a dependency graph that is acyclic and closed are
+        each satisfiable while CONTRADICTING each other: the plan below is
+        increasing, acyclic and closed, and it says both that T1 is integrated
+        first and that T1 waits on T2.
+
+        That matters because worktrees are merged ``--no-ff`` IN TASK ORDER,
+        which is document order -- so accepting this plan is accepting two
+        answers to 'which is integrated first', the very defect the
+        strictly-increasing rule was written to close. It is also what makes
+        'task order is a topological order' a true statement for the phases
+        that consume this metadata rather than a hopeful one.
+        """
+        forward = (task_block("T1", deps="T2", order=1,
+                              write_scope="file:src/a.py")
+                   + task_block("T2", order=2, write_scope="file:src/b.py"))
+        #: The fixture's discriminating property: it passes every OTHER rule.
+        self.assertIn("order=1", forward)
+        self.assertIn("order=2", forward)
+        exception = self._expect_rejection(forward, name="fwd.md")
+        self.assertIn("integrated BEFORE", str(exception))
+        self.assertNotIn("strictly increase", str(exception))
+        self.assertNotIn("contains a cycle", str(exception))
+
+    def test_an_equal_order_dependency_is_unreachable_and_here_is_what_closes_it(self):
+        """WHY THE RULE IS ``>=`` AND WHY THAT IS UNOBSERVABLE. The comparison
+        is written as 'not strictly earlier' because that is the statement
+        being made, but the EQUAL half cannot be reached: a dependency with the
+        same order as its dependent is either a different task -- and two
+        distinct tasks with equal orders are refused by the strictly-increasing
+        rule -- or the task itself, refused by the self-dependency check. So
+        weakening ``>=`` to ``>`` changes no verdict, and the honest record of
+        that is this test, which asserts the two checks that close the case
+        rather than leaving the reader to trust the claim.
+
+        The half that IS reachable is the adjacent one: a dependency at the
+        NEXT order, one step the wrong way, which nothing else sees.
+        """
+        #: Closer 1: equal orders between distinct tasks.
+        equal = self._expect_rejection(
+            task_block("T1", deps="T2", order=1, write_scope="file:src/a.py")
+            + task_block("T2", order=1, write_scope="file:src/b.py"),
+            name="equal.md")
+        self.assertIn("strictly increase", str(equal))
+        #: Closer 2: the only other way to spell an equal-order dependency.
+        self.assertIn("lists itself",
+                      str(self._expect_rejection(task_block("T1", deps="T1"),
+                                                 name="equal-self.md")))
+        #: And the reachable half of the rule.
+        exception = self._expect_rejection(
+            task_block("T1", order=1, write_scope="file:src/a.py")
+            + task_block("T2", deps="T3", order=2, write_scope="file:src/b.py")
+            + task_block("T3", order=3, write_scope="file:src/c.py"),
+            name="fwd1.md")
+        self.assertIn("integrated BEFORE", str(exception))
+        self.assertIn("'T3'", str(exception))
+
+    def test_every_dependency_pointing_backwards_is_still_accepted(self):
+        """The ACCEPT half, and it is the shape every committed fixture
+        already had -- the diamond and ``deps='T3,T2'`` both point backwards --
+        so the rule above tightens the grammar without narrowing what the plan
+        could already say. A rule that refused these would be refusing the
+        plans this phase exists to run."""
+        metadata = self.parse(
+            self._plan(("T1", "none"), ("T2", "T1"), ("T3", "T1"),
+                       ("T4", "T3,T2")), name="back.md")
+        order_of = {task["id"]: task["order"] for task in metadata["tasks"]}
+        for task in metadata["tasks"]:
+            for dependency in task["deps"]:
+                self.assertLess(order_of[dependency], task["order"])
+        self.assertEqual(metadata["tasks"][3]["deps"], ("T3", "T2"))
+
+    def test_the_rule_runs_after_the_walk_that_proves_the_graph_is_closed(self):
+        """ORDERING INSIDE THE FUNCTION, asserted because getting it wrong is a
+        ``KeyError``. The order rule indexes a mapping keyed by declared task
+        id, so an edge to an id no task declares would index a missing key and
+        leave the family -- which is why the closure walk runs first. The
+        fixture is an OPEN graph whose unknown edge also points forward, so
+        both rules have something to say and only the closure one may."""
+        exception = self._expect_rejection(
+            task_block("T1", deps="T9", order=1, write_scope="file:src/a.py")
+            + task_block("T2", order=2, write_scope="file:src/b.py"),
+            name="open-fwd.md")
+        self.assertIn("is depended on and never declared", str(exception))
+        self.assertNotIsInstance(exception, KeyError)
+
     def test_validate_acyclic_dependencies_is_total_and_parameterised(self):
         """THE ``KeyError`` THE HELPER MUST NOT RAISE. It is handed an
         ``error_type`` precisely so later phases can reuse it, and a later
@@ -1919,6 +2160,37 @@ class TaskDependencyTests(PlanFileTestCase):
                         subject="phase")
                 self.assertIn("phase", str(caught.exception))
                 self.assertNotIsInstance(caught.exception, KeyError)
+
+    def test_the_helpers_totality_is_over_closed_graphs_of_hashable_ids(self):
+        """THE CLAIM, NARROWED TO WHAT WAS MEASURED. 'Total' above means total
+        for the OPEN GRAPH, which is the one shape a caller really does hand
+        it, and the helper is parameterised for reuse -- so the boundary of the
+        claim is owed to the reuser rather than left to be found. Measured
+        outside a mapping of hashable ids with a path shorter than the
+        recursion limit, the helper leaves the family three ways.
+
+        This module's own callers never reach any of them: every id is a
+        ``_TOKEN`` string, so every edge is hashable, and every graph is
+        bounded by ``MAX_TASKS_PER_PHASE``, so no path is deep. A later caller
+        that cannot promise the same owes itself a screen before the call --
+        which is exactly what the docstring now says, and this test is what
+        stops the docstring drifting back to 'any graph'."""
+        deep = {str(node): (str(node + 1),) for node in range(sys.getrecursionlimit() + 100)}
+        deep[str(sys.getrecursionlimit() + 100)] = ()
+        for label, graph, escape in (
+                ("a non-mapping", ["a"], AttributeError),
+                ("an unhashable edge", {"a": (["b"],), "b": ()}, TypeError),
+                ("a path deeper than the recursion limit", deep, RecursionError)):
+            with self.subTest(outside=label):
+                with self.assertRaises(escape) as caught:
+                    state._validate_acyclic_dependencies(
+                        graph, error_type=state.PlanMetadataError,
+                        subject="task")
+                self.assertNotIsInstance(caught.exception, state.TrackerError)
+        #: And the domain the module's own callers stay inside, so the
+        #: narrowing is a claim about reuse and not an excuse for a live bug.
+        self.assertLess(state.MAX_TASKS_PER_PHASE, sys.getrecursionlimit())
+        self.assertTrue(state._TOKEN.fullmatch("T1"))
 
     def test_the_helper_visits_every_component_not_only_the_first(self):
         """A walk seeded from one node finds only that node's component, so a
@@ -1980,9 +2252,15 @@ class PlanPathTests(TempDirTestCase):
         nul = str(self.tmp / ("a" + chr(0) + "b.md"))
         self.assertFalse(Path(nul).is_file())
         self.assertFalse(os.path.lexists(nul))
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ValueError) as caught:
             Path(nul).read_text(encoding="utf-8")
-        self._expect_path_rejection(nul)
+        #: THIS is the family the read's own ``except (OSError, UnicodeError)``
+        #: does not catch -- a PLAIN ``ValueError``, no ``UnicodeError`` in its
+        #: MRO -- so for NUL the spelling screen is the only thing standing
+        #: between a controller and an exception outside ``TrackerError``.
+        self.assertNotIsInstance(caught.exception, (OSError, UnicodeError))
+        exception = self._expect_path_rejection(nul)
+        self.assertIsNone(exception.__cause__)
         for code in list(range(0x20)) + [0x7F]:
             spelling = str(self.tmp / f"a{chr(code)}b.md")
             with self.subTest(code=hex(code)):
@@ -2020,18 +2298,37 @@ class PlanPathTests(TempDirTestCase):
     # -- family 3: lone surrogates ----------------------------------------
 
     def test_a_lone_surrogate_in_the_path_is_refused_before_the_encoder(self):
-        """The other way a path escapes the family: ``is_file()`` and
-        ``os.path.lexists`` are both False -- so the regular-file door is
-        silent -- and the read then raises ``UnicodeEncodeError`` out of the
-        encoder that turns the name into bytes."""
+        """``is_file()`` and ``os.path.lexists`` are both False -- so the
+        regular-file door is silent -- and the read then raises
+        ``UnicodeEncodeError`` out of the encoder that turns the name into
+        bytes.
+
+        AND THE NAME HAD TO EARN ITS 'BEFORE'. ``UnicodeEncodeError``'s MRO is
+        ``UnicodeEncodeError -> UnicodeError -> ValueError``, so the read's own
+        ``except (OSError, UnicodeError)`` ALREADY catches it: without the
+        spelling screen this family would still come back as a
+        ``PlanMetadataError`` and a rejection-only assertion would pass either
+        way. The screen is what makes the refusal happen before the open, and
+        the observable difference is the ``__cause__`` -- absent when the
+        spelling was screened, and the ``UnicodeEncodeError`` itself when the
+        refusal came out of the read. That is the discriminating assertion, and
+        it is the one that makes 'before the encoder' a measured claim.
+        (NUL, family 1, is the family the read's clause genuinely does NOT
+        catch: it arrives as a plain ``ValueError``.)
+        """
         for code in (0xD800, 0xDBFF, 0xDC00, 0xDFFF):
             spelling = str(self.tmp / f"a{chr(code)}b.md")
             with self.subTest(code=hex(code)):
                 self.assertFalse(state._survives_the_encoder(chr(code)))
                 self.assertFalse(os.path.lexists(spelling))
-                with self.assertRaises(UnicodeEncodeError):
+                with self.assertRaises(UnicodeEncodeError) as caught:
                     Path(spelling).read_text(encoding="utf-8")
-                self._expect_path_rejection(spelling)
+                #: The half that makes the screen invisible to a bare
+                #: assertRaises, measured rather than assumed.
+                self.assertIsInstance(caught.exception, UnicodeError)
+                exception = self._expect_path_rejection(spelling)
+                self.assertIsNone(exception.__cause__)
+                self.assertIn("lone surrogate", str(exception))
 
     # -- family 4: the FIFO, which is a deadlock and not an error ----------
 

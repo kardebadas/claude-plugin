@@ -41,7 +41,12 @@ import json
 import os
 import time
 from contextlib import contextmanager
-from pathlib import Path
+#: ``PurePosixPath`` for the phase-plan grammar's repository-relative
+#: paths. It is the PURE half of a module already on the allowlist, so it
+#: buys no capability at all -- it touches no filesystem by construction,
+#: which is the whole reason a plan-declared path is normalised with it
+#: rather than with ``Path``.
+from pathlib import Path, PurePosixPath
 #: For ``RUNGS`` alone, and it is a capability rather than a convenience:
 #: nothing already imported here can make a mapping that refuses to be
 #: written to. A ``dict`` subclass overriding ``__setitem__`` is bypassed by
@@ -10526,3 +10531,347 @@ def _ensure_decision_recorded(run_dir: Path, result: dict) -> None:
         return
     _write_run_file(run_dir / _DECISIONS_FILE, updated,
                     "the decisions audit trail")
+
+
+# ---------------------------------------------------------------------------
+# P04: the phase-plan metadata grammar.
+#
+# THE KEY ORDER IS PINNED. A reordered, renamed, missing or extra key is a
+# ``PlanMetadataError``, never a best-effort parse. This is the whole point of
+# the format: a phase plan has to be machine-readable STRUCTURE rather than
+# prose a worker may reinterpret, and an order-insensitive reader gives that up
+# for nothing. Two parties read this comment -- the controller that dispatches
+# the phase and the human who audits it afterwards -- and an unordered bag of
+# keys is ambiguous to the second one even when the first one copes. The writer
+# is bound by the same pin: there is exactly one legal spelling of a phase
+# header, so two plans that say the same thing are byte-identical there.
+#
+# ``review_class`` REPLACES v2's ``review_gate``. The rename is not cosmetic:
+# the old key named a boolean gate, the new one carries the review-intensity
+# dial value, and a plan still spelling ``review_gate`` is a v2 plan being fed
+# to a v1 reader. There is no migration in either direction, so it is refused
+# rather than translated.
+# ---------------------------------------------------------------------------
+
+#: The review-intensity dial's vocabulary, PUBLIC under the name P05 and P06
+#: cite. It is P02's tuple, aliased and not re-typed: ``_validate_phases``
+#: already judges the ``Review Class`` cell against ``_REVIEW_CLASSES``, and a
+#: second literal here would be a second, divergable source of truth for one
+#: enum -- the same defect as a phase re-declaring another phase's columns, and
+#: the one the tracker column contract exists to forbid. Aliasing makes drift
+#: unspellable rather than merely discouraged.
+REVIEW_CLASSES = _REVIEW_CLASSES
+
+#: The comment names, spelled once. ``pipeline-auto-phase`` and
+#: ``pipeline-auto-phase-suite`` share a prefix, so every predicate below
+#: includes the trailing ``:`` -- without it a suite line is detected as a
+#: malformed phase line and the count check fires on the wrong comment.
+_PHASE_COMMENT = "pipeline-auto-phase"
+_PHASE_SUITE_COMMENT = "pipeline-auto-phase-suite"
+
+#: THE PIN. Not a set, not a mapping: a tuple, because the position of each key
+#: is as much a part of the grammar as its name.
+_PHASE_KEYS = ("id", "deps", "review_class", "review_reason")
+_PHASE_SUITE_KEYS = ("id", "commands")
+
+#: The spelling of "this phase depends on nothing". A bare empty value would be
+#: indistinguishable from a key whose value was dropped in an edit.
+_NO_DEPS = "none"
+
+_FIELD_SEPARATOR = "; "
+
+#: ASCII control characters, including NUL. They are refused everywhere below
+#: for two different reasons that happen to have one check: a cell holding a
+#: newline parses back as a different number of ROWS, and a command string
+#: holding a NUL raises ``ValueError: embedded null byte`` from the subprocess
+#: layer -- outside ``TrackerError`` -- when the suite is eventually run.
+_CONTROL_CHARACTERS = frozenset(chr(code) for code in range(0x20)) | {"\x7f"}
+
+#: Shell/glob metacharacters a repository-relative path may not carry. A plan
+#: that declares ``src/*.py`` as a write scope has declared a set whose members
+#: depend on when it is expanded, which is not a scope two implementers can be
+#: checked against for overlap.
+_GLOB_CHARACTERS = "*?[]{}"
+
+
+def _cell_safe(value: str) -> bool:
+    """A string a pipe-delimited tracker cell carries back out unchanged.
+
+    Three properties, all of them round-trip properties rather than taste:
+
+    * no ``|``, which would parse back as a different number of COLUMNS;
+    * no control character, which would parse back as a different number of
+      ROWS (or, for NUL, blow up the subprocess that runs the command);
+    * no surrounding whitespace, because a cell's contents are stripped on the
+      way in, so ``" a"`` and ``"a"`` are the same cell and only one of them is
+      what the plan said.
+    """
+    return (isinstance(value, str)
+            and "|" not in value
+            and not (_CONTROL_CHARACTERS & set(value))
+            and value == value.strip())
+
+
+def _comment_fields(line, name: str, keys: tuple, *, tail: bool) -> tuple:
+    """``<!-- name: k1=v1; k2=v2 -->`` -> ``(v1, v2)``, order PINNED.
+
+    The keys are matched positionally against ``keys``. A reordered key fails
+    at the position that should have held it, a renamed one fails at its own
+    position, a missing one shifts every later key onto the wrong position, and
+    an extra one either makes the field count wrong or -- for the one comment
+    with a free-text tail -- lands inside the tail where the caller's own value
+    check refuses it. That is four distinct defects refused by one mechanism,
+    which is why this is positional and not a dict comprehension over splits.
+
+    ``tail`` says whether the LAST value may itself contain the field
+    separator. It may for ``commands``, whose JSON legitimately carries
+    ``"; "`` inside a shell string; it may not for ``review_reason``, so that a
+    fifth key appended after it cannot be absorbed into the reason silently.
+
+    THE TWO ANCHORS DO THE WHITESPACE WORK, and there is deliberately no
+    separate ``line == line.strip()`` clause beside them: ``startswith`` on the
+    full opening refuses an indented comment and ``endswith`` on the full
+    closing refuses a trailing-space one, so a third check would be a screen no
+    input can reach -- and an unreachable screen reads, to the next person, as
+    a guarantee something is being checked here that is not. What makes the
+    indented copy safe is upstream, in ``_comment_indexes``: it DETECTS on the
+    stripped line so an indented copy is counted and then refused here, rather
+    than being invisible to the "exactly once" count.
+    """
+    opening = f"<!-- {name}: "
+    closing = " -->"
+    if (not isinstance(line, str)
+            or not line.startswith(opening)
+            or not line.endswith(closing)
+            or len(line) < len(opening) + len(closing) + 1):
+        raise PlanMetadataError(
+            f"a {name!r} metadata comment must be exactly "
+            f"{opening}<fields>{closing} on a line of its own, with no leading "
+            f"or trailing whitespace; got {line!r}")
+    body = line[len(opening):len(line) - len(closing)]
+    parts = (body.split(_FIELD_SEPARATOR, len(keys) - 1) if tail
+             else body.split(_FIELD_SEPARATOR))
+    if len(parts) != len(keys):
+        raise PlanMetadataError(
+            f"a {name!r} metadata comment carries exactly {len(keys)} keys "
+            f"separated by {_FIELD_SEPARATOR!r}, in the order "
+            f"{list(keys)}; got {len(parts)} in {body!r}")
+    values = []
+    for position, (key, part) in enumerate(zip(keys, parts), start=1):
+        prefix = f"{key}="
+        if not part.startswith(prefix):
+            raise PlanMetadataError(
+                f"{name!r} key {position} of {len(keys)} must be {key!r}: the "
+                f"key order is PINNED to {list(keys)} and a key that is merely "
+                f"PRESENT is not enough, because the order is what makes the "
+                f"grammar unambiguous to a reader and a writer alike; got "
+                f"{part!r}")
+        values.append(part[len(prefix):])
+    return tuple(values)
+
+
+def _parse_command_suite(raw: str) -> tuple[str, ...]:
+    """The ``commands=[...]`` value: a JSON array of table-safe command strings.
+
+    ``_loads`` rather than ``json.loads``, and not as a style choice: it is the
+    single condition on which ``json`` entered ``ALLOWED_IMPORTS``, and a
+    committed AST test asserts that the module's only ``json.loads`` caller is
+    ``_loads``. Its ``QuorumSchemaInvalid`` is re-raised as the exception this
+    grammar promises, so a controller catching ``PlanMetadataError`` around a
+    plan read does not have to also know about the quorum family.
+
+    Every element is checked BEFORE ``set(values)`` is built. A JSON array may
+    legally hold an object or an array, both unhashable, and hashing one would
+    raise ``TypeError`` from outside ``TrackerError`` -- the bare-``in`` failure
+    one layer along.
+    """
+    try:
+        values = _loads(raw, "a phase verification command suite")
+    except TrackerError as exc:
+        raise PlanMetadataError(
+            "a verification command suite must be a JSON array of strings; "
+            f"{raw!r} is not readable JSON ({exc})") from exc
+    if not isinstance(values, list) or not values:
+        raise PlanMetadataError(
+            "a verification command suite must be a NONEMPTY JSON array; a "
+            "phase that declares no command declares that nothing verifies it, "
+            f"which is not the same as a phase nobody wrote a suite for: {raw!r}")
+    for value in values:
+        if not isinstance(value, str) or not value.strip() or not _cell_safe(value):
+            raise PlanMetadataError(
+                "every verification command is a nonempty table-safe string "
+                "carrying no '|', no control character and no surrounding "
+                f"whitespace; got {value!r}")
+    if len(values) != len(set(values)):
+        raise PlanMetadataError(
+            "a verification command suite names each command once; a repeat "
+            "makes the suite's length disagree with the number of things it "
+            f"checks: {list(values)!r}")
+    return tuple(values)
+
+
+def _safe_relative(value) -> PurePosixPath:
+    """A repository-relative path a plan may declare, normalised to POSIX.
+
+    THE SEGMENTS ARE CHECKED RAW, never through ``PurePosixPath.parts``, and
+    that is the whole trick. ``PurePosixPath`` NORMALISES on construction:
+    ``PurePosixPath("src/./a").parts`` is ``('src', 'a')`` and
+    ``PurePosixPath("a//b").parts`` is ``('a', 'b')``, so a ``.`` or an empty
+    segment is gone before any check over ``parts`` can see it. Two spellings
+    that differ in bytes would then both be accepted and recorded as the same
+    scope, and the tracker cell would no longer say what the plan said.
+
+    ``..`` survives normalisation and is refused for the obvious reason; ``\\``
+    is refused because a Windows-spelled path is a single segment here and
+    would escape the repository on the machine that wrote it; a glob character
+    is refused because a scope whose membership depends on when it is expanded
+    cannot be checked for overlap against another scope.
+    """
+    if not isinstance(value, str) or not value:
+        raise PlanMetadataError(
+            f"a repository-relative path must be a nonempty string: {value!r}")
+    if (value.startswith("/")
+            or "\\" in value
+            or not _cell_safe(value)
+            or any(character in value for character in _GLOB_CHARACTERS)):
+        raise PlanMetadataError(
+            f"unsupported repository-relative path: {value!r}; it must be "
+            "relative, POSIX-spelled, glob-free and carry nothing a tracker "
+            "cell cannot hold")
+    for segment in value.split("/"):
+        if segment in ("", ".", "..") or segment != segment.strip():
+            raise PlanMetadataError(
+                f"unsupported repository-relative path: {value!r}; the segment "
+                f"{segment!r} is empty, a traversal, or whitespace-padded, and "
+                "pathlib would normalise the first two away before any check "
+                "over .parts could see them")
+    return PurePosixPath(value)
+
+
+def _comment_indexes(lines, name: str) -> list:
+    """Every line that CLAIMS to be a ``name`` comment, by index.
+
+    Detection is on the stripped line and validation is on the raw one, so an
+    indented copy is COUNTED -- and then refused by ``_comment_fields`` --
+    rather than being invisible to the count. A detector that missed it would
+    let a second phase header hide in the file behind two spaces.
+    """
+    opening = f"<!-- {name}:"
+    return [index for index, line in enumerate(lines)
+            if line.strip().startswith(opening)]
+
+
+def _parse_phase_header(lines) -> dict:
+    """The phase-plan document header: two comments, in order, keys pinned.
+
+    Returns ``{"id", "deps", "review_class", "review_reason", "commands"}``.
+    Raises ``PlanMetadataError`` and nothing else, for every input: this reads
+    a file an agent wrote, and a plan grammar that can throw ``AttributeError``
+    at a controller has not refused the plan, it has crashed on it.
+
+    It reads NO FILE. The caller has already opened the plan -- through
+    ``_require_regular_file``, which is the door every run-directory read uses
+    -- and hands the split lines in. Keeping the read out of here is what lets
+    the grammar be tested without a filesystem at all, and it means this
+    function has no way to be the thing that blocks on a FIFO.
+    """
+    if isinstance(lines, str) or not isinstance(lines, (list, tuple)):
+        raise PlanMetadataError(
+            "a phase header is parsed from the plan's LINES: a list of "
+            "strings, not the document text (a string is iterable by "
+            f"character and would parse as a file of one-character lines); got "
+            f"{type(lines).__name__}")
+    for index, line in enumerate(lines):
+        if not isinstance(line, str):
+            raise PlanMetadataError(
+                f"plan line {index} is {type(line).__name__}, not a string")
+
+    phase_indexes = _comment_indexes(lines, _PHASE_COMMENT)
+    if len(phase_indexes) != 1:
+        raise PlanMetadataError(
+            f"a phase plan carries exactly one {_PHASE_COMMENT!r} metadata "
+            f"comment; this one carries {len(phase_indexes)}. Zero means the "
+            "plan is prose a worker would have to interpret; two means two "
+            "answers to 'what is this phase' with nothing to choose between "
+            "them")
+    phase_index = phase_indexes[0]
+
+    first_nonempty = next((line for line in lines if line.strip()), "")
+    title = first_nonempty[2:] if first_nonempty.startswith("# ") else ""
+    if not title.strip() or title.lstrip().startswith("#"):
+        raise PlanMetadataError(
+            "a phase plan opens with a level-one markdown title before its "
+            f"metadata; the first nonempty line is {first_nonempty!r}")
+    first_section = next(
+        (index for index, line in enumerate(lines) if line.startswith("## ")),
+        len(lines))
+    if phase_index >= first_section:
+        raise PlanMetadataError(
+            f"the {_PHASE_COMMENT!r} comment is on line {phase_index} and the "
+            f"first '## ' section opens on line {first_section}: the metadata "
+            "belongs to the DOCUMENT, so it lives in the document header, "
+            "before the first section. Inside a section it reads as that "
+            "section's metadata")
+
+    phase_id, raw_deps, review_class, review_reason = _comment_fields(
+        lines[phase_index], _PHASE_COMMENT, _PHASE_KEYS, tail=False)
+
+    if not _TOKEN.fullmatch(phase_id):
+        raise PlanMetadataError(
+            f"invalid phase id {phase_id!r}: a phase id is one token")
+    if not _member(review_class, REVIEW_CLASSES):
+        raise PlanMetadataError(
+            f"review_class {review_class!r} is outside {list(REVIEW_CLASSES)!r}; "
+            "there is no partial dial setting, and an unknown value is not "
+            "quietly the cheaper one")
+    if not _text(review_reason) or not _cell_safe(review_reason):
+        raise PlanMetadataError(
+            f"review_reason {review_reason!r} must be nonempty table-safe text: "
+            "the class is a claim about this phase and the reason is the claim's "
+            "justification, which is what a human audits afterwards")
+
+    deps = () if raw_deps == _NO_DEPS else tuple(raw_deps.split(","))
+    for dep in deps:
+        if not _TOKEN.fullmatch(dep):
+            raise PlanMetadataError(
+                f"invalid phase dependency id {dep!r} in deps={raw_deps!r}; "
+                f"a phase that depends on nothing spells it {_NO_DEPS!r}")
+        if dep == _NO_DEPS:
+            raise PlanMetadataError(
+                f"deps={raw_deps!r} mixes {_NO_DEPS!r} with real dependencies; "
+                "'depends on nothing' and 'depends on a phase called none' "
+                "cannot both be spelled the same way")
+        if dep == phase_id:
+            raise PlanMetadataError(
+                f"phase {phase_id!r} lists itself in deps={raw_deps!r}; a phase "
+                "waiting on itself never becomes dispatchable")
+    if len(deps) != len(set(deps)):
+        raise PlanMetadataError(
+            f"deps={raw_deps!r} names a dependency twice; a repeat makes the "
+            "dependency count disagree with the number of phases waited on")
+
+    suite_indexes = _comment_indexes(lines, _PHASE_SUITE_COMMENT)
+    if len(suite_indexes) != 1 or suite_indexes[0] != phase_index + 1:
+        raise PlanMetadataError(
+            f"exactly one {_PHASE_SUITE_COMMENT!r} comment occurs on the line "
+            f"IMMEDIATELY after the {_PHASE_COMMENT!r} comment; found "
+            f"{len(suite_indexes)} at {suite_indexes} against a phase comment "
+            f"on line {phase_index}. Separated by so much as a blank line, the "
+            "two comments are two independent claims and an edit can move one "
+            "without the other")
+    suite_id, raw_commands = _comment_fields(
+        lines[suite_indexes[0]], _PHASE_SUITE_COMMENT, _PHASE_SUITE_KEYS,
+        tail=True)
+    if suite_id != phase_id:
+        raise PlanMetadataError(
+            f"the phase suite names {suite_id!r} and the phase metadata names "
+            f"{phase_id!r}: a suite belonging to another phase would verify "
+            "that phase and report the result against this one")
+
+    return {
+        "id": phase_id,
+        "deps": deps,
+        "review_class": review_class,
+        "review_reason": review_reason,
+        "commands": _parse_command_suite(raw_commands),
+    }

@@ -6223,9 +6223,17 @@ def _require_regular_file(path: Path, what: str) -> None:
     between them: a name longer than ``NAME_MAX`` -- measured, a 312-character
     reference, ``ENAMETOOLONG`` -- and a name under a directory this run may not
     search -- measured, a parent at mode ``000``, ``EACCES``. Both escaped this
-    function raw, so every one of its six call sites inherited the escape; a
+    function raw, so every one of its seven call sites inherited the escape; a
     local ``except OSError`` at the one that found it would have been a rule
-    scoped to where it was learned, and the other four would have stayed open.
+    scoped to where it was learned, and the other six would have stayed open.
+    THE SEVEN ARE ENUMERATED FROM THIS MODULE'S AST RATHER THAN REMEMBERED,
+    because the count moves with the module and a stale count reads as a
+    checked one: ``_question_record``, ``payload_digest``, ``_read_json``,
+    ``_response_record``, ``_plan_text``, ``resolve_evidence`` and
+    ``_ref_text``. It was five when this argument was first written and six
+    when the hole was found; ``_ref_text`` arrived afterwards and inherited the
+    wrap without knowing it existed, which is the argument for wrapping the
+    door rather than the call site, stated by the module instead of about it.
 
     THE SPLIT IS THE READ ARM'S SPLIT, SPELLED ONE LEVEL EARLIER.
     ``FileNotFoundError`` and ``NotADirectoryError`` are the two spellings of
@@ -6239,22 +6247,56 @@ def _require_regular_file(path: Path, what: str) -> None:
     the conservative direction is a stop that names the name rather than a
     silent fall-through to some other root.
 
-    THE ABSENCE ARM IS UNREACHABLE ON THIS INTERPRETER AND STAYS ANYWAY, and
-    it is the one screen in this file that mutation proves equivalent and that
-    is kept. Deleting it leaves all 1472 tests green, because
-    ``_IGNORED_ERRNOS`` currently holds ``ENOENT`` and ``ENOTDIR``, so
-    ``is_file()`` ANSWERS ``False`` for them rather than raising. The two
-    screens this codec deleted for being unreachable -- ``_table_safe`` on
-    ``purpose`` and on ``outcome`` -- were dominated by a total check on the
-    line below them, in this file, permanently; nothing about this module could
-    ever make them fire. This arm is dominated by a PRIVATE constant in the
-    standard library, and if that set ever narrows, the ``else`` is that every
-    absent file under a run directory becomes corruption at six call sites at
-    once. The BEHAVIOUR is pinned either way by
-    ``test_a_name_that_is_not_there_is_still_answered_by_falling_through``, so
-    the arm is a hedge and the test is the guarantee -- which is the honest
-    reading and is written here rather than left for the next reader to
-    rediscover by mutating it.
+    THE ABSENCE ARM IS UNREACHABLE BY CONSTRUCTION AND STAYS ANYWAY, and it is
+    the one screen in this file that mutation proved equivalent and that is
+    kept. "By construction" corrects an earlier reading of this paragraph,
+    which called it unreachable "on this interpreter" and so invited the next
+    reader to look for a platform where it fires. There is none. CPython
+    SELECTS the two classes this arm catches FROM the two errnos
+    ``_IGNORED_ERRNOS`` swallows -- ENOENT gives ``FileNotFoundError``, ENOTDIR
+    gives ``NotADirectoryError``, and every other errno ``os.stat`` can report
+    here gives a class this arm does not name -- so any ``FileNotFoundError``
+    or ``NotADirectoryError`` ``stat`` can raise is already one ``is_file()``
+    answers ``False`` for. That containment holds on every platform, Windows
+    included, where the ``winerror`` is translated to an errno before the
+    subclass is chosen. The arm is dead against the whole of ``os``, not
+    against one constant's current contents.
+
+    THE DISTINCTION FROM THE SCREENS THIS CODEC DELETED IS STILL REAL, which is
+    why an unreachable arm is kept here and two were removed there. ``_table_safe``
+    on ``purpose`` and on ``outcome`` were dominated by a total check on the
+    line below them, IN THIS FILE, permanently; nothing about this module could
+    ever make them fire. This arm is dominated by a relation between two things
+    in the standard library, and both can move. Measured over
+    ``test_task_lifecycle.py``'s 536 tests, with ``_IGNORED_ERRNOS`` simulated
+    NARROW (only EBADF and ELOOP, the direction that makes the arm live): 3
+    loud failures with the arm, 41 without. The 38 in between are one outcome
+    with one shape -- every absent file under a run directory becoming
+    corruption at all SEVEN call sites at once -- which is the fail-open this
+    door exists to refuse, arriving by the one route the door cannot see. The
+    arm does not make the module correct under a narrowing (a dangling symlink
+    stops being corruption and becomes absence, which is wrong in the other
+    direction, and fails loudly); it bounds the blast radius to something a
+    reader can diagnose.
+
+    AND THE LIKELIER DIRECTION IS THE OTHER ONE, which the first version of
+    this paragraph did not consider: if the ignore set WIDENS -- an existence
+    predicate rewritten to swallow more -- the arm is irrelevant and the C1
+    inputs silently revert to being folded into absence. Measured, with every
+    errno 1..199 ignored: 4 loud failures, arm or no arm, from
+    ``test_a_name_the_door_cannot_examine_stays_inside_the_family`` and
+    ``test_the_door_itself_keeps_every_caller_inside_the_family``. That future
+    is already pinned, by tests rather than by this arm.
+
+    THE ARM'S OWN TEST IS
+    ``test_the_doors_absence_arm_fires_if_the_stdlib_stops_swallowing``, which
+    narrows the ignore set and asserts the door still falls through. Delete the
+    arm and it fails; it is the only test that does. The sentence this replaces
+    named ``test_a_name_that_is_not_there_is_still_answered_by_falling_through``
+    as the guarantee, and that test cannot be it: it drives REAL absence,
+    ``is_file()`` answers ``False``, the arm is never entered, and the test
+    passes with the arm deleted. Naming a test that cannot fail for the arm's
+    reason is how an equivalent mutant acquires a defence nobody ran.
     """
     try:
         regular = path.is_file()

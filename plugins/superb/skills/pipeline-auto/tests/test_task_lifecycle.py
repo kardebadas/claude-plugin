@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import errno
 import hashlib
 import itertools
 import json
 import os
+import pathlib
 import re
 import signal
 import subprocess
@@ -31,6 +33,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path, PurePosixPath
+from unittest import mock
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
@@ -5801,17 +5804,74 @@ def evidence_envelopes() -> tuple:
         #: document as the canonical one.
         ("a no-break space in the title",
          canonical.replace("Auto \u2014", "Auto\u00a0\u2014", 1)),
+    ) + _value_repeat_envelopes(canonical)
+
+
+#: A CORPUS BUILT FROM KNOWN MUTANTS PROVES ONLY THAT THOSE MUTANTS DIE, and
+#: this arm is the worked example: three revisions of it, each believed
+#: complete, each closed against exactly the defects that motivated it, each
+#: followed by a survivor in a direction nobody had been bitten in yet. The
+#: whitespace entries were built from the two `.rstrip`/`.strip` mutants; the
+#: separator, non-row and deletion entries from the four that survived those;
+#: and the comment that used to stand here asserted -- correctly -- that every
+#: document above is one perturbation of ONE record's bytes, so a blindness
+#: keyed to a VALUE is invisible to them, and then asserted -- falsely, and
+#: without measuring it -- that `EVIDENCE_LEGAL`/`EVIDENCE_ILLEGAL` covered
+#: that case. They do not. Those tables drive both directions through one
+#: fixture, so they vary what a CELL can spell; they never produce a document
+#: in which a value appears anywhere a cell is not. Measured: four mutants of
+#: the byte comparison, made blind to `run_id`, `outcome`, `code_state` and
+#: `subject`, passed all 1472 tests while accepting a document under a second
+#: sha256 that parses to this same record.
+#:
+#: SO DERIVE THE CASE LIST FROM THE STRUCTURE BEING SCREENED, NOT FROM THE
+#: DEFECTS YOU REMEMBER -- and read that as an instruction for the NEXT corpus
+#: in this file, not as a note about this one. The structure here is a fixed
+#: envelope around nine named cells, so the list is one document per ENVELOPE
+#: DIMENSION (the block above: trailing bytes, leading bytes, line endings,
+#: line separators, non-row content, deletions, normalisation) PLUS one
+#: document per FIELD THE SCREEN RANGES OVER, which is what the function below
+#: generates. Two of the seven it generates were needed by no mutant anyone had
+#: seen; they are the part a mutant-shaped corpus would not have contained, and
+#: they are the reason the list is generated from the record rather than typed
+#: out from a table of survivors.
+def _value_repeat_envelopes(canonical: str) -> tuple:
+    """One document per string-valued field: the canonical bytes with that
+    field's own value repeated once outside the table.
+
+    WHY THAT IS THE SHAPE, and it is forced rather than chosen. A comparison
+    blind to a VALUE is one that normalises that value out of both sides --
+    `render(validated).replace(v, "") != text.replace(v, "")` is the whole
+    mutant -- so the only document it cannot see is one differing from the
+    canonical bytes by extra occurrences of `v` AND BY NOTHING ELSE. Appending
+    the bare value adds no line, no separator and no space, so after the
+    mutant's normalisation the two sides are byte-identical: the mutant ACCEPTS,
+    the refusal this arm asserts does not happen, and the test fails -- which
+    is the mutant dying. Append the value as its own LINE instead and the
+    newline survives the normalisation, the mutant refuses the document too,
+    the test passes, and the mutant lives: a corpus entry that looks like it
+    varies the value and pins nothing.
+
+    ONE PER FIELD, AND THE PER-FIELD PART IS MEASURED RATHER THAN ASSUMED. The
+    first shape tried was two documents on the theory that any inserted value
+    is a value; run against the seven mutants it killed `run_id` and `outcome`
+    and left `code_state` and `subject` alive through the whole suite. The
+    blindness is keyed to ONE field's spelling, so the corpus needs one
+    document per field the screen ranges over and no fewer.
+
+    `commands` and `inputs` are excluded because they are not strings. Their
+    cells are JSON arrays and the in-memory value such a comparison could key
+    on is a tuple, which has no spelling to repeat; a blindness that reached
+    them would be keyed to the cell TEXT, which is `EVIDENCE_LEGAL`'s half.
+    The `isinstance` filter is the honest boundary rather than a hand-typed
+    list of seven names -- seven of the nine qualify today, and a tenth field
+    arrives with its document already made.
+    """
+    return tuple(
+        (f"the {field} value repeated outside the table", canonical + value)
+        for field, value in EVIDENCE_VALUES.items()
+        if isinstance(value, str)
     )
-
-
-#: WHAT THE CORPUS ABOVE STILL HOLDS CONSTANT, written down because the last
-#: revision of it was believed complete and was closed against exactly the two
-#: mutants that motivated it. Every document is one perturbation of ONE
-#: record's canonical bytes, so the nine VALUES never vary here -- a comparison
-#: whose blindness is keyed to a value, or to the interior of a cell, is
-#: invisible to this arm and belongs to `EVIDENCE_LEGAL`/`EVIDENCE_ILLEGAL`
-#: instead. The two arms are complete only jointly, and neither alone pins the
-#: byte comparison.
 
 
 class EvidenceEnvelopeTests(unittest.TestCase):
@@ -5889,6 +5949,24 @@ class EvidenceEnvelopeTests(unittest.TestCase):
         """An arm that generated nothing would make the two tests above pass by
         iterating over no cases at all."""
         self.assertGreaterEqual(len(evidence_envelopes()), 10)
+
+    def test_the_arm_carries_one_document_per_string_valued_field(self):
+        """The generated half, pinned by its DERIVATION and not by a size.
+
+        Dropping `_value_repeat_envelopes` from the corpus removes seven
+        documents and NO other test in this file notices: the two assertions
+        above iterate over whatever they are given, and the size check is a
+        `>=` that twenty-two documents already satisfy. So the rule that the
+        case list is derived from the record rather than from remembered
+        mutants is asserted here, or it is advisory prose that the next
+        revision of this corpus is free to lose.
+        """
+        labels = {label for label, _ in evidence_envelopes()}
+        expected = {f"the {field} value repeated outside the table"
+                    for field, value in EVIDENCE_VALUES.items()
+                    if isinstance(value, str)}
+        self.assertEqual(len(expected), 7)
+        self.assertEqual(expected - labels, set())
 
 
 class EvidenceRenderOnlyScreenTests(unittest.TestCase):
@@ -6306,10 +6384,14 @@ class EvidenceResolutionTests(TempDirTestCase):
     def test_the_door_itself_keeps_every_caller_inside_the_family(self):
         """PINNED WHERE THE DEFECT LIVES, not where it was found.
 
-        `_require_regular_file` has SIX call sites -- counted from the AST,
+        `_require_regular_file` has SEVEN call sites -- counted from the AST,
         not remembered: `_question_record`, `payload_digest`, `_read_json`,
-        `_response_record`, `_plan_text` and `resolve_evidence` -- and every
-        one of them inherited this hole. A test that only drove `resolve_evidence`
+        `_response_record`, `_plan_text`, `resolve_evidence` and `_ref_text`
+        -- and every one of them inherited this hole. It was six when this
+        test was written and `_ref_text` arrived afterwards, inheriting the
+        wrap without asking for it: the count is re-enumerated rather than
+        carried forward, because a remembered count is the reason the door
+        was nearly wrapped at one caller instead of at itself. A test that only drove `resolve_evidence`
         would license a fix scoped to `resolve_evidence`, which is the shape of
         defect this build has already been bitten by. So the door is asked
         directly, and `_plan_text` is asked alongside it as the second caller
@@ -6345,6 +6427,33 @@ class EvidenceResolutionTests(TempDirTestCase):
                 self.assertIsNone(
                     state._require_regular_file(run / "evidence" / "T1.md",
                                                 "a probe"))
+
+    def test_the_doors_absence_arm_fires_if_the_stdlib_stops_swallowing(self):
+        """THE ARM MUTATION PROVES EQUIVALENT, VISITED IN THE WORLD WHERE IT
+        MATTERS -- and this test exists because the one the door's docstring
+        used to cite does not discriminate.
+
+        `except (FileNotFoundError, NotADirectoryError): return` is unreachable
+        while `pathlib._IGNORED_ERRNOS` holds ENOENT and ENOTDIR, and it is
+        unreachable BY CONSTRUCTION rather than by coincidence: CPython selects
+        those two classes FROM those two errnos, so any such exception `os.stat`
+        can raise is already one `is_file()` swallows, on every platform
+        including Windows, where the winerror is translated to an errno before
+        the subclass is chosen. Delete the arm and the whole suite stays green
+        -- which is why `test_a_name_that_is_not_there_is_still_answered_by_
+        falling_through` cannot be the arm's guarantee: it drives REAL absence,
+        `is_file()` answers `False`, and the arm is never entered.
+
+        So the suite visits the hedged world instead. With the ignore set
+        narrowed, absence reaches the arm as a raise; the arm answers it by
+        falling through, exactly as `False` did. Delete the arm and this fails,
+        because the `except OSError` below it turns every absent file under a
+        run directory into corruption at all seven call sites at once.
+        """
+        with mock.patch.object(pathlib, "_IGNORED_ERRNOS",
+                               (errno.EBADF, errno.ELOOP)):
+            self.assertIsNone(state._require_regular_file(
+                self.tmp / "nowhere" / "T1.md", "a probe"))
 
     def test_a_file_that_vanishes_after_the_door_is_still_absence(self):
         """THE RESIDUAL RACE, AND THE ONE `OSError` THAT STILL KEEPS LOOKING.

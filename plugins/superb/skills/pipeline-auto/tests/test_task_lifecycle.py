@@ -5760,7 +5760,57 @@ def evidence_envelopes() -> tuple:
         ("a BOM in front of the marker", "﻿" + canonical),
         ("the table indented by one space",
          canonical.replace("\n| ", "\n | ")),
+        #: THE LINE SEPARATORS `str.splitlines()` BREAKS ON AND `"\n".join`
+        #: DOES NOT PUT BACK. The parse reads `text.splitlines()` and the
+        #: comparison is against a document the renderer joined with `\n`, so
+        #: these three are the only characters that are a LINE BREAK to one
+        #: side of the comparison and ordinary text to the other. A compare
+        #: blind to them accepts a document with a stray U+2028 after the
+        #: table, under a second sha256, with every field cell untouched.
+        ("a line separator after the table", canonical + "\u2028"),
+        ("a paragraph separator after the table", canonical + "\u2029"),
+        ("a next-line after the table", canonical + "\u0085"),
+        #: THE TWO THE BYTE COMPARISON'S OWN DOCSTRING NAMES, neither of which
+        #: the whitespace-only corpus reached. "a paragraph under the table
+        #: claiming the suite actually failed, a second marker" is the sentence
+        #: in `parse_verification_evidence`, and a docstring claiming a
+        #: property no test pins is a claim nobody checked.
+        ("a second marker line", canonical + state.EVIDENCE_MARKER + "\n"),
+        ("a prose paragraph under the table",
+         canonical + "The suite actually FAILED; PASS recorded to unblock "
+                     "the run.\n"),
+        #: NON-ROW CONTENT THAT IS NOT WHITESPACE AND NOT A ROW. The title is
+        #: rendered and never read back, so every screen above the byte
+        #: comparison is blind to it by construction.
+        ("the title line rewritten",
+         canonical.replace(state.EVIDENCE_TITLE, "# A Different Heading", 1)),
+        ("a tab on the blank line", canonical.replace("\n\n", "\n\t\n", 1)),
+        #: DELETIONS, because every entry above this point ADDS or SUBSTITUTES.
+        #: A comparison normalised by DROPPING a structural line -- the blank
+        #: line, the table rule -- is blind in the other direction, and neither
+        #: line is read by anything above the byte comparison: the rule row is
+        #: explicitly skipped by the field-row filter.
+        ("the blank line after the title removed",
+         canonical.replace("\n\n", "\n", 1)),
+        ("the table rule row removed",
+         canonical.replace("| --- | --- |\n", "", 1)),
+        #: AND ONE THAT IS NOT ASCII AND NOT A SEPARATOR, so the corpus is not
+        #: closed under Unicode normalisation either: NFKC maps U+00A0 to a
+        #: space, so a comparison that normalised both sides would accept this
+        #: document as the canonical one.
+        ("a no-break space in the title",
+         canonical.replace("Auto \u2014", "Auto\u00a0\u2014", 1)),
     )
+
+
+#: WHAT THE CORPUS ABOVE STILL HOLDS CONSTANT, written down because the last
+#: revision of it was believed complete and was closed against exactly the two
+#: mutants that motivated it. Every document is one perturbation of ONE
+#: record's canonical bytes, so the nine VALUES never vary here -- a comparison
+#: whose blindness is keyed to a value, or to the interior of a cell, is
+#: invisible to this arm and belongs to `EVIDENCE_LEGAL`/`EVIDENCE_ILLEGAL`
+#: instead. The two arms are complete only jointly, and neither alone pins the
+#: byte comparison.
 
 
 class EvidenceEnvelopeTests(unittest.TestCase):
@@ -6133,8 +6183,9 @@ class EvidenceResolutionTests(TempDirTestCase):
         digest = write_evidence(self.repo_dir / "evidence")
         with self._deadline(5):
             exception = self.refusal(f"evidence/T1.md#sha256={digest}")
-        self.assertIn("exists and cannot be read", str(exception))
+        self.assertIn("carries and cannot be read", str(exception))
         self.assertIsInstance(exception.__cause__, state.QuorumError)
+        self.assertNotIsInstance(exception, state.EvidenceMissing)
 
     def test_a_name_that_is_not_a_regular_file_is_corruption_never_absence(self):
         """`is_file()` NEVER means "there is nothing here". Each shape below
@@ -6158,8 +6209,10 @@ class EvidenceResolutionTests(TempDirTestCase):
                 with self.assertRaises(state.TrackerValidationError) as caught:
                     state.resolve_evidence(run, self.repo_dir,
                                            f"evidence/T1.md#sha256={digest}")
-                self.assertIn("exists and cannot be read",
+                self.assertIn("carries and cannot be read",
                               str(caught.exception))
+                self.assertNotIsInstance(caught.exception,
+                                         state.EvidenceMissing)
 
     def test_an_unreadable_run_copy_is_corruption_never_absence(self):
         """THE CASE THE DOOR ALONE DOES NOT CLOSE, and the reason the residual
@@ -6185,6 +6238,112 @@ class EvidenceResolutionTests(TempDirTestCase):
             self.resolve(f"evidence/T1.md#sha256={repo_digest}")
         self.assertIn("cannot read", str(caught.exception))
         self.assertIsInstance(caught.exception.__cause__, OSError)
+
+    #: `is_file()` ANSWERS "NOT A REGULAR FILE" AND IT ALSO RAISES, and the
+    #: three tests below are about the second half. CPython swallows only
+    #: `pathlib._IGNORED_ERRNOS` -- measured on this interpreter as
+    #: `(ENOENT, ENOTDIR, EBADF, ELOOP)` -- and re-raises every other `OSError`
+    #: out of `_require_regular_file`. Adding the door to `resolve_evidence`
+    #: under an `except QuorumError` therefore opened a NEW escape in the
+    #: commit that closed the FIFO one: measured at that commit, a 312-character
+    #: reference left the family as `OSError [Errno 36] File name too long` and
+    #: a `run_dir/evidence` at mode 000 as a raw `PermissionError`, and BOTH
+    #: were in-family one commit earlier. Neither needs a permissions trick to
+    #: be interesting: the first is a pure argument that `_cell_safe` accepts.
+    def _door_inputs(self):
+        """`(label, make)` for the two spellings `is_file()` raises on.
+
+        `make` prepares one run directory and returns the REFERENCE to ask for,
+        so the two cases can be driven through `resolve_evidence`, through
+        `_require_regular_file` directly, and through `_plan_text` without
+        three copies of the setup.
+        """
+        def a_name_past_name_max(run):
+            (run / "evidence").mkdir(parents=True)
+            relative = "evidence/" + "n" * 300 + ".md"
+            self.assertTrue(state._cell_safe(relative),
+                            "the spelling screen accepts this reference, so it "
+                            "is the door and nothing else that meets it")
+            return relative
+
+        def a_parent_this_run_may_not_search(run):
+            (run / "evidence").mkdir(parents=True)
+            (run / "evidence" / "T1.md").write_text("x", encoding="utf-8")
+            os.chmod(run / "evidence", 0o000)
+            self.addCleanup(os.chmod, run / "evidence", 0o755)
+            return "evidence/T1.md"
+
+        return (("a name past NAME_MAX", a_name_past_name_max),
+                ("a parent this run may not search",
+                 a_parent_this_run_may_not_search))
+
+    def test_a_name_the_door_cannot_examine_stays_inside_the_family(self):
+        """THE ESCAPE THE DOOR ITSELF OPENED, asked through `resolve_evidence`.
+
+        The repository copy below is VALID and hashes to the digest asked for,
+        so a run that folded either of these into absence would resolve it and
+        report a clean PASS -- and what actually happened before the split was
+        worse than that: the `OSError` left `TrackerError` altogether, so a
+        controller holding `except TrackerError` around an evidence read died
+        on a reference nobody would look at twice.
+        """
+        digest = write_evidence(self.repo_dir / "evidence")
+        for label, make in self._door_inputs():
+            with self.subTest(door=label):
+                run = self.run_dir / label.replace(" ", "-")
+                relative = make(run)
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state.resolve_evidence(run, self.repo_dir,
+                                           f"{relative}#sha256={digest}")
+                self.assertIn("cannot examine", str(caught.exception))
+                self.assertNotIsInstance(caught.exception,
+                                         state.EvidenceMissing)
+                cause = caught.exception.__cause__
+                self.assertIsInstance(cause, state.QuorumError)
+                self.assertIsInstance(cause.__cause__, OSError)
+
+    def test_the_door_itself_keeps_every_caller_inside_the_family(self):
+        """PINNED WHERE THE DEFECT LIVES, not where it was found.
+
+        `_require_regular_file` has SIX call sites -- counted from the AST,
+        not remembered: `_question_record`, `payload_digest`, `_read_json`,
+        `_response_record`, `_plan_text` and `resolve_evidence` -- and every
+        one of them inherited this hole. A test that only drove `resolve_evidence`
+        would license a fix scoped to `resolve_evidence`, which is the shape of
+        defect this build has already been bitten by. So the door is asked
+        directly, and `_plan_text` is asked alongside it as the second caller
+        that was measurably escaping.
+        """
+        for label, make in self._door_inputs():
+            with self.subTest(door=label):
+                run = self.tmp / ("door-" + label.replace(" ", "-"))
+                relative = make(run)
+                path = run / relative
+                with self.assertRaises(state.QuorumSchemaInvalid) as caught:
+                    state._require_regular_file(path, "a probe")
+                self.assertIsInstance(caught.exception.__cause__, OSError)
+                with self.assertRaises(state.PlanMetadataError) as plan:
+                    state._plan_text(str(path))
+                self.assertIsInstance(plan.exception, state.TrackerError)
+
+    def test_a_name_that_is_not_there_is_still_answered_by_falling_through(self):
+        """THE HALF THE SPLIT MUST NOT BREAK. `FileNotFoundError` and
+        `NotADirectoryError` are the two spellings of "not there", and the door
+        answers neither -- it returns silently and lets the caller's own read
+        report absence as that caller has always reported it. A door that
+        raised on them would turn every missing run copy into corruption and
+        stop the search at the first root."""
+        for label, prepare in (
+                ("nothing at this name", lambda run: None),
+                ("a regular file where the directory should be",
+                 lambda run: (run.mkdir(parents=True),
+                              (run / "evidence").write_text("x", "utf-8")))):
+            with self.subTest(absence=label):
+                run = self.tmp / ("absent-" + label.replace(" ", "-"))
+                prepare(run)
+                self.assertIsNone(
+                    state._require_regular_file(run / "evidence" / "T1.md",
+                                                "a probe"))
 
     def test_a_file_that_vanishes_after_the_door_is_still_absence(self):
         """THE RESIDUAL RACE, AND THE ONE `OSError` THAT STILL KEEPS LOOKING.
@@ -6234,6 +6393,57 @@ class EvidenceResolutionTests(TempDirTestCase):
             f"evidence/absent.md#sha256={digest}"))
         self.assertIn("evidence/absent.md", message)
 
+    def test_absence_has_its_own_class_and_corruption_does_not(self):
+        """THREE OUTCOMES, AND A CALLER MUST BE ABLE TO TELL THEM APART.
+
+        `resolve_evidence` resolves, or reports ABSENT, or reports CORRUPT, and
+        the three shipped as one class with `__cause__` absent on the two that
+        matter -- so the only thing left to branch on was a substring of a
+        diagnostic, which is prose the next task is free to reword. The task
+        that consumes this codec has to branch on it: "no evidence was ever
+        published" is work still to do, and "the evidence that was published
+        cannot be read" is damaged durable state.
+        """
+        repo_digest = write_evidence(self.repo_dir / "evidence")
+        with self.assertRaises(state.EvidenceMissing):
+            self.resolve(f"evidence/absent.md#sha256={repo_digest}")
+
+        path = self.run_dir / "evidence" / "T1.md"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"not the bytes that hash to that")
+        corruptions = {
+            "a digest mismatch": f"evidence/T1.md#sha256={repo_digest}",
+        }
+        content = state.EVIDENCE_MARKER.encode("utf-8") + b"\n\xff\xfe\n"
+        (self.run_dir / "evidence" / "T2.md").write_bytes(content)
+        corruptions["bytes that are not UTF-8"] = (
+            f"evidence/T2.md#sha256={hashlib.sha256(content).hexdigest()}")
+        for label, reference in corruptions.items():
+            with self.subTest(corruption=label):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    self.resolve(reference)
+                self.assertNotIsInstance(caught.exception,
+                                         state.EvidenceMissing)
+
+    def test_the_new_class_is_caught_by_every_handler_already_written(self):
+        """THE POINT OF SUBCLASSING RATHER THAN ADDING A SIBLING. `EvidenceMissing`
+        ADDS a distinction; it must not move a stop out of the reach of code
+        that already catches this module's families. Asserted by CATCHING it,
+        not by reading the class statement: an `__mro__` assertion would still
+        pass if the raise site had been given some other class."""
+        digest = write_evidence(self.repo_dir / "evidence")
+        reference = f"evidence/absent.md#sha256={digest}"
+        for family in (state.TrackerError, state.TrackerValidationError):
+            with self.subTest(handler=family.__name__):
+                try:
+                    self.resolve(reference)
+                except family as caught:
+                    self.assertIsInstance(caught, state.EvidenceMissing)
+                else:  # pragma: no cover - the raise above is unconditional
+                    self.fail(f"{family.__name__} did not catch it")
+        self.assertTrue(issubclass(state.EvidenceMissing,
+                                   state.TrackerValidationError))
+
     def test_an_unbound_or_short_reference_is_refused_before_any_read(self):
         write_evidence(self.run_dir / "evidence")
         for reference in ("evidence/T1.md", f"evidence/T1.md#sha256={'a' * 8}",
@@ -6266,16 +6476,31 @@ class EvidenceResolutionTests(TempDirTestCase):
         for that spelling, so no door upstream could have seen it. `_cell_safe`
         before `Path()` is the same screen `_plan_text` puts on a plan path.
 
-        The lone surrogate is here for a different reason and is asserted the
-        same way on purpose: on Linux a surrogate is the `surrogateescape`
-        spelling of a real filename byte, so it does NOT escape today -- it
-        names a file that merely does not exist. It is the encoder, not a
-        remembered list, that has to decide which spellings are which, and a
-        screen that admitted it would be one `PurePath` release away from the
-        NUL case.
+        THE TWO SURROGATES ARE HERE FOR OPPOSITE REASONS, and an earlier
+        revision of this test carried only the first of them -- the one
+        surrogate that cannot falsify the claim the docstring made. Measured at
+        the `read_bytes` call site, filesystem encoding `utf-8`, error handler
+        `surrogateescape`:
+
+        * `\udcff` is INSIDE `U+DC80`-`U+DCFF`, the window `surrogateescape`
+          uses to spell a real filename byte. It reaches the syscall as an
+          ordinary `FileNotFoundError` -- a file that can exist and merely does
+          not -- so it does NOT escape the family even with no screen at all.
+          It is here to show the screen refuses a spelling that is harmless,
+          which is the screen's cost and is stated rather than hidden.
+        * `\ud800` is OUTSIDE that window. The encoder refuses it and raises
+          `UnicodeEncodeError`, a `ValueError`, from outside `TrackerError` --
+          measured against the type-check-only form, and so do `\udc00` and
+          `\udfff`. It is here because it is the half that escapes, and a test
+          carrying only `\udcff` pinned a claim about surrogates from the one
+          surrogate that supports it.
+
+        That asymmetry is exactly why the ENCODER is asked per spelling
+        (`_survives_the_encoder`) instead of a range being remembered.
         """
         roots = (str(self.tmp) + "/\x00run", str(self.tmp) + "/\udcffrun",
-                 str(self.tmp) + "/a|b", str(self.tmp) + "/run ", "")
+                 str(self.tmp) + "/\ud800run", str(self.tmp) + "/a|b",
+                 str(self.tmp) + "/run ", "")
         reference = f"evidence/T1.md#sha256={DIGEST}"
         for spelling in roots:
             with self.subTest(spelling=spelling.encode(

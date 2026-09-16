@@ -6213,8 +6213,61 @@ def _require_regular_file(path: Path, what: str) -> None:
     ``QuorumError`` too, so a caller -- and a test -- that could only see the
     family could not tell a quorum nobody dispatched from a quorum whose record
     is a directory. Corruption is what this is, and corruption is what it says.
+
+    ``is_file()`` ITSELF RAISES, which is why the call below is wrapped rather
+    than written bare -- and it is the reason this split lives HERE rather than
+    at whichever call site happens to notice. CPython swallows only
+    ``pathlib._IGNORED_ERRNOS``, measured on this interpreter as
+    ``(ENOENT, ENOTDIR, EBADF, ELOOP)``, and re-raises every other ``OSError``.
+    Two reachable inputs land outside that set with no permissions trick
+    between them: a name longer than ``NAME_MAX`` -- measured, a 312-character
+    reference, ``ENAMETOOLONG`` -- and a name under a directory this run may not
+    search -- measured, a parent at mode ``000``, ``EACCES``. Both escaped this
+    function raw, so every one of its six call sites inherited the escape; a
+    local ``except OSError`` at the one that found it would have been a rule
+    scoped to where it was learned, and the other four would have stayed open.
+
+    THE SPLIT IS THE READ ARM'S SPLIT, SPELLED ONE LEVEL EARLIER.
+    ``FileNotFoundError`` and ``NotADirectoryError`` are the two spellings of
+    "not there" and fall through silently, exactly as a ``False`` from
+    ``is_file()`` on a name that does not exist already does -- so the callers
+    that answer absence themselves keep answering it. Every other ``OSError``
+    is a name this run cannot establish anything about, and an unestablished
+    name is never reported as an absent one. ``ENAMETOOLONG`` is arguably
+    absence -- a name past ``NAME_MAX`` cannot exist -- and is deliberately NOT
+    special-cased: this module does not guess at the meaning of an errno, and
+    the conservative direction is a stop that names the name rather than a
+    silent fall-through to some other root.
+
+    THE ABSENCE ARM IS UNREACHABLE ON THIS INTERPRETER AND STAYS ANYWAY, and
+    it is the one screen in this file that mutation proves equivalent and that
+    is kept. Deleting it leaves all 1472 tests green, because
+    ``_IGNORED_ERRNOS`` currently holds ``ENOENT`` and ``ENOTDIR``, so
+    ``is_file()`` ANSWERS ``False`` for them rather than raising. The two
+    screens this codec deleted for being unreachable -- ``_table_safe`` on
+    ``purpose`` and on ``outcome`` -- were dominated by a total check on the
+    line below them, in this file, permanently; nothing about this module could
+    ever make them fire. This arm is dominated by a PRIVATE constant in the
+    standard library, and if that set ever narrows, the ``else`` is that every
+    absent file under a run directory becomes corruption at six call sites at
+    once. The BEHAVIOUR is pinned either way by
+    ``test_a_name_that_is_not_there_is_still_answered_by_falling_through``, so
+    the arm is a hedge and the test is the guarantee -- which is the honest
+    reading and is written here rather than left for the next reader to
+    rediscover by mutating it.
     """
-    if not path.is_file() and os.path.lexists(path):
+    try:
+        regular = path.is_file()
+    except (FileNotFoundError, NotADirectoryError):
+        return
+    except OSError as exc:
+        raise QuorumSchemaInvalid(
+            f"{what} at {str(path)!r} is a name this run cannot examine "
+            f"({type(exc).__name__} errno {exc.errno}: {exc}); asking its "
+            "shape failed, so nothing is known about it -- and a name nothing "
+            "is known about is not a name known to be absent, which is the "
+            "only answer this door lets fall through") from exc
+    if not regular and os.path.lexists(path):
         raise QuorumSchemaInvalid(
             f"{what} at {str(path)!r} is a name this run directory carries and "
             "cannot be read; a directory, a dangling link, a symlink loop or a "
@@ -11438,8 +11491,8 @@ def _plan_text(path) -> str:
         _require_regular_file(plan, "a phase plan")
     except QuorumError as exc:
         raise PlanMetadataError(
-            f"the phase plan at {spelling!r} is a name that exists and cannot "
-            f"be read ({exc}); a directory, a dangling link, a symlink loop or "
+            f"the phase plan at {spelling!r} is a name this run cannot read "
+            f"({exc}); a directory, a dangling link, a symlink loop or "
             "a FIFO is corruption and never an absent plan -- and the FIFO is "
             "why the shape is asked before the open rather than by it, because "
             "that open blocks for a writer that never comes") from exc
@@ -13011,10 +13064,21 @@ def _evidence_directory(value, *, field: str) -> Path:
     that spelling, so no door upstream sees it. ``_cell_safe`` is the screen,
     exactly as ``_plan_text`` uses it for a plan path: a path corpus is not a
     field corpus, and a lone surrogate is the reason the encoder is ASKED
-    (``_survives_the_encoder``) rather than remembered -- on Linux a surrogate
-    is the ``surrogateescape`` spelling of a real filename byte, so it names a
-    file that can exist, and only the encoder knows which side of the line a
-    given one falls.
+    (``_survives_the_encoder``) rather than remembered.
+
+    THE SURROGATES DO NOT ALL BEHAVE ALIKE, and an earlier revision of this
+    docstring said they did. Measured at the ``read_bytes`` call site, with the
+    filesystem encoding ``utf-8`` and its error handler ``surrogateescape``:
+    only ``U+DC80``-``U+DCFF`` are the ``surrogateescape`` spelling of a real
+    filename byte, and those reach the syscall as an ordinary
+    ``FileNotFoundError`` -- a file that can exist and merely does not.
+    ``U+D800``, ``U+DC00`` and ``U+DFFF`` are outside that window: the encoder
+    refuses them and raises ``UnicodeEncodeError``, a ``ValueError``, from
+    outside ``TrackerError``. So the screen is load-bearing for most of the
+    surrogate range and not for one 128-character slice of it -- which is
+    exactly why the encoder is asked per spelling instead of the range being
+    remembered, and why a screen that admitted "surrogates are fine on Linux"
+    would have been generalised from the one slice that supports it.
 
     ``reference`` NEEDS NO SCREEN HERE because it already has one:
     ``_digest_reference`` runs it through ``_table_safe`` -> ``_cell_safe``
@@ -13041,6 +13105,33 @@ def _evidence_directory(value, *, field: str) -> Path:
             "ValueError and a lone surrogate as UnicodeEncodeError, both "
             "outside TrackerError, and both past a door that cannot see them")
     return Path(spelling)
+
+
+class EvidenceMissing(TrackerValidationError):
+    """No copy of a digest-bound evidence reference exists under either root.
+
+    UNDER ``TrackerValidationError`` so that every ``except TrackerError`` and
+    every ``except TrackerValidationError`` already written keeps catching it:
+    this class ADDS a distinction, it does not move a stop out of anyone's
+    reach.
+
+    IT EXISTS BECAUSE ``resolve_evidence`` HAS THREE OUTCOMES AND SHIPPED WITH
+    TWO NAMES. Resolved; ABSENT -- nothing under the run directory and nothing
+    under the repository root; and CORRUPT -- a name that is there and cannot
+    be read, or bytes that do not hash to the digest the reference binds, or
+    bytes that are not UTF-8. Absence and all three corruptions arrived as the
+    same class with the same (absent) ``__cause__``, so the only thing a caller
+    could branch on was a substring of a diagnostic -- prose the next task is
+    free to reword, which makes it a contract nobody agreed to. This is
+    ``QuorumSchemaInvalid``'s own argument one codec along: "a caller -- and a
+    test -- that could only see the family could not tell X from Y".
+
+    THE TWO ARE NOT ONE RECOVERY, which is why the distinction is worth a
+    class. "No evidence was ever published for this subject" is a run that has
+    not done the work yet and may still do it; "the evidence that was published
+    cannot be read or does not match its digest" is a run whose durable state
+    is damaged, and retrying the same read forever is the wrong answer to it.
+    """
 
 
 def resolve_evidence(run_dir, repo_dir, reference: str) -> dict:
@@ -13082,6 +13173,22 @@ def resolve_evidence(run_dir, repo_dir, reference: str) -> dict:
     THE DECODE IS WRAPPED for the same family reason. A file whose digest
     matches and whose bytes are not UTF-8 raises ``UnicodeDecodeError``, which
     is a ``ValueError``; the brief decoded it bare.
+
+    THE DOOR'S OWN ``OSError`` IS NOT HANDLED HERE, and the absence of a second
+    ``except`` on that call is deliberate rather than an omission.
+    ``_require_regular_file`` used to let ``is_file()``'s residual ``OSError``
+    -- ``ENAMETOOLONG`` on a 312-character reference, ``EACCES`` under a
+    mode-``000`` parent -- straight out through this ``except QuorumError``,
+    and both left the family. The split that closes it is inside the door,
+    where its other five call sites inherit it too; catching ``OSError`` here
+    would have fixed this function and left ``_plan_text`` and the three quorum
+    readers holding the same hole.
+
+    THREE OUTCOMES, AND THE ABSENT ONE HAS ITS OWN CLASS. ``EvidenceMissing``
+    is raised only by the fall-off below -- nothing under either root. Every
+    corruption (a name that cannot be read, a digest mismatch, bytes that are
+    not UTF-8) stays a plain ``TrackerValidationError``, so a caller branches
+    on a class rather than on a substring of a sentence.
     """
     relative, digest = _digest_reference(reference, field="evidence reference")
     roots = (_evidence_directory(run_dir, field="run_dir"),
@@ -13093,7 +13200,7 @@ def resolve_evidence(run_dir, repo_dir, reference: str) -> dict:
         except QuorumError as exc:
             raise TrackerValidationError(
                 f"evidence {reference!r} names {relative!r} under {str(root)!r}, "
-                f"which exists and cannot be read ({exc}). Corruption is never "
+                f"which this run cannot read ({exc}). Corruption is never "
                 "absence, so it stops here rather than falling through to the "
                 "other search root") from exc
         try:
@@ -13122,7 +13229,7 @@ def resolve_evidence(run_dir, repo_dir, reference: str) -> dict:
                 f"({exc}); a record this module cannot read is not a record it "
                 "can have checked") from exc
         return parse_verification_evidence(decoded)
-    raise TrackerValidationError(
+    raise EvidenceMissing(
         f"evidence is missing: {reference!r} names {relative!r}, which is not "
         "there under the run directory or under the repository root. A "
         "reference nothing resolves is a PASS nobody can inspect")

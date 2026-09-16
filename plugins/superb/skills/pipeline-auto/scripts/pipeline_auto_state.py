@@ -13233,3 +13233,663 @@ def resolve_evidence(run_dir, repo_dir, reference: str) -> dict:
         f"evidence is missing: {reference!r} names {relative!r}, which is not "
         "there under the run directory or under the repository root. A "
         "reference nothing resolves is a PASS nobody can inspect")
+
+
+# ---------------------------------------------------------------------------
+# P04 Task 6: tracker accessors, ref resolution, and the slot cap -- F1, F2.
+#
+# THREE NAMES THIS BLOCK'S BRIEF LISTED AS PRODUCTS ALREADY EXISTED, and a
+# module-level redefinition rebinds the global for every existing caller.
+# ``_field`` is P02's header-to-key map, read wherever a section's columns are;
+# the brief re-declared it with a second parameter, which would have moved all
+# of them at once. ``_csv`` is P02's cell reader, and the brief's version folded
+# ``-`` and ``""`` together -- two values ``_cell_list`` keeps apart on purpose.
+# ``_attempt_token`` is Task 4's single conversion point, with the nine-digit
+# spelling ceiling the brief's version lacks. All three are CONSUMED here.
+# ---------------------------------------------------------------------------
+
+#: P02's ``_field`` under the name this block reads it by. AN ALIAS, NEVER A
+#: SECOND COPY: ``parse_tracker``, ``render_tracker``, ``SECTIONS`` and
+#: ``append_row`` all key rows through that one function, so a reimplementation
+#: here would be a second answer to "what is this column called" -- correct on
+#: the day it was written and free to drift from the spelling the tracker is
+#: actually stored in afterwards.
+#:
+#: It is IDEMPOTENT over its own output, which is what lets a caller apply it to
+#: ``section_columns(...)`` -- already keys, not display headers -- without
+#: knowing which of the two it was handed.
+_key = _field
+
+
+def _run_field(tracker: dict, field: str) -> str:
+    """One ``## Run`` cell, or a stop inside this module's exception family.
+
+    ``tracker["run"][field]`` raises ``KeyError`` on a tracker with no run
+    section and ``TypeError`` on one whose run section is a list -- both
+    outside ``TrackerError``, so both escape every handler a controller has
+    written and kill the run rather than stopping it.
+    """
+    try:
+        return tracker["run"][field]
+    except (KeyError, TypeError, IndexError) as exc:
+        raise TrackerValidationError(
+            f"tracker run field is missing or unreadable: {field}") from exc
+
+
+def _task_row(tracker: dict, task_id) -> dict:
+    """The one ``## Tasks`` row with this id. THE ROW ITSELF, not a copy.
+
+    ``_validate_tasks`` refuses a duplicate id, so "the row" is well defined;
+    an unknown id is a stop rather than ``None``, because every caller below
+    would otherwise index ``None`` one line later and leave the family.
+    """
+    for row in tracker.get("tasks", ()) or ():
+        if row["id"] == task_id:
+            return row
+    raise TrackerValidationError(f"unknown task: {task_id!r}")
+
+
+def _replace_task(tracker: dict, replacement: dict) -> dict:
+    """Swap one task row for an edited copy, IN PLACE IN THE ORDER IT HAD.
+
+    A replacement matching no row RAISES rather than appending or silently
+    doing nothing: the caller's edit would otherwise be lost while the
+    transition it belongs to reported itself applied, which is the one failure
+    a durable transition may never have.
+    """
+    target = replacement["id"]
+    rows = tracker.get("tasks", ()) or ()
+    if not any(row["id"] == target for row in rows):
+        raise TrackerValidationError(
+            f"cannot replace task {target!r}: no row carries that id, and an "
+            "edit applied to nothing is a transition that reports itself done")
+    tracker["tasks"] = [
+        replacement if row["id"] == target else row for row in rows
+    ]
+    return tracker
+
+
+def _quorum_owners(tracker: dict) -> set:
+    """Owners held by an IN-FLIGHT quorum.
+
+    P04 reads ``QID``, ``State`` and ``Owners`` and writes nothing here:
+    ``## Quorum`` belongs entirely to P03. A finalized row holds no slots --
+    its brains have answered and been released -- so folding the two states
+    together would make every past quorum permanently occupy the capacity the
+    next one needs.
+
+    The ``-``/empty filter is over MEMBERS, not over the cell: ``_csv`` already
+    answers ``()`` for a whole cell spelled ``-``, but ``a,-,b`` and ``a,,b``
+    are multi-valued cells with a placeholder inside them, and those are the
+    spellings that would otherwise enter the set as owner names.
+    """
+    owners: set = set()
+    for row in tracker.get("quorum", ()) or ():
+        if row["state"] != _IN_FLIGHT:
+            continue
+        owners.update(value for value in _csv(row["owners"])
+                      if value and value != _ABSENT_CELL)
+    return owners
+
+
+def _append_history(value: str, entry: str) -> str:
+    """Append one entry to a comma-separated history cell.
+
+    ``-`` is the empty marker, so appending to it REPLACES it; appending beside
+    it would leave a cell whose first member is the absence sentinel, which
+    ``_csv`` reads back as a nameless checkpoint.
+    """
+    return entry if value in ("", _ABSENT_CELL) else f"{value},{entry}"
+
+
+# ---------------------------------------------------------------------------
+# P04 Task 6: capacity arithmetic -- fault F2.
+#
+# THREE SLOTS ARE HELD FOR A QUORUM AND THE RESERVE IS NOT A TUNING KNOB.
+# Reserving up to ``worker_limit`` deadlocks the run PERMANENTLY: a blocked task
+# holds the slot needed to dispatch the brains that would unblock it, and there
+# is no timeout, no retry and no state anyone can reach that frees it. Nothing
+# in superb:pipeline covers this, because superb:pipeline has no brains.
+# ---------------------------------------------------------------------------
+
+QUORUM_SLOT_RESERVE = 3
+
+#: A blocked ``[?]`` task STILL OCCUPIES ITS IMPLEMENTATION SLOT. The worker
+#: holding it has not been released -- it is waiting on the answer -- which is
+#: the whole reason the three slots above are held back in the first place.
+#: ``[x]`` and ``[ ]`` are deliberately absent: a finished task's worker is
+#: free, and an unstarted task never had one.
+_OCCUPYING_STATES = ("[~]", "[?]")
+
+
+def implementation_slot_cap(worker_limit) -> int:
+    """How many slots implementation tasks may occupy at once.
+
+    THE FLOOR IS ONE, NOT ZERO. Below ``worker_limit = 4`` the subtraction goes
+    non-positive and a cap of zero would stop the run rather than slow it: with
+    the floor, tasks serialise and the three brain slots stay free, which is the
+    degraded mode the constraint intends.
+
+    ``bool`` is excluded BY TYPE and first, for ``initialize_run``'s reason:
+    ``isinstance(True, int)`` is true and ``True - 3`` is ``-2``, so a bare
+    ``isinstance`` admits a cap computed from a flag.
+    """
+    if (isinstance(worker_limit, bool) or not isinstance(worker_limit, int)
+            or worker_limit < 1):
+        raise TrackerValidationError(
+            f"worker_limit {worker_limit!r} is not a positive integer; the "
+            "implementation cap is derived from it and a cap derived from a "
+            "string, a float or a flag is a capacity nobody granted")
+    return max(1, worker_limit - QUORUM_SLOT_RESERVE)
+
+
+def _implementation_owners(tracker: dict) -> set:
+    return {
+        row["owner"] for row in tracker.get("tasks", ()) or ()
+        if _member(row["state"], _OCCUPYING_STATES)
+        and row["owner"] != _ABSENT_CELL
+    }
+
+
+def _active_owners(tracker: dict) -> set:
+    """Every worker this run is currently holding, of either kind."""
+    return _implementation_owners(tracker) | _quorum_owners(tracker)
+
+
+# ---------------------------------------------------------------------------
+# P04 Task 6: reading a git reference WITHOUT running git.
+#
+# The brief named ``_git`` and ``_git_out`` as ``subprocess.run`` wrappers.
+# ``subprocess`` IS NOT IN ``ALLOWED_IMPORTS`` and the master plan refuses it by
+# name -- "arbitrary command execution, the single capability this boundary most
+# exists to withhold". So the ref store is read directly, the same translation
+# every ``re.compile`` screen in these plans gets and for the same reason.
+#
+# THE REPOSITORY ROOT IS THE ONE RECORDED AT INIT. It is never derived from
+# ``run_dir`` depth: a run directory nested at an unexpected depth would
+# otherwise bind the run to the wrong repository, silently.
+# ---------------------------------------------------------------------------
+
+_GIT_DIRNAME = ".git"
+#: ``.git`` is a FILE holding this prefix in a linked worktree -- which is the
+#: whole integration topology of this phase, one worktree per concurrently
+#: dispatched implementer, so a resolver that required a directory would refuse
+#: every repository this run actually creates.
+_GITDIR_PREFIX = "gitdir: "
+_COMMONDIR_FILE = "commondir"
+_PACKED_REFS_FILE = "packed-refs"
+_SYMREF_PREFIX = "ref: "
+_PEEL_PREFIX = "^"
+_COMMENT_PREFIX = "#"
+#: A symbolic ref may point at another symbolic ref. The chain is bounded so a
+#: cycle is a diagnostic rather than a hang; git's own limit is 5.
+_SYMREF_LIMIT = 8
+#: The five names git will look for directly under ``$GIT_DIR``. Every other
+#: unqualified name is searched through the namespaces below, in gitrevisions'
+#: order -- which is why ``refs/heads/`` precedes ``refs/remotes/`` here: a
+#: resolver that reversed them would review a stale fetched tip and say nothing.
+_PSEUDO_REFS = ("HEAD", "FETCH_HEAD", "ORIG_HEAD", "MERGE_HEAD",
+                "CHERRY_PICK_HEAD")
+_REF_NAMESPACES = ("refs/", "refs/tags/", "refs/heads/", "refs/remotes/")
+
+
+def _repo_dir(tracker: dict) -> Path:
+    """The recorded repository root as a path, resolved once."""
+    root = repo_root(tracker)
+    try:
+        return Path(root).resolve()
+    except (OSError, RuntimeError) as exc:
+        #: ``resolve`` raises ``RuntimeError`` on a symlink loop even with
+        #: ``strict=False``, and ``RuntimeError`` is not a ``TrackerError``.
+        raise TrackerValidationError(
+            f"the recorded repository root {root!r} cannot be resolved "
+            f"({type(exc).__name__}: {exc})") from exc
+
+
+def _ref_name(value) -> str:
+    """One git reference name, screened before any of it reaches a path.
+
+    ``_TOKEN`` -- which is all ``target_branch`` is held to -- ADMITS ``/``,
+    so ``a/../../../../etc/passwd`` is a perfectly legal tracker cell and would
+    otherwise be joined straight onto the ref store. The segment rules are
+    ``_safe_relative``'s, asked RAW for ``_safe_relative``'s reason: pathlib
+    normalises ``.`` and an empty segment away before any check over ``.parts``
+    could see them.
+    """
+    if not isinstance(value, str) or not value or not _cell_safe(value):
+        raise TrackerValidationError(
+            f"unusable git reference {value!r}: it must be a nonempty string a "
+            "tracker cell can carry back out unchanged")
+    for segment in value.split("/"):
+        if (segment in ("", ".", "..") or segment != segment.strip()
+                or segment.startswith(".")):
+            raise TrackerValidationError(
+                f"unusable git reference {value!r}: the segment {segment!r} is "
+                "empty, a traversal, whitespace-padded or hidden, and a "
+                "reference that walks out of the ref store names a file rather "
+                "than a commit")
+    return value
+
+
+def _ref_text(path: Path, what: str):
+    """The contents of one ref-store file, or ``None`` if it is not there.
+
+    ``is_file()`` NEVER MEANS "there is nothing here": it is false for a
+    directory, a dangling symlink, a symlink loop and a FIFO, and a FIFO opened
+    for reading BLOCKS until a writer arrives -- under the run lock, with no
+    writer coming. ``_require_regular_file`` is this module's door for that and
+    is used rather than re-written; it raises inside the quorum family, so the
+    wrap is what keeps a ref-store fault reading as a tracker fault.
+    """
+    try:
+        _require_regular_file(path, what)
+    except QuorumError as exc:
+        raise TrackerValidationError(
+            f"{what} at {str(path)!r} is a name this run cannot read ({exc}); "
+            "a directory, a dangling link, a symlink loop or a FIFO is "
+            "corruption and never an absent reference") from exc
+    try:
+        return path.read_text(encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except (OSError, UnicodeError) as exc:
+        raise TrackerValidationError(
+            f"unreadable {what} at {str(path)!r}: {type(exc).__name__}: "
+            f"{exc}") from exc
+
+
+def _git_store(repo) -> tuple:
+    """``(gitdir, commondir)`` for one checkout.
+
+    They differ in a linked worktree: per-worktree state (``HEAD``) lives in
+    ``gitdir`` and the shared refs live in ``commondir``, so a resolver that
+    knew only one of the two would read either the wrong ``HEAD`` or no
+    branches at all.
+    """
+    root = Path(repo)
+    pointer = root / _GIT_DIRNAME
+    try:
+        is_directory = pointer.is_dir()
+    except OSError as exc:
+        raise TrackerValidationError(
+            f"the repository at {str(root)!r} cannot be examined "
+            f"({type(exc).__name__}: {exc})") from exc
+    if is_directory:
+        gitdir = pointer
+    else:
+        text = _ref_text(pointer, "the .git pointer")
+        if text is None or not text.startswith(_GITDIR_PREFIX):
+            raise TrackerValidationError(
+                f"{str(root)!r} is not a git repository: it carries no {_GIT_DIRNAME} "
+                "directory and no gitdir pointer, so no reference in it resolves")
+        gitdir = _relative_to(root, text[len(_GITDIR_PREFIX):].strip())
+    common = _ref_text(gitdir / _COMMONDIR_FILE, "the git commondir pointer")
+    return gitdir, gitdir if common is None else _relative_to(gitdir, common.strip())
+
+
+def _relative_to(base: Path, value: str) -> Path:
+    """One git pointer file's payload, which may be absolute or base-relative."""
+    if not value:
+        raise TrackerValidationError(
+            f"an empty git directory pointer under {str(base)!r} names nothing")
+    pointed = Path(value)
+    return pointed if pointed.is_absolute() else base / pointed
+
+
+def _ref_candidates(name: str) -> tuple:
+    """The ordered names git would try for one reference."""
+    if name.startswith(_REF_NAMESPACES[0]) or name in _PSEUDO_REFS:
+        return (name,)
+    return tuple(f"{space}{name}" for space in _REF_NAMESPACES) + (
+        f"{_REF_NAMESPACES[3]}{name}/HEAD",)
+
+
+def _packed_ref(common: Path, name: str):
+    """One entry from ``packed-refs``, PEELED where the file peeled it.
+
+    ``git pack-refs`` DELETES the loose file, so a resolver that read only
+    ``refs/heads/<name>`` would report an entirely ordinary repository as having
+    no target branch. An annotated tag's line is followed by a ``^<sha>`` line
+    carrying the commit it points at, which is what ``<ref>^{commit}`` means.
+    """
+    text = _ref_text(common / _PACKED_REFS_FILE, "the git packed-refs file")
+    if text is None:
+        return None
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if not line or line.startswith((_COMMENT_PREFIX, _PEEL_PREFIX)):
+            continue
+        parts = line.split(" ", 1)
+        if len(parts) != 2 or parts[1].strip() != name:
+            continue
+        following = lines[index + 1] if index + 1 < len(lines) else ""
+        if following.startswith(_PEEL_PREFIX):
+            return following[len(_PEEL_PREFIX):].strip()
+        return parts[0].strip()
+    return None
+
+
+def _lookup_ref(gitdir: Path, common: Path, name: str):
+    """The raw contents of the first ref file that answers to ``name``.
+
+    Loose before packed FOR EACH CANDIDATE, and never loose-for-all before
+    packed-for-all: a loose ``refs/heads/x`` is what a packed ``refs/tags/x``
+    loses to, and swapping the nesting would resolve the tag.
+    """
+    for candidate in _ref_candidates(name):
+        for store in (gitdir, common):
+            text = _ref_text(store / candidate, f"the git ref {candidate!r}")
+            if text is not None and text.strip():
+                return text.strip()
+        packed = _packed_ref(common, candidate)
+        if packed is not None:
+            return packed
+    return None
+
+
+def _resolved_commit(repo, ref: str) -> str:
+    """One reference, resolved to the single 40-character commit it names.
+
+    THE ANSWER IS AN OBJECT NAME OR IT IS A STOP. A symbolic name resolves
+    somewhere else tomorrow, and every range proof this run makes has this value
+    as one of its ends, so anything that does not come back as a full object
+    name is refused rather than recorded.
+    """
+    name = _ref_name(ref)
+    if _COMMIT.fullmatch(name):
+        return name
+    gitdir, common = _git_store(repo)
+    seen = [name]
+    for _ in range(_SYMREF_LIMIT):
+        value = _lookup_ref(gitdir, common, name)
+        if value is None:
+            raise TrackerValidationError(
+                f"reference {ref!r} names no reference in the repository at "
+                f"{str(repo)!r}; a baseline that cannot be resolved is one end "
+                "of a range proof that has no end")
+        if value.startswith(_SYMREF_PREFIX):
+            name = _ref_name(value[len(_SYMREF_PREFIX):].strip())
+            if name in seen:
+                raise TrackerValidationError(
+                    f"reference {ref!r} is a symbolic-ref cycle through "
+                    f"{name!r}; following it is a hang rather than an answer")
+            seen.append(name)
+            continue
+        if not _COMMIT.fullmatch(value):
+            raise TrackerValidationError(
+                f"reference {ref!r} resolves to {value!r}, which is not one "
+                "40-character object name")
+        return value
+    raise TrackerValidationError(
+        f"reference {ref!r} is a symbolic-ref chain deeper than "
+        f"{_SYMREF_LIMIT}; a baseline nobody can reach is not a baseline")
+
+
+# ---------------------------------------------------------------------------
+# P04 Task 6: the approved task definition.
+#
+# THE PLAN IS THE AUTHORITY AND THE ROW IS A MIRROR OF IT. There is no ``Deps``
+# column: dependencies live in the phase-plan metadata and nowhere else, so a
+# row that carried its own copy would be a second, divergable source of truth.
+# Only ``Kind`` is cross-checked, because ``Kind`` is what decides whether a
+# reservation persists a baseline at all.
+# ---------------------------------------------------------------------------
+
+def _phase_plan_path(tracker: dict, phase_id) -> Path:
+    """The approved phase plan for one phase, as an absolute path.
+
+    ``phase_plans`` and ``## Phases`` are written in ONE transition by
+    ``import_phase_plan``, in the same order, which is what makes "the entry at
+    that phase's index" a fact rather than a convention. The length check is
+    what notices if that ever stops being true.
+    """
+    paths = _csv(_run_field(tracker, "phase_plans"))
+    phase_ids = [row["id"] for row in tracker.get("phases", ()) or ()]
+    if len(paths) != len(phase_ids) or not _member(phase_id, phase_ids):
+        raise TrackerValidationError(
+            f"phase {phase_id!r} does not resolve to exactly one approved "
+            f"phase plan: {len(phase_ids)} phase rows against {len(paths)} "
+            "recorded plan paths")
+    try:
+        relative = _safe_relative(paths[phase_ids.index(phase_id)])
+    except PlanMetadataError as exc:
+        raise TrackerValidationError(
+            f"the recorded phase plan for {phase_id!r} is not a usable "
+            f"repository-relative path ({exc})") from exc
+    return _repo_dir(tracker) / relative
+
+
+def _approved_definition(tracker: dict, task_id: str) -> dict:
+    """The phase plan's definition of one task row.
+
+    The brief's signature took ``run_dir`` as well. Nothing here reads it: the
+    plan is found through the RECORDED repository root and the recorded
+    ``phase_plans`` cell, which is exactly the property the run-dir-depth rule
+    exists to protect, and an argument no body reads is an argument a caller
+    can get wrong for free.
+    """
+    row = _task_row(tracker, task_id)
+    plan = _phase_plan_path(tracker, row["phase"])
+    definition = next(
+        (task for task in parse_plan_metadata(plan)["tasks"]
+         if task["id"] == task_id), None)
+    if definition is None:
+        raise TrackerValidationError(
+            f"task {task_id!r} is not defined by the approved phase plan at "
+            f"{str(plan)!r}; a task the plan does not name is work nobody "
+            "approved a write scope for")
+    if row["kind"] != definition["kind"]:
+        raise TrackerValidationError(
+            f"task {task_id!r} records kind {row['kind']!r} and the approved "
+            f"plan declares {definition['kind']!r}; the plan is the authority, "
+            "and the kind is what decides whether a reservation persists the "
+            "baseline every range proof needs")
+    return definition
+
+
+# ---------------------------------------------------------------------------
+# P04 Task 6: importing one approved phase plan.
+#
+# ``initialize_run`` writes the ``## Run`` artifact references and an EMPTY
+# ``## Tasks``, and leaves ``phase_plans`` at ``-`` because stage 07 is what
+# discovers a phase plan. Appending the rows is P04's, because the row set is a
+# projection of the phase-plan metadata grammar and of nothing else.
+# ---------------------------------------------------------------------------
+
+def import_phase_plan(run_dir, *, phase_plan) -> dict:
+    """Append one approved phase plan's phase row, task rows and path.
+
+    ALL THREE IN ONE TRANSITION. ``_phase_plan_path`` reads the ``phase_plans``
+    entry at the phase's own index, so a design that recorded the path in a
+    second transition would have a window in which the two lists disagree --
+    and the tracker would resolve one phase's tasks against another's plan.
+
+    A SECOND IMPORT OF A PHASE RAISES; an immediate re-issue of the SAME
+    transition replays and is inert. The two are different events and P02's
+    replay key is what tells them apart: a controller resuming an interrupted
+    import must not be told its run is corrupt, and a controller importing a
+    phase it already imported must not be told nothing happened.
+    """
+    metadata = parse_plan_metadata(phase_plan)
+    phase_id = metadata["phase"]["id"]
+
+    def mutate(tracker: dict) -> dict:
+        root = _repo_dir(tracker)
+        try:
+            relative = Path(phase_plan).resolve().relative_to(root).as_posix()
+        except (ValueError, OSError, RuntimeError) as exc:
+            raise TrackerValidationError(
+                f"the phase plan at {str(phase_plan)!r} is not inside the "
+                f"recorded repository root {str(root)!r}, so it has no "
+                "repository-relative spelling to record") from exc
+        try:
+            _safe_relative(relative)
+        except PlanMetadataError as exc:
+            raise TrackerValidationError(
+                f"the phase plan path {relative!r} cannot be held in a tracker "
+                f"cell ({exc})") from exc
+        if any(row["id"] == phase_id for row in tracker["phases"]):
+            raise TrackerValidationError(
+                f"phase {phase_id} is already imported; a second import would "
+                "give one phase two review classes and its tasks two rows")
+        seen = {row["id"] for row in tracker["tasks"]}
+        phase = {column: _ABSENT_CELL for column in section_columns("phases")}
+        phase.update({
+            _key("ID"): phase_id,
+            _key("State"): "[ ]",
+            _key("Review Class"): metadata["phase"]["review_class"],
+            _key("Class Source"): "plan",
+        })
+        append_row(tracker, "phases", phase)
+        for task in metadata["tasks"]:
+            if task["id"] in seen:
+                raise TrackerValidationError(
+                    f"duplicate task id {task['id']!r}: a row in this tracker "
+                    "already carries it, so two approved phase plans disagree "
+                    "about which phase owns it")
+            seen.add(task["id"])
+            row = {column: _ABSENT_CELL for column in section_columns("tasks")}
+            row.update({
+                _key("ID"): task["id"],
+                _key("Phase"): phase_id,
+                _key("Kind"): task["kind"],
+                _key("State"): "[ ]",
+                _key("Provisional"): "no",
+            })
+            append_row(tracker, "tasks", row)
+        tracker["run"]["phase_plans"] = _append_history(
+            tracker["run"]["phase_plans"], relative)
+        return tracker
+
+    return locked_tracker_update(
+        run_dir, transition_id=f"import-phase-plan-{phase_id}", mutate=mutate)
+
+
+# ---------------------------------------------------------------------------
+# P04 Task 6: the reservation guards -- faults F1 and F2.
+# ---------------------------------------------------------------------------
+
+def _require_dependencies_complete(tracker: dict, definition: dict) -> None:
+    for dependency in definition["deps"]:
+        if _task_row(tracker, dependency)["state"] != "[x]":
+            raise TrackerValidationError(
+                f"dependency {dependency} of task {definition['id']} is not "
+                "complete; the plan integrates it first, and starting the "
+                "dependent now builds on work that may still change")
+
+
+def _require_no_scope_conflict(tracker: dict, definition: dict) -> None:
+    """F1: two tasks whose write scopes intersect are never active together.
+
+    SPARE CAPACITY NEVER OVERRIDES THIS. Capacity is about how many tasks may
+    run; this is about which two may not, and under plain equality ``tree:src``
+    and ``file:src/a.py`` are different strings, reserve together, and two
+    implementers open the same file in two worktrees.
+    """
+    for row in tracker.get("tasks", ()) or ():
+        if (row["id"] == definition["id"]
+                or not _member(row["state"], _OCCUPYING_STATES)):
+            continue
+        other = _approved_definition(tracker, row["id"])
+        if _scope_sets_overlap(definition["write_scope"], other["write_scope"]):
+            raise TrackerValidationError(
+                f"write scope conflict: {definition['id']} "
+                f"{list(definition['write_scope'])} overlaps active "
+                f"{other['id']} {list(other['write_scope'])}")
+
+
+def _require_capacity(tracker: dict, owner: str) -> None:
+    """F2: three slots stay free for the quorum that unblocks a blocked task.
+
+    TWO BOUNDS, AND THE SECOND IS NOT THE FIRST RESTATED. The cap bounds
+    implementation tasks; ``worker_limit`` bounds everyone, brains included. A
+    single in-flight quorum leaves the second dominated by the first, but the
+    schema permits more than one, and with two in flight a run can be under its
+    implementation cap and over its total.
+    """
+    limit = int(_run_field(tracker, "worker_limit"))
+    cap = implementation_slot_cap(limit)
+    owners = _implementation_owners(tracker)
+    if owner not in owners and len(owners) + 1 > cap:
+        raise TrackerValidationError(
+            f"implementation slots exhausted: {len(owners)} of {cap} in use "
+            f"(worker_limit {limit} minus {QUORUM_SLOT_RESERVE} held for a "
+            "quorum). Reserving past the cap deadlocks the run permanently: a "
+            "blocked task holds the slot the brains that would unblock it need")
+    if len(_active_owners(tracker) | {owner}) > limit:
+        raise TrackerValidationError(
+            f"global worker_limit {limit} is exhausted, counting the owners an "
+            "in-flight quorum holds as well as the implementation tasks")
+
+
+def _validate_assignment(task_id, owner, attempt) -> str:
+    """The three identity arguments, screened before the lock is ever taken.
+
+    IT RETURNS THE ATTEMPT TOKEN rather than checking the attempt and leaving
+    the caller to convert it. The two spellings were written side by side and
+    the screen was then DOMINATED by the conversion one line below it -- a
+    mutant deleting it changed nothing, because ``_attempt_token`` is total and
+    raising and the caller needed its result anyway. Returning the value is what
+    makes the single conversion point a single CALL.
+
+    ``_OWNER`` rather than ``_TOKEN``: the owner grammar is already pinned --
+    P03 writes owner ids into response FILENAMES, and the 64-character bound and
+    the trailing-dot rule are about exactly that. Re-deriving it from ``_TOKEN``
+    here would admit ``/``, ``:``, ``@`` and ``+`` into a name that becomes a
+    path, and a trailing dot into one that becomes a filename.
+    """
+    if not isinstance(task_id, str) or not _TOKEN.fullmatch(task_id):
+        raise TrackerValidationError(
+            f"invalid task id {task_id!r}: a task id is one token, because it "
+            "is written into a tracker cell and into the replay key of the "
+            "transition that reserves it")
+    if not isinstance(owner, str) or not _OWNER.fullmatch(owner):
+        raise TrackerValidationError(
+            f"invalid owner {owner!r}: an owner is one bounded identifier "
+            "token, because it is written into a table cell and into the "
+            "name of the file that carries this worker's answer")
+    return _attempt_token(attempt)
+
+
+def reserve_task(run_dir, *, task_id: str, owner: str, attempt: int) -> dict:
+    """Persist the first ``[ ] -> [~]`` assignment, with its baseline.
+
+    THE BASELINE IS THE TARGET TIP AT RESERVATION, and it is persisted here
+    rather than derived later. ``HEAD~1`` silently truncates a multi-commit task
+    to its last commit and every earlier commit escapes every scope and range
+    check; the run's own ``base_commit`` is equally wrong in the other
+    direction, because tasks integrated before this one are already in the
+    target and would be charged to this task's range.
+
+    An ARTIFACT task records none: it produces no source range, so a baseline
+    would be one end of a proof that is never drawn.
+    """
+    token = _validate_assignment(task_id, owner, attempt)
+
+    def mutate(tracker: dict) -> dict:
+        row = _task_row(tracker, task_id)
+        if row["state"] != "[ ]":
+            raise TrackerValidationError(
+                f"reserve_task handles the first start only; task {task_id} is "
+                f"{row['state']!r}, and a re-assignment carries a decision "
+                "reference that this transition has nowhere to put")
+        definition = _approved_definition(tracker, task_id)
+        _require_dependencies_complete(tracker, definition)
+        _require_no_scope_conflict(tracker, definition)
+        _require_capacity(tracker, owner)
+        checkpoint = f"started:{token}"
+        if definition["kind"] == TASK_KINDS[0]:
+            baseline = _resolved_commit(
+                _repo_dir(tracker), _run_field(tracker, "target_branch"))
+            checkpoint = f"{checkpoint},baseline:{token}@{baseline}"
+        updated = dict(row)
+        updated.update({
+            _key("State"): "[~]",
+            _key("Owner"): owner,
+            _key("Attempt"): token,
+            _key("Checkpoints"): _append_history(row["checkpoints"], checkpoint),
+        })
+        return _replace_task(tracker, updated)
+
+    return locked_tracker_update(
+        run_dir, transition_id=f"reserve-{task_id}-{attempt}", mutate=mutate)

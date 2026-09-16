@@ -26,6 +26,7 @@ import json
 import os
 import re
 import signal
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -6671,6 +6672,1143 @@ class EvidenceModuleBoundaryTests(unittest.TestCase):
                 with self.assertRaises(state.TrackerValidationError):
                     state.parse_verification_evidence(text)
 
+
+
+# --------------------------------------------------------------------------
+# Task 6: the run harness -- reused by tasks 6 through 12.
+#
+# `subprocess` is imported HERE and not in the module. The tests drive a real
+# git repository because a fake one would prove nothing about the ref store
+# the module reads; the module itself may not import `subprocess` at all --
+# `ALLOWED_IMPORTS` is twelve names and command execution is the single
+# capability that boundary most exists to withhold.
+# --------------------------------------------------------------------------
+
+#: A legal payload/context digest for a quorum row. Sixty-four lowercase hex
+#: characters, and deliberately NOT a digest of anything: `_validate_quorum`
+#: checks the SHAPE, and a value computed by the module under test would let
+#: the fixture agree with the code by construction.
+FAKE_DIGEST = "5e" * 32
+OTHER_DIGEST = "a7" * 32
+#: A question-record reference a blocked task can name. `_validate_tasks` asks
+#: only that a `[?]` row's Question cell is not the absence marker.
+QUESTION_REF = f"quorum:docs/q.md#sha256={'3c' * 32}"
+
+
+def git(repo, *args: str) -> str:
+    return subprocess.run(
+        ("git", "-C", str(repo), *args),
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+def make_repo(root) -> Path:
+    repo = Path(root) / "repo"
+    repo.mkdir(parents=True)
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "test@example.invalid")
+    git(repo, "config", "user.name", "test")
+    (repo / "src").mkdir()
+    (repo / "src" / "seed.py").write_text("seed = 1\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "seed")
+    #: `target` is moved ONE COMMIT PAST the run's base_commit on purpose. The
+    #: reservation baseline is the tip of the target branch AT RESERVATION, and
+    #: a fixture where the two coincide cannot tell that rule from
+    #: "the baseline is base_commit" -- which is the F3 shape arriving through
+    #: a fixture rather than through the code.
+    (repo / "src" / "seed.py").write_text("seed = 2\n", encoding="utf-8")
+    git(repo, "commit", "-qam", "second")
+    git(repo, "branch", "-f", "target", "HEAD")
+    git(repo, "checkout", "-q", "main")
+    git(repo, "reset", "-q", "--hard", "HEAD~1")
+    return repo
+
+
+def make_run(root, tasks_body: str, *, worker_limit: int = 4, import_plan: bool = True):
+    """Return (repo, run_dir, phase_plan).
+
+    `initialize_run` is P02's and takes no artifact-reference arguments: it
+    writes `decisions`, `findings` and `repo_root` itself and leaves
+    `phase_plans` at `-`, because stage 07 is what discovers a phase plan.
+    `import_phase_plan` -- P04's -- is what records the path, in the same
+    transition that appends the phase row it indexes against.
+    """
+    repo = make_repo(root)
+    run_dir = repo / "docs" / "superpowers" / "runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    plan = write_phase_plan(run_dir, tasks_body)
+    state.initialize_run(
+        run_dir, run_id="run-1", base_commit=git(repo, "rev-parse", "HEAD"),
+        target_branch="target", worker_limit=worker_limit, repo_root=str(repo),
+    )
+    if import_plan:
+        state.import_phase_plan(run_dir, phase_plan=plan)
+    return repo, run_dir, plan
+
+
+def three_disjoint_tasks() -> str:
+    return n_disjoint_tasks(3)
+
+
+def n_disjoint_tasks(count: int) -> str:
+    return "".join(
+        task_block(f"T{index}", order=index, batch=f"b{index}",
+                   write_scope=f"file:src/a{index}.py")
+        for index in range(1, count + 1)
+    )
+
+
+def blank_row(section: str) -> dict:
+    """An all-'-' row with exactly P02's committed columns for that section."""
+    return {state._key(column): "-" for column in state.section_columns(section)}
+
+
+def bump(run_dir, transition: str = "test-bump") -> dict:
+    """One durable transition that changes nothing.
+
+    It exists so a test can ask for a SECOND call of a transition rather than a
+    REPLAY of the first: `locked_tracker_update` recognises a replay by
+    comparing against `last_transition`, so only the most recent transition
+    replays, and the two behaviours are otherwise impossible to tell apart.
+    """
+    return state.locked_tracker_update(
+        run_dir, transition_id=transition, mutate=lambda tracker: tracker)
+
+
+def open_quorum_row(run_dir, owners=("brain-1", "brain-2", "brain-3"),
+                    *, qid="3f2a1b0c9d8e", quorum_state="in_flight",
+                    transition="test-open-quorum") -> None:
+    """Stand in for P03's `open_quorum`: one record with three owners."""
+    def mutate(tracker: dict) -> dict:
+        row = blank_row("quorum")
+        row.update(qid=qid, axis="new", phase="P04", state=quorum_state,
+                   owners=",".join(owners), payload_digest=FAKE_DIGEST,
+                   context_digest=OTHER_DIGEST)
+        if quorum_state == "finalized":
+            row.update(outcome="escalated", depth="1")
+        return state.append_row(tracker, "quorum", row)
+
+    state.locked_tracker_update(run_dir, transition_id=transition, mutate=mutate)
+
+
+def task_row(tracker: dict, task_id: str) -> dict:
+    return next(row for row in tracker["tasks"] if row["id"] == task_id)
+
+
+def set_task_state(run_dir, task_id: str, transition: str, **fields) -> None:
+    def mutate(tracker: dict) -> dict:
+        task_row(tracker, task_id).update(fields)
+        return tracker
+
+    state.locked_tracker_update(
+        run_dir, transition_id=transition, mutate=mutate)
+
+
+# --------------------------------------------------------------------------
+# Task 6 tests -- the tracker accessors.
+#
+# The first two are the Produces-block check, executable. The brief named
+# `_field` and `_csv` as Task 6 products; both are P02's, and a module-level
+# redefinition rebinds the global for every existing caller.
+# --------------------------------------------------------------------------
+
+class TrackerAccessorTests(unittest.TestCase):
+
+    def test_field_is_still_p02s_one_argument_header_to_key_map(self):
+        """`_field` was named as a Task 6 product with the signature
+        `_field(row, column)`. It is P02's `_field(column)`, read at every
+        section-column site in the module, and a two-argument redefinition
+        would move all of them at once."""
+        self.assertEqual(state._field("Source Ref"), "source_ref")
+        self.assertEqual(state._field("Payload Digest"), "payload_digest")
+        self.assertEqual(state._field("Re-review"), "re_review")
+        with self.assertRaises(TypeError):
+            state._field({"id": "T1"}, "ID")
+
+    def test_key_is_p02s_map_under_a_second_name_not_a_second_copy(self):
+        """A copy would be a second answer to 'what is this column called',
+        free to drift from the one `parse_tracker` and `append_row` use."""
+        self.assertIs(state._key, state._field)
+
+    def test_key_is_idempotent_over_an_already_keyed_column(self):
+        """`section_columns` returns KEYS, not display headers, so every
+        caller below applies `_key` to something already keyed."""
+        for section in state.SECTIONS:
+            for column in state.section_columns(section):
+                with self.subTest(section=section, column=column):
+                    self.assertEqual(state._key(column), column)
+
+    def test_csv_is_still_p02s_cell_reader(self):
+        """`_csv` was named as a Task 6 product too, with `-` and `''` folded
+        together. P02's distinguishes them, and `_cell_list` relies on it:
+        `-` is an empty cell and `''` is one nameless member."""
+        self.assertEqual(state._csv("-"), ())
+        self.assertEqual(state._csv("a,b"), ("a", "b"))
+        self.assertEqual(state._csv(" a , b "), ("a", "b"))
+        self.assertEqual(state._csv(""), ("",))
+
+    def test_attempt_token_is_still_task_4s_single_conversion_point(self):
+        self.assertEqual(state._attempt_token(1), "attempt-001")
+        self.assertEqual(state._attempt_token(1000), "attempt-1000")
+        with self.assertRaises(state.TrackerValidationError):
+            state._attempt_token(10 ** state._MAX_ATTEMPT_DIGITS)
+
+    def test_run_field_reads_a_field_and_names_a_missing_one(self):
+        tracker = {"run": {"worker_limit": "6"}}
+        self.assertEqual(state._run_field(tracker, "worker_limit"), "6")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._run_field(tracker, "phase_plans")
+        self.assertIn("phase_plans", str(caught.exception))
+
+    def test_run_field_refuses_a_tracker_with_no_run_section(self):
+        """A `KeyError`/`TypeError` here would leave this module's exception
+        family, which is what every controller handler is written against."""
+        for tracker in ({}, {"run": None}, {"run": ["worker_limit"]}):
+            with self.subTest(tracker=tracker):
+                with self.assertRaises(state.TrackerValidationError):
+                    state._run_field(tracker, "worker_limit")
+
+    def test_task_row_finds_by_id_and_names_an_unknown_task(self):
+        tracker = {"tasks": [{"id": "T1"}, {"id": "T2"}]}
+        self.assertIs(state._task_row(tracker, "T2"), tracker["tasks"][1])
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._task_row(tracker, "T9")
+        self.assertIn("T9", str(caught.exception))
+
+    def test_replace_task_swaps_exactly_one_row_and_keeps_the_order(self):
+        tracker = {"tasks": [{"id": "T1", "state": "[ ]"},
+                             {"id": "T2", "state": "[ ]"},
+                             {"id": "T3", "state": "[ ]"}]}
+        state._replace_task(tracker, {"id": "T2", "state": "[~]"})
+        self.assertEqual([row["id"] for row in tracker["tasks"]],
+                         ["T1", "T2", "T3"])
+        self.assertEqual([row["state"] for row in tracker["tasks"]],
+                         ["[ ]", "[~]", "[ ]"])
+
+    def test_replace_task_refuses_a_replacement_for_no_row(self):
+        """Silently appending nothing would leave the caller's edit lost and
+        the transition reported as applied."""
+        tracker = {"tasks": [{"id": "T1", "state": "[ ]"}]}
+        with self.assertRaises(state.TrackerValidationError):
+            state._replace_task(tracker, {"id": "T9", "state": "[~]"})
+
+    def test_append_history_starts_an_empty_cell_and_extends_a_full_one(self):
+        self.assertEqual(state._append_history("-", "started:attempt-001"),
+                         "started:attempt-001")
+        self.assertEqual(state._append_history("", "a"), "a")
+        self.assertEqual(state._append_history("a", "b"), "a,b")
+
+    def test_quorum_owners_counts_only_the_in_flight_rows(self):
+        tracker = {"quorum": [
+            {"state": "in_flight", "owners": "brain-1,brain-2,brain-3"},
+            {"state": "finalized", "owners": "brain-7,brain-8,brain-9"},
+        ]}
+        self.assertEqual(state._quorum_owners(tracker),
+                         {"brain-1", "brain-2", "brain-3"})
+
+    def test_quorum_owners_skips_the_absence_marker_and_an_empty_cell(self):
+        """The filter is over MEMBERS, not over the whole cell. `_csv` already
+        answers `()` for a cell spelled `-`, so a test that only passes `-` as
+        the whole cell cannot see the filter at all -- `a,-,b` and `a,,b` are
+        the spellings that would otherwise enter the set as owner names."""
+        self.assertEqual(
+            state._quorum_owners({"quorum": [{"state": "in_flight",
+                                              "owners": "-"}]}),
+            set())
+        self.assertEqual(
+            state._quorum_owners({"quorum": [{"state": "in_flight",
+                                              "owners": "brain-1,-,brain-2"}]}),
+            {"brain-1", "brain-2"})
+        self.assertEqual(
+            state._quorum_owners({"quorum": [{"state": "in_flight",
+                                              "owners": "brain-1,,brain-2"}]}),
+            {"brain-1", "brain-2"})
+
+    def test_quorum_owners_answers_an_empty_and_an_absent_section(self):
+        self.assertEqual(state._quorum_owners({"quorum": []}), set())
+        self.assertEqual(state._quorum_owners({}), set())
+
+    def test_implementation_owners_counts_running_and_blocked_alike(self):
+        """A blocked `[?]` task still occupies its implementation slot: the
+        worker holding it has not been released, which is the whole reason
+        three slots are held back for the quorum that would unblock it."""
+        tracker = {"tasks": [
+            {"id": "T1", "state": "[~]", "owner": "impl-1"},
+            {"id": "T2", "state": "[?]", "owner": "impl-2"},
+            {"id": "T3", "state": "[x]", "owner": "impl-3"},
+            {"id": "T4", "state": "[ ]", "owner": "-"},
+        ]}
+        self.assertEqual(state._implementation_owners(tracker),
+                         {"impl-1", "impl-2"})
+
+    def test_implementation_owners_never_counts_the_absence_marker(self):
+        """P02's `_validate_tasks` refuses a started row with no owner, so a
+        VALIDATED tracker cannot produce this -- the screen is a hedge over an
+        unvalidated caller, and the hedge is pinned here so that deleting it is
+        a failing test rather than a silent widening. `-` counted as an owner
+        would consume a slot for a worker that does not exist."""
+        tracker = {"tasks": [{"id": "T1", "state": "[~]", "owner": "-"},
+                             {"id": "T2", "state": "[?]", "owner": "impl-2"}]}
+        self.assertEqual(state._implementation_owners(tracker), {"impl-2"})
+
+    def test_active_owners_is_the_union_of_both_populations(self):
+        tracker = {
+            "tasks": [{"id": "T1", "state": "[~]", "owner": "impl-1"}],
+            "quorum": [{"state": "in_flight",
+                        "owners": "brain-1,brain-2,brain-3"}],
+        }
+        self.assertEqual(
+            state._active_owners(tracker),
+            {"impl-1", "brain-1", "brain-2", "brain-3"})
+
+
+# --------------------------------------------------------------------------
+# Task 6 tests -- fault F2: the slot cap.
+# --------------------------------------------------------------------------
+
+class SlotCapTests(unittest.TestCase):
+
+    def test_cap_holds_three_slots_for_a_quorum(self):
+        self.assertEqual(state.QUORUM_SLOT_RESERVE, 3)
+        self.assertEqual(state.implementation_slot_cap(4), 1)
+        self.assertEqual(state.implementation_slot_cap(6), 3)
+        self.assertEqual(state.implementation_slot_cap(10), 7)
+
+    def test_cap_floors_at_one_so_tasks_serialise_rather_than_stall(self):
+        # Below four the cap floors at ONE, not zero: tasks serialise and the
+        # brain slots stay free. Flooring at zero would stop the run instead.
+        self.assertEqual(state.implementation_slot_cap(3), 1)
+        self.assertEqual(state.implementation_slot_cap(1), 1)
+
+    def test_the_cap_is_never_the_limit_itself_above_the_floor(self):
+        """The F2 shape stated as a property rather than as three remembered
+        numbers: above the point where the floor binds, the cap is strictly
+        below `worker_limit` by exactly the reserve."""
+        for limit in range(4, 40):
+            with self.subTest(limit=limit):
+                cap = state.implementation_slot_cap(limit)
+                self.assertEqual(limit - cap, state.QUORUM_SLOT_RESERVE)
+                self.assertLess(cap, limit)
+
+    def test_cap_rejects_a_nonpositive_or_wrong_typed_limit(self):
+        for value in (0, -1, True, False, "4", 4.0, None, [4], {"a": 1}):
+            with self.subTest(value=value):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.implementation_slot_cap(value)
+
+
+# --------------------------------------------------------------------------
+# Task 6 tests -- resolving a ref without `subprocess`.
+#
+# `_git` and `_git_out` were named as Task 6 products as `subprocess` wrappers.
+# `subprocess` is not in `ALLOWED_IMPORTS` and the master plan refuses it by
+# name, so the ref store is read directly -- the same translation the plans'
+# `re.compile` screens get, for the same reason.
+# --------------------------------------------------------------------------
+
+class GitRefResolutionTests(TempDirTestCase):
+
+    def repo(self) -> Path:
+        return make_repo(self.tmp)
+
+    def test_a_loose_branch_ref_resolves_to_its_commit(self):
+        repo = self.repo()
+        self.assertEqual(state._resolved_commit(repo, "target"),
+                         git(repo, "rev-parse", "target"))
+
+    def test_a_packed_branch_ref_resolves_to_the_same_commit(self):
+        """`git pack-refs` deletes the loose file. A resolver that only read
+        `refs/heads/<name>` would report a perfectly ordinary repository as
+        having no target branch."""
+        repo = self.repo()
+        expected = git(repo, "rev-parse", "target")
+        git(repo, "pack-refs", "--all")
+        self.assertFalse((repo / ".git" / "refs" / "heads" / "target").exists())
+        self.assertEqual(state._resolved_commit(repo, "target"), expected)
+
+    def test_a_fully_qualified_ref_resolves(self):
+        repo = self.repo()
+        self.assertEqual(state._resolved_commit(repo, "refs/heads/target"),
+                         git(repo, "rev-parse", "target"))
+
+    def test_head_is_chased_through_its_symref(self):
+        repo = self.repo()
+        self.assertEqual(state._resolved_commit(repo, "HEAD"),
+                         git(repo, "rev-parse", "HEAD"))
+
+    def test_a_full_object_name_resolves_to_itself(self):
+        repo = self.repo()
+        commit = git(repo, "rev-parse", "target")
+        self.assertEqual(state._resolved_commit(repo, commit), commit)
+
+    def test_an_unknown_ref_is_a_stop_that_names_it(self):
+        repo = self.repo()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._resolved_commit(repo, "no-such-branch")
+        self.assertIn("no-such-branch", str(caught.exception))
+
+    def test_a_repository_with_no_git_directory_is_a_stop(self):
+        plain = self.tmp / "plain"
+        plain.mkdir()
+        with self.assertRaises(state.TrackerValidationError):
+            state._resolved_commit(plain, "target")
+
+    def test_a_dot_git_FILE_is_followed_to_the_real_git_directory(self):
+        """A per-implementer worktree is the whole integration topology of this
+        phase, and in one `.git` is a FILE holding `gitdir: <path>`. A resolver
+        that required a directory would refuse every worktree the run makes."""
+        repo = self.repo()
+        expected = git(repo, "rev-parse", "target")
+        worktree = self.tmp / "wt"
+        git(repo, "worktree", "add", "-q", "--detach", str(worktree), "target")
+        self.addCleanup(git, repo, "worktree", "remove", "--force", str(worktree))
+        self.assertTrue((worktree / ".git").is_file())
+        self.assertEqual(state._resolved_commit(worktree, "target"), expected)
+
+    def test_a_ref_name_that_traverses_out_of_the_store_is_refused(self):
+        """`_TOKEN` admits `/`, so `target_branch` could be spelled
+        `a/../../../../etc/passwd` and still pass every cell grammar; the ref
+        lookup is what has to refuse it."""
+        repo = self.repo()
+        for name in ("a/../../config", "a//b", "a/./b", "a/ b", ".hidden/x",
+                     "refs/../config", "a/..", ".."):
+            with self.subTest(name=name):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state._resolved_commit(repo, name)
+                #: THE DIAGNOSIS, not the family. Without the screen
+                #: `refs/a/../../config` normalises onto `.git/config`, which
+                #: is a real readable file whose contents are not an object
+                #: name -- so the resolver still raises, from one function
+                #: further on, having read a file outside the ref store.
+                self.assertIn("unusable git reference", str(caught.exception))
+                self.assertNotIn("names no reference", str(caught.exception))
+                self.assertNotIn("40-character object name",
+                                 str(caught.exception))
+
+    def test_a_ref_whose_file_is_a_directory_is_corruption_not_absence(self):
+        """`is_file()` never means 'there is nothing here'."""
+        repo = self.repo()
+        (repo / ".git" / "refs" / "heads" / "shaped").mkdir()
+        with self.assertRaises(state.TrackerError):
+            state._resolved_commit(repo, "shaped")
+
+    def test_a_ref_whose_file_is_a_fifo_does_not_hang_the_run(self):
+        """A FIFO opened for reading BLOCKS until a writer arrives, and under
+        the run lock no writer is coming. The shape is asked before the open."""
+        repo = self.repo()
+        os.mkfifo(repo / ".git" / "refs" / "heads" / "piped")
+
+        def alarm(signum, frame):
+            raise AssertionError("_resolved_commit blocked on a FIFO")
+
+        previous = signal.signal(signal.SIGALRM, alarm)
+        self.addCleanup(signal.signal, signal.SIGALRM, previous)
+        signal.alarm(5)
+        try:
+            with self.assertRaises(state.TrackerError):
+                state._resolved_commit(repo, "piped")
+        finally:
+            signal.alarm(0)
+
+    def test_a_symref_cycle_is_bounded_rather_than_looping(self):
+        repo = self.repo()
+        (repo / ".git" / "refs" / "heads" / "ping").write_text(
+            "ref: refs/heads/pong\n", encoding="utf-8")
+        (repo / ".git" / "refs" / "heads" / "pong").write_text(
+            "ref: refs/heads/ping\n", encoding="utf-8")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._resolved_commit(repo, "ping")
+        #: The depth bound refuses this input too, so the family alone proves
+        #: nothing: a cycle must be named a cycle, or the bound is doing the
+        #: work and the check that names the loop can be deleted unnoticed.
+        self.assertIn("cycle", str(caught.exception))
+        self.assertNotIn("deeper than", str(caught.exception))
+
+    def test_a_ref_holding_something_that_is_not_an_object_name_is_refused(self):
+        repo = self.repo()
+        (repo / ".git" / "refs" / "heads" / "junk").write_text(
+            "not a commit\n", encoding="utf-8")
+        with self.assertRaises(state.TrackerValidationError):
+            state._resolved_commit(repo, "junk")
+
+    def test_a_ref_under_a_branch_that_is_a_file_is_absent_not_corruption(self):
+        """`refs/heads/target` is a FILE, so `refs/heads/target/sub` raises
+        `ENOTDIR` -- which `is_file()` swallows and `lexists` answers False to,
+        so `_require_regular_file` stays silent and the read is what meets it.
+
+        `NotADirectoryError` is one of the two spellings of "not there", the
+        same ruling `_require_regular_file`'s own split records. Dropping it
+        from the absence arm turns every ref whose parent is a branch name into
+        repository corruption, and a controller asking for a branch that simply
+        does not exist gets told its repository is damaged."""
+        repo = self.repo()
+        self.assertTrue((repo / ".git" / "refs" / "heads" / "target").is_file())
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._resolved_commit(repo, "target/sub")
+        self.assertIn("names no reference", str(caught.exception))
+        self.assertNotIn("cannot read", str(caught.exception))
+        self.assertNotIn("unreadable", str(caught.exception))
+
+    def test_a_ref_that_is_not_utf8_is_unreadable_rather_than_absent(self):
+        """`_require_regular_file` lets a regular file through, so the read is
+        where a non-UTF-8 ref surfaces. Reporting it as absent would say the
+        branch does not exist, and a run would start a task against a baseline
+        it had silently failed to read."""
+        repo = self.repo()
+        (repo / ".git" / "refs" / "heads" / "mojibake").write_bytes(b"\xff\xfe\n")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._resolved_commit(repo, "mojibake")
+        self.assertIn("unreadable", str(caught.exception))
+        self.assertNotIn("names no reference", str(caught.exception))
+
+    def test_an_annotated_tag_peels_to_its_commit(self):
+        repo = self.repo()
+        git(repo, "tag", "-a", "v1", "-m", "release", "target")
+        git(repo, "pack-refs", "--all")
+        self.assertEqual(state._resolved_commit(repo, "v1"),
+                         git(repo, "rev-parse", "v1^{commit}"))
+
+    def test_the_search_order_prefers_a_branch_over_a_remote(self):
+        """gitrevisions searches `refs/heads/<name>` before
+        `refs/remotes/<name>`; a resolver that reversed them would silently
+        review a stale fetched tip."""
+        repo = self.repo()
+        branch = git(repo, "rev-parse", "target")
+        remote = repo / ".git" / "refs" / "remotes" / "target"
+        remote.parent.mkdir(parents=True, exist_ok=True)
+        remote.write_text(git(repo, "rev-parse", "main") + "\n", encoding="utf-8")
+        self.assertNotEqual(branch, git(repo, "rev-parse", "main"))
+        self.assertEqual(state._resolved_commit(repo, "target"), branch)
+
+
+# --------------------------------------------------------------------------
+# Task 6 tests -- importing one approved phase plan.
+# --------------------------------------------------------------------------
+
+class ImportPhasePlanTests(TempDirTestCase):
+
+    def test_appends_one_row_per_planned_task_with_the_committed_columns(self):
+        repo, run_dir, plan = make_run(self.tmp, three_disjoint_tasks())
+        tracker = state.validate_run(run_dir)
+        self.assertEqual([row["id"] for row in tracker["tasks"]],
+                         ["T1", "T2", "T3"])
+        expected = set(state.section_columns("tasks"))
+        for row in tracker["tasks"]:
+            with self.subTest(task=row["id"]):
+                self.assertEqual(set(row), expected)
+                self.assertEqual(row["state"], "[ ]")
+                self.assertEqual(row["phase"], "P04")
+                self.assertEqual(row["kind"], "source")
+                self.assertEqual(row["owner"], "-")
+                self.assertEqual(row["attempt"], "-")
+                self.assertEqual(row["provisional"], "no")
+
+    def test_an_artifact_task_keeps_its_declared_kind(self):
+        """A fixture of three source tasks cannot tell `row["kind"] = kind`
+        from `row["kind"] = "source"`."""
+        body = (task_block("T1", order=1, batch="b1", write_scope="file:src/a.py")
+                + task_block("T2", order=2, batch="b2", kind="artifact",
+                             write_scope="tree:docs", outputs="docs/out.md"))
+        repo, run_dir, plan = make_run(self.tmp, body, worker_limit=6)
+        tracker = state.validate_run(run_dir)
+        self.assertEqual([row["kind"] for row in tracker["tasks"]],
+                         ["source", "artifact"])
+
+    def test_task_rows_carry_no_dependency_column(self):
+        """Dependencies live in the phase plan and nowhere else; a second copy
+        on the row would be a divergable source of truth."""
+        repo, run_dir, plan = make_run(self.tmp, three_disjoint_tasks())
+        tracker = state.validate_run(run_dir)
+        self.assertNotIn("deps", tracker["tasks"][0])
+        self.assertNotIn("dependencies", tracker["tasks"][0])
+
+    def test_records_the_phase_with_its_plan_declared_review_class(self):
+        repo, run_dir, plan = make_run(self.tmp, three_disjoint_tasks())
+        tracker = state.validate_run(run_dir)
+        phase = next(row for row in tracker["phases"] if row["id"] == "P04")
+        self.assertEqual(phase["review_class"], "required")
+        self.assertEqual(phase["class_source"], "plan")
+        self.assertEqual(phase["ratchet"], "-")
+        self.assertEqual(phase["state"], "[ ]")
+
+    def test_a_final_only_plan_is_mirrored_rather_than_defaulted(self):
+        """With every fixture declaring `required`, `row[...] = "required"`
+        passes -- and the dial would then be a constant."""
+        repo = make_repo(self.tmp)
+        run_dir = repo / "docs" / "superpowers" / "runs" / "run-1"
+        run_dir.mkdir(parents=True)
+        plan = write_phase_plan(run_dir, task_block("T1"),
+                                header=phase_header(review_class="final-only"))
+        state.initialize_run(
+            run_dir, run_id="run-1", base_commit=git(repo, "rev-parse", "HEAD"),
+            target_branch="target", worker_limit=6, repo_root=str(repo))
+        state.import_phase_plan(run_dir, phase_plan=plan)
+        phase = state.validate_run(run_dir)["phases"][0]
+        self.assertEqual(phase["review_class"], "final-only")
+        self.assertEqual(phase["class_source"], "plan")
+
+    def test_records_the_plan_path_against_the_phase_it_imported(self):
+        """`_phase_plan_path` reads the `phase_plans` entry at the phase's own
+        index, so the two lists are written in one transition or they drift."""
+        repo, run_dir, plan = make_run(self.tmp, three_disjoint_tasks())
+        tracker = state.validate_run(run_dir)
+        self.assertEqual(state._run_field(tracker, "phase_plans"),
+                         plan.relative_to(repo).as_posix())
+        self.assertEqual(state._phase_plan_path(tracker, "P04"),
+                         plan.resolve())
+
+    def test_a_second_phase_appends_and_stays_index_aligned(self):
+        repo, run_dir, plan = make_run(self.tmp, three_disjoint_tasks())
+        second = write_phase_plan(
+            run_dir, task_block("U1", write_scope="file:src/u.py"),
+            header=phase_header(phase_id="P05", deps="P04"), name="phase-05.md")
+        state.import_phase_plan(run_dir, phase_plan=second)
+        tracker = state.validate_run(run_dir)
+        self.assertEqual([row["id"] for row in tracker["phases"]],
+                         ["P04", "P05"])
+        self.assertEqual(state._csv(state._run_field(tracker, "phase_plans")),
+                         (plan.relative_to(repo).as_posix(),
+                          second.relative_to(repo).as_posix()))
+        self.assertEqual(state._phase_plan_path(tracker, "P04"), plan.resolve())
+        self.assertEqual(state._phase_plan_path(tracker, "P05"), second.resolve())
+
+    def test_refuses_to_import_the_same_phase_twice(self):
+        repo, run_dir, plan = make_run(self.tmp, three_disjoint_tasks())
+        #: A durable transition in between, so the second import is a SECOND
+        #: CALL and not a REPLAY of the first -- the two are distinguished by
+        #: `last_transition` alone, and only the replay is inert.
+        bump(run_dir)
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.import_phase_plan(run_dir, phase_plan=plan)
+        self.assertIn("P04", str(caught.exception))
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_an_immediate_re_import_replays_and_changes_nothing(self):
+        """The interrupted-controller case, and the one the duplicate refusal
+        above must not be mistaken for: re-issuing the transition that may or
+        may not have landed is how `UpdateOutcomeUncertain` is settled."""
+        repo, run_dir, plan = make_run(self.tmp, three_disjoint_tasks())
+        before = (run_dir / "progress.md").read_bytes()
+        tracker = state.import_phase_plan(run_dir, phase_plan=plan)
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+        self.assertEqual([row["id"] for row in tracker["tasks"]],
+                         ["T1", "T2", "T3"])
+
+    def test_a_malformed_plan_imports_nothing(self):
+        repo = make_repo(self.tmp)
+        run_dir = repo / "docs" / "superpowers" / "runs" / "run-1"
+        run_dir.mkdir(parents=True)
+        plan = write_phase_plan(run_dir, task_block("T1"),
+                                header=phase_header(review_class="medium"))
+        state.initialize_run(
+            run_dir, run_id="run-1", base_commit=git(repo, "rev-parse", "HEAD"),
+            target_branch="target", worker_limit=6, repo_root=str(repo))
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.PlanMetadataError):
+            state.import_phase_plan(run_dir, phase_plan=plan)
+        self.assertEqual(state.validate_run(run_dir)["tasks"], [])
+        self.assertEqual(state.validate_run(run_dir)["phases"], [])
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_a_plan_outside_the_recorded_repository_is_refused(self):
+        """The plan path is recorded as a REPOSITORY-RELATIVE cell, so a plan
+        that is not under the recorded root has no such spelling; guessing one
+        would bind the run to a file nothing else can find again."""
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(),
+                                    import_plan=False)
+        outside = write_phase_plan(self.tmp, task_block("T1"), name="outside.md")
+        with self.assertRaises(state.TrackerValidationError):
+            state.import_phase_plan(run_dir, phase_plan=outside)
+        self.assertEqual(state.validate_run(run_dir)["tasks"], [])
+
+    def test_the_phase_plan_path_is_resolved_against_the_recorded_root(self):
+        """Not against the process working directory, and not by walking up
+        from `run_dir`: a run directory at an unexpected depth would otherwise
+        bind silently to another repository."""
+        repo, run_dir, plan = make_run(self.tmp, three_disjoint_tasks())
+        tracker = state.validate_run(run_dir)
+        self.assertEqual(state._repo_dir(tracker), repo.resolve())
+        self.assertTrue(
+            str(state._phase_plan_path(tracker, "P04")).startswith(
+                str(repo.resolve())))
+
+    def test_a_phase_list_longer_than_the_plan_list_is_a_stop_not_an_IndexError(self):
+        """`import_phase_plan` writes both lists in one transition, so only a
+        hand-edited tracker can put them out of step -- and then
+        `paths[phase_ids.index(...)]` raises `IndexError`, which is outside
+        this module's exception family and escapes every controller handler."""
+        tracker = {"run": {"phase_plans": "docs/p04.md"},
+                   "phases": [{"id": "P04"}, {"id": "P05"}]}
+        for phase_id in ("P04", "P05"):
+            with self.subTest(phase_id=phase_id):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state._phase_plan_path(tracker, phase_id)
+                self.assertIn("approved", str(caught.exception))
+
+    def test_two_phase_plans_may_not_claim_one_task_id(self):
+        """Caught HERE and not only by P02's reparse canary, which refuses the
+        duplicate row for its own reason and says nothing about the plans."""
+        repo, run_dir, plan = make_run(self.tmp, three_disjoint_tasks())
+        second = write_phase_plan(
+            run_dir, task_block("T2", write_scope="file:src/z.py"),
+            header=phase_header(phase_id="P05", deps="P04"), name="phase-05.md")
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.import_phase_plan(run_dir, phase_plan=second)
+        self.assertIn("which phase owns it", str(caught.exception))
+        #: P02's own duplicate-row refusal, which fires at the reparse canary
+        #: if this one is deleted. Its wording must be ABSENT here.
+        self.assertNotIn("which copy the scan reaches first",
+                         str(caught.exception))
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_an_unknown_phase_has_no_approved_plan(self):
+        repo, run_dir, plan = make_run(self.tmp, three_disjoint_tasks())
+        tracker = state.validate_run(run_dir)
+        with self.assertRaises(state.TrackerValidationError):
+            state._phase_plan_path(tracker, "P09")
+
+
+# --------------------------------------------------------------------------
+# Task 6 tests -- faults F1 and F2: reserving a task.
+# --------------------------------------------------------------------------
+
+class ReserveTaskTests(TempDirTestCase):
+
+    def test_worker_limit_four_reserves_one_task_and_a_quorum_still_fits(self):
+        """F2: reserving up to worker_limit deadlocks the run permanently --
+        the blocked task holds the slot needed to dispatch the brains that
+        would unblock it."""
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=4)
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.reserve_task(run_dir, task_id="T2", owner="impl-2", attempt=1)
+        self.assertIn("quorum", str(caught.exception))
+        #: The OTHER refusal's wording must be absent, or this passes on a
+        #: scope conflict between two provably disjoint files.
+        self.assertNotIn("write scope", str(caught.exception))
+
+        tracker = state.validate_run(run_dir)
+        self.assertEqual(
+            [row["id"] for row in tracker["tasks"] if row["state"] == "[~]"], ["T1"]
+        )
+        self.assertEqual(state._implementation_owners(tracker), {"impl-1"})
+
+        # The three held slots are really available: a quorum opened afterwards
+        # takes them and the run sits AT its limit, not over it.
+        open_quorum_row(run_dir)
+        tracker = state.validate_run(run_dir)
+        self.assertEqual(
+            state._quorum_owners(tracker), {"brain-1", "brain-2", "brain-3"}
+        )
+        self.assertEqual(len(state._active_owners(tracker)), 4)
+        self.assertEqual(int(tracker["run"]["worker_limit"]), 4)
+
+        with self.assertRaises(state.TrackerValidationError):
+            state.reserve_task(run_dir, task_id="T2", owner="impl-2", attempt=1)
+
+    def test_worker_limit_six_reserves_three_tasks_then_refuses_a_fourth(self):
+        body = three_disjoint_tasks() + task_block(
+            "T4", order=4, batch="b4", write_scope="file:src/a4.py"
+        )
+        repo, run_dir, _ = make_run(self.tmp, body, worker_limit=6)
+        for index in range(1, 4):
+            state.reserve_task(
+                run_dir, task_id=f"T{index}", owner=f"impl-{index}", attempt=1
+            )
+        tracker = state.validate_run(run_dir)
+        self.assertEqual(len(state._implementation_owners(tracker)), 3)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.reserve_task(run_dir, task_id="T4", owner="impl-4", attempt=1)
+        self.assertIn("quorum", str(caught.exception))
+
+    def test_a_blocked_task_still_occupies_its_implementation_slot(self):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=4)
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        set_task_state(run_dir, "T1", "test-block-T1", state="[?]",
+                       question=QUESTION_REF)
+        tracker = state.validate_run(run_dir)
+        self.assertEqual(state._implementation_owners(tracker), {"impl-1"})
+        with self.assertRaises(state.TrackerValidationError):
+            state.reserve_task(run_dir, task_id="T2", owner="impl-2", attempt=1)
+
+    def test_a_completed_task_releases_its_slot(self):
+        """The mirror of the test above, and what stops `_OCCUPYING_STATES`
+        from being satisfied by 'every state that is not unstarted'."""
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=4)
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        set_task_state(
+            run_dir, "T1", "test-finish-T1", state="[x]",
+            result=f"docs/r.md#sha256={'1a' * 32}",
+            verification=f"docs/v.md#sha256={'2b' * 32}",
+            source_ref="b" * 40, commits="b" * 40, integration="held")
+        tracker = state.validate_run(run_dir)
+        self.assertEqual(state._implementation_owners(tracker), set())
+        state.reserve_task(run_dir, task_id="T2", owner="impl-2", attempt=1)
+        tracker = state.validate_run(run_dir)
+        self.assertEqual(task_row(tracker, "T2")["state"], "[~]")
+
+    def test_overlapping_scopes_never_reserve_together_despite_spare_capacity(self):
+        """F1: tree:src and file:src/a.py must never both be active."""
+        body = (
+            task_block("T1", order=1, batch="b1", write_scope="tree:src")
+            + task_block("T2", order=2, batch="b2", write_scope="file:src/a.py")
+        )
+        repo, run_dir, _ = make_run(self.tmp, body, worker_limit=12)
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.reserve_task(run_dir, task_id="T2", owner="impl-2", attempt=1)
+        self.assertIn("write scope", str(caught.exception))
+        #: Capacity is spare -- twelve workers, one in use -- so the capacity
+        #: refusal's wording must be absent or this test proves nothing about
+        #: scopes at all.
+        self.assertNotIn("quorum", str(caught.exception))
+        self.assertIn("T1", str(caught.exception))
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_disjoint_scopes_do_reserve_together(self):
+        """The accepting half. A suite of refusals alone is satisfied by a
+        `_require_no_scope_conflict` that refuses everything."""
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=8)
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        state.reserve_task(run_dir, task_id="T2", owner="impl-2", attempt=1)
+        tracker = state.validate_run(run_dir)
+        self.assertEqual(
+            [row["id"] for row in tracker["tasks"] if row["state"] == "[~]"],
+            ["T1", "T2"])
+
+    def test_a_scope_conflict_with_a_FINISHED_task_is_not_a_conflict(self):
+        """`_OCCUPYING_STATES` again, from the scope side: a completed task
+        holds no scope, or the second half of every run would be unreservable."""
+        body = (
+            task_block("T1", order=1, batch="b1", write_scope="tree:src")
+            + task_block("T2", order=2, batch="b2", write_scope="file:src/a.py")
+        )
+        repo, run_dir, _ = make_run(self.tmp, body, worker_limit=12)
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        set_task_state(
+            run_dir, "T1", "test-finish-T1", state="[x]",
+            result=f"docs/r.md#sha256={'1a' * 32}",
+            verification=f"docs/v.md#sha256={'2b' * 32}",
+            source_ref="b" * 40, commits="b" * 40, integration="held")
+        state.reserve_task(run_dir, task_id="T2", owner="impl-2", attempt=1)
+        self.assertEqual(
+            task_row(state.validate_run(run_dir), "T2")["state"], "[~]")
+
+    def test_reservation_persists_the_baseline_for_a_source_task(self):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        target = git(repo, "rev-parse", "target")
+        tracker = state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        row = task_row(tracker, "T1")
+        self.assertEqual(row["state"], "[~]")
+        self.assertEqual(row["owner"], "impl-1")
+        self.assertEqual(row["attempt"], "attempt-001")
+        self.assertIn("started:attempt-001", row["checkpoints"])
+        self.assertIn(f"baseline:attempt-001@{target}", row["checkpoints"])
+
+    def test_the_baseline_is_the_target_tip_and_not_the_runs_base_commit(self):
+        """F3's shape, one task earlier than the task that proves it: the
+        review baseline is the one persisted at reservation. `make_repo` puts
+        `target` one commit ahead of `base_commit` precisely so the two cannot
+        be confused by a fixture where they coincide."""
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        tracker = state.validate_run(run_dir)
+        base = tracker["run"]["base_commit"]
+        target = git(repo, "rev-parse", "target")
+        self.assertNotEqual(base, target)
+        checkpoints = task_row(
+            state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1),
+            "T1")["checkpoints"]
+        self.assertIn(f"baseline:attempt-001@{target}", checkpoints)
+        self.assertNotIn(base, checkpoints)
+
+    def test_artifact_task_reservation_records_no_baseline(self):
+        body = task_block("T1", kind="artifact", write_scope="tree:docs",
+                          outputs="docs/out.md")
+        repo, run_dir, _ = make_run(self.tmp, body, worker_limit=6)
+        tracker = state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        row = task_row(tracker, "T1")
+        self.assertNotIn("baseline:", row["checkpoints"])
+        self.assertIn("started:attempt-001", row["checkpoints"])
+
+    def test_handles_the_first_start_only(self):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.reserve_task(run_dir, task_id="T1", owner="impl-9", attempt=2)
+        self.assertIn("first start", str(caught.exception))
+
+    def test_refuses_an_incomplete_dependency(self):
+        body = (
+            task_block("T1", order=1, batch="b1", write_scope="file:src/a1.py")
+            + task_block("T2", deps="T1", order=2, batch="b2",
+                         write_scope="file:src/a2.py")
+        )
+        repo, run_dir, _ = make_run(self.tmp, body, worker_limit=8)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.reserve_task(run_dir, task_id="T2", owner="impl-2", attempt=1)
+        self.assertIn("dependency", str(caught.exception))
+        self.assertIn("T1", str(caught.exception))
+
+    def test_a_completed_dependency_unblocks_the_task(self):
+        body = (
+            task_block("T1", order=1, batch="b1", write_scope="file:src/a1.py")
+            + task_block("T2", deps="T1", order=2, batch="b2",
+                         write_scope="file:src/a2.py")
+        )
+        repo, run_dir, _ = make_run(self.tmp, body, worker_limit=8)
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        set_task_state(
+            run_dir, "T1", "test-finish-T1", state="[x]",
+            result=f"docs/r.md#sha256={'1a' * 32}",
+            verification=f"docs/v.md#sha256={'2b' * 32}",
+            source_ref="b" * 40, commits="b" * 40, integration="held")
+        state.reserve_task(run_dir, task_id="T2", owner="impl-2", attempt=1)
+        self.assertEqual(
+            task_row(state.validate_run(run_dir), "T2")["state"], "[~]")
+
+    def test_a_row_whose_kind_disagrees_with_the_approved_plan_is_refused(self):
+        """The row and the plan are two records of one fact, and the plan is
+        the authority. A row edited to `artifact` would otherwise skip the
+        baseline the range proof needs."""
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        set_task_state(run_dir, "T1", "test-retype-T1", kind="artifact")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        self.assertIn("kind", str(caught.exception))
+
+    def test_a_row_the_approved_plan_does_not_define_is_refused(self):
+        repo, run_dir, plan = make_run(self.tmp, three_disjoint_tasks(),
+                                       worker_limit=6)
+        plan.write_text(
+            "# Phase 04 plan\n\n" + phase_header() + "\n"
+            + task_block("T9", write_scope="file:src/a9.py"),
+            encoding="utf-8")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        self.assertIn("approved phase plan", str(caught.exception))
+
+    def test_a_task_id_outside_the_token_grammar_is_named_as_such(self):
+        """The transition id is built from the task id, so `_TOKEN` refuses a
+        malformed one a second time inside `locked_tracker_update` -- with a
+        message about replay keys. Asserting only the exception family lets the
+        screen here be deleted and the test still pass."""
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        before = (run_dir / "progress.md").read_bytes()
+        for task_id in ("T 1", "T|1", "T,1", "-T1", "", ["T1"], None, 7, b"T1"):
+            with self.subTest(task_id=task_id):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state.reserve_task(run_dir, task_id=task_id,
+                                       owner="impl-1", attempt=1)
+                self.assertIn("invalid task id", str(caught.exception))
+                self.assertNotIn("invalid transition identity",
+                                 str(caught.exception))
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_an_owner_is_held_to_the_pinned_owner_grammar_not_to_TOKEN(self):
+        """`_TOKEN` admits `/`, `:`, `@`, `+` and a trailing dot, and has no
+        length bound. An owner id becomes a RESPONSE FILENAME in P03, so those
+        are the exact characters `_OWNER` exists to keep out -- and a test
+        whose only bad owners are `impl|1` and `impl 1` cannot tell the two
+        grammars apart, because both refuse those."""
+        repo, run_dir, _ = make_run(self.tmp, n_disjoint_tasks(4), worker_limit=8)
+        before = (run_dir / "progress.md").read_bytes()
+        rejected = ("impl|1", "impl,1", "impl 1", "", None, ["impl-1"], 7,
+                    "impl/1", "impl:1", "impl@1", "impl+1", "impl.",
+                    "i" * (state._OWNER_MAX + 1), ".impl")
+        for owner in rejected:
+            with self.subTest(owner=owner):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state.reserve_task(run_dir, task_id="T1", owner=owner,
+                                       attempt=1)
+                self.assertIn("invalid owner", str(caught.exception))
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+        #: The accepting half. A suite of refusals alone is satisfied by a
+        #: screen that refuses everything, and that screen passes.
+        for index, owner in enumerate(("impl-1", "impl_2", "impl.3",
+                                       "i" * state._OWNER_MAX), start=1):
+            with self.subTest(accepted=owner):
+                state.reserve_task(run_dir, task_id=f"T{index}", owner=owner,
+                                   attempt=1)
+                self.assertEqual(
+                    task_row(state.validate_run(run_dir), f"T{index}")["owner"],
+                    owner)
+
+    def test_an_attempt_outside_the_positive_integers_is_named_as_such(self):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        before = (run_dir / "progress.md").read_bytes()
+        for attempt in (0, -1, "1", True, False, 1.0, None, [1],
+                        10 ** state._MAX_ATTEMPT_DIGITS):
+            with self.subTest(attempt=attempt):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state.reserve_task(run_dir, task_id="T1", owner="impl-1",
+                                       attempt=attempt)
+                self.assertIn("attempt", str(caught.exception))
+                self.assertNotIn("invalid transition identity",
+                                 str(caught.exception))
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_a_task_the_tracker_does_not_carry_is_named_as_unknown(self):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.reserve_task(run_dir, task_id="TX", owner="impl-1", attempt=1)
+        self.assertIn("unknown task", str(caught.exception))
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_replay_of_the_same_transition_is_inert(self):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        first = state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        snapshot = (run_dir / "progress.md").read_bytes()
+        replay = state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        self.assertEqual((run_dir / "progress.md").read_bytes(), snapshot)
+        self.assertEqual(
+            task_row(replay, "T1")["attempt"], task_row(first, "T1")["attempt"]
+        )
+
+    def test_repository_root_comes_from_the_tracker_not_from_run_dir_depth(self):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        tracker = state.validate_run(run_dir)
+        self.assertEqual(state._repo_dir(tracker), repo.resolve())
+
+    def test_an_owner_already_counted_is_not_charged_a_second_slot(self):
+        """`_require_capacity` counts OWNERS, not rows, so a task reserved
+        under an owner the cap has already counted costs nothing more. The cap
+        is full here -- worker_limit 4, cap 1 -- and the reservation still
+        lands, which is the whole of what `owner not in owners` buys."""
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=4)
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        tracker = state.validate_run(run_dir)
+        self.assertEqual(state.implementation_slot_cap(
+            int(tracker["run"]["worker_limit"])), 1)
+        state.reserve_task(run_dir, task_id="T2", owner="impl-1", attempt=1)
+        tracker = state.validate_run(run_dir)
+        self.assertEqual(
+            [row["id"] for row in tracker["tasks"] if row["state"] == "[~]"],
+            ["T1", "T2"])
+        self.assertEqual(state._implementation_owners(tracker), {"impl-1"})
+
+    def test_the_global_limit_counts_quorum_owners_too(self):
+        """The cap is not the only bound, and the second bound is REACHABLE.
+
+        With exactly one quorum in flight it is not: `i + 1 <= L - 3` and
+        `i + 3 + 1 > L` have no common solution, so a single quorum leaves the
+        global check dominated by the cap. TWO in-flight quorums separate them
+        -- six brain owners against a cap computed from three -- which is the
+        configuration this test builds, so the clause is pinned by an input
+        that actually reaches it rather than by one that never could.
+        """
+        repo, run_dir, _ = make_run(self.tmp, n_disjoint_tasks(6), worker_limit=10)
+        self.assertEqual(state.implementation_slot_cap(10), 7)
+        open_quorum_row(run_dir, owners=("brain-1", "brain-2", "brain-3"),
+                        qid="3f2a1b0c9d8e", transition="test-quorum-one")
+        open_quorum_row(run_dir, owners=("brain-4", "brain-5", "brain-6"),
+                        qid="7d6c5b4a3e2f", transition="test-quorum-two")
+        for index in range(1, 5):
+            state.reserve_task(run_dir, task_id=f"T{index}",
+                               owner=f"impl-{index}", attempt=1)
+        tracker = state.validate_run(run_dir)
+        self.assertEqual(len(state._implementation_owners(tracker)), 4)
+        self.assertEqual(len(state._active_owners(tracker)), 10)
+        #: Under the implementation cap -- four of seven -- and at the global
+        #: limit, so only the second clause can refuse this.
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.reserve_task(run_dir, task_id="T5", owner="impl-5", attempt=1)
+        self.assertIn("worker_limit", str(caught.exception))
+        self.assertNotIn("implementation slots exhausted", str(caught.exception))
+
+    def test_a_finalized_quorum_holds_no_slots(self):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=4)
+        open_quorum_row(run_dir, quorum_state="finalized")
+        tracker = state.validate_run(run_dir)
+        self.assertEqual(state._quorum_owners(tracker), set())
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        self.assertEqual(
+            task_row(state.validate_run(run_dir), "T1")["state"], "[~]")
+
+
+class ReserveTaskUnreachableScreenTests(TempDirTestCase):
+    """`_require_fresh_attempt` was named as a Task 6 product. It cannot fire
+    from `reserve_task`, and this is the pair of checks that closes it -- stated
+    as a test rather than left for a reviewer to rediscover by mutating a screen
+    that is not there. It belongs to `resume_task` (Task 7), whose row really
+    does carry an attempt history.
+    """
+
+    def test_reserve_only_ever_sees_an_unstarted_row(self):
+        """The first half of the closure: a row that carries any history is
+        no longer `[ ]`, and `reserve_task` refuses it before an attempt is
+        ever compared against that history."""
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=2)
+        self.assertIn("first start", str(caught.exception))
+        self.assertNotIn("already been used", str(caught.exception))
+
+    def test_an_unstarted_row_may_carry_no_attempt_history_at_all(self):
+        """P02's `_validate_tasks` is the half that makes the screen
+        unreachable: a `[ ]` row carrying any lifecycle cell does not parse."""
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=6)
+        tracker = state.validate_run(run_dir)
+        row = task_row(tracker, "T1")
+        for key in ("attempt", "checkpoints", "result"):
+            with self.subTest(key=key):
+                self.assertEqual(row[key], "-")
+        for key in ("attempt", "checkpoints", "result"):
+            with self.subTest(forbidden=key):
+                with self.assertRaises(state.TrackerValidationError):
+                    set_task_state(run_dir, "T1", f"test-poke-{key}",
+                                   **{key: "attempt-001"})
+
+
+class Task6ModuleBoundaryTests(unittest.TestCase):
+    """What Task 6 must NOT have done to the module it extends."""
+
+    def test_the_module_still_imports_nothing_outside_the_twelve(self):
+        """`_git` and `_git_out` were named as Task 6 products, as
+        `subprocess.run` wrappers. `subprocess` grants arbitrary command
+        execution -- the single capability `ALLOWED_IMPORTS` most exists to
+        withhold -- and the master plan refuses it by name."""
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        tree = ast.parse(source)
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imported.add((node.module or "").split(".")[0])
+        self.assertEqual(imported, {
+            "__future__", "contextlib", "copy", "errno", "fcntl", "hashlib",
+            "json", "msvcrt", "os", "pathlib", "time", "types"})
+        self.assertNotIn("subprocess", imported)
+        self.assertNotIn("re", imported)
+
+    def test_no_module_level_name_is_bound_twice(self):
+        """The mechanical form of 'a name that exists is consumed, never
+        re-declared'. Task 6's brief named `_field` and `_csv`, both P02's."""
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        counts = module_bindings(ast.parse(source).body)
+        self.assertEqual(
+            sorted(name for name, count in counts.items() if count > 1), [])
+
+    def test_the_task_kind_vocabulary_is_still_one_tuple(self):
+        """`TASK_KINDS` (Task 2's, public) and `_TASK_KINDS` (P02's) are the
+        same three words in two namespaces; Task 6 reads the plan's."""
+        self.assertEqual(tuple(state.TASK_KINDS), tuple(state._TASK_KINDS))
+
+    def test_the_occupying_states_are_a_subset_of_p02s_task_states(self):
+        for value in state._OCCUPYING_STATES:
+            with self.subTest(value=value):
+                self.assertIn(value, state._TASK_STATES)
+        self.assertNotIn("[x]", state._OCCUPYING_STATES)
+        self.assertNotIn("[ ]", state._OCCUPYING_STATES)
 
 # THE RUNNER GOES LAST, and it has to. `unittest.main()` calls `sys.exit()`, so
 # this block sat at what was once the end of the file and became its MIDDLE the

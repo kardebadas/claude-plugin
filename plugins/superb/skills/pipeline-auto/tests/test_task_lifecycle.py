@@ -2577,5 +2577,780 @@ class TaskHarnessTests(PlanFileTestCase):
             "T1")
 
 
+# --------------------------------------------------------------------------
+# Task 3 tests -- fault F1: `scopes_overlap` implemented as plain equality, so
+# `tree:src` and `file:src/a.py` reserve together and two implementers write
+# the same file.
+#
+# THE CORPUS IS A TABLE OF REASONS, NOT A LIST OF BOOLEANS, and that is the
+# whole design. `scopes_overlap` returns a bool, so two different rules can
+# agree on every fixture anybody thought to write down -- which is exactly how
+# F1 survives: an equality rule and an ancestor rule both say True for
+# `tree:src` against `tree:src`, so a test that only asserts True cannot tell
+# them apart. Every row below therefore carries the REASON it holds, each
+# reason family carries a structural assertion that a rival rule provably
+# fails, and `RivalRuleTests` runs the rivals over the table and demands a
+# disagreement with a named witness. A corpus that stopped discriminating would
+# fail there rather than pass quietly.
+# --------------------------------------------------------------------------
+
+#: A path segment spelled with one precomposed code point, and the same
+#: grapheme spelled as base + combining accent. Built with `chr` because a
+#: \uXXXX escape in a tool argument is decoded before it reaches disk, so the
+#: two spellings would silently become one file.
+_PRECOMPOSED = "caf" + chr(0xE9)
+_DECOMPOSED = "caf" + "e" + chr(0x301)
+
+#: (left, right, expected, reason). Read the reasons before the booleans.
+#:
+#: * `same-path`      - the two scopes name the same path. TRUE, and it is the
+#:                      one family a plain equality rule also gets right.
+#: * `ancestor`       - the paths DIFFER and one contains the other. TRUE, and
+#:                      an equality rule cannot produce it. This is F1.
+#: * `prefix`         - one path string is a strict PREFIX of the other without
+#:                      being a path ancestor. FALSE, and a `startswith`
+#:                      spelling cannot produce it. This is the trap one level
+#:                      up from F1.
+#: * `file-ancestor`  - one path IS a proper ancestor of the other, but the
+#:                      containing scope is a `file:`. FALSE, and a type-blind
+#:                      ancestry rule cannot produce it.
+#: * `case`           - segments differing only in case. FALSE; POSIX paths are
+#:                      case-sensitive and the tracker records bytes.
+#: * `normalisation`  - the same grapheme in two Unicode spellings. FALSE;
+#:                      `PurePosixPath` does not normalise, so these are two
+#:                      paths, and nobody writes this fixture down by accident.
+#: * `unrelated`      - no relation at all.
+SCOPE_PAIRS = (
+    ("file:src/a.py", "file:src/a.py", True, "same-path"),
+    ("tree:src", "tree:src", True, "same-path"),
+    ("tree:src", "file:src", True, "same-path"),
+    ("file:src/a:b.py", "file:src/a:b.py", True, "same-path"),
+    ("tree:.github/workflows", "file:.github/workflows", True, "same-path"),
+    ("tree:" + _PRECOMPOSED, "tree:" + _PRECOMPOSED, True, "same-path"),
+
+    ("tree:src", "file:src/a.py", True, "ancestor"),
+    ("tree:src", "tree:src/deep/nested", True, "ancestor"),
+    ("tree:src/pkg", "file:src/pkg/mod/a.py", True, "ancestor"),
+    ("tree:.github", "file:.github/workflows/ci.yml", True, "ancestor"),
+    ("tree:a", "file:a/b/c/d/e/f/g/h/i/j/k.py", True, "ancestor"),
+    ("tree:a-b", "file:a-b/c.py", True, "ancestor"),
+    ("file:a/b/c.py", "tree:a/b", True, "ancestor"),
+    ("tree:src", "file:src/a:b.py", True, "ancestor"),
+    ("tree:" + _PRECOMPOSED, "file:" + _PRECOMPOSED + "/a.py", True, "ancestor"),
+
+    ("tree:src", "file:srcx/a.py", False, "prefix"),
+    ("tree:docs", "tree:docsx", False, "prefix"),
+    ("tree:src/pkg", "file:src/pkgx/a.py", False, "prefix"),
+    ("tree:.git", "file:.github/workflows/ci.yml", False, "prefix"),
+    ("tree:v1", "file:v10/a.py", False, "prefix"),
+    ("tree:a-b", "file:a-b-c/x.py", False, "prefix"),
+    ("file:src/a.py", "file:src/a.pyc", False, "prefix"),
+    ("tree:a/b", "tree:a/bc/d", False, "prefix"),
+
+    ("file:src/a.py", "tree:src/a.py/deep", False, "file-ancestor"),
+    ("file:a", "file:a/b", False, "file-ancestor"),
+    ("file:docs", "file:docs/index.md", False, "file-ancestor"),
+
+    ("tree:src", "file:SRC/a.py", False, "case"),
+    ("tree:Docs", "tree:docs", False, "case"),
+
+    ("tree:" + _PRECOMPOSED, "file:" + _DECOMPOSED + "/a.py", False,
+     "normalisation"),
+    ("file:" + _PRECOMPOSED, "file:" + _DECOMPOSED, False, "normalisation"),
+
+    ("file:src/a.py", "file:src/b.py", False, "unrelated"),
+    ("tree:src", "tree:docs", False, "unrelated"),
+    ("tree:src", "file:docs/a.md", False, "unrelated"),
+    ("tree:source", "file:src/a.py", False, "unrelated"),
+    ("file:a/b/c.py", "tree:a/b/d", False, "unrelated"),
+)
+
+
+def scope_path(scope: str) -> str:
+    """The path half of a typed scope, split the way the module splits it.
+
+    `partition` and not `split(":")`: `file:src/a:b.py` is a legal scope whose
+    PATH carries a colon, and a maxsplit-free split would throw `b.py` away and
+    quietly turn a fixture into a different fixture.
+    """
+    return scope.partition(":")[2]
+
+
+def scope_type(scope: str) -> str:
+    return scope.partition(":")[0]
+
+
+def is_ancestor(outer: str, inner: str) -> bool:
+    """Proper path ancestry, asked the way the module asks it."""
+    return PurePosixPath(outer) in PurePosixPath(inner).parents
+
+
+class ScopeAlgebraTests(unittest.TestCase):
+    """The plain read of the contract, kept as the brief wrote it."""
+
+    def test_overlapping_scopes_conflict(self):
+        cases = (
+            ("file:src/a.py", "file:src/a.py"),
+            ("tree:src", "file:src/a.py"),          # the pair plain equality misses
+            ("tree:src", "tree:src/deep/nested"),
+            ("tree:src", "tree:src"),
+            ("tree:src/pkg", "file:src/pkg/mod/a.py"),
+            ("tree:src/a.py", "file:src/a.py"),     # a tree naming exactly one file
+        )
+        for left, right in cases:
+            with self.subTest(left=left, right=right):
+                self.assertTrue(state.scopes_overlap(left, right))
+                self.assertTrue(state.scopes_overlap(right, left))
+
+    def test_disjoint_scopes_do_not_conflict(self):
+        cases = (
+            ("file:src/a.py", "file:src/b.py"),
+            ("tree:src", "tree:docs"),
+            ("tree:src", "file:docs/a.md"),
+            ("tree:source", "file:src/a.py"),       # a name prefix is not ancestry
+            ("tree:src/pkg", "file:src/pkgx/a.py"),
+            ("file:src/a.py", "tree:src/a.py/deep"),
+        )
+        for left, right in cases:
+            with self.subTest(left=left, right=right):
+                self.assertFalse(state.scopes_overlap(left, right))
+                self.assertFalse(state.scopes_overlap(right, left))
+
+    def test_rejects_untyped_or_unsafe_scopes(self):
+        for scope in ("src/a.py", "glob:src", "file:../a", "file:"):
+            with self.subTest(scope=scope):
+                with self.assertRaises(state.PlanMetadataError):
+                    state.scopes_overlap(scope, "file:src/a.py")
+
+    def test_scope_sets_find_a_single_conflicting_pair(self):
+        left = ("file:src/a.py", "tree:docs")
+        self.assertTrue(
+            state._scope_sets_overlap(left, ("file:src/b.py", "file:docs/index.md"))
+        )
+        self.assertFalse(
+            state._scope_sets_overlap(left, ("file:src/b.py", "tree:reports"))
+        )
+
+    def test_path_in_scope(self):
+        cases = (
+            ("src/a.py", "file:src/a.py", True),
+            ("src/a.py", "file:src/b.py", False),
+            ("src/a.py", "tree:src", True),
+            ("src/deep/a.py", "tree:src", True),
+            ("srcx/a.py", "tree:src", False),
+            ("src", "tree:src", True),
+        )
+        for path, scope, expected in cases:
+            with self.subTest(path=path, scope=scope):
+                self.assertIs(state._path_in_scope(path, scope), expected)
+
+
+class ScopeReasonTableTests(unittest.TestCase):
+    """Every row of `SCOPE_PAIRS`, with the reason asserted structurally.
+
+    The boolean alone is what let F1 hide. Each family below also asserts the
+    PROPERTY that makes the row discriminating, so a fixture cannot be quietly
+    edited into a row that no longer separates the rules it was written to
+    separate.
+    """
+
+    def test_every_pair_answers_as_the_table_says(self):
+        for left, right, expected, reason in SCOPE_PAIRS:
+            with self.subTest(left=left, right=right, reason=reason):
+                self.assertIs(state.scopes_overlap(left, right), expected)
+
+    def test_the_answer_is_symmetric_for_every_pair(self):
+        """Symmetry is a property of the EXPRESSION in the module -- "does
+        either scope claim the other's root" -- and it is asserted here so that
+        a rewrite into a type-pair case analysis, which is where the ancestor
+        branch went missing the first time, cannot reintroduce an asymmetric
+        arm unnoticed."""
+        for left, right, expected, _ in SCOPE_PAIRS:
+            with self.subTest(left=left, right=right):
+                self.assertIs(state.scopes_overlap(right, left), expected)
+
+    def test_the_answer_is_a_bool_and_not_a_truthy_object(self):
+        """`assertTrue` accepts a `PurePosixPath`; a caller writing the answer
+        into a tracker cell does not."""
+        for left, right, _, _ in SCOPE_PAIRS:
+            with self.subTest(left=left, right=right):
+                self.assertIsInstance(state.scopes_overlap(left, right), bool)
+
+    def test_the_ancestor_family_is_unreachable_by_equality(self):
+        """F1, stated as a property of the corpus rather than of one fixture.
+
+        Every `ancestor` row has UNEQUAL paths and a real containment, so a
+        plain equality rule provably cannot answer True for any of them -- and
+        each of them is True."""
+        rows = [row for row in SCOPE_PAIRS if row[3] == "ancestor"]
+        self.assertGreaterEqual(len(rows), 9)
+        for left, right, expected, _ in rows:
+            with self.subTest(left=left, right=right):
+                self.assertTrue(expected)
+                self.assertNotEqual(scope_path(left), scope_path(right))
+                self.assertTrue(
+                    is_ancestor(scope_path(left), scope_path(right))
+                    or is_ancestor(scope_path(right), scope_path(left)))
+                self.assertIn("tree", (scope_type(left), scope_type(right)))
+
+    def test_the_prefix_family_is_reachable_by_startswith_and_is_false(self):
+        """The trap one level up from equality: `"docsx/a.md".startswith(
+        "docs")` is True. Every `prefix` row really is a string prefix, so a
+        `startswith` spelling provably answers True for all of them -- and the
+        right answer for all of them is False."""
+        rows = [row for row in SCOPE_PAIRS if row[3] == "prefix"]
+        self.assertGreaterEqual(len(rows), 8)
+        for left, right, expected, _ in rows:
+            with self.subTest(left=left, right=right):
+                self.assertFalse(expected)
+                one, two = scope_path(left), scope_path(right)
+                self.assertTrue(one.startswith(two) or two.startswith(one))
+                self.assertFalse(is_ancestor(one, two) or is_ancestor(two, one))
+
+    def test_the_file_ancestor_family_is_ancestry_the_type_forbids(self):
+        """A `file:` scope claims ONE path. `file:src/a.py` against
+        `tree:src/a.py/deep` is genuine path ancestry and still no conflict,
+        so a rule that dropped the type and asked only about containment
+        provably answers True for all of them."""
+        rows = [row for row in SCOPE_PAIRS if row[3] == "file-ancestor"]
+        self.assertGreaterEqual(len(rows), 3)
+        for left, right, expected, _ in rows:
+            with self.subTest(left=left, right=right):
+                self.assertFalse(expected)
+                one, two = scope_path(left), scope_path(right)
+                self.assertTrue(is_ancestor(one, two) or is_ancestor(two, one))
+                outer = left if is_ancestor(one, two) else right
+                self.assertEqual(scope_type(outer), "file")
+
+    def test_the_same_path_family_is_the_one_equality_also_gets_right(self):
+        rows = [row for row in SCOPE_PAIRS if row[3] == "same-path"]
+        self.assertGreaterEqual(len(rows), 6)
+        for left, right, expected, _ in rows:
+            with self.subTest(left=left, right=right):
+                self.assertTrue(expected)
+                self.assertEqual(scope_path(left), scope_path(right))
+
+    def test_a_differing_type_over_an_equal_path_still_conflicts(self):
+        """`tree:src` and `file:src` are different STRINGS naming the same
+        path. A rule that compared the whole scope string -- `return a == b` --
+        would answer False, and the two tasks would both be dispatched onto
+        `src`."""
+        self.assertNotEqual("tree:src", "file:src")
+        self.assertIs(state.scopes_overlap("tree:src", "file:src"), True)
+        self.assertIs(state.scopes_overlap("file:src", "tree:src"), True)
+
+    def test_case_and_unicode_spelling_are_two_paths_and_not_one(self):
+        """Two families nobody writes down by hand. `PurePosixPath` neither
+        case-folds nor normalises, so `caf` + U+00E9 and `cafe` + U+0301 are
+        two distinct scopes -- and a future implementation that reached for
+        `str.lower()` or `unicodedata.normalize` would be widening
+        `ALLOWED_IMPORTS` to make two tracker cells that differ in bytes
+        compare equal."""
+        self.assertNotEqual(_PRECOMPOSED, _DECOMPOSED)
+        self.assertEqual(_PRECOMPOSED.casefold(), _PRECOMPOSED)
+        for left, right, expected, reason in SCOPE_PAIRS:
+            if reason in ("case", "normalisation"):
+                with self.subTest(left=left, right=right, reason=reason):
+                    self.assertIs(state.scopes_overlap(left, right), expected)
+                    self.assertNotEqual(scope_path(left), scope_path(right))
+
+    def test_the_table_covers_every_named_reason(self):
+        """A row deleted or a family silently emptied is a corpus that stopped
+        discriminating; the count is the alarm."""
+        reasons = {row[3] for row in SCOPE_PAIRS}
+        self.assertEqual(
+            reasons,
+            {"same-path", "ancestor", "prefix", "file-ancestor", "case",
+             "normalisation", "unrelated"})
+        self.assertGreaterEqual(len(SCOPE_PAIRS), 35)
+
+
+class RivalRuleTests(unittest.TestCase):
+    """The corpus is only worth what it REFUTES, so the rivals are run here.
+
+    Each rival below is a plausible wrong implementation -- three of them are
+    named faults or one step from one -- and each is required to disagree with
+    the real answers on a witness row the test names. This is the assertion
+    that a fixture list drawn from "the defects that were thought of" cannot
+    make: it fails the moment the corpus stops separating two rules, instead of
+    passing quietly while a mutant survives.
+    """
+
+    def answers(self, rule) -> tuple:
+        return tuple(rule(left, right) for left, right, _, _ in SCOPE_PAIRS)
+
+    def truth(self) -> tuple:
+        return tuple(expected for _, _, expected, _ in SCOPE_PAIRS)
+
+    def assert_refuted(self, name, rule):
+        mine, theirs = self.truth(), self.answers(rule)
+        self.assertIsNone(
+            None if mine != theirs else name,
+            f"{name} agrees with the real rule on every row of SCOPE_PAIRS; "
+            "the corpus no longer discriminates")
+        witnesses = [SCOPE_PAIRS[index] for index in range(len(mine))
+                     if mine[index] != theirs[index]]
+        self.assertTrue(witnesses)
+        return witnesses
+
+    def test_the_real_rule_answers_the_table(self):
+        self.assertEqual(
+            self.answers(state.scopes_overlap), self.truth())
+
+    def test_plain_equality_is_refuted_and_this_is_fault_f1(self):
+        def equality(left, right):
+            return scope_path(left) == scope_path(right)
+        witnesses = self.assert_refuted("plain path equality", equality)
+        self.assertIn(("tree:src", "file:src/a.py", True, "ancestor"), witnesses)
+        for _, _, expected, reason in witnesses:
+            self.assertTrue(expected)
+            self.assertEqual(reason, "ancestor")
+
+    def test_whole_scope_string_equality_is_refuted(self):
+        witnesses = self.assert_refuted(
+            "whole scope string equality", lambda left, right: left == right)
+        self.assertIn(("tree:src", "file:src", True, "same-path"), witnesses)
+
+    def test_a_string_prefix_containment_is_refuted(self):
+        def claims(path, kind, scope):
+            return path == scope or (kind == "tree" and path.startswith(scope))
+
+        def prefix(left, right):
+            return (claims(scope_path(right), scope_type(left), scope_path(left))
+                    or claims(scope_path(left), scope_type(right),
+                              scope_path(right)))
+        witnesses = self.assert_refuted("a startswith containment", prefix)
+        self.assertIn(("tree:src", "file:srcx/a.py", False, "prefix"), witnesses)
+        for _, _, expected, reason in witnesses:
+            self.assertFalse(expected)
+            self.assertEqual(reason, "prefix")
+
+    def test_a_type_blind_ancestry_is_refuted(self):
+        def blind(left, right):
+            one, two = scope_path(left), scope_path(right)
+            return one == two or is_ancestor(one, two) or is_ancestor(two, one)
+        witnesses = self.assert_refuted("type-blind ancestry", blind)
+        self.assertIn(("file:src/a.py", "tree:src/a.py/deep", False,
+                       "file-ancestor"), witnesses)
+
+    def test_a_tree_that_does_not_contain_itself_is_refuted(self):
+        """`_within_scope`'s asymmetry, transplanted. This is the rival a Task
+        3 written by calling `_within_scope` would actually be."""
+        def claims(path, kind, scope):
+            return ((kind == "file" and path == scope)
+                    or (kind == "tree"
+                        and PurePosixPath(scope) in PurePosixPath(path).parents))
+
+        def transplanted(left, right):
+            return (claims(scope_path(right), scope_type(left), scope_path(left))
+                    or claims(scope_path(left), scope_type(right),
+                              scope_path(right)))
+        witnesses = self.assert_refuted("_within_scope's predicate",
+                                        transplanted)
+        self.assertIn(("tree:src", "tree:src", True, "same-path"), witnesses)
+
+    def test_always_true_and_always_false_are_both_refuted(self):
+        """The corpus has both answers in it, which a list of conflicts alone
+        would not."""
+        self.assert_refuted("always True", lambda left, right: True)
+        self.assert_refuted("always False", lambda left, right: False)
+
+
+class ScopeClaimedSetTests(unittest.TestCase):
+    """The DERIVED rule, checked against a generated corpus rather than a list.
+
+    `scopes_overlap` claims to answer "do these two scopes claim a common
+    repository path". That claim has a witness form, and both directions of it
+    are checked here over a cross product nobody hand-wrote:
+
+    * COMPLETENESS -- if some path is claimed by both scopes, they overlap.
+      Plain equality fails this at (`tree:src`, `file:src/a.py`, `src/a.py`)
+      without anybody having had to think of that pair.
+    * SOUNDNESS -- if they overlap, one of the two SCOPE ROOTS is a path both
+      claim. A rule that said True for two genuinely disjoint scopes has to
+      produce a witness and cannot.
+    """
+
+    ROOTS = ("src", "srcx", "src/pkg", "src/pkgx", "docs", "docsx",
+             "docs/api", "a/b/c", "a/b", "a")
+    SCOPES = tuple(f"{kind}:{root}"
+                   for root in ROOTS for kind in state._WRITE_SCOPE_TYPES)
+    #: The witness corpus: every root, every root's children and grandchildren,
+    #: and a sibling whose name is a string prefix of one of them.
+    PATHS = tuple(dict.fromkeys(
+        list(ROOTS)
+        + [f"{root}/a.py" for root in ROOTS]
+        + [f"{root}/deep/nested/a.py" for root in ROOTS]
+        + [f"{root}x/a.py" for root in ROOTS]))
+
+    def test_the_corpus_is_big_enough_to_be_worth_running(self):
+        """40 spellings collapse to 37 paths, and the three collisions are the
+        point rather than an accident: `srcx/a.py` is reached both as the root
+        `srcx` and as the string-prefix sibling of `src`, so the corpus
+        contains the prefix trap under two different descriptions."""
+        self.assertEqual(len(self.SCOPES), 20)
+        self.assertEqual(len(self.PATHS), 37)
+        for collision in ("srcx/a.py", "docsx/a.py", "src/pkgx/a.py"):
+            self.assertIn(collision, self.PATHS)
+
+    def test_a_path_claimed_by_both_scopes_forces_an_overlap(self):
+        checked = 0
+        for left, right in itertools.product(self.SCOPES, repeat=2):
+            shared = [path for path in self.PATHS
+                      if state._path_in_scope(path, left)
+                      and state._path_in_scope(path, right)]
+            if not shared:
+                continue
+            checked += 1
+            with self.subTest(left=left, right=right, witness=shared[0]):
+                self.assertIs(state.scopes_overlap(left, right), True)
+        self.assertGreater(checked, 60)
+
+    def test_an_overlap_always_names_one_of_the_two_roots_as_its_witness(self):
+        checked = 0
+        for left, right in itertools.product(self.SCOPES, repeat=2):
+            if not state.scopes_overlap(left, right):
+                continue
+            checked += 1
+            with self.subTest(left=left, right=right):
+                self.assertTrue(
+                    (state._path_in_scope(scope_path(left), right)
+                     and state._path_in_scope(scope_path(left), left))
+                    or (state._path_in_scope(scope_path(right), left)
+                        and state._path_in_scope(scope_path(right), right)),
+                    "an overlap with no witness path is a rule that answered "
+                    "True about nothing")
+        self.assertGreater(checked, 60)
+
+    def test_no_pair_is_disjoint_and_sharing_a_path_at_the_same_time(self):
+        """The two directions above, joined: over the whole cross product the
+        boolean and the witness search agree exactly."""
+        for left, right in itertools.product(self.SCOPES, repeat=2):
+            shared = any(state._path_in_scope(path, left)
+                         and state._path_in_scope(path, right)
+                         for path in self.PATHS)
+            with self.subTest(left=left, right=right):
+                if shared:
+                    self.assertIs(state.scopes_overlap(left, right), True)
+
+    def test_overlap_is_reflexive_and_symmetric_over_the_whole_corpus(self):
+        for scope in self.SCOPES:
+            with self.subTest(scope=scope):
+                self.assertIs(state.scopes_overlap(scope, scope), True)
+        for left, right in itertools.product(self.SCOPES, repeat=2):
+            with self.subTest(left=left, right=right):
+                self.assertIs(state.scopes_overlap(left, right),
+                              state.scopes_overlap(right, left))
+
+    def test_a_file_scope_conflicts_with_exactly_one_other_file_scope(self):
+        """Derived rather than listed: across the generated corpus, a `file:`
+        scope's conflicts with other `file:` scopes are exactly itself, because
+        two one-path sets intersect only when the paths are equal."""
+        files = [scope for scope in self.SCOPES if scope_type(scope) == "file"]
+        for left in files:
+            with self.subTest(left=left):
+                self.assertEqual(
+                    [right for right in files
+                     if state.scopes_overlap(left, right)],
+                    [left])
+
+    def test_a_tree_scope_conflicts_with_strictly_more_than_itself(self):
+        """The half a plain equality rule cannot produce: for a root that has
+        descendants in the corpus, `tree:` conflicts with scopes it is not
+        equal to."""
+        trees = [scope for scope in self.SCOPES if scope_type(scope) == "tree"]
+        widened = [scope for scope in trees
+                   if len([other for other in self.SCOPES
+                           if state.scopes_overlap(scope, other)]) > 2]
+        self.assertGreaterEqual(len(widened), 6)
+
+
+class WithinScopeIsNotOverlapTests(unittest.TestCase):
+    """The measured divergence, pinned so the reuse stays refused.
+
+    `_within_scope` is the containment predicate P04 Task 2 wrote for OUTPUTS,
+    and it deliberately says a `tree:` scope does not contain itself. Reusing
+    it here would make two tasks that both declare `tree:docs` look disjoint --
+    which is F1 arriving from the one direction that looks like good reuse.
+    """
+
+    def test_within_scope_still_refuses_a_trees_own_root(self):
+        self.assertIs(
+            state._within_scope(PurePosixPath("docs"),
+                                [("tree", PurePosixPath("docs"))]),
+            False)
+
+    def test_overlap_accepts_the_very_path_within_scope_refuses(self):
+        self.assertIs(state.scopes_overlap("tree:docs", "tree:docs"), True)
+        self.assertIs(state.scopes_overlap("tree:docs", "file:docs"), True)
+        self.assertIs(state._path_in_scope("docs", "tree:docs"), True)
+
+    def test_the_two_agree_everywhere_except_a_trees_own_root(self):
+        """The divergence is exactly one row wide, and that is the point: the
+        SHAPE is inherited, the predicate is not."""
+        paths = ("docs", "docs/a.md", "docs/deep/a.md", "docsx/a.md", "src")
+        scopes = ("tree:docs", "file:docs", "tree:docs/deep")
+        for path, scope in itertools.product(paths, scopes):
+            kind, root = scope_type(scope), PurePosixPath(scope_path(scope))
+            within = state._within_scope(PurePosixPath(path), [(kind, root)])
+            claimed = state._path_in_scope(path, scope)
+            with self.subTest(path=path, scope=scope):
+                if kind == "tree" and PurePosixPath(path) == root:
+                    self.assertTrue(claimed and not within)
+                else:
+                    self.assertIs(claimed, within)
+
+
+class ScopeSetOverlapTests(unittest.TestCase):
+    """`_scope_sets_overlap`: the form a reservation actually asks in."""
+
+    def test_one_conflicting_pair_anywhere_is_a_conflict(self):
+        for left, right in (
+                (("file:src/a.py",), ("file:src/a.py",)),
+                (("tree:docs", "file:src/a.py"), ("file:docs/index.md",)),
+                (("file:src/a.py", "file:src/b.py"), ("tree:src",)),
+                (("file:z/1", "file:z/2", "tree:docs"),
+                 ("file:y/1", "file:y/2", "file:docs/deep/a.md"))):
+            with self.subTest(left=left, right=right):
+                self.assertIs(state._scope_sets_overlap(left, right), True)
+                self.assertIs(state._scope_sets_overlap(right, left), True)
+
+    def test_disjoint_sets_are_disjoint(self):
+        for left, right in (
+                (("file:src/a.py", "tree:docs"), ("file:src/b.py", "tree:reports")),
+                (("tree:src",), ("tree:srcx", "file:srcx/a.py")),
+                (("tree:a/b",), ("tree:a/bc", "file:a/bc/d.py"))):
+            with self.subTest(left=left, right=right):
+                self.assertIs(state._scope_sets_overlap(left, right), False)
+                self.assertIs(state._scope_sets_overlap(right, left), False)
+
+    def test_an_empty_set_conflicts_with_nothing(self):
+        self.assertIs(state._scope_sets_overlap((), ("tree:src",)), False)
+        self.assertIs(state._scope_sets_overlap(("tree:src",), []), False)
+        self.assertIs(state._scope_sets_overlap((), ()), False)
+
+    def test_a_list_is_accepted_as_well_as_a_tuple(self):
+        self.assertIs(
+            state._scope_sets_overlap(["tree:src"], ["file:src/a.py"]), True)
+
+    def test_a_bare_string_is_refused_rather_than_iterated(self):
+        """The failure is not that the characters fail to parse -- it is that
+        with an empty opposing set they are never reached, and the answer is a
+        confident False that dispatches two implementers onto one file."""
+        for left, right in (("file:src/a.py", ("file:src/a.py",)),
+                            (("file:src/a.py",), "file:src/a.py"),
+                            ("file:src/a.py", ()),
+                            ((), "file:src/a.py")):
+            with self.subTest(left=left, right=right):
+                with self.assertRaises(state.PlanMetadataError):
+                    state._scope_sets_overlap(left, right)
+
+    def test_a_one_shot_iterator_is_refused_rather_than_silently_exhausted(self):
+        """A generator would be consumed by the first row of the nested walk,
+        so every later comparison would see an empty set -- a false False that
+        only appears when the left-hand set has more than one member."""
+        with self.assertRaises(state.PlanMetadataError):
+            state._scope_sets_overlap(("file:a", "tree:docs"),
+                                      iter(("file:docs/index.md",)))
+
+    def test_every_scope_is_parsed_even_when_an_earlier_pair_collides(self):
+        """Short-circuiting the parse would make "is this list well formed"
+        depend on which pair happened to collide first, so a run could adopt a
+        scope list that the very same list rejects tomorrow. The first pair
+        here conflicts; the malformed member is still refused."""
+        for left, right in (
+                (("file:src/a.py", "glob:src"), ("file:src/a.py",)),
+                (("file:src/a.py",), ("file:src/a.py", "src/b.py")),
+                (("file:src/a.py",), ("file:src/a.py", "file:../b"))):
+            with self.subTest(left=left, right=right):
+                with self.assertRaises(state.PlanMetadataError):
+                    state._scope_sets_overlap(left, right)
+
+    def test_a_set_member_that_is_two_scopes_is_refused(self):
+        """A comma-separated FIELD is not a scope set member; it is the raw
+        text a set is parsed out of. Accepting it would compare against the
+        first member alone."""
+        with self.assertRaises(state.PlanMetadataError):
+            state._scope_sets_overlap(("file:src/a.py,tree:docs",),
+                                      ("tree:docs",))
+
+
+class ScopePartsTotalityTests(unittest.TestCase):
+    """Every refusal is a `PlanMetadataError`, for every input, on both sides.
+
+    A scope reaches these functions from a plan an agent wrote and from a
+    tracker cell a previous run recorded. `TypeError`, `AttributeError` and
+    `ValueError` all live outside `TrackerError`, so a controller wrapping this
+    in `except TrackerError` would DIE on a bad scope rather than refuse it.
+    """
+
+    BAD_SCOPES = (
+        None, 42, 4.5, True, b"file:src/a.py", ["file:src/a.py"],
+        ("file:src/a.py",), {"file": "src/a.py"}, PurePosixPath("src/a.py"),
+        "", " ", "\t", "none", "src/a.py", ":src/a.py", "file", "file:",
+        "tree:", "FILE:src/a.py", "Tree:docs", "dir:docs", "glob:src/*.py",
+        " file:src/a.py", "file:src/a.py ", "file:/etc/passwd", "file:../a",
+        "file:a/../b", "file:src/./a", "file:a//b", "file:src/a/",
+        "file:src/*.py", "file:src/[a].py", "file:a\\b",
+        "file:src/a.py,tree:docs", "file:a,b.py", "file:src/a.py,",
+    )
+
+    def test_a_bad_scope_is_refused_on_either_side_of_the_comparison(self):
+        for scope in self.BAD_SCOPES:
+            with self.subTest(scope=repr(scope)):
+                with self.assertRaises(state.PlanMetadataError):
+                    state.scopes_overlap(scope, "file:src/a.py")
+                with self.assertRaises(state.PlanMetadataError):
+                    state.scopes_overlap("file:src/a.py", scope)
+                with self.assertRaises(state.PlanMetadataError):
+                    state._scope_parts(scope)
+
+    def test_a_refusal_is_inside_the_modules_exception_family(self):
+        for scope in self.BAD_SCOPES:
+            with self.subTest(scope=repr(scope)):
+                with self.assertRaises(state.TrackerError):
+                    state._scope_parts(scope)
+
+    def test_a_character_family_no_ascii_list_contains_is_refused(self):
+        """Built with `chr` so the families read as CODE POINTS: NUL, a line
+        feed and a tab out of `range(0x20)`; then 0x85, 0x2028 and 0x2029,
+        three row breaks `str.splitlines` honours and no ASCII control list
+        holds; then two lone surrogates the UTF-8 encoder refuses outright.
+        The screen is `_safe_relative`'s, and it is asserted through this
+        block's own door so a future short cut past that door is visible."""
+        for code in (0x00, 0x0A, 0x0D, 0x09, 0x1F, 0x7F, 0x85, 0x2028, 0x2029,
+                     0xD800, 0xDFFF):
+            scope = "file:src/a" + chr(code) + "b.py"
+            with self.subTest(code=hex(code)):
+                with self.assertRaises(state.PlanMetadataError):
+                    state.scopes_overlap(scope, "file:src/a.py")
+                with self.assertRaises(state.PlanMetadataError):
+                    state._path_in_scope("src/a.py", scope)
+
+    def test_the_empty_and_root_spellings_are_refused_rather_than_universal(self):
+        """`file:` and `tree:` have no path at all, and `tree:/` and `tree:.`
+        are the two ways of spelling "the repository root" -- a scope that
+        would conflict with EVERY other scope and silence the whole algebra."""
+        for scope in ("file:", "tree:", "file:/", "tree:/", "file:.", "tree:.",
+                      "tree:..", "file: "):
+            with self.subTest(scope=scope):
+                with self.assertRaises(state.PlanMetadataError):
+                    state.scopes_overlap(scope, "file:src/a.py")
+
+    def test_a_multi_member_field_is_refused_and_says_how_many_it_found(self):
+        with self.assertRaises(state.PlanMetadataError) as caught:
+            state._scope_parts("file:src/a.py,tree:docs")
+        self.assertIn("2 write scopes", str(caught.exception))
+
+    def test_the_zero_member_half_of_the_arity_check_is_unreachable(self):
+        """`!= 1` states the rule; only the `> 1` half can be spelled, because
+        `_parse_write_scope` already refuses an empty list and `none` with it.
+        Both closures are asserted so that removing either one is visible here
+        rather than in a scope that compares against nothing."""
+        with self.assertRaises(state.PlanMetadataError) as empty:
+            state._parse_write_scope("none")
+        self.assertIn("at least one write scope", str(empty.exception))
+        with self.assertRaises(state.PlanMetadataError):
+            state._parse_write_scope("")
+        with self.assertRaises(state.PlanMetadataError) as through:
+            state._scope_parts("none")
+        self.assertIn("at least one write scope", str(through.exception))
+
+    def test_the_vocabulary_is_p02s_tuple_and_not_a_second_copy(self):
+        """A re-typed `{"file", "tree"}` inside this block would be a second
+        statement of the scope grammar that can drift from the plan parser's,
+        and the two disagreeing is a scope the plan accepts and the reservation
+        algebra refuses -- or the other way round, which is worse.
+
+        PINNED BEHAVIOURALLY RATHER THAN BY GREPPING THE SOURCE. A textual
+        assertion cannot tell a re-typed literal from the same literal quoted
+        in a docstring, and it is satisfied by a copy spelled `["file",
+        "tree"]`. Rebinding the module's tuple is the measurement: if this
+        block reads it, the vocabulary moves with it; if it holds its own copy,
+        `tree:` stays accepted here after the module stopped knowing the word.
+        """
+        self.assertEqual(state._WRITE_SCOPE_TYPES, ("file", "tree"))
+        original = state._WRITE_SCOPE_TYPES
+        try:
+            state._WRITE_SCOPE_TYPES = ("file", "branch")
+            with self.assertRaises(state.PlanMetadataError):
+                state._scope_parts("tree:docs")
+            with self.assertRaises(state.PlanMetadataError):
+                state.scopes_overlap("tree:docs", "file:docs/a.md")
+            self.assertEqual(state._scope_parts("branch:docs"),
+                             ("branch", PurePosixPath("docs")))
+            #: And the CONTAINMENT half moves with it too: index 1 of the tuple
+            #: is what `_scope_claims` calls the subtree type, so the renamed
+            #: word inherits the subtree behaviour rather than losing it.
+            self.assertIs(
+                state.scopes_overlap("branch:docs", "file:docs/a.md"), True)
+        finally:
+            state._WRITE_SCOPE_TYPES = original
+        self.assertEqual(state._WRITE_SCOPE_TYPES, ("file", "tree"))
+        self.assertIs(state.scopes_overlap("tree:docs", "file:docs/a.md"), True)
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        self.assertEqual(source.count('_WRITE_SCOPE_TYPES = ("file", "tree")'), 1)
+
+    def test_the_algebra_still_needs_no_regex_engine(self):
+        """F1's fix is a path predicate, not a pattern. Two of P04's briefs
+        reached for `re.compile`; the allowlist is twelve and `re` is not in
+        it."""
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        self.assertNotIn("re.compile(", source)
+        self.assertIsNone(sys.modules["pipeline_auto_state"].__dict__.get("re"))
+
+
+class PathInScopeTests(unittest.TestCase):
+    """The witness predicate on its own, including the families that only show
+    up when a path is compared against a scope rather than a scope against a
+    scope."""
+
+    def test_a_path_is_claimed_by_its_own_tree_and_every_ancestor_tree(self):
+        path = "a/b/c/d.py"
+        for root in ("a", "a/b", "a/b/c"):
+            with self.subTest(root=root):
+                self.assertIs(state._path_in_scope(path, f"tree:{root}"), True)
+                self.assertIs(state._path_in_scope(path, f"file:{root}"), False)
+        self.assertIs(state._path_in_scope(path, f"file:{path}"), True)
+        self.assertIs(state._path_in_scope(path, f"tree:{path}"), True)
+
+    def test_a_sibling_whose_name_is_a_prefix_is_not_claimed(self):
+        for path, root in (("srcx/a.py", "src"), ("docsx/a.md", "docs"),
+                           (".github/ci.yml", ".git"), ("v10/a.py", "v1"),
+                           ("a/bc/d.py", "a/b"), ("a-b-c/x.py", "a-b")):
+            with self.subTest(path=path, root=root):
+                self.assertIs(state._path_in_scope(path, f"tree:{root}"), False)
+                self.assertTrue(path.startswith(root))
+
+    def test_the_path_side_goes_through_the_same_bar_as_the_scope_side(self):
+        for path in (None, 42, ["src/a.py"], PurePosixPath("src/a.py"), "",
+                     "/etc/passwd", "../a", "a/../b", "src/./a", "a//b",
+                     "src/a/", "src/*.py", "a\\b", " src/a.py", "src/a.py "):
+            with self.subTest(path=repr(path)):
+                with self.assertRaises(state.PlanMetadataError):
+                    state._path_in_scope(path, "tree:src")
+
+    def test_a_deeply_nested_path_is_claimed_by_its_top_level_tree(self):
+        """`.parents` is walked, not a fixed depth: 40 segments deep is still
+        inside `tree:a`."""
+        path = "a/" + "/".join(f"s{index}" for index in range(39)) + "/z.py"
+        self.assertEqual(len(PurePosixPath(path).parts), 41)
+        self.assertIs(state._path_in_scope(path, "tree:a"), True)
+        self.assertIs(state._path_in_scope(path, "tree:ax"), False)
+        self.assertIs(state._path_in_scope(path, "file:a"), False)
+        self.assertIs(state.scopes_overlap("tree:a", f"file:{path}"), True)
+
+    def test_a_path_is_never_claimed_by_a_scope_in_a_different_case(self):
+        self.assertIs(state._path_in_scope("src/a.py", "tree:SRC"), False)
+        self.assertIs(state._path_in_scope("SRC/a.py", "tree:src"), False)
+        self.assertIs(state._path_in_scope("src/A.py", "file:src/a.py"), False)
+
+    def test_the_answer_is_a_bool(self):
+        self.assertIsInstance(state._path_in_scope("src/a.py", "tree:src"), bool)
+        self.assertIsInstance(state._path_in_scope("x/a.py", "tree:src"), bool)
+
+
 if __name__ == "__main__":
     unittest.main()

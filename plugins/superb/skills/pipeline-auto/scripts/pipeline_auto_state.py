@@ -11538,3 +11538,199 @@ def parse_plan_metadata(path) -> dict:
                     "dependency at an equal or later order is a plan that "
                     "integrates work before the work it is built on")
     return {"phase": phase, "tasks": tasks}
+
+
+# ---------------------------------------------------------------------------
+# P04 Task 3: the typed write-scope algebra -- fault F1.
+#
+# TWO SCOPES OVERLAP IFF THE SET OF REPOSITORY PATHS THEY CLAIM INTERSECTS, and
+# EQUALITY ALONE IS THE FAULT THIS BLOCK EXISTS TO CLOSE. Under equality
+# ``tree:src`` and ``file:src/a.py`` are different strings and different paths,
+# so the two tasks reserve together, two implementers open the same file in two
+# worktrees, and the collision surfaces as a merge conflict at integration --
+# which the master plan makes a HARD STOP precisely because a conflict there is
+# evidence that this function answered wrongly.
+#
+# THE RULE IS ASKED, NOT ENUMERATED. A ``file:`` scope claims exactly one path;
+# a ``tree:`` scope claims its own path and everything strictly beneath it. Each
+# claimed set therefore has a SMALLEST member, and it is the scope's own path --
+# so two claimed sets intersect iff one scope claims the OTHER'S ROOT. That is
+# the whole algebra, it is symmetric by construction rather than by a second
+# branch, and it is why ``scopes_overlap`` is two calls to the same containment
+# predicate rather than a three-way case analysis over the type pairs. A case
+# analysis is where the missing ancestor branch hid in the first place.
+#
+# CONTAINMENT IS ASKED THROUGH ``.parents`` AND NEVER THROUGH A STRING PREFIX,
+# which is the trap one level up from equality: ``"docsx/a.md".startswith(
+# "docs")`` is ``True`` and ``tree:docs`` does not contain ``docsx/a.md``, so
+# the prefix spelling serialises two tasks that could have run concurrently and,
+# read the other way round, would hand ``tree:.git`` authority over
+# ``.github/workflows/ci.yml``.
+#
+# AND IT DOES NOT CALL ``_within_scope``. That predicate answers a different
+# question -- "is this OUTPUT inside this declared scope" -- and deliberately
+# says a ``tree:`` scope does not contain itself, because a task whose declared
+# output is a directory has promised to produce a directory. Measured:
+# ``_within_scope(PurePosixPath("docs"), [("tree", PurePosixPath("docs"))])`` is
+# ``False``, which is right for an output and catastrophic for an overlap, where
+# ``tree:docs`` obviously collides with ``tree:docs``. What is inherited is the
+# SHAPE of the test and ``_WRITE_SCOPE_TYPES`` as the vocabulary; not the
+# predicate, whose asymmetry belongs to outputs alone.
+# ---------------------------------------------------------------------------
+
+
+def _scope_parts(scope: str):
+    """ONE typed write scope, as ``(type, PurePosixPath)``.
+
+    THE VOCABULARY AND THE PATH BAR ARE ``_parse_write_scope``'S, NOT A SECOND
+    COPY. Re-typing ``{"file", "tree"}`` here would be a second statement of
+    the scope grammar that can drift from the plan parser's, and the two
+    disagreeing is a scope a plan accepts and the reservation algebra rejects
+    -- or worse, the other way round. Task 1 rebound ``_TOKEN`` and silently
+    narrowed sixteen call sites; the lesson is the same shape.
+
+    THE ARITY CHECK IS THE PRICE OF THAT REUSE AND IT IS REACHABLE.
+    ``_parse_write_scope`` reads the COMMA-SEPARATED field a plan writes, so
+    ``scopes_overlap("file:a,tree:b", "file:c")`` would otherwise silently
+    compare against only the first member and report that a task claiming
+    ``tree:b`` collides with nothing. One scope in, one pair out. The
+    zero-member half of ``!= 1`` cannot be spelled -- ``_parse_write_scope``
+    already refuses an empty list, and ``none`` with it -- and the comparison
+    says what the rule means rather than what is reachable, exactly as the
+    ``>=`` in the order/dependency check does.
+
+    THE STRING SCREEN IS FIRST BECAUSE ``_declared_members`` HAS NO TYPE GUARD.
+    ``None.split(",")`` is ``AttributeError`` and ``42 == "none"`` is ``False``
+    on the way to the same call, and neither is a ``TrackerError``: a
+    controller catching this module's family would die on a caller's typo
+    instead of refusing it. ``_text`` is the screen the module already uses for
+    "a field that was actually filled in".
+    """
+    if not _text(scope):
+        raise PlanMetadataError(
+            "a write scope is a nonempty string spelled "
+            f"{_WRITE_SCOPE_TYPES[0]}:<path> or {_WRITE_SCOPE_TYPES[1]}:<path>;"
+            f" got {scope!r}")
+    _, parsed = _parse_write_scope(scope)
+    if len(parsed) != 1:
+        raise PlanMetadataError(
+            f"{scope!r} names {len(parsed)} write scopes and this asks about "
+            "ONE; a comma-separated field is compared with "
+            "_scope_sets_overlap, which reads every member, and not by "
+            "handing the whole field to a single-scope predicate that would "
+            "answer for the first member alone")
+    return parsed[0]
+
+
+def _scope_claims(path: PurePosixPath, scope_type: str,
+                  scope_path: PurePosixPath) -> bool:
+    """Does the scope ``(scope_type, scope_path)`` claim ``path``?
+
+    The one containment statement the rest of this block is built out of, taken
+    on ALREADY-PARSED values so the predicate can be reused without re-reading
+    a string. ``file:`` claims one path; ``tree:`` claims its own path and
+    every path strictly beneath it, asked through ``.parents``.
+
+    A ``tree:`` SCOPE CLAIMS ITSELF HERE, and that single clause is the
+    difference from ``_within_scope``. Both ask about descent; only this one
+    also says yes to the root, because two tasks that both declare
+    ``tree:docs`` are two tasks that cannot run at the same time.
+    """
+    return path == scope_path or (
+        scope_type == _WRITE_SCOPE_TYPES[1] and scope_path in path.parents)
+
+
+def scopes_overlap(a: str, b: str) -> bool:
+    """Do two typed write scopes claim any repository path in common?
+
+    ``True`` means the two tasks holding them may not be dispatched together.
+    Spare worker capacity never overrides this answer: capacity is about how
+    many tasks may run, and this is about which two may not.
+
+    THE ANSWER IS "DOES EITHER SCOPE CLAIM THE OTHER'S ROOT", which is exact
+    rather than a heuristic: every claimed set is nonempty and contains its own
+    scope path as its smallest member, so if the two sets intersect at all,
+    they intersect at one of the two roots. Writing it this way makes symmetry
+    a property of the EXPRESSION rather than of a fourth branch somebody has to
+    remember to keep in step, and it collapses the type-pair case analysis --
+    file/file, tree/file, file/tree, tree/tree -- that is where the ancestor
+    branch went missing.
+
+    Raises ``PlanMetadataError`` for anything that is not one typed, safe,
+    repository-relative scope, on either side, and nothing else for any input.
+    """
+    type_a, path_a = _scope_parts(a)
+    type_b, path_b = _scope_parts(b)
+    return (_scope_claims(path_b, type_a, path_a)
+            or _scope_claims(path_a, type_b, path_b))
+
+
+def _scope_sets_overlap(left, right) -> bool:
+    """Do two SETS of typed write scopes share any claimed path?
+
+    The form a reservation actually asks in: a task declares a list of scopes
+    and is compared against the list held by every task already in flight.
+
+    A BARE STRING IS REFUSED RATHER THAN ITERATED. ``"file:src/a.py"`` is a
+    perfectly good iterable -- of CHARACTERS -- and the damage is not that the
+    characters fail to parse but that they are never reached: ``any()`` over an
+    empty right-hand set returns ``False`` before the first one is examined, so
+    the single most likely caller mistake reports "no conflict" and two
+    implementers are dispatched onto the same file. That is fault F1 arriving
+    by a route the overlap rule itself is innocent of.
+
+    ``tuple``/``list`` IS A LISTED PAIR AND THE REASON IS THE IMPORT BUDGET.
+    The honest question is "is this a materialised sequence of strings", and
+    the abstract answer spells ``collections.abc.Sequence`` -- which ``str``
+    satisfies anyway, and which would widen ``ALLOWED_IMPORTS`` past twelve for
+    a predicate this module can state. The two shapes this module builds are a
+    tuple out of ``_parse_write_scope`` and a list out of a split cell.
+
+    MATERIALISING IS NOT DEFENSIVE TIDYING: the nested comprehension walks
+    ``right`` once per member of ``left``, so a one-shot iterator would be
+    exhausted after the first row and every later comparison would silently see
+    an empty set -- the same false ``False`` again.
+
+    EVERY SCOPE ON BOTH SIDES IS PARSED BEFORE ANY PAIR IS ANSWERED, so a
+    malformed scope is refused whether or not an earlier pair happened to
+    collide. With the parse left to ``any()``'s short circuit, the answer to
+    "is this scope list well formed" would depend on which pair collided first,
+    and a run could adopt a scope the very same list rejects tomorrow.
+    """
+    for side, which in ((left, "left"), (right, "right")):
+        if not isinstance(side, (tuple, list)):
+            raise PlanMetadataError(
+                f"the {which} write-scope set must be a tuple or a list of "
+                f"typed scope strings; got {type(side).__name__} {side!r}. A "
+                "bare string is an iterable of characters, and an empty "
+                "opposing set would report 'no conflict' before one of them "
+                "was ever examined")
+    left = tuple(left)
+    right = tuple(right)
+    parsed_left = [_scope_parts(scope) for scope in left]
+    parsed_right = [_scope_parts(scope) for scope in right]
+    return any(_scope_claims(path_b, type_a, path_a)
+               or _scope_claims(path_a, type_b, path_b)
+               for type_a, path_a in parsed_left
+               for type_b, path_b in parsed_right)
+
+
+def _path_in_scope(path: str, scope: str) -> bool:
+    """Is one repository-relative path claimed by one typed write scope?
+
+    The WITNESS form of the overlap question, and the reason it is a public
+    part of this block rather than an inlined branch: when ``scopes_overlap``
+    says ``True`` there is always a concrete path both scopes claim, and it is
+    one of the two scope roots. A test can therefore demand the witness instead
+    of accepting the bare boolean -- which is what makes an ancestor rule
+    distinguishable from an equality rule, since both say ``True`` for
+    ``tree:docs`` against ``tree:docs`` and only one of them can produce
+    ``src/a.py`` as the path ``tree:src`` and ``file:src/a.py`` share.
+
+    ``path`` GOES THROUGH ``_safe_relative`` TOO. A caller's path is as
+    untrusted as a plan's: ``"src/../../etc"`` normalises into a different
+    answer under ``PurePosixPath`` and ``"srcx/a.py"`` must not be admitted by
+    a prefix. One bar, stated once, for both sides of the comparison.
+    """
+    scope_type, scope_path = _scope_parts(scope)
+    return _scope_claims(_safe_relative(path), scope_type, scope_path)

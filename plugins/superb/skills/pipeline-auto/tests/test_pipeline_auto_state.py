@@ -11904,6 +11904,32 @@ def seed_adoptions(run_dir, phase, count, *, prefix="a", first=0):
 BUDGET_PHASES = ("P04", "P05", "P06")
 
 
+def register_questions(run_dir, *ids):
+    """Put `ids` in `## Questions`, standing in for stage 03's one human gate.
+
+    THE QUORUM AXIS NAMESPACE IS THIS SECTION. `_validate_quorum` admits an
+    axis only if it is a stage-03 question id or the reserved literal `new`, so
+    a run that finalises a quorum on `storage-engine` and never registered that
+    question cannot hold the row the finalisation writes — the transition stops
+    and nothing is published. Registering it here builds the STATE a run is in
+    by the time a worker raises a question on an axis stage 03 named; it does
+    not perform the transition that gets there, for `register_phases`' reason.
+
+    Slots are numbered off what the section already holds rather than from one,
+    because slots must read 1..n in order and a second call would otherwise
+    write a second slot 1.
+    """
+    path = Path(run_dir) / "progress.md"
+    tracker = pas.parse_tracker(path.read_text(encoding="utf-8"))
+    for identifier in ids:
+        pas.append_row(tracker, "questions",
+                       {"id": identifier, "origin": "synthesis",
+                        "slot": str(len(tracker["questions"]) + 1),
+                        "state": "proposed", "decision": "-"})
+    path.write_text(pas.render_tracker(tracker), encoding="utf-8")
+    return tracker
+
+
 def register_phases(run_dir, *ids):
     """Put `ids` in `## Phases`, standing in for P06's `create_phase`.
 
@@ -13218,17 +13244,27 @@ class JsonEntersWrappedTests(unittest.TestCase):
             pas._loads(deep, "a probe")
 
     def test_the_five_final_statuses_meet_p02s_outcome_grammar_except_one(self):
-        """A SEAM PINNED RATHER THAN DISCOVERED. P02's `_QuorumOutcome` admits
-        `adopted`, `escalated` and `rejected-<reason>`; P03's contract names a
-        fifth status, `question-not-decidable`, which is none of those. So the
-        task that writes a `## Quorum` row owes a mapping for that one status,
-        and this case is where that debt is visible. It fails the day either
-        side changes, which is the point — the alternative is a run that
-        finalises correctly and then cannot record what it decided."""
+        """THE SEAM, NOW CLOSED, AND PINNED SO IT STAYS CLOSED. P02's
+        `_QuorumOutcome` once admitted only `adopted`, `escalated` and
+        `rejected-<reason>`, so P03's fifth status had nowhere to be written
+        and the run could finalise correctly and then not record what it had
+        found. It was closed by WIDENING P02's vocabulary — the `Outcome` cell
+        is P02's — rather than by coercing the status to `escalated`, which
+        would file "there was nothing here to decide between" as "the run asked
+        a human", or by spelling it `rejected-...`, which would file it as a
+        candidate the run turned down when no candidate was ever compared.
+
+        Both directions are asserted. Without the second, a `_QuorumOutcome`
+        relaxed into accepting any word at all would satisfy the first."""
         writable = {status for status in pas._FINAL_STATUSES
                     if pas._QUORUM_OUTCOME.fullmatch(status)}
-        self.assertEqual(pas._FINAL_STATUSES - writable, {"question-not-decidable"})
+        self.assertEqual(pas._FINAL_STATUSES - writable, frozenset())
         self.assertEqual(len(pas._FINAL_STATUSES), 5)
+        self.assertIn(pas._UNDECIDABLE, pas._FINAL_STATUSES)
+        self.assertTrue(pas._QUORUM_OUTCOME.fullmatch(pas._UNDECIDABLE))
+        for near_miss in ("question-not-decided", "not-decidable", "rejected",
+                          "undecidable", "question not decidable"):
+            self.assertFalse(pas._QUORUM_OUTCOME.fullmatch(near_miss), near_miss)
 
 
 # --- opening a quorum ------------------------------------------------------
@@ -16320,6 +16356,15 @@ def adoption_repo(case, *, decisions=None):
     write_repo(root, "spec.md", SPEC_MD)
     (run_dir / "decisions.md").write_text(
         UNRELATED_HUMAN if decisions is None else decisions, encoding="utf-8")
+    #: THE ROW THE FINALISATION WRITES HAS TO BE HOLDABLE. `## Quorum` closes
+    #: its `Axis` cell to the stage-03 question ids plus `new` and resolves its
+    #: `Phase` cell against `## Phases`, so a run whose tracker knows neither
+    #: stops at the mirror with nothing published — which is the right
+    #: behaviour and the wrong fixture. Registered from `QUESTION` rather than
+    #: retyped, so a fixture that changed its axis or phase cannot leave this
+    #: registering the old one.
+    register_questions(run_dir, QUESTION["axis"])
+    register_phases(run_dir, QUESTION["phase"])
     return root, run_dir
 
 
@@ -17370,6 +17415,10 @@ class AdoptedDecisionRecordTests(unittest.TestCase):
         the one being retired, "this section" and "the rest of the file" are
         the same range and no input tells them apart."""
         first, _ = self.adopt()
+        #: Registered because the mirrored row's `Axis` cell is closed to the
+        #: stage-03 question ids: a second axis the tracker never heard of
+        #: stops the finalisation before this case reaches its own claim.
+        register_questions(self.run_dir, "cache-layer")
         other, _ = self.adopt(
             axis="cache-layer",
             question="Which cache layer fronts the session table?")
@@ -17557,12 +17606,7 @@ class AdoptedDecisionRecordTests(unittest.TestCase):
         """One dispatched `new`-axis quorum whose minted axis is a registered
         stage-03 question id, and its qid."""
         qid = pas.derive_qid(question, "new")
-        path = self.run_dir / "progress.md"
-        tracker = pas.parse_tracker(path.read_text(encoding="utf-8"))
-        pas.append_row(tracker, "questions",
-                       {"id": qid, "origin": "synthesis", "slot": "1",
-                        "state": "answered", "decision": "H-001"})
-        path.write_text(pas.render_tracker(tracker), encoding="utf-8")
+        register_questions(self.run_dir, qid)
         opened = open_question(self, self.run_dir, axis="new",
                                question=question)
         self.assertEqual(opened, qid, "the mint is the question's own bare "
@@ -17802,6 +17846,577 @@ class AdoptedDecisionRecordTests(unittest.TestCase):
         self.assertEqual(result["status"], "escalated")
         self.assertEqual(result["reason"], "uncomparable-answer")
         self.assertEqual(self.trail(), UNRELATED_HUMAN)
+
+# --- P03's own tracker rows ------------------------------------------------
+
+
+def emitted_escalation_reasons() -> set:
+    """Every reason token the finaliser can put in a record, FROM ITS SOURCE.
+
+    Derived from the call tree rather than transcribed, because a totality
+    claim built on a remembered list is a claim about the author's memory. The
+    task brief for this row writer listed eleven tokens and the finaliser emits
+    fourteen — `blocked`, `run-budget-exhausted` and
+    `answers-describe-different-things` were all missing from it, and a
+    hand-copied table would have inherited exactly that gap.
+
+    Two shapes are collected because the module writes reasons two ways: a
+    literal handed straight to a `reason=` keyword, and the token
+    `quorum_budget` assigns to its own local `reason` and the finaliser then
+    forwards as `budget["reason"]` — invisible to a scan for constants at the
+    call site.
+    """
+    source = module_source()
+    tokens = set()
+    for name in ("_compute_quorum_result", "_apply_adoption_gates",
+                 "quorum_budget"):
+        for node in ast.walk(function_node(source, name)):
+            if (isinstance(node, ast.keyword) and node.arg == "reason"
+                    and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)):
+                tokens.add(node.value.value)
+            if (isinstance(node, ast.Assign)
+                    and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)
+                    and any(isinstance(target, ast.Name)
+                            and target.id == "reason"
+                            for target in node.targets)):
+                tokens.add(node.value.value)
+    return tokens
+
+
+class QuorumRowGrammarTests(unittest.TestCase):
+    """One row, ordered by P02's columns and holdable by P02's parser.
+
+    Every fixture here is built so that P02's column ORDER, the builder's own
+    order and alphabetical order all disagree. A case whose values happen to be
+    in the section's order cannot tell a row that consults `section_columns`
+    from one that does not, which is the whole claim.
+    """
+
+    def values(self, section="quorum"):
+        columns = pas.section_columns(section)
+        self.assertNotEqual(
+            columns, tuple(sorted(columns)),
+            "P02's columns are in alphabetical order, so a row sorted by name "
+            "and a row in the section's order are the same row and nothing "
+            "below distinguishes them")
+        built = {column: f"v-{column}" for column in reversed(columns)}
+        self.assertNotEqual(
+            tuple(built), columns,
+            "the fixture is already in P02's order, so a builder that ignored "
+            "section_columns entirely would pass")
+        return columns, built
+
+    def test_a_row_comes_back_in_p02s_column_order_whatever_order_it_was_built_in(self):
+        for section in ("quorum", "escalations"):
+            with self.subTest(section=section):
+                columns, built = self.values(section)
+                row = pas._row_for(section, built)
+                self.assertEqual(tuple(row), columns)
+                self.assertEqual(row, built)
+                self.assertEqual(tuple(row.values()),
+                                 tuple(f"v-{column}" for column in columns))
+
+    def test_a_row_of_the_right_length_with_one_wrong_name_is_refused(self):
+        """COUNTING IS NOT ENOUGH, and this is the shape that proves it. A row
+        copied from a display header has exactly twelve keys and one of them
+        spelled for a column the section has never had; `zip` and `len` both
+        accept it, and `render_tracker` then reports the column that went
+        MISSING rather than the one that was invented."""
+        _columns, built = self.values()
+        built["Payload Digest"] = built.pop("payload_digest")
+        self.assertEqual(len(built), len(pas.section_columns("quorum")))
+        with self.assertRaises(pas.QuorumError) as caught:
+            pas._row_for("quorum", built)
+        self.assertIn("payload_digest", str(caught.exception))
+        self.assertIn("Payload Digest", str(caught.exception))
+
+    def test_a_complete_row_carrying_one_extra_key_is_refused(self):
+        """THE UNEXPECTED HALF ON ITS OWN. A rename leaves `missing` and
+        `unexpected` BOTH non-empty, so the test above cannot tell
+        `if missing or unexpected` from either half alone — mutation found
+        exactly that: deleting the `unexpected` check survived the whole suite.
+        A row that is complete PLUS one is the fixture where only one half
+        fires, and the assertion on the empty half is what pins that."""
+        _columns, built = self.values()
+        built["invented"] = "v-invented"
+        with self.assertRaises(pas.QuorumError) as caught:
+            pas._row_for("quorum", built)
+        message = str(caught.exception)
+        self.assertIn("invented", message)
+        self.assertIn("missing []", message,
+                      "this fixture is supposed to be short of nothing; if it "
+                      "is, it no longer isolates the unexpected half")
+
+    def test_a_row_short_by_one_column_and_inventing_nothing_is_refused(self):
+        """THE MISSING HALF ON ITS OWN, and the other side of the same
+        mutation: deleting the `missing` check also survived, because every
+        fixture that reached it was inventing a name at the same time."""
+        columns, built = self.values()
+        dropped = columns[-1]
+        del built[dropped]
+        with self.assertRaises(pas.QuorumError) as caught:
+            pas._row_for("quorum", built)
+        message = str(caught.exception)
+        self.assertIn(dropped, message)
+        self.assertIn("unexpected []", message,
+                      "this fixture is supposed to invent nothing; if it does, "
+                      "it no longer isolates the missing half")
+
+    def test_the_section_is_p02s_key_and_not_its_markdown_heading(self):
+        """`section_columns` is keyed by the tracker key, so `"Quorum"` raises
+        — and the row writer passes the name straight through rather than
+        casefolding a caller's guess into something that happens to work."""
+        _columns, built = self.values()
+        with self.assertRaises(pas.TrackerValidationError):
+            pas._row_for("Quorum", built)
+
+    def test_a_cell_that_would_silently_reshape_the_table_is_refused(self):
+        """The three characters that PARSE. A pipe gives the row an extra
+        column, a newline gives the section an extra row and a comma splits one
+        token into two — none of them raises anywhere, and the tracker comes
+        back holding cells nobody wrote."""
+        for poison in ("a|b", "a,b", "a\nb", "a\rb", "|", ","):
+            with self.subTest(value=poison):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas._cell(poison, "a probe")
+
+    def test_a_cell_that_is_not_a_cell_is_refused_rather_than_repr_ed(self):
+        """`str(["a"])` renders, parses back and reads as a value somebody
+        wrote. `True` is the sharper one: `isinstance(True, int)` is true, so
+        an integer-admitting writer puts the word `True` into a column that has
+        no meaning for it."""
+        for value in ([], ["a"], {}, {"a": 1}, 1.5, True, False, object()):
+            with self.subTest(value=value):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas._cell(value, "a probe")
+
+    def test_absence_and_emptiness_render_as_the_dash_the_parser_reads_back(self):
+        self.assertEqual(pas._cell(None, "a probe"), "-")
+        self.assertEqual(pas._cell("   ", "a probe"), "-")
+        self.assertEqual(pas._cell("  x  ", "a probe"), "x")
+        self.assertEqual(pas._cell(3, "a probe"), "3")
+        #: Zero is a DEPTH, not an absence: a human decision is depth 0.
+        self.assertEqual(pas._cell(0, "a probe"), "0")
+
+    def test_a_list_cell_carries_the_whole_list_and_not_its_head(self):
+        """If every fixture held one entry, `",".join(values)` and `values[0]`
+        would be the same function. This one holds three, in an order that is
+        neither sorted nor reverse-sorted."""
+        owners = list(QUORUM_OWNERS)
+        cell = pas._cell_list(owners, "a probe")
+        self.assertEqual(cell, "qq,alpha,mm")
+        self.assertNotEqual(cell, owners[0])
+        self.assertNotEqual(cell, ",".join(sorted(owners)))
+        self.assertEqual(pas._csv(cell), QUORUM_OWNERS)
+        self.assertEqual(pas._cell_list([], "a probe"), "-")
+        self.assertEqual(pas._cell_list(None, "a probe"), "-")
+        with self.assertRaises(pas.QuorumSchemaInvalid):
+            pas._cell_list("qq", "a probe")
+
+    def test_the_two_row_states_it_writes_are_the_ones_p02_reads(self):
+        """A seam pinned rather than discovered: the brief for this task said
+        an escalation is written `pending`, which is a word no enum in this
+        module holds and would halt the run at the render."""
+        self.assertIn(pas._FINALIZED, pas._QUORUM_STATES)
+        self.assertNotEqual(pas._FINALIZED, pas._IN_FLIGHT)
+        self.assertEqual(pas._ESCALATION_STATES[0], "queued")
+        self.assertNotIn("pending", pas._ESCALATION_STATES)
+
+
+class QuorumMirrorTests(unittest.TestCase):
+    """What one finalisation writes into P03's own two sections.
+
+    The run is a real one: a real repository, real citations, a real dispatch,
+    real response files on disk. Nothing here seeds a row.
+    """
+
+    def setUp(self):
+        self.root, self.run_dir = adoption_repo(self)
+
+    def finalize(self, payloads=None, **overrides):
+        qid = open_question(self, self.run_dir, **overrides)
+        answer_quorum(self.run_dir, qid, payloads or [
+            graded("postgres", "specified"),
+            graded("postgres", "speculation"),
+            graded("sqlite", "speculation")])
+        return qid, pas.finalize_quorum(str(self.run_dir), qid=qid)
+
+    def tracker(self):
+        return pas.validate_run(self.run_dir)
+
+    def trail(self):
+        return (self.run_dir / "decisions.md").read_text(encoding="utf-8")
+
+    def opened(self, qid):
+        return json.loads(
+            (self.run_dir / "quorum" / qid / "open.json")
+            .read_text(encoding="utf-8"))
+
+    def test_an_adoption_is_mirrored_into_one_quorum_row_and_batches_nobody(self):
+        qid, result = self.finalize()
+        tracker = self.tracker()
+        self.assertEqual(len(tracker["quorum"]), 1)
+        row = tracker["quorum"][0]
+        self.assertEqual(row["qid"], qid)
+        self.assertEqual(row["axis"], "storage-engine")
+        self.assertEqual(row["phase"], "P04")
+        self.assertEqual(row["state"], "finalized")
+        self.assertEqual(row["outcome"], "adopted")
+        self.assertEqual(row["decision"], f"Q-{qid}")
+        self.assertEqual(row["rung"], "specified")
+        self.assertEqual(row["depth"], "1")
+        #: An adoption is the run deciding for itself; it is not a question for
+        #: a human, and queueing one would batch the user something the run
+        #: has just answered.
+        self.assertEqual(tracker["escalations"], [])
+        self.assertEqual(result["status"], "adopted")
+
+    def test_the_owners_cell_is_the_dispatch_order_and_the_whole_roster(self):
+        qid, _result = self.finalize()
+        row = self.tracker()["quorum"][0]
+        self.assertEqual(pas._csv(row["owners"]), QUORUM_OWNERS)
+        self.assertNotEqual(pas._csv(row["owners"]), tuple(sorted(QUORUM_OWNERS)))
+        self.assertEqual(self.opened(qid)["owners"], list(QUORUM_OWNERS))
+
+    def test_the_two_digests_are_the_two_the_open_record_bound(self):
+        """Two cells, two facts, and they are asserted to DIFFER from each
+        other: a writer that put one digest in both columns would satisfy a
+        case that only checked each cell was sha256 hex."""
+        qid, result = self.finalize()
+        row = self.tracker()["quorum"][0]
+        opened = self.opened(qid)
+        self.assertEqual(row["payload_digest"], opened["payload_digest"])
+        self.assertEqual(row["context_digest"], opened["context_digest"])
+        self.assertEqual(row["context_digest"], result["context_digest"])
+        self.assertNotEqual(row["payload_digest"], row["context_digest"])
+
+    def test_the_responses_cell_names_each_owners_latest_answer_and_only_that(self):
+        """A THREE-BRAIN QUORUM CAN HOLD FOUR RESPONSE FILES. A malformed first
+        answer buys one re-dispatch, so `alpha` here has two attempts on disk
+        while `qq` and `mm` have one — and `_validate_quorum` refuses a row
+        citing more than three files. The fixture asserts its own property:
+        without the fourth file, "every response" and "the latest per owner"
+        are the same cell and this case tests neither."""
+        qid = open_question(self, self.run_dir)
+        pas.record_brain_response(str(self.run_dir), qid=qid, owner="alpha",
+                                  payload={"not": "a response"})
+        for owner, payload in zip(QUORUM_OWNERS,
+                                  [graded("postgres", "specified"),
+                                   graded("postgres", "speculation"),
+                                   graded("sqlite", "speculation")]):
+            pas.record_brain_response(str(self.run_dir), qid=qid, owner=owner,
+                                      payload=dict(payload, qid=qid))
+        directory = self.run_dir / "quorum" / qid / "responses"
+        self.assertEqual(len(sorted(directory.glob("*.json"))), 4)
+        result = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(result["status"], "adopted")
+        cells = pas._csv(self.tracker()["quorum"][0]["responses"])
+        self.assertEqual(
+            cells,
+            (f"quorum/{qid}/responses/qq__1.json",
+             f"quorum/{qid}/responses/alpha__2.json",
+             f"quorum/{qid}/responses/mm__1.json"))
+        self.assertNotIn(f"quorum/{qid}/responses/alpha__1.json", cells)
+
+    def test_an_escalation_is_mirrored_into_both_sections_with_its_blast(self):
+        """The blast cell carries the WHOLE trespass, not its head, and the
+        trespass is not the axis the question was asked on — so a writer that
+        reported `blast[0]`, or that reported the axis, fails here."""
+        loud = dict(graded("postgres", "specified"),
+                    blast=["schema-migration", "storage-engine",
+                           "external-service"])
+        qid, result = self.finalize([loud, graded("postgres", "speculation"),
+                                     graded("sqlite", "speculation")])
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "irreversible-axis")
+        tracker = self.tracker()
+        row = tracker["quorum"][0]
+        self.assertEqual(row["outcome"], "escalated")
+        self.assertEqual(row["decision"], "-")
+        self.assertEqual(row["rung"], "specified")
+        self.assertEqual(row["depth"], "-")
+        self.assertEqual(len(tracker["escalations"]), 1)
+        escalation = tracker["escalations"][0]
+        self.assertEqual(escalation["qid"], qid)
+        self.assertEqual(escalation["state"], "queued")
+        self.assertEqual(escalation["batch"], "-")
+        self.assertEqual(escalation["resolution"], "-")
+        blast = pas._csv(escalation["blast"])
+        self.assertEqual(blast, ("external-service", "schema-migration"))
+        self.assertNotEqual(escalation["blast"], blast[0])
+        self.assertNotEqual(escalation["blast"], row["axis"])
+        self.assertNotIn("storage-engine", blast)
+
+    def test_an_escalation_with_no_trespass_names_the_axis_it_was_raised_on(self):
+        """The other half of the mapping. `-` in this column would be the one
+        cell the batching human reads saying nothing at all."""
+        qid, result = self.finalize([graded("postgres", "convention-cited")] * 3)
+        self.assertEqual(result["reason"], "below-floor")
+        escalation = self.tracker()["escalations"][0]
+        self.assertEqual(escalation["qid"], qid)
+        self.assertEqual(escalation["blast"], "storage-engine")
+        #: RULE 5. The floor this tripped on is in the record and must not be
+        #: in a row: the tracker is a file a brain can be handed, and the bar
+        #: it has to clear frames every answer it would give.
+        self.assertIn("floor_rung", result)
+        rendered = (self.run_dir / "progress.md").read_text(encoding="utf-8")
+        self.assertNotIn("floor", rendered)
+        for value in ("0.95", "0.85", "0.70", "0.55", "0.30"):
+            self.assertNotIn(value, rendered)
+
+    def test_a_rejection_is_recorded_as_an_outcome_and_never_batched_to_a_human(self):
+        """A quorum may decide an open question and may never overrule a
+        recorded one — but the user has already spoken on this axis, so asking
+        them again is the re-litigation the replay guard refuses from the other
+        direction. The rejection is the `Outcome` cell, which is where the
+        run's earliest drift warning is counted from.
+
+        THE POSITIVE CONTROL IS IN THE SAME RUN. Without the escalation below,
+        a mirror that appended no escalation row for ANY outcome would pass.
+        """
+        (self.run_dir / "decisions.md").write_text(DECISION_HUMAN,
+                                                   encoding="utf-8")
+        rejected, result = self.finalize()
+        self.assertEqual(result["status"], "rejected-contradicts-human")
+        tracker = self.tracker()
+        self.assertEqual(tracker["quorum"][0]["qid"], rejected)
+        self.assertEqual(tracker["quorum"][0]["outcome"],
+                         "rejected-contradicts-human")
+        self.assertEqual(tracker["quorum"][0]["decision"], "-")
+        self.assertEqual(tracker["escalations"], [])
+
+        loud = dict(graded("postgres", "specified"), blast=["external-service"])
+        escalated, second = self.finalize(
+            [loud, graded("postgres", "speculation"),
+             graded("sqlite", "speculation")],
+            question="Which engine stores the session table for good?")
+        self.assertEqual(second["status"], "escalated")
+        tracker = self.tracker()
+        self.assertEqual([row["qid"] for row in tracker["quorum"]],
+                         [rejected, escalated])
+        self.assertEqual([row["qid"] for row in tracker["escalations"]],
+                         [escalated])
+
+    def test_a_question_the_quorum_could_not_decide_is_written_as_itself(self):
+        """THE STATUS THAT HAD NOWHERE TO BE WRITTEN. Coercing it to
+        `escalated` would file "there was nothing here to decide between" as
+        "the run asked a human", and the terminal report keys off which. It is
+        recorded verbatim, and it IS escalated, because nothing about it was
+        settled."""
+        payloads = [graded("prose-a", "specified", subject="a"),
+                    graded("prose-b", "specified", subject="b"),
+                    graded("prose-c", "specified", subject="c")]
+        qid, result = self.finalize(
+            payloads, options_supplied="no",
+            question="What should the session layer do?")
+        self.assertEqual(result["status"], pas._UNDECIDABLE)
+        tracker = self.tracker()
+        self.assertEqual(tracker["quorum"][0]["outcome"], "question-not-decidable")
+        self.assertNotEqual(tracker["quorum"][0]["outcome"], "escalated")
+        self.assertEqual([row["qid"] for row in tracker["escalations"]], [qid])
+        self.assertEqual(tracker["escalations"][0]["blast"], "storage-engine")
+
+    def test_the_escalation_id_is_the_highest_on_record_plus_one(self):
+        """LENGTH PLUS ONE IS NOT A HIGH-WATER MARK. Seeded with `E-3` and
+        `E-7`, a writer numbering off the row count mints `E-3` — a duplicate
+        the section already refuses — and the run stops on an id it created
+        itself."""
+        path = self.run_dir / "progress.md"
+        tracker = pas.parse_tracker(path.read_text(encoding="utf-8"))
+        for identifier in ("E-3", "E-7"):
+            pas.append_row(tracker, "escalations",
+                           {"id": identifier, "qid": "-", "blast": "-",
+                            "state": "queued", "batch": "-", "resolution": "-"})
+        path.write_text(pas.render_tracker(tracker), encoding="utf-8")
+        loud = dict(graded("postgres", "specified"), blast=["external-service"])
+        _qid, result = self.finalize([loud, graded("postgres", "speculation"),
+                                      graded("sqlite", "speculation")])
+        self.assertEqual(result["status"], "escalated")
+        minted = self.tracker()["escalations"][-1]["id"]
+        self.assertEqual(minted, "E-8")
+        self.assertNotEqual(minted, "E-3")
+
+    def test_a_row_p02_would_refuse_stops_the_run_before_anything_is_published(self):
+        """THE ORDERING THAT MAKES THE FAULT RECOVERABLE.
+        `locked_tracker_update` re-validates what `mutate` returns, but only
+        AFTER `mutate` has run — and by then `final.json` is on disk and every
+        later call returns it without re-entering the mirror, so the rows could
+        never be written at all. Judged inside the mirror, the same fault
+        publishes nothing: a human registers the missing question and the very
+        next call finalises.
+        """
+        qid = open_question(self, self.run_dir, axis="cache-layer",
+                            question="Which cache layer fronts the session?")
+        answer_quorum(self.run_dir, qid, [graded("postgres", "specified"),
+                                          graded("postgres", "speculation"),
+                                          graded("sqlite", "speculation")])
+        before = self.tracker()["run"]["revision"]
+        with self.assertRaises(pas.TrackerValidationError):
+            pas.finalize_quorum(str(self.run_dir), qid=qid)
+        final = self.run_dir / "quorum" / qid / "final.json"
+        self.assertFalse(final.exists())
+        self.assertEqual(self.trail(), UNRELATED_HUMAN)
+        after = self.tracker()
+        self.assertEqual(after["quorum"], [])
+        self.assertEqual(after["run"]["revision"], before)
+
+        register_questions(self.run_dir, "cache-layer")
+        result = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(result["status"], "adopted")
+        self.assertEqual([row["axis"] for row in self.tracker()["quorum"]],
+                         ["cache-layer"])
+
+    def test_a_replayed_finalisation_appends_no_second_row(self):
+        """`final.json` is a single-assignment cell and the transition id is
+        replay-inert, so the second call must leave the two sections exactly as
+        the first left them — a second row would be one adoption reported
+        twice."""
+        qid, _result = self.finalize()
+        before = self.tracker()
+        pas.finalize_quorum(str(self.run_dir), qid=qid)
+        after = self.tracker()
+        self.assertEqual(after["quorum"], before["quorum"])
+        self.assertEqual(after["escalations"], before["escalations"])
+        self.assertEqual(len(after["quorum"]), 1)
+
+
+class EscalationReasonMappingTests(unittest.TestCase):
+    """Every reason this phase can emit has to say what the human is shown."""
+
+    def test_every_reason_the_finaliser_emits_has_a_blast_mapping(self):
+        """DERIVED FROM THE SOURCE, NOT FROM MEMORY. The brief this writer was
+        built from listed eleven tokens; the finaliser emits fourteen. A
+        hand-copied table would have inherited the gap and a run that escalated
+        for `blocked` would have stopped at the row."""
+        emitted = emitted_escalation_reasons()
+        self.assertEqual(emitted, set(pas._ESCALATION_BLAST))
+        self.assertGreaterEqual(len(emitted), 14)
+        for missed_by_the_brief in ("blocked", "run-budget-exhausted",
+                                    "answers-describe-different-things"):
+            self.assertIn(missed_by_the_brief, emitted)
+        self.assertIn("unmintable-axis", pas._ESCALATION_BLAST)
+
+    def test_only_the_trespass_reason_reads_the_records_blast(self):
+        """A mapping in which every entry had the same value would be a
+        constant wearing a table's clothes."""
+        sources = set(pas._ESCALATION_BLAST.values())
+        self.assertEqual(sources, {pas._BLAST_FROM_TRESPASS, pas._BLAST_FROM_AXIS})
+        self.assertEqual(
+            [reason for reason, source in pas._ESCALATION_BLAST.items()
+             if source == pas._BLAST_FROM_TRESPASS],
+            ["irreversible-axis"])
+
+    def test_an_unmapped_reason_is_refused_rather_than_written_as_a_dash(self):
+        tracker = {"escalations": []}
+        for reason in ("brand-new-reason", None, "", 7, ["irreversible-axis"]):
+            with self.subTest(reason=reason):
+                with self.assertRaises(pas.QuorumError):
+                    pas._escalation_row(tracker, {"qid": "a" * 12,
+                                                  "status": "escalated",
+                                                  "axis": "storage-engine",
+                                                  "reason": reason})
+
+    def test_the_statuses_that_batch_a_human_are_the_two_that_settle_nothing(self):
+        self.assertEqual(pas._ESCALATING_STATUSES,
+                         frozenset({"escalated", "question-not-decidable"}))
+        for settled in ("adopted", "rejected-contradicts-human",
+                        "rejected-contradicts-quorum"):
+            self.assertNotIn(settled, pas._ESCALATING_STATUSES)
+        self.assertEqual(pas._ESCALATING_STATUSES | {"adopted",
+                                                     "rejected-contradicts-human",
+                                                     "rejected-contradicts-quorum"},
+                         set(pas._FINAL_STATUSES))
+
+
+class QuorumTrackerRowsTests(unittest.TestCase):
+    """The mirror, re-derived from the files for the terminal report."""
+
+    def setUp(self):
+        self.root, self.run_dir = adoption_repo(self)
+
+    def finalize(self, payloads=None, **overrides):
+        qid = open_question(self, self.run_dir, **overrides)
+        answer_quorum(self.run_dir, qid, payloads or [
+            graded("postgres", "specified"),
+            graded("postgres", "speculation"),
+            graded("sqlite", "speculation")])
+        return qid, pas.finalize_quorum(str(self.run_dir), qid=qid)
+
+    def rows(self):
+        return pas.quorum_tracker_rows(str(self.run_dir))
+
+    def two_quorums(self):
+        """One adoption and one escalation, whose APPEND order is not their
+        QID order — so "the order the run wrote them" and "the order this
+        function reports them" are two different answers."""
+        loud = dict(graded("postgres", "specified"), blast=["external-service"])
+        first, _ = self.finalize([loud, graded("postgres", "speculation"),
+                                  graded("sqlite", "speculation")])
+        second, _ = self.finalize(
+            question="Which engine stores the session table for good?")
+        self.assertNotEqual(sorted((first, second)), [first, second],
+                            "this fixture's append order already equals its "
+                            "qid order, so nothing below can tell them apart")
+        return first, second
+
+    def test_the_rows_are_re_derived_and_agree_cell_for_cell_with_the_tracker(self):
+        first, second = self.two_quorums()
+        rows = self.rows()
+        self.assertEqual([row["qid"] for row in rows], sorted((first, second)))
+        indexed = {row["qid"]: row for row in rows}
+        for row in pas.validate_run(self.run_dir)["quorum"]:
+            self.assertEqual(indexed[row["qid"]], row)
+
+    def test_each_row_is_ordered_by_p02s_columns(self):
+        self.finalize()
+        columns = pas.section_columns("quorum")
+        self.assertNotEqual(columns, tuple(sorted(columns)))
+        self.assertEqual(tuple(self.rows()[0]), columns)
+
+    def test_provenance_is_the_decision_cell_a_human_id_cannot_wear(self):
+        """There is no `Provenance` column and there does not need to be: an
+        adopted quorum names `Q-<qid>`, a grammar `_HUMAN_DECISION` refuses, so
+        a machine decision can never be read back as a human one."""
+        qid, _result = self.finalize()
+        cell = self.rows()[0]["decision"]
+        self.assertEqual(cell, f"Q-{qid}")
+        self.assertTrue(pas._QUORUM_DECISION.fullmatch(cell))
+        self.assertFalse(pas._HUMAN_DECISION.fullmatch(cell))
+
+    def test_a_quorum_that_dispatched_nothing_has_no_row_and_is_not_lost(self):
+        """A budget trip writes `final.json` and not one byte more — no open
+        record, no payload digest, no context digest, because none would be
+        true of a dispatch that never happened. `## Quorum` is validated as a
+        DISPATCH record, so there is no legal row for it; it stays visible in
+        `quorum_events`, which is what the budget and the escalation count read."""
+        qid, _result = self.finalize()
+        trip = budget_qid("b", 0)
+        seed_final(self.run_dir, trip, status="escalated", phase="P04",
+                   override={"dispatched": False, "axis": "storage-engine",
+                             "reason": "phase-budget-exhausted"})
+        self.assertEqual([row["qid"] for row in self.rows()], [qid])
+        self.assertIn(trip, [event["qid"] for event
+                             in pas.quorum_events(str(self.run_dir))])
+
+    def test_a_record_that_will_not_say_whether_it_dispatched_is_a_stop(self):
+        """The fail-quiet this refuses is a real adoption dropped out of the
+        run's own account of itself without a word."""
+        self.finalize()
+        for dispatched in ({}, {"dispatched": "yes"}, {"dispatched": 1},
+                           {"dispatched": None}):
+            with self.subTest(override=dispatched):
+                seed_final(self.run_dir, budget_qid("c", 0), status="escalated",
+                           phase="P04",
+                           override={"axis": "storage-engine", **dispatched})
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    self.rows()
+
+    def test_a_run_that_has_opened_no_quorum_reports_no_rows(self):
+        """The accept case every stricter bar above is paired with."""
+        self.assertEqual(self.rows(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

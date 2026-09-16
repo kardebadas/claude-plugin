@@ -639,7 +639,12 @@ _MAX_BATCH = 4
 #: answer a stage-03 question or an escalation, so the grammar — not merely
 #: "some non-empty cell" — is what these sections are judged against.
 _HUMAN_DECISION = _Numbered("H-")
-_ESCALATION_ID = _Numbered("E-")
+#: Spelled once because it is MINTED as well as matched: the quorum row
+#: writer numbers a new escalation off the ids already in the section, and a
+#: prefix written a second time at the mint is a prefix free to disagree with
+#: the grammar that judges it -- an id this module writes and then refuses.
+_ESCALATION_PREFIX = "E-"
+_ESCALATION_ID = _Numbered(_ESCALATION_PREFIX)
 #: The id of one flagged, unresolved intent conflict. The ``Conflicts`` cell is
 #: ``-`` or a comma-separated list of these and NOTHING else: a cell that took
 #: prose would take ``resolved-by-controller``, which records a conflict the
@@ -997,23 +1002,50 @@ def _validate_escalations(tracker: dict) -> None:
             "one AskUserQuestion call")
 
 
+#: THE THIRD EXACT OUTCOME WORD, and P02's because the ``Outcome`` cell is
+#: P02's. A quorum whose three answers were not about one question decided
+#: nothing, escalated nothing and REJECTED NOTHING -- no candidate was refused,
+#: because no two candidates ever addressed the same thing. Spelling it
+#: ``rejected-<reason>`` to fit the old two-word grammar would file "there was
+#: nothing here to decide between" as "the run turned an answer down", and the
+#: terminal report keys off exactly that difference: a rejection is a brain
+#: pulling away from what the user asked for and is the earliest drift warning
+#: this design has, while an undecidable question is a question that was never
+#: answerable as asked. Coercing it to ``escalated`` was refused for the same
+#: reason one rung up -- ``open_quorum`` already refuses to project a settled
+#: rejection down to ``escalated`` -- and dropping it is the one outcome the
+#: brief forbids, because the row IS the audit trail.
+#:
+#: WIDENED HERE RATHER THAN BESIDE P03'S FINALISER. The vocabulary of this
+#: column belongs to the section that renders and validates it; a P03-local
+#: widening would be P03 re-declaring P02's grammar, which is the duplication
+#: ``section_columns`` exists to prevent. P03 reads this name back rather than
+#: respelling the literal, so the writer and the validator cannot drift.
+_UNDECIDABLE = "question-not-decidable"
+
+
 class _QuorumOutcome:
-    """``adopted``, ``escalated``, or ``rejected-<reason>``.
+    """``adopted``, ``escalated``, ``question-not-decidable``, or ``rejected-<reason>``.
 
     P02 closes the SHAPE of an outcome and not the rejection vocabulary: naming
     the reasons is P03's contract, and an enum here would have to be edited in
     two places every time one is added — the kind of duplication that ends with
     a specified writer emitting a reason this module halts the run on.
 
-    What is closed is that the two non-rejecting words are exact, and that
+    What is closed is that the three non-rejecting words are exact, and that
     anything else must both announce itself as a rejection and carry a reason.
     A bare ``rejected`` is the outcome recorded with the reason dropped, and the
     reason is the only part a human reading the run afterwards can act on.
+
+    THE THIRD WORD IS NOT A RELAXATION OF THAT RULE. ``question-not-decidable``
+    is exact, closed, and named above with the argument for it; what stays
+    refused is an open vocabulary of bare words, which is what would let a
+    rejection be recorded without its reason.
     """
 
     __slots__ = ()
 
-    _EXACT = ("adopted", "escalated")
+    _EXACT = ("adopted", "escalated", _UNDECIDABLE)
     _PREFIX = "rejected-"
     _REASON = _CharClass(_LOWER, _LOWER + "-")
 
@@ -5927,16 +5959,17 @@ _DECISIONS_FILE = "decisions.md"
 _FINAL_FILE = "final.json"
 _EXTENSIONS_FILE = "extensions.json"
 
-#: Every status a finalised quorum may carry, and the whole of them. Four of
-#: the five are also writable into a ``## Quorum`` row's ``Outcome`` cell;
-#: ``question-not-decidable`` is NOT -- P02's ``_QuorumOutcome`` admits
-#: ``adopted``, ``escalated`` and ``rejected-<reason>`` and nothing else. That
-#: disagreement is real, it belongs to whichever task writes the row, and it is
-#: pinned in the suite rather than left to be discovered there, so neither side
-#: can drift without the seam going red.
+#: Every status a finalised quorum may carry, and the whole of them. ALL FIVE
+#: are writable into a ``## Quorum`` row's ``Outcome`` cell, and that is a
+#: RESOLVED seam rather than a coincidence: ``_QuorumOutcome`` admitted only
+#: ``adopted``, ``escalated`` and ``rejected-<reason>`` until the row writer
+#: needed to record a question the quorum could not decide, and the word was
+#: added to THAT grammar -- see ``_UNDECIDABLE`` -- rather than coerced here.
+#: The suite pins the two sets against each other, so neither side can drift
+#: without the seam going red.
 _FINAL_STATUSES = frozenset({
     "adopted", "escalated", "rejected-contradicts-human",
-    "rejected-contradicts-quorum", "question-not-decidable",
+    "rejected-contradicts-quorum", _UNDECIDABLE,
 })
 
 #: THE ONE STATUS THAT CHARGES THE BUDGET. Escalations never count -- an
@@ -8410,11 +8443,14 @@ def current_floor(run_dir: str) -> dict:
 
 # --- phase 3: the outcome --------------------------------------------------
 
-#: The status a quorum whose three answers were not about one question carries.
-#: It is deliberately NOT ``escalated``: a question the quorum found
+#: The status a quorum whose three answers were not about one question carries
+#: is ``_UNDECIDABLE``, and it is DEFINED WITH ``_QuorumOutcome`` rather than
+#: here. It is deliberately not ``escalated`` -- a question the quorum found
 #: undecidable and a question it escalated are different facts, and the
-#: terminal report keys off which.
-_UNDECIDABLE = "question-not-decidable"
+#: terminal report keys off which -- and the ``## Quorum`` row has to be able to
+#: say so, which made the word part of that column's vocabulary rather than
+#: part of this section's private state. Read back from there so the status
+#: this writes and the grammar that admits it cannot come apart.
 
 #: ``rejected-contradicts-<provenance>``, built from the provenance of the
 #: record that was contradicted so the two statuses cannot come apart from the
@@ -8992,6 +9028,443 @@ def _repair_decision_record(run_dir: Path, settled: dict) -> None:
     _ensure_decision_recorded(run_dir, settled)
 
 
+# --- P03's own tracker rows ------------------------------------------------
+#
+# NO PHASE WRITES ANOTHER PHASE'S ROWS AND NO PHASE RE-DECLARES ANOTHER
+# PHASE'S COLUMNS. P03 owns the quorum lifecycle, so P03 writes the ``##
+# Quorum`` and ``## Escalations`` rows that mirror it -- and builds every one
+# of them against ``section_columns``, so a column P02 adds, drops or renames
+# fails HERE, at the seam, instead of drifting into a write that puts a cell
+# under the wrong header and still parses.
+
+#: The state a mirrored row carries. Asserted against ``_QUORUM_STATES`` in the
+#: suite rather than indexed out of it, for ``_IN_FLIGHT``'s reason: an index
+#: reads as arithmetic over a tuple whose order is not a promise, while a
+#: literal plus a pinned assertion says which word and fails if it moves.
+_FINALIZED = "finalized"
+
+#: The cell an absent value renders as. ``_csv`` reads it back as the empty
+#: tuple, so it is "nothing here" spelled in the one way the parser agrees
+#: with -- an empty cell round-trips as a one-element list holding the empty
+#: string, which is a different fact.
+_ABSENT_CELL = "-"
+
+#: What a cell may not contain, whatever the record says. ``|`` re-columns the
+#: row, a newline splits it into two rows that are each the wrong width, and
+#: ``,`` splits one token into two inside every list-valued cell. All three
+#: PARSE -- that is the whole danger -- and the tracker comes back holding
+#: cells nobody wrote.
+_CELL_POISON = "|,\n\r"
+
+#: The statuses that put a question in front of a human, and the whole of them.
+#:
+#: A REJECTION IS RECORDED AND IS NOT ESCALATED, which is a ruling rather than
+#: an omission. ``rejected-contradicts-human`` means the winning answer pulls
+#: against a decision THE USER ALREADY MADE, and ``rejected-contradicts-quorum``
+#: against one this run already adopted: in both the axis is settled and the
+#: blocked task can proceed on the standing record. Queueing an escalation
+#: there would batch the user a question they have already answered, which is
+#: the re-litigation ``open_quorum``'s replay guard refuses to produce from the
+#: other direction. The rejection is not lost -- it is the ``Outcome`` cell of
+#: the ``## Quorum`` row, which is where the run's count of "brains pulling
+#: away from what the user asked for" is read from.
+#:
+#: ``_UNDECIDABLE`` IS ESCALATED, because nothing was settled by it: three
+#: answers about three different things leave the question exactly as open as
+#: it was raised, and a human is the only remaining way to close it.
+_ESCALATING_STATUSES = frozenset({_ESCALATED, _UNDECIDABLE})
+
+#: Where one escalation's ``Blast`` cell comes from, PER REASON TOKEN, and a
+#: reason absent from this mapping is refused rather than defaulted.
+#:
+#: THE TOTALITY IS THE POINT, not the two values. Every reason this phase can
+#: emit has to appear here, so adding a twelfth escalation reason is a change
+#: that cannot be made without deciding what a human is shown when it fires --
+#: and the suite derives the token list from the finaliser's own source rather
+#: than from this table, so a reason added there and forgotten here is a red
+#: test and not a ``-`` in the one column the batching human reads.
+#:
+#: ``irreversible-axis`` IS THE ONE THAT DIFFERS, because it is the one outcome
+#: whose record carries the axes that tripped it: the trespass is the fact, not
+#: the axis the question was asked on. Everything else touches exactly the axis
+#: it was raised against, which is what ``Blast`` means in this section --
+#: ``_BLAST_RADII`` is the admissibility vocabulary and is deliberately not
+#: this column's.
+_BLAST_FROM_TRESPASS = "blast"
+_BLAST_FROM_AXIS = "axis"
+_ESCALATION_BLAST = MappingProxyType({
+    "irreversible-axis": _BLAST_FROM_TRESPASS,
+    "unmintable-axis": _BLAST_FROM_AXIS,
+    "stale-context": _BLAST_FROM_AXIS,
+    "incomplete-quorum": _BLAST_FROM_AXIS,
+    "blocked": _BLAST_FROM_AXIS,
+    "uncomparable-answer": _BLAST_FROM_AXIS,
+    "unresolvable-anchor": _BLAST_FROM_AXIS,
+    "unrecordable-decision": _BLAST_FROM_AXIS,
+    "below-floor": _BLAST_FROM_AXIS,
+    "equal-or-inverted-rung": _BLAST_FROM_AXIS,
+    "depth-exceeded": _BLAST_FROM_AXIS,
+    "phase-budget-exhausted": _BLAST_FROM_AXIS,
+    "run-budget-exhausted": _BLAST_FROM_AXIS,
+    "answers-describe-different-things": _BLAST_FROM_AXIS,
+})
+
+
+def _cell(value, what: str) -> str:
+    """One tracker cell, screened out of a record a human may have edited.
+
+    ``final.json`` and ``open.json`` are files inside the run directory, so
+    every value that reaches a row arrives from agent-authored or hand-editable
+    JSON and may legally be a list, an object or a number.
+
+    THE SHAPE IS REFUSED RATHER THAN COERCED. ``str(["a"])`` is ``"['a']"``,
+    which renders, parses back, and reads as a cell somebody wrote; the
+    validators downstream would then report an unknown axis or an outcome
+    outside the grammar, naming the symptom one section away from the record
+    that caused it. ``bool`` is excluded from the integers on purpose --
+    ``str(True)`` is ``'True'`` and ``isinstance(True, int)`` is true, so
+    admitting it writes a word no column has a meaning for.
+
+    THE THREE POISON CHARACTERS ARE THE ONES THAT STILL PARSE. A ``|`` gives
+    the row an extra column, a newline gives the section an extra row, and a
+    ``,`` turns one token into two inside every comma-separated cell. None of
+    them raises anywhere; the tracker simply comes back holding cells nobody
+    wrote, which is the failure ``_TOKEN`` exists to prevent one layer up and
+    is asked again here because this writer is the one that composes them.
+    """
+    if value is None:
+        return _ABSENT_CELL
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise QuorumSchemaInvalid(
+            f"{what} is a {type(value).__name__}, not a cell; coercing it "
+            "would render a repr into the tracker, which parses back looking "
+            "exactly like a value somebody wrote")
+    text = str(value).strip()
+    if any(char in text for char in _CELL_POISON):
+        raise QuorumSchemaInvalid(
+            f"{what} is {text!r}, which carries one of {_CELL_POISON!r}; each "
+            "of those re-shapes the table SILENTLY -- a pipe adds a column, a "
+            "newline adds a row, a comma splits one token into two -- so the "
+            "tracker parses back holding cells nobody wrote")
+    return text or _ABSENT_CELL
+
+
+def _cell_list(values, what: str) -> str:
+    """A comma-separated cell, or ``-`` for an empty one.
+
+    ``-`` RATHER THAN THE EMPTY STRING, because ``_csv`` is the reader and the
+    two are not the same value to it: ``-`` comes back as ``()`` and ``""``
+    comes back as ``("",)``. An empty cell would therefore read as a section
+    holding one nameless response, one nameless owner, one nameless axis.
+    """
+    if values is None:
+        return _ABSENT_CELL
+    if not isinstance(values, (list, tuple)):
+        raise QuorumSchemaInvalid(
+            f"{what} is a {type(values).__name__}, not a list; a scalar joined "
+            "into a comma-separated cell is one value rendered as a list of "
+            "its characters or not rendered at all")
+    return ",".join(_cell(value, what) for value in values) or _ABSENT_CELL
+
+
+def _row_for(section: str, values: dict) -> dict:
+    """Order one row by P02's columns, LOUDLY.
+
+    P02 owns the column grammar and P03 owns the quorum lifecycle, so P03
+    writes its own rows and re-declares nobody's columns. Checking against
+    ``section_columns`` means a column P02 adds, drops or renames fails here --
+    at the seam, naming both halves of the mismatch -- rather than drifting
+    into a write that nothing notices.
+
+    NAMED, NEVER COUNTED, for ``append_row``'s reason: a row copied from a
+    stale column list has exactly the right number of keys and one of them
+    spelled for a column that no longer exists. Counting accepts that and
+    ``render_tracker`` then reports the column that went MISSING rather than
+    the one that was invented.
+
+    ``section`` IS P02'S SECTION KEY -- ``quorum``, ``escalations`` -- and not
+    the markdown heading. ``section_columns("Quorum")`` raises, which is the
+    right answer to a caller that guessed, and is why this function passes the
+    name straight through instead of casefolding it into something that
+    happens to work.
+    """
+    columns = section_columns(section)
+    missing = [column for column in columns if column not in values]
+    unexpected = [key for key in values if key not in columns]
+    if missing or unexpected:
+        raise QuorumError(
+            f"a {section!r} row P03 built does not match P02's columns "
+            f"(missing {missing}, unexpected {unexpected}); reconcile it with "
+            f"section_columns({section!r}), which is {list(columns)}")
+    return {column: values[column] for column in columns}
+
+
+def _response_cell(qid: str, owner: str, attempt: int) -> str:
+    """Where one recorded answer lives, RUN-RELATIVE.
+
+    Run-relative rather than repo-root-relative, because this cell names a file
+    inside the run's own tree and is read by a human resolving it against the
+    run directory they are already looking at. ``_run_relative`` is the other
+    spelling and is for a path a BRAIN must cite, which is resolved against the
+    recorded repository root; using it here would also re-validate the run on
+    every cell, inside a lock this writer already holds.
+    """
+    return (f"{_QUORUM_DIRNAME}/{qid}/{_RESPONSES_DIRNAME}/"
+            f"{_response_name(owner, attempt)}")
+
+
+def _recorded_responses(run_dir: Path, qid: str, owners: list) -> list:
+    """Each owner's LATEST answer on disk, and at most one per owner.
+
+    THE LATEST, NOT ALL OF THEM, and the distinction is what keeps the cell
+    legal: a brain whose first answer was malformed buys one re-dispatch, so a
+    three-brain quorum can hold FOUR response files, and ``_validate_quorum``
+    refuses a row citing more than three. It is also the right fact -- the
+    superseded first attempt is recorded in the directory and is not what the
+    outcome was computed from.
+
+    READ THROUGH ``_owner_attempts`` rather than globbed, so the same gap rule,
+    the same shape checks and the same directory guard that priced the quorum
+    price the row: a responses directory that is a regular file, a dangling
+    link or a FIFO is corruption here exactly as it is there, and not a quorum
+    whose brains silently answered nothing.
+
+    AN OWNER WITH NOTHING ON RECORD IS LEGAL HERE, which it is not at
+    finalisation. ``stale-context`` and ``unmintable-axis`` both return before
+    a single answer is read, so their rows name no response at all -- and that
+    is the true cell, not a defect to paper over.
+    """
+    recorded = []
+    for owner in owners:
+        attempts = _owner_attempts(run_dir, qid, owner)
+        if attempts:
+            recorded.append(_response_cell(qid, owner, len(attempts)))
+    return recorded
+
+
+def _quorum_row(run_dir: Path, record: dict) -> dict:
+    """One finalised quorum, as the ``## Quorum`` row that mirrors it.
+
+    THE AXIS CELL IS THE AXIS AS ASKED, never ``decision_axis``. The two
+    legally disagree and both are right: this row records WHAT WAS ASKED and
+    keeps the reserved literal ``new`` for the life of the run, while the
+    decision record records THE AXIS THAT QUESTION OPENED, which for a
+    ``new``-axis question is its own bare qid. ``_validate_quorum`` closes this
+    cell to the stage-03 question ids plus the literal, so a minted axis could
+    not be written here anyway -- the two namespaces do not overlap and are not
+    meant to.
+
+    EIGHT OF THE TWELVE CELLS ARE NOT IN ``final.json``. ``quorum_events`` is a
+    four-cell BUDGET projection and says so; the owners, the two digests and
+    the responses belong to the DISPATCH, so they are read back off
+    ``open.json`` and off the responses directory. That second source is why
+    this takes a run directory and not an event.
+
+    NO RUNG VALUE, NO FLOOR, NO BUDGET COUNT AND NO RAISER. ``Rung`` carries a
+    rung NAME, which is what ``_validate_quorum`` admits and what a human
+    reads; the value behind it, the adoption floor a ``below-floor`` record
+    carries, the two ceilings a budget record carries and the raiser's identity
+    all stay out of the tracker, because the tracker is a file a brain can be
+    handed and every one of them frames an answer.
+    """
+    qid = record["qid"]
+    opened = _open_record(run_dir, qid)
+    owners = _record_owners(opened, qid)
+    return _row_for("quorum", {
+        "qid": _cell(qid, f"the qid of the final record for {qid}"),
+        "axis": _cell(record.get("axis"),
+                      f"the axis the final record for {qid} was asked on"),
+        "phase": _cell(record.get("phase"),
+                       f"the phase the final record for {qid} charges"),
+        "state": _FINALIZED,
+        "owners": _cell_list(owners, f"an owner of {qid}"),
+        "payload_digest": _cell(
+            _dispatched_digest(opened, qid),
+            f"the payload digest bound by the open record for {qid}"),
+        "context_digest": _cell(
+            _bound_digest(opened, qid, "context_digest",
+                          "the row records the trail this quorum was judged "
+                          "against, and a row that records none cannot be "
+                          "told apart from one judged against a trail that "
+                          "has since moved"),
+            f"the context digest bound by the open record for {qid}"),
+        "responses": _cell_list(_recorded_responses(run_dir, qid, owners),
+                                f"a recorded response for {qid}"),
+        "depth": _cell(record.get("depth"),
+                       f"the decision depth computed for {qid}"),
+        "rung": _cell(record.get("winner_rung"),
+                      f"the winning rung computed for {qid}"),
+        "outcome": _cell(record.get("status"),
+                         f"the status of the final record for {qid}"),
+        "decision": _cell(record.get("decision_id"),
+                          f"the decision record {qid} adopted"),
+    })
+
+
+def _next_escalation_id(tracker: dict) -> str:
+    """The next ``E-<n>``, numbered off the ids the section already holds.
+
+    MAXIMUM PLUS ONE, NOT LENGTH PLUS ONE. ``_validate_escalations`` refuses a
+    duplicate id, and a count is not a high-water mark the moment anything ever
+    removes a row or writes one out of order -- a resumed run replaying a
+    transition that added two rows would mint over the second of them and stop
+    the run on a duplicate it created itself.
+
+    IDS THIS GRAMMAR DOES NOT RECOGNISE ARE SKIPPED RATHER THAN PARSED.
+    ``int()`` on a cell is a ``ValueError`` outside this module's exception
+    family, and the tracker this reads was validated before ``mutate`` was
+    called -- so an unrecognised id here is a P06 row shape that has not
+    arrived yet, not a number to guess at.
+    """
+    used = [int(row["id"][len(_ESCALATION_PREFIX):])
+            for row in tracker["escalations"]
+            if _text(row.get("id")) and _ESCALATION_ID.fullmatch(row["id"])]
+    return f"{_ESCALATION_PREFIX}{max(used, default=0) + 1}"
+
+
+def _escalation_row(tracker: dict, record: dict) -> dict:
+    """One escalation queued for the next human gate.
+
+    ``queued``, WITH NO BATCH AND NO RESOLUTION. The three cells are one state:
+    ``_validate_escalations`` refuses a queued row that names a batch and
+    refuses any unanswered row that names a resolution, because a batch is
+    assigned when the escalations are gathered at a stage boundary and a
+    resolution exists only after a human has spoken. Writing "pending" here --
+    a word no enum in this module holds -- would halt the run at the render.
+
+    THE REASON HAS NOWHERE TO GO, and that is recorded rather than worked
+    around. ``## Escalations`` is ``ID | QID | Blast | State | Batch |
+    Resolution``: there is no reason column, so the token that says WHY the
+    quorum escalated lives in ``final.json`` and is reachable from the row only
+    by way of the qid. Inventing a column here would be P03 re-declaring P02's
+    grammar, and folding the reason into ``Blast`` would put a non-axis into
+    the one cell that is validated as a list of axis tokens. The remedy, if the
+    batching human needs the reason in the row, is a P02 column -- named in
+    this task's report rather than taken locally.
+    """
+    reason = record.get("reason")
+    source = _ESCALATION_BLAST.get(reason) if _text(reason) else None
+    if source is None:
+        raise QuorumError(
+            f"{record['qid']} escalated for reason {reason!r}, which no "
+            f"Blast cell is mapped for; every reason this phase can emit is "
+            "enumerated in _ESCALATION_BLAST so that adding one is a decision "
+            "about what the batching human is shown, not a '-' in the only "
+            "column they read")
+    blast = (record.get("blast") if source == _BLAST_FROM_TRESPASS
+             else [record.get("axis")])
+    return _row_for("escalations", {
+        "id": _next_escalation_id(tracker),
+        "qid": _cell(record["qid"], "the qid this escalation belongs to"),
+        "blast": _cell_list(blast, f"an axis {record['qid']} escalates on"),
+        "state": _ESCALATION_STATES[0],
+        "batch": _ABSENT_CELL,
+        "resolution": _ABSENT_CELL,
+    })
+
+
+def _mirror_quorum(run_dir: Path, tracker: dict, record: dict) -> dict:
+    """Write P03's own rows. Called only from inside a locked transition.
+
+    VALIDATED HERE, BEFORE ``final.json`` IS PUBLISHED, and the ordering is the
+    whole point of doing it twice. ``locked_tracker_update`` re-validates what
+    ``mutate`` returns -- but it does that AFTER ``mutate`` has run, and by
+    then the outcome is already on disk. An illegal row discovered there would
+    leave a settled quorum whose rows can never be written, because every later
+    call returns the published record without re-entering this path. Asked
+    here, the same fault stops the finalisation with nothing published: the
+    quorum stays finalisable, a human fixes what is wrong -- a phase the
+    tracker has no record of, an axis that is neither a stage-03 question id
+    nor the reserved literal -- and the next call finalises normally.
+
+    A STOP, NOT AN ESCALATION, and not a row written with the offending cell
+    softened. Both of those are the run editing the audit trail to make its own
+    write succeed, and the fact being recorded is the one thing that must not
+    be negotiable. ``TrackerValidationError`` is inside ``TrackerError``, so a
+    controller's existing handler catches it -- and it must treat it as a human
+    stop rather than a retry, because a retry recomputes the same row.
+
+    BOTH VALIDATORS RUN AFTER BOTH APPENDS, and that ordering is the real one.
+    ``_validate_escalations`` resolves an escalation's ``QID`` against the qids
+    ``## Quorum`` holds, so judging the sections BETWEEN the two appends would
+    refuse a row that is about to become legal and stop a finalisation that had
+    nothing wrong with it.
+
+    THE APPEND ORDER ITSELF IS NOT LOAD-BEARING, and saying so is a correction
+    rather than a caveat: the two calls touch disjoint lists, ``_escalation_row``
+    reads only ``tracker["escalations"]``, and ``append_row`` judges a row
+    against its own section alone -- so swapping these two lines is an
+    EQUIVALENT mutant, and mutation confirmed it. It is written quorum-first
+    because that is the order the sections are read in, and a comment claiming
+    a dependency the code does not have is a comment that survives the change
+    that breaks it.
+    """
+    tracker = append_row(tracker, "quorum", _quorum_row(run_dir, record))
+    if record["status"] in _ESCALATING_STATUSES:
+        tracker = append_row(tracker, "escalations",
+                             _escalation_row(tracker, record))
+    _validate_quorum(tracker)
+    _validate_escalations(tracker)
+    return tracker
+
+
+def quorum_tracker_rows(run_dir: str) -> list[dict]:
+    """The ``## Quorum`` mirror, re-derived from the files for the terminal report.
+
+    RE-DERIVED, NEVER READ BACK OUT OF THE TRACKER. The tracker is the index
+    and ``final.json`` is the evidence; a report built from the index alone
+    would report a row a hand edit had changed, and the counter an autonomous
+    controller is most motivated to be wrong about is its own count of the
+    decisions it made.
+
+    PROVENANCE IS VISIBLE, and it is the ``Decision`` cell that carries it.
+    There is no ``Provenance`` column and there does not need to be: every row
+    in this section is a machine outcome, and an adopted one names ``Q-<qid>``
+    -- a grammar no human decision can wear, which is exactly why
+    ``_final_event`` makes an adoption name its own. A provenance field read
+    only by a validator has informed nobody; this one is read by whatever
+    renders the run's own account of itself.
+
+    A QUORUM THAT DISPATCHED NOTHING HAS NO ROW HERE, and cannot have one. A
+    budget trip writes ``final.json`` and not one byte more -- no open record,
+    no payload, no context digest, because none of them would be true of a
+    dispatch that never happened -- while ``## Quorum`` is validated as a
+    DISPATCH record: three owners, two sha256 digests, the responses they
+    produced. So those records are skipped, and the omission is deliberate and
+    bounded: they remain in ``quorum_events``, which is where the budget and
+    the terminal report's escalation count read them from.
+
+    ``dispatched`` IS REQUIRED TO BE A BOOL rather than read for truthiness. A
+    record missing it, or carrying a string, would silently drop a real
+    adoption out of the run's own account of itself -- the same fail-quiet an
+    unreadable record is refused for two functions up.
+    """
+    path = _run_path(run_dir)
+    rows = []
+    #: Ordered by ``quorum_events`` and screened by it -- which is also where
+    #: two quorums claiming one decision record is caught. The full record is
+    #: then re-read through ``_final_event``, because that projection is four
+    #: cells by design and this row is twelve. Two reads of one name, and the
+    #: second is the one every cell below comes from, so no cell is taken from
+    #: a reading the qid check was not applied to.
+    for event in quorum_events(str(path)):
+        qid = event["qid"]
+        _projected, record = _final_event(
+            _quorum_directory(path, qid) / _FINAL_FILE, qid)
+        dispatched = record.get("dispatched")
+        if not isinstance(dispatched, bool):
+            raise QuorumSchemaInvalid(
+                f"the final record for {qid} states dispatched "
+                f"{dispatched!r}, not a bool; the ## Quorum row is a record of "
+                "a DISPATCH -- three owners, two digests, the responses they "
+                "produced -- and a record that will not say whether it "
+                "dispatched anything would be dropped from the run's own "
+                "account of itself without a word")
+        if dispatched:
+            rows.append(_quorum_row(path, record))
+    return rows
+
+
 def finalize_quorum(run_dir: str, *, qid: str) -> dict:
     """Phase 3 of the record, through the tracker lock as ``quorum-<qid>``.
 
@@ -8999,6 +9472,11 @@ def finalize_quorum(run_dir: str, *, qid: str) -> dict:
     single-assignment cell and the outcome it holds is returned unchanged: a
     second run of the same three brains gives a different answer about as often
     as the rung gap is narrow, and there is no principled way to prefer either.
+
+    THE ROWS ARE MIRRORED BEFORE EITHER, for the reason ``_mirror_quorum``
+    states: a row P02's validators refuse is discovered while the outcome is
+    still unpublished, so the fault is a human stop the run recovers from
+    rather than a settled quorum that can never be indexed.
 
     THE DECISION IS APPENDED AFTER ``final.json`` IS PUBLISHED, and the order
     is deliberate. An interruption between the two leaves a finalised quorum
@@ -9042,15 +9520,20 @@ def finalize_quorum(run_dir: str, *, qid: str) -> dict:
 
     def mutate(tracker):
         result = _compute_quorum_result(run_dir, qid, tracker)
+        #: THE ROWS ARE BUILT AND JUDGED BEFORE ONE BYTE IS PUBLISHED, and the
+        #: order is the difference between a recoverable stop and a quorum
+        #: whose outcome is on disk and whose rows can never be written. Only
+        #: the tracker is touched here, in memory, and
+        #: ``locked_tracker_update`` writes it after ``mutate`` returns -- so
+        #: if either publish below fails, no row lands either.
+        mirrored = _mirror_quorum(run_dir, tracker, result)
         holder["result"] = result
         publish_immutable(final_path, _dumps(result))
         _ensure_decision_recorded(run_dir, result)
-        #: The tracker is returned unchanged: this task publishes the outcome
-        #: and the decision, and the ``## Quorum`` and ``## Escalations`` rows
-        #: that mirror it are written by the row writer P03 still owes. What
-        #: the transition buys HERE is its replay key -- the one transition
-        #: that changes run state is recorded as having happened.
-        return tracker
+        #: What the transition buys is its replay key AND the mirror: the one
+        #: transition that changes run state records the outcome, the decision
+        #: and the two rows that index them, or none of the four.
+        return mirrored
 
     locked_tracker_update(run_dir, transition_id=_QUORUM_TRANSITION + qid,
                           mutate=mutate)

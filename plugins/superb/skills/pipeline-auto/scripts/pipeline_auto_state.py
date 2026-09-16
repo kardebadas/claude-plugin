@@ -11194,10 +11194,18 @@ def _within_scope(output: PurePosixPath, parsed_scopes) -> bool:
     SHAPE of the containment test -- ``.parents`` and never a string prefix --
     and ``_WRITE_SCOPE_TYPES`` as the vocabulary; it does not inherit this
     predicate, whose asymmetry is deliberate and belongs to outputs alone.
+
+    THE VOCABULARY IS ``_WRITE_SCOPE_TYPES``, NOT A RE-TYPED PAIR OF LITERALS.
+    This function held its own ``"file"`` and ``"tree"`` until P04 Task 3's
+    review measured it: the module then contained two statements of the scope
+    grammar, and renaming a type in the tuple the plan parser reads would have
+    left this predicate silently matching NOTHING -- every output would fall
+    outside every declared scope, and the scope check that exists to catch a
+    task writing where it did not declare would pass everything.
     """
     return any(
-        (scope_type == "file" and output == scope)
-        or (scope_type == "tree" and scope in output.parents)
+        (scope_type == _WRITE_SCOPE_TYPES[0] and output == scope)
+        or (scope_type == _WRITE_SCOPE_TYPES[1] and scope in output.parents)
         for scope_type, scope in parsed_scopes)
 
 
@@ -11576,6 +11584,23 @@ def parse_plan_metadata(path) -> dict:
 # ``tree:docs`` obviously collides with ``tree:docs``. What is inherited is the
 # SHAPE of the test and ``_WRITE_SCOPE_TYPES`` as the vocabulary; not the
 # predicate, whose asymmetry belongs to outputs alone.
+#
+# KNOWN LIMITATION -- CASE AND UNICODE ARE COMPARED AS BYTES, NOT AS A
+# FILESYSTEM WOULD. ``tree:src`` and ``tree:SRC`` do not overlap here, and
+# neither do the precomposed and decomposed spellings of the same accented
+# segment. On a case-insensitive or normalising filesystem (macOS's default
+# APFS, NTFS) those pairs name ONE directory, so two implementers could be
+# dispatched onto it and this function would have said ``False``. The choice is
+# deliberate and it is the git index's: git records path bytes, the tracker
+# records the bytes a plan wrote, and the alternatives are worse -- ``casefold``
+# would make ``file:Makefile`` and ``file:makefile`` collide on Linux where they
+# are two real files, and ``unicodedata.normalize`` would widen
+# ``ALLOWED_IMPORTS`` past twelve to make two tracker cells that differ in bytes
+# compare equal. What follows from it: on such a filesystem the divergence
+# surfaces as the merge conflict the master plan already treats as a hard stop,
+# and the mitigation is a plan review that spells one path one way -- not a
+# looser comparison here. ``ScopeAlgebraTests`` pins both families as ``False``
+# so the limitation cannot be changed silently.
 # ---------------------------------------------------------------------------
 
 
@@ -11605,6 +11630,17 @@ def _scope_parts(scope: str):
     controller catching this module's family would die on a caller's typo
     instead of refusing it. ``_text`` is the screen the module already uses for
     "a field that was actually filled in".
+
+    ITS TWO HALVES BUY DIFFERENT THINGS AND ONLY ONE OF THEM CHANGES THE
+    EXCEPTION. The ``isinstance`` half is the one above: without it a non-string
+    leaves this module's family altogether. The ``strip`` half changes only the
+    MESSAGE -- ``""``, ``" "`` and ``"\\t"`` are all refused downstream anyway,
+    as an "empty member" and as "untyped" respectively, which are two different
+    diagnoses of one blank cell and neither of them says the thing the caller
+    needs to hear. Narrowing this line to ``isinstance`` therefore survives the
+    suite on behaviour alone; ``test_a_blank_scope_is_refused_by_this_screen_
+    and_not_merely_downstream`` pins the message so the narrowing is a mutant
+    that dies rather than a silent loss of the diagnosis.
     """
     if not _text(scope):
         raise PlanMetadataError(
@@ -11640,6 +11676,28 @@ def _scope_claims(path: PurePosixPath, scope_type: str,
         scope_type == _WRITE_SCOPE_TYPES[1] and scope_path in path.parents)
 
 
+def _pair_overlaps(one, two) -> bool:
+    """Do two ALREADY-PARSED typed scopes claim a repository path in common?
+
+    THE OVERLAP RULE IS SPELLED HERE ONCE AND NOWHERE ELSE. Both callers --
+    ``scopes_overlap`` for a pair of strings and ``_scope_sets_overlap`` for the
+    cross product of two lists -- used to carry their own copy of ``claims(b in
+    a) or claims(a in b)``, which is two statements of one rule that can drift:
+    a fix applied to the single-pair spelling and not to the set spelling would
+    leave every reservation in the run answering the OLD rule while the unit
+    test of the pair passed. That is the same shape this block's header refuses
+    for the scope vocabulary, applied to the algebra itself.
+
+    ``one`` and ``two`` are ``(type, PurePosixPath)`` as ``_scope_parts``
+    returns them, so the rule can be asked about a pair that has already been
+    parsed without re-reading either string.
+    """
+    type_a, path_a = one
+    type_b, path_b = two
+    return (_scope_claims(path_b, type_a, path_a)
+            or _scope_claims(path_a, type_b, path_b))
+
+
 def scopes_overlap(a: str, b: str) -> bool:
     """Do two typed write scopes claim any repository path in common?
 
@@ -11659,10 +11717,7 @@ def scopes_overlap(a: str, b: str) -> bool:
     Raises ``PlanMetadataError`` for anything that is not one typed, safe,
     repository-relative scope, on either side, and nothing else for any input.
     """
-    type_a, path_a = _scope_parts(a)
-    type_b, path_b = _scope_parts(b)
-    return (_scope_claims(path_b, type_a, path_a)
-            or _scope_claims(path_a, type_b, path_b))
+    return _pair_overlaps(_scope_parts(a), _scope_parts(b))
 
 
 def _scope_sets_overlap(left, right) -> bool:
@@ -11686,10 +11741,32 @@ def _scope_sets_overlap(left, right) -> bool:
     a predicate this module can state. The two shapes this module builds are a
     tuple out of ``_parse_write_scope`` and a list out of a split cell.
 
-    MATERIALISING IS NOT DEFENSIVE TIDYING: the nested comprehension walks
-    ``right`` once per member of ``left``, so a one-shot iterator would be
-    exhausted after the first row and every later comparison would silently see
-    an empty set -- the same false ``False`` again.
+    THE SCREEN IS WHAT MAKES THE NESTED WALK SAFE, AND NOTHING AFTER IT
+    RE-DEFENDS. The comprehension below walks the right-hand side once per
+    member of the left, so a one-shot iterator would be exhausted after the
+    first row and every later comparison would silently see an empty set -- the
+    same false ``False`` again. That is a reason for the ``tuple``/``list``
+    screen, not for a ``tuple(...)`` call underneath it: by the time control
+    reaches the parse, both sides are already materialised sequences, and
+    ``parsed_left``/``parsed_right`` are lists in any case. Two such calls used
+    to sit here, presented as a defence; they were unreachable, and an
+    unreachable screen reads as a guarantee that something is being checked
+    which is not -- the same ruling ``_safe_relative``'s docstring records for
+    its deleted absolute-path clause.
+
+    AN EMPTY LEFT IS REFUSED AND AN EMPTY RIGHT IS NOT, and the asymmetry is the
+    two sides meaning different things. The left is "these are MY scopes", and a
+    task that declares none does not exist: ``_parse_write_scope`` already
+    refuses a scopeless task, so an empty left never comes from a plan -- it
+    comes from a lookup that missed, a ``-`` cell, a task id that did not match,
+    a split that yielded nothing. Answering ``False`` there means "I failed to
+    find my own scopes, therefore nothing can conflict with me", which is fault
+    F1's shape arriving by a third route and is exactly the false ``False`` the
+    bare-string screen above exists to refuse; the two would otherwise be
+    treated inconsistently. The right is "what is already in flight", and an
+    empty one is the ordinary first dispatch of a run: nothing is running, so
+    nothing conflicts, and ``False`` is the true answer rather than an absence
+    of information.
 
     EVERY SCOPE ON BOTH SIDES IS PARSED BEFORE ANY PAIR IS ANSWERED, so a
     malformed scope is refused whether or not an earlier pair happened to
@@ -11705,14 +11782,20 @@ def _scope_sets_overlap(left, right) -> bool:
                 "bare string is an iterable of characters, and an empty "
                 "opposing set would report 'no conflict' before one of them "
                 "was ever examined")
-    left = tuple(left)
-    right = tuple(right)
+    if not left:
+        raise PlanMetadataError(
+            "the left write-scope set is the asking task's OWN scopes and is "
+            "empty; a task that writes nowhere cannot be reserved against "
+            "anything, and _parse_write_scope already refuses one, so an empty "
+            "left is a lookup that missed rather than a task with no scopes. "
+            "Answering 'no conflict' for it would report that a task whose "
+            "scopes could not be found collides with nothing. An empty RIGHT "
+            "is allowed and means nothing is in flight")
     parsed_left = [_scope_parts(scope) for scope in left]
     parsed_right = [_scope_parts(scope) for scope in right]
-    return any(_scope_claims(path_b, type_a, path_a)
-               or _scope_claims(path_a, type_b, path_b)
-               for type_a, path_a in parsed_left
-               for type_b, path_b in parsed_right)
+    return any(_pair_overlaps(one, two)
+               for one in parsed_left
+               for two in parsed_right)
 
 
 def _path_in_scope(path: str, scope: str) -> bool:

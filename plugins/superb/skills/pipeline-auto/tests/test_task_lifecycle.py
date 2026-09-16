@@ -2685,6 +2685,42 @@ def is_ancestor(outer: str, inner: str) -> bool:
     return PurePosixPath(outer) in PurePosixPath(inner).parents
 
 
+def claims(kind: str, scope: str, path: str) -> bool:
+    """Does the typed scope `kind:scope` claim `path`? THE INDEPENDENT ORACLE.
+
+    Written out of raw `"/"`-separated segments and importing NOTHING from the
+    module -- not `_scope_claims`, not `_path_in_scope`, not `PurePosixPath`.
+    That is the whole point of it. The cross-product tests used to compute
+    their witness sets with `state._path_in_scope`, which is built on
+    `_scope_claims`, which is what `scopes_overlap` is built on: mutate the
+    containment predicate and BOTH sides of the "oracle" move together, so the
+    witness logic agrees with itself and the only thing left to fail is a
+    coverage counter. Measured under the F1 mutant before this was written: 40
+    pairs with a shared witness, ZERO logical contradictions, and all three
+    kills came from `assertGreater(checked, 60)`.
+
+    A segment list is the definition rather than a re-implementation: `file:`
+    claims one path, `tree:` claims its own path and every path whose segments
+    START with the scope's segments. Comparing SEGMENTS and not characters is
+    what keeps `tree:src` off `srcx/a.py`, and it is arrived at here from the
+    meaning of a directory rather than from the module's spelling of it.
+    """
+    scope_segments = scope.split("/")
+    path_segments = path.split("/")
+    if path_segments == scope_segments:
+        return True
+    return (kind == "tree"
+            and len(path_segments) > len(scope_segments)
+            and path_segments[:len(scope_segments)] == scope_segments)
+
+
+def scope_claims_path(scope: str, path: str) -> bool:
+    """`claims`, addressed by a whole scope string. The corpus is written in
+    scopes and the oracle is written in parts; this is the join, and it is one
+    line so the oracle stays as short as it is legible."""
+    return claims(scope_type(scope), scope_path(scope), path)
+
+
 class ScopeAlgebraTests(unittest.TestCase):
     """The plain read of the contract, kept as the brief wrote it."""
 
@@ -2874,13 +2910,33 @@ class RivalRuleTests(unittest.TestCase):
     that a fixture list drawn from "the defects that were thought of" cannot
     make: it fails the moment the corpus stops separating two rules, instead of
     passing quietly while a mutant survives.
+
+    EVERY RIVAL IS RUN IN BOTH ORDERS, and that is not tidiness. A rival is a
+    function of two arguments; running it only as `rule(left, right)` asks it
+    about the twelve (type_a, type_b, relation) cells `SCOPE_PAIRS` happens to
+    spell in that order and leaves four -- `(file,file,b<a)`, `(file,tree,eq)`,
+    `(tree,file,b<a)`, `(tree,tree,b<a)` -- never asked. Measured: over the
+    complete space of boolean functions of that cell, fifteen rivals agreed
+    with the one-direction answers everywhere and still differed from the real
+    rule, and one of them -- `test_a_one_armed_tree_branch_is_refuted` below --
+    is F1's own omission moved one cell over. Reversing each row closes all
+    four; `test_the_corpus_pins_every_type_pair_cell` is the standing proof.
     """
 
+    def rows(self) -> tuple:
+        """Every pair in BOTH orders. The expected answer is the same in each,
+        because overlap is symmetric -- which the module is separately required
+        to be, so this is not the symmetry test wearing a disguise: it is what
+        makes an ASYMMETRIC rival visible at all."""
+        return SCOPE_PAIRS + tuple(
+            (right, left, expected, reason)
+            for left, right, expected, reason in SCOPE_PAIRS)
+
     def answers(self, rule) -> tuple:
-        return tuple(rule(left, right) for left, right, _, _ in SCOPE_PAIRS)
+        return tuple(rule(left, right) for left, right, _, _ in self.rows())
 
     def truth(self) -> tuple:
-        return tuple(expected for _, _, expected, _ in SCOPE_PAIRS)
+        return tuple(expected for _, _, expected, _ in self.rows())
 
     def assert_refuted(self, name, rule):
         mine, theirs = self.truth(), self.answers(rule)
@@ -2888,7 +2944,8 @@ class RivalRuleTests(unittest.TestCase):
             None if mine != theirs else name,
             f"{name} agrees with the real rule on every row of SCOPE_PAIRS; "
             "the corpus no longer discriminates")
-        witnesses = [SCOPE_PAIRS[index] for index in range(len(mine))
+        rows = self.rows()
+        witnesses = [rows[index] for index in range(len(mine))
                      if mine[index] != theirs[index]]
         self.assertTrue(witnesses)
         return witnesses
@@ -2949,6 +3006,100 @@ class RivalRuleTests(unittest.TestCase):
                                         transplanted)
         self.assertIn(("tree:src", "tree:src", True, "same-path"), witnesses)
 
+    def test_a_one_armed_tree_branch_is_refuted(self):
+        """F1's omission, moved one cell over: a `tree:` contains a `tree:`
+        below it only when the SHALLOWER one is written first. It is a
+        type-pair case analysis with one arm missing, which is the shape the
+        real fault had, and it survived this class until every rival was run
+        reversed -- it agrees with the real rule on all 35 forward rows,
+        because `SCOPE_PAIRS` spells its `tree`/`tree` ancestor pair outer
+        first. `assert_refuted`'s own "the corpus no longer discriminates"
+        alarm fired, and nothing caught it.
+        """
+        def one_armed(left, right):
+            kind_a, kind_b = scope_type(left), scope_type(right)
+            path_a, path_b = scope_path(left), scope_path(right)
+            if path_a == path_b:
+                return True
+            if kind_a == "tree" and is_ancestor(path_a, path_b):
+                return True
+            return (kind_b == "tree" and kind_a != "tree"
+                    and is_ancestor(path_b, path_a))
+        witnesses = self.assert_refuted("a one-armed tree/tree branch",
+                                        one_armed)
+        self.assertIn(("tree:src/deep/nested", "tree:src", True, "ancestor"),
+                      witnesses)
+        for _, _, expected, reason in witnesses:
+            self.assertTrue(expected)
+            self.assertEqual(reason, "ancestor")
+
+    def test_the_corpus_pins_every_type_pair_cell(self):
+        """WHY THE REVERSED HALF IS ENOUGH, stated as a count rather than as a
+        hope.
+
+        A "type-pair case analysis" -- the family the real fault belonged to --
+        is exactly a boolean function of `(type_a, type_b, relation)`, where
+        the relation is one of equal / a contains b / b contains a / neither.
+        That is 16 cells, so 2**16 such rivals. A rival is refuted by this
+        class iff it differs from the real rule on a cell some row exercises,
+        so the number that SURVIVE is `2 ** (uncovered cells) - 1`: every
+        assignment that is free on the uncovered cells and forced on the rest,
+        minus the real rule itself.
+
+        Forward only, that was 2**4 - 1 = 15 survivors. With both orders every
+        cell is covered and the count is 2**0 - 1 = 0. The assertions below
+        measure the covered set and the agreement, which is what the arithmetic
+        rests on; `RivalRuleTests`' named rivals are then the readable
+        witnesses rather than the whole argument.
+        """
+        def relation(one, two):
+            if PurePosixPath(one) == PurePosixPath(two):
+                return "eq"
+            if is_ancestor(one, two):
+                return "a<b"
+            if is_ancestor(two, one):
+                return "b<a"
+            return "none"
+
+        def cell(left, right):
+            return (scope_type(left), scope_type(right),
+                    relation(scope_path(left), scope_path(right)))
+
+        def real(one_cell):
+            kind_a, kind_b, rel = one_cell
+            return (rel == "eq"
+                    or (rel == "a<b" and kind_a == "tree")
+                    or (rel == "b<a" and kind_b == "tree"))
+
+        every_cell = {(kind_a, kind_b, rel)
+                      for kind_a in ("file", "tree")
+                      for kind_b in ("file", "tree")
+                      for rel in ("eq", "a<b", "b<a", "none")}
+        self.assertEqual(len(every_cell), 16)
+
+        forward = {cell(left, right) for left, right, _, _ in SCOPE_PAIRS}
+        self.assertEqual(len(forward), 12)
+        self.assertEqual(
+            sorted(every_cell - forward),
+            [("file", "file", "b<a"), ("file", "tree", "eq"),
+             ("tree", "file", "b<a"), ("tree", "tree", "b<a")])
+
+        covered = {cell(left, right) for left, right, _, _ in self.rows()}
+        self.assertEqual(covered, every_cell)
+
+        #: Every row agrees with the cell model, so a row really does constrain
+        #: its cell -- otherwise "covered" would mean nothing. A cell carrying
+        #: two different expected answers would make the corpus contradictory
+        #: and is caught here rather than by an arbitrary rival.
+        answer_for = {}
+        for left, right, expected, _ in self.rows():
+            here = cell(left, right)
+            self.assertIs(real(here), expected, (left, right))
+            self.assertIs(answer_for.setdefault(here, expected), expected)
+
+        survivors = 2 ** len(every_cell - covered) - 1
+        self.assertEqual(survivors, 0)
+
     def test_always_true_and_always_false_are_both_refuted(self):
         """The corpus has both answers in it, which a list of conflicts alone
         would not."""
@@ -2969,6 +3120,21 @@ class ScopeClaimedSetTests(unittest.TestCase):
     * SOUNDNESS -- if they overlap, one of the two SCOPE ROOTS is a path both
       claim. A rule that said True for two genuinely disjoint scopes has to
       produce a witness and cannot.
+
+    THE WITNESS SETS ARE COMPUTED BY `claims`, NOT BY `_path_in_scope`. This
+    class asked the module for its own witnesses until P04 Task 3's review
+    measured what that was worth: `_path_in_scope` is `_scope_claims` with a
+    `_safe_relative` in front of it, and `scopes_overlap` is `_scope_claims`
+    twice, so under a mutation to that one predicate both sides of the
+    comparison moved together -- 40 shared-witness pairs, zero logical
+    contradictions, and every kill coming from `assertGreater(checked, 60)`, a
+    coverage counter rather than the witness logic. Worse,
+    `_path_in_scope(scope_path(x), x)` is `True` by construction, so the
+    soundness assertion reduced algebraically to the definition of
+    `scopes_overlap` and no implementation written in terms of `_scope_claims`
+    could fail it. `claims` is twelve lines of segment arithmetic that import
+    nothing from the module, so the two sides can now disagree -- which is the
+    only state in which an oracle has said anything.
     """
 
     ROOTS = ("src", "srcx", "src/pkg", "src/pkgx", "docs", "docsx",
@@ -2993,12 +3159,39 @@ class ScopeClaimedSetTests(unittest.TestCase):
         for collision in ("srcx/a.py", "docsx/a.py", "src/pkgx/a.py"):
             self.assertIn(collision, self.PATHS)
 
+    def test_the_oracle_is_not_the_module_wearing_a_hat(self):
+        """`claims` has to be checked against something before it can check
+        anything, and the something is the hand-written reason table -- which
+        was drawn up before either was written and whose rows carry their
+        reasons. If the oracle agreed with `_scope_claims` because it WAS
+        `_scope_claims`, this would still pass; what makes it evidence is that
+        `claims` never calls the module, so the two agreeing is two independent
+        derivations of one rule meeting.
+        """
+        for left, right, expected, reason in SCOPE_PAIRS:
+            with self.subTest(left=left, right=right, reason=reason):
+                by_oracle = (scope_claims_path(left, scope_path(right))
+                             or scope_claims_path(right, scope_path(left)))
+                self.assertIs(by_oracle, expected)
+
+    def test_path_in_scope_answers_the_oracle_over_the_whole_corpus(self):
+        """The witness form, pinned against the independent oracle rather than
+        against itself. Every scope against every path: 20 x 37 = 740 answers,
+        none of them hand-written."""
+        checked = 0
+        for scope, path in itertools.product(self.SCOPES, self.PATHS):
+            checked += 1
+            with self.subTest(scope=scope, path=path):
+                self.assertIs(state._path_in_scope(path, scope),
+                              scope_claims_path(scope, path))
+        self.assertEqual(checked, 740)
+
     def test_a_path_claimed_by_both_scopes_forces_an_overlap(self):
         checked = 0
         for left, right in itertools.product(self.SCOPES, repeat=2):
             shared = [path for path in self.PATHS
-                      if state._path_in_scope(path, left)
-                      and state._path_in_scope(path, right)]
+                      if scope_claims_path(left, path)
+                      and scope_claims_path(right, path)]
             if not shared:
                 continue
             checked += 1
@@ -3014,24 +3207,32 @@ class ScopeClaimedSetTests(unittest.TestCase):
             checked += 1
             with self.subTest(left=left, right=right):
                 self.assertTrue(
-                    (state._path_in_scope(scope_path(left), right)
-                     and state._path_in_scope(scope_path(left), left))
-                    or (state._path_in_scope(scope_path(right), left)
-                        and state._path_in_scope(scope_path(right), right)),
+                    (scope_claims_path(right, scope_path(left))
+                     and scope_claims_path(left, scope_path(left)))
+                    or (scope_claims_path(left, scope_path(right))
+                        and scope_claims_path(right, scope_path(right))),
                     "an overlap with no witness path is a rule that answered "
                     "True about nothing")
         self.assertGreater(checked, 60)
 
     def test_no_pair_is_disjoint_and_sharing_a_path_at_the_same_time(self):
-        """The two directions above, joined: over the whole cross product the
-        boolean and the witness search agree exactly."""
+        """The two directions above, joined into a BICONDITIONAL: over the
+        whole cross product the module's boolean and the oracle's witness
+        search agree exactly, in both directions.
+
+        The `if shared:` this used to carry made it the completeness half a
+        second time -- a rule that answered True for a pair sharing nothing
+        walked straight through it. The corpus makes the other half exact:
+        every scope root is in PATHS, so if two scopes overlap at all they
+        overlap at a root the search examines, and "no shared path here" really
+        does mean "disjoint".
+        """
         for left, right in itertools.product(self.SCOPES, repeat=2):
-            shared = any(state._path_in_scope(path, left)
-                         and state._path_in_scope(path, right)
+            shared = any(scope_claims_path(left, path)
+                         and scope_claims_path(right, path)
                          for path in self.PATHS)
             with self.subTest(left=left, right=right):
-                if shared:
-                    self.assertIs(state.scopes_overlap(left, right), True)
+                self.assertIs(state.scopes_overlap(left, right), shared)
 
     def test_overlap_is_reflexive_and_symmetric_over_the_whole_corpus(self):
         for scope in self.SCOPES:
@@ -3124,10 +3325,52 @@ class ScopeSetOverlapTests(unittest.TestCase):
                 self.assertIs(state._scope_sets_overlap(left, right), False)
                 self.assertIs(state._scope_sets_overlap(right, left), False)
 
-    def test_an_empty_set_conflicts_with_nothing(self):
-        self.assertIs(state._scope_sets_overlap((), ("tree:src",)), False)
+    def test_an_empty_right_is_nothing_in_flight_and_conflicts_with_nothing(self):
+        """The ordinary first dispatch of a run: the asking task has scopes,
+        nothing is running yet, and `False` is the TRUE answer rather than an
+        absence of information."""
+        self.assertIs(state._scope_sets_overlap(("tree:src",), ()), False)
         self.assertIs(state._scope_sets_overlap(("tree:src",), []), False)
-        self.assertIs(state._scope_sets_overlap((), ()), False)
+        self.assertIs(
+            state._scope_sets_overlap(("tree:src", "file:docs/a.md"), ()), False)
+
+    def test_an_empty_left_is_refused_because_it_is_a_lookup_that_missed(self):
+        """The asymmetry, and the reason for it. The left is "these are MY
+        scopes", and `_parse_write_scope` already refuses a task that declares
+        none -- so an empty left never came from a plan. It came from a `-`
+        cell, a task id that did not match, or a split that yielded nothing,
+        and answering `False` would report that a task whose own scopes could
+        not be found collides with nothing. That is the same false `False` the
+        bare-string screen exists to refuse, and the two were treated
+        inconsistently until this refusal was added: the bare string `""` was
+        rejected while `()` -- which reaches the same zero comparisons by a
+        shorter route -- was pinned as correct.
+        """
+        for right in ((), [], ("tree:src",), ["tree:src", "file:docs/a.md"]):
+            for left in ((), []):
+                with self.subTest(left=left, right=right):
+                    with self.assertRaises(state.PlanMetadataError) as caught:
+                        state._scope_sets_overlap(left, right)
+                    self.assertIn("left", str(caught.exception))
+
+    def test_zero_comparisons_never_answer_false(self):
+        """The property the two tests above are two halves of, stated once: the
+        function returns `False` only after it has actually compared a pair.
+        Every input that would reach the nested walk with nothing to walk is
+        refused instead -- a bare string (iterable of characters, never a
+        scope), a one-shot iterator, and now an empty left.
+        """
+        for left, right in (((), ("tree:src",)),
+                            ([], []),
+                            ("tree:src", ("tree:src",)),
+                            (iter(("tree:src",)), ("tree:src",))):
+            with self.subTest(left=left, right=right):
+                with self.assertRaises(state.PlanMetadataError):
+                    state._scope_sets_overlap(left, right)
+        #: and the one shape that legitimately compares nothing keeps its
+        #: answer, because "nothing is in flight" is information and not a
+        #: failure to look.
+        self.assertIs(state._scope_sets_overlap(("tree:src",), ()), False)
 
     def test_a_list_is_accepted_as_well_as_a_tuple(self):
         self.assertIs(
@@ -3204,6 +3447,28 @@ class ScopePartsTotalityTests(unittest.TestCase):
                     state.scopes_overlap("file:src/a.py", scope)
                 with self.assertRaises(state.PlanMetadataError):
                     state._scope_parts(scope)
+
+    def test_a_blank_scope_is_refused_by_this_screen_and_not_merely_downstream(self):
+        """The `strip` half of `_text` pinned, because behaviour alone does not
+        pin it.
+
+        `""`, `" "` and `"\\t"` are all refused downstream anyway -- `""` as
+        "has an empty member" out of the comma split, `" "` and `"\\t"` as
+        "untyped" out of the partition -- so narrowing `_scope_parts`'s screen
+        to `isinstance` survives the whole suite on refusals alone. What it
+        loses is the DIAGNOSIS: a blank tracker cell would be reported as a
+        dangling comma or as a missing type, neither of which is what happened,
+        and both of which send whoever reads the error looking for the wrong
+        thing. So the message is the assertion here. The `isinstance` half is a
+        different matter and is pinned by exception FAMILY above: without it a
+        non-string leaves `TrackerError` altogether.
+        """
+        for scope in ("", " ", "\t", "\n", "  \t "):
+            with self.subTest(scope=repr(scope)):
+                with self.assertRaises(state.PlanMetadataError) as caught:
+                    state._scope_parts(scope)
+                self.assertIn("nonempty string", str(caught.exception))
+                self.assertIn(repr(scope), str(caught.exception))
 
     def test_a_refusal_is_inside_the_modules_exception_family(self):
         for scope in self.BAD_SCOPES:
@@ -3284,6 +3549,22 @@ class ScopePartsTotalityTests(unittest.TestCase):
             #: word inherits the subtree behaviour rather than losing it.
             self.assertIs(
                 state.scopes_overlap("branch:docs", "file:docs/a.md"), True)
+            #: AND THE MODULE'S OTHER READER OF THE VOCABULARY MOVES TOO.
+            #: `_within_scope` (P04 Task 2) held its own `"file"` and `"tree"`
+            #: until this assertion was added, so the module really did carry
+            #: two statements of the grammar: after the rebind above it went on
+            #: answering about `tree:` -- a type the plan parser had stopped
+            #: accepting -- and answered NOTHING about `branch:`, which is the
+            #: fail-open direction. Every declared output would then have
+            #: fallen outside every declared scope.
+            self.assertIs(
+                state._within_scope(PurePosixPath("docs/a.md"),
+                                    [("branch", PurePosixPath("docs"))]),
+                True)
+            self.assertIs(
+                state._within_scope(PurePosixPath("docs/a.md"),
+                                    [("tree", PurePosixPath("docs"))]),
+                False)
         finally:
             state._WRITE_SCOPE_TYPES = original
         self.assertEqual(state._WRITE_SCOPE_TYPES, ("file", "tree"))

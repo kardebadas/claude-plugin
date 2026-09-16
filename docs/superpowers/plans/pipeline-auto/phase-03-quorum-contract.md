@@ -4079,9 +4079,33 @@ guessed at in code beyond the minimum noted; each needs a ruling.
    and `append_row(tracker, section, row)`; P03 owns the quorum lifecycle and so
    writes its own rows through those, inside `locked_tracker_update`. No phase
    writes another phase's rows; no phase re-declares another phase's columns.
-   `quorum_tracker_rows()` builds against `section_columns("Quorum")` rather than
-   a local tuple, so a column change in P02 breaks loudly at the seam. `reopen_of`
-   and `raised_bar_rung` are carried as `Reopen Of` and `Raised Bar`.
+   `quorum_tracker_rows()` builds against `section_columns("quorum")` rather than
+   a local tuple, so a column change in P02 breaks loudly at the seam.
+
+   **PARTLY REOPENED by the P03 interface sweep.** The last sentence of this item
+   used to read "`reopen_of` and `raised_bar_rung` are carried as `Reopen Of` and
+   `Raised Bar`." **They are not.** `## Quorum` has twelve columns and neither is
+   among them:
+
+   ```
+   ('qid', 'axis', 'phase', 'state', 'owners', 'payload_digest',
+    'context_digest', 'responses', 'depth', 'rung', 'outcome', 'decision')
+   ```
+
+   Task 13 carries both fields in `open.json` and `final.json`, so nothing is
+   lost from disk — but the tracker's own index cannot say that a quorum was a
+   re-open or what bar it had to clear, and **`derive_next_action` reads the
+   tracker, not the records.**
+
+   It failed quietly for the reason this sweep exists: `_row_for` validates only
+   the keys it is handed, so a row that never offers `Reopen Of` is never asked
+   for it, and no P03 task consumed the promise. Marking an item *Settled* is not
+   the same as building it, and a review that checks what a task claimed will
+   never catch the difference.
+
+   **Owed by P02: both columns.** Until then a re-open is invisible in the index.
+   (Also corrected here: the call is `section_columns("quorum")` — the lowercase
+   tracker key. `section_columns("Quorum")` raises.)
 
 3. **The tie-break by strict consequence subset can never produce an adoption.**
    The spec lists it between "higher rung wins" and "escalate", but it also says

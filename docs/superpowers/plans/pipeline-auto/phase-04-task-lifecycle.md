@@ -2896,6 +2896,30 @@ git commit -m "feat(pipeline-auto): prove source ranges against the reserved bas
 
 ### Task 9: `publish_worker_result`
 
+> **CROSS-PHASE CONTRACT BREAK, found by the P04 Task 4 review — this must be
+> settled before Task 9 writes a path.** P06's reviewer-independence check
+> (`owner_history`, `phase-06-master-gate.md:1255`) scans
+> `run_dir / "results"` and matches `^-\s+\*\*Owner:\*\*\s*(\S+)$`.
+> Task 9's plan writes results to `run_dir / "agent-output" / …`
+> (`phase-04-task-lifecycle.md:2996`), and `render_worker_result` emits the
+> owner as a **table cell**, not as that line.
+>
+> So the check is broken twice over — wrong directory AND wrong grammar — and
+> both failures are **silent**: `owner_history` returns the owners it already
+> had from tracker rows, and the results-tree scan contributes the empty set.
+> Its stated purpose is that "the surviving record of a superseded attempt is
+> its immutable result file", so the fail-open direction is exactly the
+> property P06 names: **a worker released after finishing a task can be
+> assigned to review it.**
+>
+> The master plan (`:326`) pins the owner grammar as binding and assigns the
+> template to P04, so P04 owns the grammar half. **The directory half is
+> unowned and must be decided, not inherited**: either Task 9 writes to
+> `results/`, or P06 scans `agent-output/`. Whichever moves, the other plan
+> changes in the same commit — a contract that exists in two documents with
+> two different answers is how this was missed for four tasks.
+
+
 A worker publishes its own immutable result and nothing else. Publication is atomic and no-clobber: republishing byte-identical content is an idempotent no-op, and any other content at the same path is conflicting evidence, not an update. `publish_immutable` returns the sha256 hex digest, so `publish_worker_result` computes the repository-relative path itself and checks the returned digest against the content it rendered.
 
 **Files:**

@@ -2523,31 +2523,31 @@ git commit -m "feat(pipeline-auto): record every brain response immutably and al
 
 ### Task 10: Classifying an interrupted quorum
 
-> **From the Task 8 review — `stale-context` is load-bearing, and the reason is
-> sharper than "the context may change".** `decisions-effective.md` is **one
-> run-global mutable file**, rewritten by every `open_quorum`, while each
-> `open.json` binds a `payload_digest` over its content *at its own open time*.
-> So a later raise invalidates an earlier in-flight quorum's digest, and the
-> earlier quorum's brains are still reading the file the later raise rewrote.
-> Measured:
+> **CORRECTED BY MEASUREMENT in Task 10 (`375eeb5`). `stale-context` is
+> load-bearing and stale IS ordinary — but the causal claim recorded here was
+> wrong, and the wrong version would have produced a wrong classifier.**
 >
-> ```
-> q1 payload_digest at open      : cce8cfb8...
-> q1 recomputed immediately      : cce8cfb8...   match
-> [a decision lands; q2 is raised]
-> q1 recomputed after q2         : db2ddeb2...   MATCH: False
-> q1's brain-a is still told to read docs/superpowers/runs/<id>/decisions-effective.md
-> ```
+> What was recorded: "a digest mismatch is the normal consequence of a second
+> raise." **It is not.** `project_decisions` is deterministic, so a bare second
+> raise rewrites `decisions-effective.md` **byte-identically** and moves neither
+> digest. What moves them is a decision **landing**:
 >
-> **The lock does not prevent this and cannot.** Task 8's commit message claimed
-> it did; that claim is wrong and is corrected in the code. Serialised raises
-> produce it just as thoroughly, because the brains read the file *outside* any
-> lock this module holds.
+> - `context_digest`, taken over `decisions.md`, flips **at once**.
+> - `payload_digest`, taken over the projection, flips only when some later,
+>   unrelated raise rewrites that file.
 >
-> So `stale-context` is not a rare interruption state — it is the **ordinary**
-> state of any quorum that was in flight when another was raised. Classify it
-> from the digest that was recorded against the projection as it stands now, and
-> do not assume a mismatch means a crash.
+> So the projection is a **lagging** signal, and the two must both be compared
+> with the classifier naming which moved. The projection alone calls a stale
+> quorum fresh until an unrelated question happens to be raised; `decisions.md`
+> alone is blind to a hand-edited projection.
+>
+> Everything else in the original ruling stands and is implemented: stale is
+> ordinary rather than corruption, a stale quorum is never re-opened, and the
+> resolution routes to stage 11.
+>
+> The original text is replaced rather than annotated because a classifier
+> built from it would have compared the wrong file and been wrong in the
+> common case.
 
 
 **Files:**

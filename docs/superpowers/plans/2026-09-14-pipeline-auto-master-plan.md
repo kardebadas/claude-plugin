@@ -225,6 +225,34 @@ previously could not?"** If yes, justify the capability or find another way. If
 no, the cost is a name in a list and the benefit is usually a rule stated once
 instead of twice.
 
+## The plugin gate's real baseline is ONE failure, not three
+
+`./tools/check-plugin.sh` reports three failures in this working tree and
+**one** on committed content. Measured both ways:
+
+```
+with the dirty plugin.json            with plugin.json committed
+  FAIL version drift claude/codex       FAIL pipeline-auto has no SKILL.md
+  FAIL pipeline-auto has no SKILL.md    (nothing else)
+  FAIL codex manifest Pipeline v2
+```
+
+Two of the three come entirely from an uncommitted edit to
+`plugins/superb/.codex-plugin/plugin.json` — a Codex build stamped
+`0.14.0+codex.20260910151644` — that predates this build and belongs to the
+user. **Do not commit it**: committing would write a fabricated version drift
+into the repository to make a gate look green.
+
+The one genuine failure is cleared by P07, which creates `SKILL.md`. After
+that the plugin gate is fully green on a clean tree, and any new failure is
+this build's.
+
+This was mis-stated as "three known pre-existing failures" from P01 through
+P03 Task 11. No decision depended on it — the count was consistent across
+every task and none of the three was ever caused by a commit here — but the
+characterisation was wrong, and a worker told to expect three would accept a
+regression that took it from one to three.
+
 ## Every phase closes with an interface sweep
 
 **This step exists because four pinned interfaces escaped two complete phases.**

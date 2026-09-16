@@ -195,6 +195,93 @@ WRITE_CAPABLE = frozenset({
     "symlink_to",
 })
 
+
+def command_execution_family() -> frozenset[str]:
+    """Every ``os`` attribute that runs a command or creates a process.
+
+    THE ``subprocess`` BAN WAS NOMINAL UNTIL THIS EXISTED. ``os`` is on
+    ``ALLOWED_IMPORTS`` — the lock needs ``os.open``/``os.fstat``/``os.close``
+    and the atomic replace needs ``os.replace`` — and ``os`` also carries
+    ``popen``, ``system``, the whole ``exec*`` and ``spawn*`` families,
+    ``posix_spawn`` and ``fork``. Nothing forbade any of them. A worker could
+    have "solved" a later task with ``os.popen("git ...")`` and passed every
+    check in this file while violating the rule the boundary exists to state:
+    the master plan refuses arbitrary command execution by name, as "the single
+    capability this boundary most exists to withhold", and the allowlist is
+    about CAPABILITY, not about which module spells it.
+
+    THE FAMILY IS ENUMERATED FROM ``dir(os)``, NOT TYPED OUT. A hand-written
+    tuple is a corpus drawn from what somebody remembered, and this build's
+    standing rule is that such a corpus proves only what it remembers: it would
+    have pinned ``popen`` and ``system`` and missed ``execlpe``, ``spawnlpe``
+    and ``posix_spawnp`` — and it would never grow when the interpreter does.
+    Derived here, the set is whatever the running ``os`` actually offers under
+    the name rules below, so a future ``os.posix_spawn_ex`` is refused on the
+    day it ships rather than on the day somebody remembers it.
+
+    THE LEADING UNDERSCORE IS STRIPPED BEFORE THE PREFIX TEST, which is the
+    concrete thing enumeration bought over memory: ``os._execvpe`` and
+    ``os._spawnvef`` are private, undocumented, present on this interpreter,
+    and execute. A prefix test on the raw name misses both.
+
+    ``startfile`` is added unconditionally. It exists only on Windows, so a
+    set derived on Linux would omit it and the guard would be weaker on the one
+    platform where it is reachable — the same failure as a remembered list,
+    arriving through the machine the test happened to run on.
+
+    Signalling and reaping are deliberately OUT (``kill``, ``killpg``,
+    ``wait*``, ``pidfd_open``), as is ``register_at_fork``, which registers a
+    callback and starts nothing. They neither run a command nor create a
+    process, and a guard that refuses them would be refusing something other
+    than what it claims.
+    """
+    family = set()
+    for name in dir(os):
+        bare = name.lstrip("_")
+        if bare.startswith(("exec", "spawn", "posix_spawn", "popen")):
+            family.add(name)
+        elif bare in ("system", "fork", "forkpty", "startfile"):
+            family.add(name)
+    return frozenset(family | {"startfile"})
+
+
+#: Refused MODULE-WIDE, by name, exactly as ``FORBIDDEN_BUILTINS`` is. The
+#: read-only guard above is scoped to one function because the module is
+#: allowed to grow a writer; there is no task in any phase of this plan that is
+#: allowed to grow a process, so this half has no scope to relax.
+FORBIDDEN_OS_CALLS = command_execution_family()
+
+
+def command_execution_names(source: str) -> list[str]:
+    """Every forbidden ``os`` name this source reaches, by any spelling.
+
+    FOUR SPELLINGS, because a ban on one of them is a ban on the spelling and
+    not on the capability:
+
+    * ``os.popen(...)`` — the attribute, wherever it appears. By NAME, like
+      ``WRITE_CAPABLE``: this cannot tell ``os.system`` from some other
+      object's ``.system``, and that over-strictness points the safe way.
+    * ``from os import popen`` — which passes the ``ALLOWED_IMPORTS`` check
+      above untouched, since the module it names IS on the allowlist.
+    * a bare ``popen(...)`` call, the thing such an import creates.
+    * the string ``"popen"``, which is ``getattr(os, "popen")`` and every other
+      reflective route. Only an EXACT match counts, so prose in a docstring
+      naming the function is unaffected — and a string constant that is
+      precisely one of these names has no other honest use in this module.
+    """
+    found = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Attribute):
+            found.add(node.attr)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            found.add(node.func.id)
+        elif (isinstance(node, ast.ImportFrom)
+              and (node.module or "").split(".")[0] == "os"):
+            found.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            found.add(node.value)
+    return sorted(found & FORBIDDEN_OS_CALLS)
+
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
 
 import pipeline_auto_state as pas  # noqa: E402
@@ -446,6 +533,85 @@ class RoundTripTests(unittest.TestCase):
             write_capable_calls(source, "validate_run"), [],
             "validate_run must stay read-only; it may not create, replace, "
             "remove or re-permission anything on disk")
+
+    def test_the_module_runs_no_command_and_creates_no_process(self):
+        """The half of the ``subprocess`` ban that was never written down.
+
+        ``subprocess`` is off ``ALLOWED_IMPORTS`` and three tests assert it,
+        which reads like a ban on running commands and is not one: ``os`` is ON
+        the allowlist and reaches ``popen``, ``system``, ``exec*``, ``spawn*``,
+        ``posix_spawn*`` and ``fork``. Until this test, every one of them was
+        legal — so the boundary refused the IMPORT everyone thinks of and
+        allowed the CAPABILITY it exists to withhold. ``os.popen("git ...")``
+        would have passed the whole suite.
+
+        The family comes from ``dir(os)`` (see ``command_execution_family``),
+        and the check is module-wide and unscoped, like ``FORBIDDEN_BUILTINS``.
+        """
+        #: The derivation, asserted rather than assumed: a set that came back
+        #: empty would make the guard below vacuous and green forever.
+        self.assertGreaterEqual(len(FORBIDDEN_OS_CALLS), 20)
+        for expected in ("popen", "system", "execv", "execve", "execlpe",
+                         "spawnv", "spawnlpe", "posix_spawn", "posix_spawnp",
+                         "fork", "forkpty", "startfile", "_execvpe"):
+            with self.subTest(name=expected):
+                self.assertIn(expected, FORBIDDEN_OS_CALLS)
+        #: And the names that are NOT execution stay out, or the guard is
+        #: refusing something other than what it claims.
+        for allowed in ("kill", "killpg", "waitpid", "register_at_fork",
+                        "pidfd_open", "get_exec_path", "open", "replace",
+                        "fstat", "close", "O_CREAT"):
+            with self.subTest(name=allowed):
+                self.assertNotIn(allowed, FORBIDDEN_OS_CALLS)
+        self.assertEqual(
+            command_execution_names(module_source()), [],
+            "the module reached a command-execution or process-creation "
+            "attribute of os; the subprocess ban is about the capability, not "
+            "about which module spells it")
+
+    def test_the_command_execution_check_fails_on_a_spliced_os_popen(self):
+        """A test of the test: the ban above must be falsifiable.
+
+        A guard asserting a set is empty is green the day it is written and
+        green the day it stops working, and the two are indistinguishable
+        without this. Each spelling is spliced into the REAL module source, one
+        at a time, and must be detected — including the three that route around
+        an attribute check (the ``from os import`` form, the bare call it
+        creates, and the reflective ``getattr``).
+        """
+        source = module_source()
+        self.assertEqual(command_execution_names(source), [])
+        #: NOTHING BELOW IS EXECUTED. Each entry is a string spliced into a
+        #: COPY of the module text, which `command_execution_names` hands to
+        #: `ast.parse` and nothing else -- no `compile`, no `exec`, no import
+        #: of the mutant. They are the inputs the guard must DETECT, and a
+        #: guard proved against anything weaker than a real call is a guard
+        #: proved against a stand-in.
+        for statement in (
+            'os.popen("true").read()',
+            'os.system("true")',
+            'os.execv("/bin/true", ["true"])',
+            'os.posix_spawn("/bin/true", ["true"], {})',
+            'os.spawnvp(os.P_WAIT, "true", ["true"])',
+            'os._execvpe("/bin/true", ["true"])',
+            'os.fork()',
+            'runner = os.popen',
+            'getattr(os, "popen")("true")',
+        ):
+            mutant = with_statement_in(source, "validate_run", statement)
+            with self.subTest(statement=statement):
+                self.assertNotEqual(mutant, source)
+                self.assertNotEqual(
+                    command_execution_names(mutant), [],
+                    "a command-execution call went undetected")
+        #: The import forms are module-level, so they are spliced at the head
+        #: rather than into a function body.
+        for header in ("from os import popen\n",
+                       "from os import system as _run\n",
+                       "from os import popen\npopen('true')\n"):
+            with self.subTest(header=header):
+                self.assertNotEqual(
+                    command_execution_names(header + source), [])
 
     def test_the_read_only_check_fails_on_a_write_inside_validate_run(self):
         """A test of the test: the guarantee above must be falsifiable.

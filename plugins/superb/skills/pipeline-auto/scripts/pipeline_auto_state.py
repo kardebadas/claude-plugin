@@ -13380,6 +13380,22 @@ def _append_history(value: str, entry: str) -> str:
     ``-`` is the empty marker, so appending to it REPLACES it; appending beside
     it would leave a cell whose first member is the absence sentinel, which
     ``_csv`` reads back as a nameless checkpoint.
+
+    BOTH BRANCHES ARE LIVE, AND THE EQUIVALENCE IS STATED OVER THE DOMAIN
+    RATHER THAN OVER ONE CALLER. An earlier justification argued the appending
+    branch never runs -- "``reserve_task`` only runs on a ``[ ]`` row whose
+    ``checkpoints`` cell is ``-``, so this is the identity" -- which is an
+    argument about ONE of the two call sites. ``import_phase_plan`` is the
+    other, and there the entry branch is the live one: the first import sets
+    ``phase_plans`` from ``-`` to a path, and every import after it appends
+    beside a real path
+    (``test_a_second_phase_appends_and_stays_index_aligned``). A totality claim
+    derives its case list from the call tree, not from one fixture -- and an
+    equivalence claim is a totality claim about the inputs that reach it.
+
+    So the rule is the function's own: two inputs mean "nothing recorded yet"
+    and are REPLACED; anything else is EXTENDED. Which caller lands in which
+    branch is a consequence, never the premise.
     """
     return entry if value in ("", _ABSENT_CELL) else f"{value},{entry}"
 
@@ -13493,17 +13509,34 @@ def _ref_name(value) -> str:
 
     ``_TOKEN`` -- which is all ``target_branch`` is held to -- ADMITS ``/``,
     so ``a/../../../../etc/passwd`` is a perfectly legal tracker cell and would
-    otherwise be joined straight onto the ref store. The segment rules are
-    ``_safe_relative``'s, asked RAW for ``_safe_relative``'s reason: pathlib
-    normalises ``.`` and an empty segment away before any check over ``.parts``
-    could see them.
+    otherwise be joined straight onto the ref store. The segments are asked RAW
+    for ``_safe_relative``'s reason: pathlib normalises ``.`` and an empty
+    segment away before any check over ``.parts`` could see them.
+
+    The segment rules are ``_safe_relative``'s PLUS GIT'S HIDDEN-COMPONENT
+    RULE, which is strictly stronger and was previously written here as an
+    identity. ``.hidden``, ``a/.h/b``, ``..weird`` and ``...`` are all accepted
+    by ``_safe_relative`` and refused here, matching ``git check-ref-format``;
+    stronger is the safe direction for a value that becomes a path.
+
+    ``"."`` AND ``".."`` ARE NOT IN THE TUPLE, and their absence is the point.
+    Both start with ``.``, so ``startswith(".")`` on the line below refuses
+    them; listing them as well was two checks refusing the same input, and a
+    mutant deleting ``".."`` from the tuple survived the whole suite because
+    nothing could tell the difference. This is the ``_table_safe``-on-
+    ``purpose`` case and NOT ``_require_regular_file``'s absence arm: the
+    domination is between two clauses of ONE condition in THIS file, permanent
+    and unable to move, where the absence arm is dominated by a relation
+    between two things in the standard library, either of which can. So this
+    one is deleted and that one is kept. ``""`` is what remains load-bearing:
+    an empty segment starts with nothing.
     """
     if not isinstance(value, str) or not value or not _cell_safe(value):
         raise TrackerValidationError(
             f"unusable git reference {value!r}: it must be a nonempty string a "
             "tracker cell can carry back out unchanged")
     for segment in value.split("/"):
-        if (segment in ("", ".", "..") or segment != segment.strip()
+        if (segment == "" or segment != segment.strip()
                 or segment.startswith(".")):
             raise TrackerValidationError(
                 f"unusable git reference {value!r}: the segment {segment!r} is "
@@ -13614,9 +13647,21 @@ def _packed_ref(common: Path, name: str):
 def _lookup_ref(gitdir: Path, common: Path, name: str):
     """The raw contents of the first ref file that answers to ``name``.
 
-    Loose before packed FOR EACH CANDIDATE, and never loose-for-all before
-    packed-for-all: a loose ``refs/heads/x`` is what a packed ``refs/tags/x``
-    loses to, and swapping the nesting would resolve the tag.
+    LOOSE BEFORE PACKED FOR EACH CANDIDATE, AND NEVER LOOSE-FOR-ALL BEFORE
+    PACKED-FOR-ALL. The candidate order is gitrevisions' -- ``refs/tags/``
+    precedes ``refs/heads/`` -- and storage is NOT a tiebreak between two
+    candidates, only between two spellings of the SAME one. So on a store
+    carrying a packed ``refs/tags/x`` and a loose ``refs/heads/x``, the tag is
+    reached at the earlier candidate and WINS, which is what ``git rev-parse x``
+    answers on that same store.
+
+    An earlier revision of this docstring had both halves backwards -- it
+    claimed the loose head wins and that the swap would resolve the tag, when
+    it is the swap that resolves the head. Hoisting the packed lookup into a
+    second loop would scan every candidate loose first, find ``refs/heads/x``
+    before any packed entry, and resolve the HEAD: a silent disagreement with
+    ``git rev-parse`` on an ordinary repository, and the nesting this function
+    exists to refuse.
     """
     for candidate in _ref_candidates(name):
         for store in (gitdir, common):
@@ -13844,10 +13889,35 @@ def _require_capacity(tracker: dict, owner: str) -> None:
     """F2: three slots stay free for the quorum that unblocks a blocked task.
 
     TWO BOUNDS, AND THE SECOND IS NOT THE FIRST RESTATED. The cap bounds
-    implementation tasks; ``worker_limit`` bounds everyone, brains included. A
-    single in-flight quorum leaves the second dominated by the first, but the
-    schema permits more than one, and with two in flight a run can be under its
-    implementation cap and over its total.
+    implementation tasks; ``worker_limit`` bounds everyone, brains included.
+
+    THE SECOND CLAUSE SEPARATES FROM THE FIRST IN TWO REGIMES, not one. An
+    earlier revision of this docstring named only the second of them and
+    derived the exclusion algebraically -- "``i + 1 <= L - 3`` and ``i + 4 > L``
+    have no common solution, so one quorum is dominated by the cap". That
+    derivation DROPS THE ``max(1, ...)`` FLOOR ``implementation_slot_cap``
+    applies, and the floor is the whole point of that function: for
+    ``L <= 3`` the cap is ``1``, not ``L - 3``, so ``i = 0`` passes the first
+    bound and ONE in-flight quorum's three owners plus the incoming one already
+    exceed ``L``.
+
+    The two regimes, taken from a search of the integer space rather than from
+    algebra re-derived by hand -- the first derivation read as verified and was
+    not:
+
+    * **The floor binds** (``worker_limit`` 1, 2 or 3): cap ``1``, no
+      implementation owner yet, one in-flight quorum. Searching every
+      ``(L, |impl|, quorum rows, |quorum owners|)`` shape over ``L`` 1..12
+      finds the one-quorum regime is EXACTLY ``L in {1, 2, 3}`` with
+      ``|impl| == 0``, and nothing else.
+    * **Above the floor**, two in-flight quorums -- six brain owners against a
+      cap computed from three.
+
+    The first regime is a real degraded mode and not the F2 deadlock: at
+    ``L <= 3`` every reservation is refused WHILE a quorum is in flight, and
+    the quorum finalises and releases its owners without needing a slot it
+    cannot have. It is temporary by construction, which is exactly what
+    separates it from the permanent deadlock reserving past the cap creates.
     """
     limit = int(_run_field(tracker, "worker_limit"))
     cap = implementation_slot_cap(limit)

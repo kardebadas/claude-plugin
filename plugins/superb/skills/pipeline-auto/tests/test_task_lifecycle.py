@@ -7175,6 +7175,128 @@ class GitRefResolutionTests(TempDirTestCase):
         self.assertTrue((worktree / ".git").is_file())
         self.assertEqual(state._resolved_commit(worktree, "target"), expected)
 
+    def test_a_packed_tag_beats_a_loose_head_because_the_CANDIDATE_is_earlier(self):
+        """Loose-before-packed is PER CANDIDATE, and the nesting is the rule.
+
+        `_ref_candidates` is gitrevisions' order, so `refs/tags/x` is tried
+        before `refs/heads/x`; storage breaks a tie only between two spellings
+        of ONE candidate. On a store carrying a packed `refs/tags/x` and a loose
+        `refs/heads/x` the TAG therefore wins.
+
+        Hoisting the packed lookup into a second loop -- loose-for-all before
+        packed-for-all, which is what the docstring here used to describe as the
+        code's behaviour -- finds the loose head first and resolves the other
+        commit. That mutant survived the whole suite, because every ref test
+        until this one exercised loose, packed, symref, peel and worktree
+        SEPARATELY and never made two of them compete.
+
+        The expectation is taken from real `git rev-parse` on the same store
+        rather than from a reading of this module, so the test disagrees with
+        git or with the code, never with the author's model of either.
+        """
+        repo = self.repo()
+        head_commit = git(repo, "rev-parse", "HEAD")
+        tag_commit = git(repo, "rev-parse", "target")
+        self.assertNotEqual(head_commit, tag_commit)
+        (repo / ".git" / "refs" / "heads" / "x").write_text(
+            head_commit + "\n", encoding="utf-8")
+        (repo / ".git" / "packed-refs").write_text(
+            "# pack-refs with: peeled fully-peeled sorted \n"
+            f"{tag_commit} refs/tags/x\n", encoding="utf-8")
+        #: Both spellings really are present, or the assertion below is about
+        #: a store with only one answer in it.
+        self.assertTrue((repo / ".git" / "refs" / "heads" / "x").is_file())
+        self.assertEqual(state._lookup_ref(*state._git_store(repo),
+                                           "refs/heads/x"), head_commit)
+        self.assertEqual(state._packed_ref(state._git_store(repo)[1],
+                                           "refs/tags/x"), tag_commit)
+        self.assertEqual(git(repo, "rev-parse", "x"), tag_commit)
+        self.assertEqual(state._resolved_commit(repo, "x"),
+                         git(repo, "rev-parse", "x"))
+        self.assertEqual(state._resolved_commit(repo, "x"), tag_commit)
+
+    def test_a_linked_worktrees_own_gitdir_outranks_the_shared_commondir(self):
+        """`(gitdir, common)` is an ORDER, and this is the ref that sees it.
+
+        A linked worktree carries `HEAD` in BOTH stores: its own detached
+        `HEAD` in the per-worktree gitdir, and the main checkout's
+        `ref: refs/heads/main` in the shared commondir. They name different
+        commits, which is the entire reason per-worktree state exists.
+
+        The existing worktree test resolves `target` -- a branch, which lives
+        only in commondir -- so it proves commondir is READ and cannot see which
+        store is read FIRST. Swapping the pair survived the suite on that test
+        alone. Here the swap resolves the main worktree's `HEAD` instead, which
+        is the wrong commit for this checkout and, worse, a silently plausible
+        one.
+
+        `HEAD` is reachable as a `target_branch`: `_ref_name` admits it and
+        `_PSEUDO_REFS` lists it.
+        """
+        repo = self.repo()
+        worktree = self.tmp / "wt"
+        git(repo, "worktree", "add", "-q", "--detach", str(worktree), "target")
+        self.addCleanup(git, repo, "worktree", "remove", "--force",
+                        str(worktree))
+        gitdir, common = state._git_store(worktree)
+        self.assertNotEqual(gitdir.resolve(), common.resolve())
+        own = (gitdir / "HEAD").read_text(encoding="utf-8").strip()
+        shared = (common / "HEAD").read_text(encoding="utf-8").strip()
+        #: The same NAME in both stores, holding different things -- without
+        #: this the order is unobservable and the test is the old one again.
+        self.assertTrue((gitdir / "HEAD").is_file())
+        self.assertTrue((common / "HEAD").is_file())
+        self.assertNotEqual(own, shared)
+        resolved = state._resolved_commit(worktree, "HEAD")
+        self.assertEqual(resolved, git(worktree, "rev-parse", "HEAD"))
+        self.assertEqual(resolved, own)
+        #: And it is NOT the commit commondir-first would have produced, which
+        #: is the assertion the swapped pair fails.
+        self.assertNotEqual(resolved, git(repo, "rev-parse", "HEAD"))
+
+    def test_an_acyclic_symref_chain_is_refused_at_the_bound_itself(self):
+        """`_SYMREF_LIMIT` is a real bound, and it was pinned by nothing.
+
+        The cycle detector terminates every CYCLE, so loosening 8 to 200 broke
+        no test: with the cycle check present a longer chain still ends. What
+        the bound defends against is a deep ACYCLIC chain -- work proportional
+        to a number an agent-supplied ref store chooses -- and that is only
+        visible at the boundary.
+
+        So both sides are walked: the deepest chain that resolves, and the
+        first that does not. A test that only asserted the refusal would pass
+        with the limit set to 1, and one that only asserted the success would
+        pass with it set to 200.
+        """
+        repo = self.repo()
+        commit = git(repo, "rev-parse", "target")
+        heads = repo / ".git" / "refs" / "heads"
+
+        def chain(hops: int) -> str:
+            """`hops` symbolic links ending at a real object name."""
+            names = [f"c{hops}x{index}" for index in range(hops + 1)]
+            for index, name in enumerate(names[:-1]):
+                (heads / name).write_text(
+                    f"ref: refs/heads/{names[index + 1]}\n", encoding="utf-8")
+            (heads / names[-1]).write_text(commit + "\n", encoding="utf-8")
+            return names[0]
+
+        self.assertEqual(state._SYMREF_LIMIT, 8)
+        #: Seven hops plus the object name is exactly eight lookups.
+        #:
+        #: NO `git rev-parse` CROSS-CHECK HERE, deliberately: git's own symref
+        #: bound is FIVE, so it refuses this chain at a depth the module still
+        #: accepts. The looser bound is `_SYMREF_LIMIT`'s documented choice, not
+        #: a disagreement to resolve, and calling git would pin git's number.
+        self.assertEqual(state._resolved_commit(repo, chain(7)), commit)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._resolved_commit(repo, chain(8))
+        #: THE DIAGNOSIS, not the family: an unreadable file and a missing ref
+        #: both raise here too, and only the sentence tells the bound apart.
+        self.assertIn("chain deeper than 8", str(caught.exception))
+        self.assertNotIn("names no reference", str(caught.exception))
+        self.assertNotIn("cycle", str(caught.exception))
+
     def test_a_ref_name_that_traverses_out_of_the_store_is_refused(self):
         """`_TOKEN` admits `/`, so `target_branch` could be spelled
         `a/../../../../etc/passwd` and still pass every cell grammar; the ref
@@ -7804,12 +7926,18 @@ class ReserveTaskTests(TempDirTestCase):
     def test_the_global_limit_counts_quorum_owners_too(self):
         """The cap is not the only bound, and the second bound is REACHABLE.
 
-        With exactly one quorum in flight it is not: `i + 1 <= L - 3` and
-        `i + 3 + 1 > L` have no common solution, so a single quorum leaves the
-        global check dominated by the cap. TWO in-flight quorums separate them
-        -- six brain owners against a cap computed from three -- which is the
-        configuration this test builds, so the clause is pinned by an input
-        that actually reaches it rather than by one that never could.
+        TWO in-flight quorums separate the bounds ABOVE THE FLOOR -- six brain
+        owners against a cap computed from three -- which is the configuration
+        this test builds.
+
+        This docstring used to add that one quorum could never reach the second
+        clause, because `i + 1 <= L - 3` and `i + 3 + 1 > L` have no common
+        solution. THAT IS FALSE: the cap is `max(1, L - 3)`, so for `L <= 3` it
+        is `1` and `i = 0` passes the first bound while one quorum's three
+        owners already exceed `L`. The companion test below pins that regime,
+        and the case list there came from a search of the integer space rather
+        than from algebra re-derived by hand -- which is how this claim came to
+        read as verified without being true.
         """
         repo, run_dir, _ = make_run(self.tmp, n_disjoint_tasks(6), worker_limit=10)
         self.assertEqual(state.implementation_slot_cap(10), 7)
@@ -7829,6 +7957,61 @@ class ReserveTaskTests(TempDirTestCase):
             state.reserve_task(run_dir, task_id="T5", owner="impl-5", attempt=1)
         self.assertIn("worker_limit", str(caught.exception))
         self.assertNotIn("implementation slots exhausted", str(caught.exception))
+
+    def test_one_quorum_reaches_the_global_clause_wherever_the_floor_binds(self):
+        """The SIMPLE reachable case, and the one the algebra above missed.
+
+        `implementation_slot_cap` floors at one, so at `worker_limit` 1, 2 or 3
+        the cap is `1` while the limit is below the four workers a quorum plus
+        one implementer needs. `i = 0` therefore passes the first bound and the
+        SECOND refuses -- with one quorum, not two.
+
+        THE CASE LIST IS SEARCHED, NOT DERIVED. Enumerating every
+        `(worker_limit, |impl owners|, quorum rows, |quorum owners|)` shape over
+        `worker_limit` 1..12 and evaluating the two clauses exactly as the
+        module writes them, the one-quorum regime is EXACTLY
+        `worker_limit in {1, 2, 3}` with no implementation owner in flight --
+        three shapes, no more. That is the boundary this test walks, and it
+        walks `worker_limit=4` as well, the first limit at which the same
+        configuration is ACCEPTED, because a test that only shows refusals
+        cannot tell a bound from a blanket refusal.
+        """
+        refused = {}
+        for limit in (1, 2, 3, 4):
+            with self.subTest(worker_limit=limit):
+                tmp = Path(tempfile.mkdtemp(dir=self.tmp))
+                repo, run_dir, _ = make_run(tmp, three_disjoint_tasks(),
+                                            worker_limit=limit)
+                #: The floor, at every limit here -- so the first clause admits
+                #: exactly one implementation owner and `i = 0` passes it.
+                self.assertEqual(state.implementation_slot_cap(limit), 1)
+                open_quorum_row(run_dir,
+                                owners=("brain-1", "brain-2", "brain-3"))
+                tracker = state.validate_run(run_dir)
+                self.assertEqual(
+                    len([row for row in tracker["quorum"]
+                         if row["state"] == "in_flight"]), 1)
+                self.assertEqual(state._implementation_owners(tracker), set())
+                if limit == 4:
+                    #: One quorum plus one implementer is exactly four, so the
+                    #: second clause does not fire and the reservation stands.
+                    state.reserve_task(run_dir, task_id="T1", owner="impl-1",
+                                       attempt=1)
+                    self.assertEqual(
+                        task_row(state.validate_run(run_dir), "T1")["state"],
+                        "[~]")
+                    continue
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state.reserve_task(run_dir, task_id="T1", owner="impl-1",
+                                       attempt=1)
+                #: THE DIAGNOSIS, not the family: the first clause would refuse
+                #: this too if the cap were wrong, and the two are told apart
+                #: only by which sentence comes back.
+                self.assertIn("worker_limit", str(caught.exception))
+                self.assertNotIn("implementation slots exhausted",
+                                 str(caught.exception))
+                refused[limit] = str(caught.exception)
+        self.assertEqual(sorted(refused), [1, 2, 3])
 
     def test_a_finalized_quorum_holds_no_slots(self):
         repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(), worker_limit=4)

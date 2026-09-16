@@ -12659,8 +12659,22 @@ def _json_array_cell(values: tuple) -> str:
     therefore be a screen no input can reach, and an unreachable screen reads,
     to the next person, as a guarantee that something is being checked here
     which is not.
+
+    ``allow_nan=False``, FOR ``_dumps``'S REASON AND NOT BY CALLING IT.
+    ``_dumps`` is the module's one spelling of a JSON *file* -- sorted, indented
+    and newline-terminated -- and a tracker cell is one line, so this cannot
+    delegate to it; what it can do is not repeat the default it was written to
+    correct. Measured: without this, ``_json_array_cell((float("nan"),))``
+    returns ``'[NaN]'``, a bare token RFC 8259 has no literal for, so the cell
+    a record carries -- and the digest binds -- is a document only Python can
+    read back. Today ``commands`` is the only field that reaches here unscreened
+    and ``_parse_command_suite`` refuses the float on the way back, so the
+    escape is closed downstream; ``ValueError`` is what refuses it now, and
+    ``_evidence_commands`` already catches that, so the refusal lands in the
+    family and one screen earlier. No AST guard covers ``json.dumps`` -- only
+    ``json.loads`` -- so this is written here rather than relied on.
     """
-    return json.dumps(list(values))
+    return json.dumps(list(values), allow_nan=False)
 
 
 def _evidence_subject(value) -> tuple[str, str]:
@@ -12741,11 +12755,26 @@ def _evidence_inputs(value) -> tuple[str, ...]:
     path names a file whose contents may have changed since, which is the
     failure ``_digest_reference`` exists for, arriving through the field whose
     whole job is to prevent it.
+
+    THE ``isinstance`` GUARD IS REACHABLE TWICE OVER, which is why it stays
+    where the ones in ``_json_array_cell`` and ``_validate_verification_evidence``
+    went. Review read it as the same unreachable pattern -- a bare string
+    becomes a tuple of characters that each fail ``_digest_reference``, a
+    generator is materialised by ``tuple()`` -- and both of those are true and
+    neither is the case that matters. Measured with the guard bypassed:
+    ``inputs=5`` raises ``TypeError: 'int' object is not iterable`` from
+    ``tuple()``, OUTSIDE ``TrackerError``, killing a controller that wrapped an
+    evidence render in ``except TrackerError``; and ``inputs=iter(())`` is
+    ACCEPTED, rendering the empty-cell marker for a record whose author handed
+    over an iterator. A screen with a measured escape behind it is not a screen
+    that reads as a guarantee of nothing.
     """
     if not isinstance(value, (tuple, list)):
         raise TrackerValidationError(
             f"inputs must be a tuple or a list; got {type(value).__name__} "
-            f"{value!r}")
+            f"{value!r}. A non-iterable reaches tuple() as a TypeError from "
+            "outside this module's exception family, and an exhausted iterator "
+            "reaches it as no inputs at all")
     values = tuple(value)
     for member in values:
         _digest_reference(member, field="inputs member")
@@ -12798,6 +12827,25 @@ def _validate_verification_evidence(record) -> dict:
     still ``_attempt_token``'s own output -- ``_ATTEMPT_TOKEN`` is a round trip
     through the renderer, not a digit-count pattern -- so there is exactly one
     spelling of any given attempt across both documents.
+
+    ``purpose`` AND ``outcome`` DO NOT GO THROUGH ``_table_safe``, and the
+    omission is deliberate. Both are compared against a CLOSED SET of values
+    this module wrote -- ``EVIDENCE_PURPOSES`` through ``_member``, which is
+    total over every type, and ``EVIDENCE_OUTCOME`` through ``!=``, which is
+    too -- so nothing a ``_table_safe`` call could refuse survives the line
+    below it, whatever type or spelling it arrives as. Mutation confirmed it:
+    deleting both screens left the whole suite green, an equivalent mutant. An
+    unreachable screen reads, to the next person, as a guarantee that something
+    is being checked here which is not, and this file has already removed the
+    same pattern from ``_json_array_cell`` and ``_evidence_commands``. The
+    other seven fields keep theirs and the difference is not taste:
+    ``_RUN_ID``, ``_ATTEMPT_TOKEN`` and ``_COMMIT`` are matched with
+    ``fullmatch``, which raises ``TypeError`` on a non-string -- outside this
+    module's exception family -- so ``_table_safe`` is what makes the value a
+    string before the pattern is asked; ``environment`` is free text screened
+    by nothing else at all; and the two array fields have their own readers.
+    ``_member`` and ``!=`` need no such help, which is exactly why these two
+    screens were the unreachable ones.
     """
     if not isinstance(record, dict):
         raise TrackerValidationError(
@@ -12815,7 +12863,7 @@ def _validate_verification_evidence(record) -> dict:
             "believe it had said something")
 
     values = {}
-    values["purpose"] = _table_safe(record["purpose"], field="purpose")
+    values["purpose"] = record["purpose"]
     if not _member(values["purpose"], EVIDENCE_PURPOSES):
         raise TrackerValidationError(
             f"unknown evidence purpose {values['purpose']!r}; the registered "
@@ -12846,7 +12894,7 @@ def _validate_verification_evidence(record) -> dict:
             "tomorrow, so a record bound to one proves a suite passed at no "
             "particular state; for a task-integration record it is the --no-ff "
             "merge commit, never the task branch tip")
-    values["outcome"] = _table_safe(record["outcome"], field="outcome")
+    values["outcome"] = record["outcome"]
     if values["outcome"] != EVIDENCE_OUTCOME:
         raise TrackerValidationError(
             f"outcome {values['outcome']!r} is not {EVIDENCE_OUTCOME!r}; a "
@@ -12946,14 +12994,53 @@ def parse_verification_evidence(text: str) -> dict:
 
 
 def _evidence_directory(value, *, field: str) -> Path:
-    """One of ``resolve_evidence``'s two search roots, type-checked before
-    ``Path`` sees it. ``Path(None)`` is a ``TypeError`` from outside this
-    module's exception family, and a controller that caught ``TrackerError``
-    around an evidence read would not catch it."""
-    if not isinstance(value, (str, Path)):
+    """One of ``resolve_evidence``'s two search roots, screened before ``Path``
+    sees it -- for its TYPE and for its SPELLING, which are two corpora.
+
+    THE TYPE. ``Path(None)`` is a ``TypeError`` from outside this module's
+    exception family, and a controller that caught ``TrackerError`` around an
+    evidence read would not catch it. ``bytes`` raises from ``Path`` too, and an
+    ``os.PathLike`` would hide an arbitrary ``__fspath__`` behind the read, so
+    the accepted types are ``str`` and ``Path`` and nothing else.
+
+    THE SPELLING, AND THIS IS THE HALF A TYPE CHECK CANNOT DO. Measured on this
+    Python, against the shipped type-check-only form: a ``run_dir`` or a
+    ``repo_dir`` holding ``\\x00`` reaches the syscall as ``ValueError:
+    embedded null byte``, from outside ``TrackerError`` -- and it gets there
+    silently, because ``is_file()`` and ``os.path.lexists`` are BOTH false for
+    that spelling, so no door upstream sees it. ``_cell_safe`` is the screen,
+    exactly as ``_plan_text`` uses it for a plan path: a path corpus is not a
+    field corpus, and a lone surrogate is the reason the encoder is ASKED
+    (``_survives_the_encoder``) rather than remembered -- on Linux a surrogate
+    is the ``surrogateescape`` spelling of a real filename byte, so it names a
+    file that can exist, and only the encoder knows which side of the line a
+    given one falls.
+
+    ``reference`` NEEDS NO SCREEN HERE because it already has one:
+    ``_digest_reference`` runs it through ``_table_safe`` -> ``_cell_safe``
+    before this function is ever called. The roots were the only two arguments
+    reaching the filesystem unspelt.
+    """
+    if isinstance(value, Path):
+        spelling = str(value)
+    elif isinstance(value, str):
+        spelling = value
+    else:
         raise TrackerValidationError(
-            f"{field} must be a path; got {type(value).__name__} {value!r}")
-    return Path(value)
+            f"{field} must be a str or a pathlib.Path; got "
+            f"{type(value).__name__} {value!r}. bytes would raise TypeError "
+            "from Path and an os.PathLike would hide an arbitrary __fspath__ "
+            "behind the read")
+    if not spelling or not _cell_safe(spelling):
+        raise TrackerValidationError(
+            f"unusable {field} {spelling!r}: an evidence search root must be a "
+            "nonempty string a tracker cell can carry back out unchanged -- no "
+            "NUL or other control character, nothing the section reader breaks "
+            "a line on, nothing the UTF-8 encoder refuses, no '|', and no "
+            "surrounding whitespace. A NUL here reaches the syscall as "
+            "ValueError and a lone surrogate as UnicodeEncodeError, both "
+            "outside TrackerError, and both past a door that cannot see them")
+    return Path(spelling)
 
 
 def resolve_evidence(run_dir, repo_dir, reference: str) -> dict:
@@ -12966,26 +13053,60 @@ def resolve_evidence(run_dir, repo_dir, reference: str) -> dict:
     who can write the repository copy chooses which record a mismatching run
     copy is replaced by. One reference names one document.
 
-    THE FILE IS READ RATHER THAN STATTED FIRST. ``is_file()`` followed by
-    ``read_bytes()`` is a time-of-check/time-of-use gap whose loser is a
-    ``FileNotFoundError`` out of the read -- an ``OSError``, outside this
-    module's exception family. Asking for the bytes answers "is there a
-    readable regular file here" and "what is in it" in one syscall sequence, so
-    a directory, a vanished file and an unreadable one all arrive as the same
-    "keep looking".
+    THE SHAPE IS ASKED BEFORE THE OPEN, AND ONLY "NOT THERE" KEEPS LOOKING.
+    RULE 11 LANDS HERE TOO, and this function earned it the hard way: reading
+    first and folding every ``OSError`` into "keep looking" HANGS THE RUN on a
+    FIFO. Measured, bounded at 5s: a FIFO at ``evidence/T1.md`` under the run
+    directory left ``resolve_evidence`` blocked in ``open`` with no writer ever
+    coming, holding whatever lock the caller holds, with no diagnostic and no
+    timeout. ``is_file()`` is false for a FIFO, so the brief's
+    ``is_file()``-then-read merely SKIPPED it; a bare read is worse than the
+    brief. ``_require_regular_file`` is the door -- ``stat`` on a FIFO returns
+    immediately, only ``open`` waits -- and a directory, a dangling link, a
+    symlink loop and a FIFO are corruption here exactly as they are everywhere
+    else in this module, never an absent record.
 
-    THE DECODE IS WRAPPED for the same reason. A file whose digest matches and
-    whose bytes are not UTF-8 raises ``UnicodeDecodeError``, which is a
-    ``ValueError``; the brief decoded it bare.
+    AND UNREADABLE IS NOT ABSENT EITHER, which the door alone does NOT fix:
+    ``is_file()`` is TRUE for a mode-``000`` regular file, because ``stat``
+    needs ``+x`` on the parent and not ``+r`` on the file. Measured against the
+    undifferentiated ``except OSError: continue``: a valid repository copy and
+    an UNREADABLE run copy resolved silently to the repository copy -- which
+    defeats the precedence rule the paragraph above argues for, by making the
+    run copy unreadable instead of mismatching. So the residual ``OSError`` is
+    SPLIT. ``FileNotFoundError`` and ``NotADirectoryError`` are the name not
+    being there -- the ordinary "the run has no copy" case, and the loser of
+    the time-of-check/time-of-use race the door opens -- and they keep looking.
+    Every other ``OSError`` is a name that is there and cannot be read, and it
+    stops, inside the family, naming the root it stopped under.
+
+    THE DECODE IS WRAPPED for the same family reason. A file whose digest
+    matches and whose bytes are not UTF-8 raises ``UnicodeDecodeError``, which
+    is a ``ValueError``; the brief decoded it bare.
     """
     relative, digest = _digest_reference(reference, field="evidence reference")
     roots = (_evidence_directory(run_dir, field="run_dir"),
              _evidence_directory(repo_dir, field="repo_dir"))
     for root in roots:
+        candidate = root / relative
         try:
-            content = (root / relative).read_bytes()
-        except OSError:
+            _require_regular_file(candidate, "an evidence record")
+        except QuorumError as exc:
+            raise TrackerValidationError(
+                f"evidence {reference!r} names {relative!r} under {str(root)!r}, "
+                f"which exists and cannot be read ({exc}). Corruption is never "
+                "absence, so it stops here rather than falling through to the "
+                "other search root") from exc
+        try:
+            content = candidate.read_bytes()
+        except (FileNotFoundError, NotADirectoryError):
             continue
+        except OSError as exc:
+            raise TrackerValidationError(
+                f"evidence {reference!r} names {relative!r} under {str(root)!r}, "
+                f"which is a regular file this run cannot read ({exc}). An "
+                "unreadable copy is corruption, never absence: treating it as "
+                "absence lets whoever can make the run copy unreadable choose "
+                "the repository copy in its place") from exc
         if hashlib.sha256(content).hexdigest() != digest:
             raise TrackerValidationError(
                 f"evidence digest does not match its content: {reference!r} "
@@ -13003,5 +13124,5 @@ def resolve_evidence(run_dir, repo_dir, reference: str) -> dict:
         return parse_verification_evidence(decoded)
     raise TrackerValidationError(
         f"evidence is missing: {reference!r} names {relative!r}, which is not "
-        "a readable file under the run directory or the repository root. A "
+        "there under the run directory or under the repository root. A "
         "reference nothing resolves is a PASS nobody can inspect")

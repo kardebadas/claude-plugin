@@ -33,6 +33,7 @@
 - **A test claiming totality derives its case list from the function's call tree**, not from what the author remembers reading. Vary every field with both an unhashable value and a wrong-typed scalar.
 - **`is_file()` never means "there is nothing here".** It is false for a directory, a dangling symlink, a symlink loop and a FIFO — all of which exist and cannot be read. Folding them into "absent" is fail-open. Ask existence of the name (`os.path.lexists`) and readability of the target (`read_text` only for a regular file, which also stops a FIFO blocking under a lock). Found twice in consecutive tasks, both times only by mutation.
 - **A SYMMETRIC property is blind to a screen deleted from the code both sides share.** P04 Task 5 swept 972 generated records asserting "render accepts iff parse accepts", against builders that call neither function. The oracle was genuinely independent — and the sweep still stayed green under three mutants, because deleting a check from the *shared* validator removes it from both sides at once and the biconditional still holds. Agreement tests catch divergence, never a shared omission. **Pair every agreement sweep with a table of candidates carrying their own verdicts** (legal/illegal, decided independently of the implementation), or the sweep certifies only that the two directions are equally wrong. Mutation is what exposed this: 18/22 on the first run with the sweep green on all three survivors.
+- **And a candidate table of VALUES does not reach a screen whose subject is the DOCUMENT.** The correction above was still not enough, and the same task proved it. The candidate table fixed the three survivors and a fourth stayed alive: the byte comparison `render(validated) != text`, made newline-insensitive (`.rstrip("\n")`) and then whitespace-insensitive (`.strip()`). Both mutants accepted the canonical record, the same record with no trailing newline, and the same record with three — **one record, three legal spellings, three sha256s** — with the full 1456-test suite green. Neither the sweep nor the table could see it: every document either builds goes through one fixture that always emits one leading marker line and exactly one trailing `\n`, so all of that coverage is over CELLS and the ENVELOPE around them was pinned by nothing. **When a screen's subject is the whole document — a byte comparison, a marker line, a field-name sequence — the corpus must vary the outer boundary**: trailing-newline count, leading blank lines, a trailing space, a CRLF copy, a BOM, an indented table. Add one literal canonical specimen too, so the boundary is pinned by a comparison a reader can check by eye.
 - **`cp` is aliased to `cp -i` in this environment and `cp -f` does not reliably suppress it** — one restore of the user's `plugin.json` silently did nothing. Use `cat src > dst` or `/bin/cp`, and re-read the file to confirm a restore actually happened.
 - **A phase plan's "Produces" block is a claim to CHECK, not a list to implement.** Four names across three P04 briefs were already defined in the module, and a module-level redefinition rebinds the global for every existing caller. `_cell` is P03's tracker-cell writer with **eleven** call sites — redefining it with a different arity is a `TypeError` at all eleven; `_field` (line 261), `_csv` (line 344) and `_COMMIT` (line 719) are P02's. Task 1 did exactly this to `_TOKEN` and silently narrowed a grammar used at sixteen sites. **Before implementing a Produces block, check each name against the module: a name that exists is consumed, never re-declared.** The mechanical form of this rule is an AST guard asserting no module-level name is bound twice, which P04 Task 4 added. **As first written it enforced three binding forms, not all** — `def`, `class` and a plain `x = ...` — and measured against four injected duplicates it missed the annotated assignment (`x: T = ...`), the tuple target (`x, y = ...`) and the one inside a module-level `try`, and ignored `import`/`from … import` bindings entirely. It was widened in the P04 Task 4 fix round to count every binding form, including those inside a module-level `if`, `try`, `for` or `with`, while treating the arms of an `if`/`else` or `try`/`except` as alternatives so the module's own `fcntl`/`msvcrt` platform switch is not a false positive. **Read the claim as scoped to what the guard covers**: it catches a duplicate module-level binding, in any syntactic form, without anyone remembering to look — it does not see a name shadowed inside a function, a name bound by `exec`, or a name a `from x import *` would bring in.
 - **A fixture whose incidental properties coincide with the property under test cannot distinguish them.** Every `ClassifyQuorum` fixture used owners `brain-a, brain-b, brain-c` — alphabetical *and* dispatch order — and only ever made the *first* owner the answered one. So across a whole test class, "dispatch order", "alphabetical order" and "the first owner" were one thing, and two mutants that reordered the dispatch list survived 847 tests. The claim mattered: a caller rebuilds brain *n*'s payload from the position it finds the name in, so a wrong order re-sends the wrong brain's bytes. **When a test asserts an ordering, a selection, or an identity, build the fixture so the right answer and the incidental one differ** — non-alphabetical names, the interesting element in the middle, a count that is not also an index.
@@ -183,7 +184,32 @@ def publish_worker_result(run_dir: str, *, result: dict) -> str: ...
 def import_worker_result(run_dir: str, *, result_path: str) -> dict: ...
 def verify_source_range(repo: str, *, baseline: str, head: str, scopes: list) -> dict: ...
 def reconcile_run(run_dir: str) -> dict: ...
+def render_verification_evidence(record: dict) -> str: ...        # THE only writer
+def parse_verification_evidence(text: str) -> dict: ...           # last screen is the renderer
+def resolve_evidence(run_dir, repo_dir, reference: str) -> dict: ...  # run dir first; a mismatch stops there
 ```
+
+**The verification-evidence codec is public and belongs to P04** (added by the
+Task 5 fix round, on `integrate_task`'s precedent above). P05 and P06 both
+consume evidence records and neither can reach a private codec. Three
+constraints ride with the names and bind their callers:
+
+- **A record is rendered and only then published.** `render_verification_evidence`
+  is the ONLY writer, because `parse_verification_evidence`'s last screen is a
+  byte comparison against its output — so a document assembled any other way
+  cannot be read back, and a record's identity is the sha256 of exactly those
+  bytes. Task 10 must render *then* `publish_immutable`, never write a document
+  it built itself.
+- **`EVIDENCE_PURPOSES` is extended by the phase that needs the purpose.** P05
+  appends `task-review` and `adversarial`; P06 appends `branch-review`,
+  `completeness` and `final`. An unregistered purpose is refused, which is the
+  point: a purpose nobody declared is a record nobody validates.
+- **`purpose` and `subject` are deliberately NOT cross-checked** and no
+  cross-field rule is pinned today (`purpose="phase"` with `subject="task/T1"`
+  validates). The mapping is derivable for the three purposes P04 ships and is
+  not derivable for `adversarial`, `completeness` or `final`, so a rule written
+  now is one P05 and P06 must remember to extend in a second place. If P06 wants
+  it, the shape is a registry beside `EVIDENCE_PURPOSES`, not a conditional.
 
 ### P05 produces — consumed by P06
 

@@ -5722,6 +5722,183 @@ class EvidenceAgreementEquivalenceTests(unittest.TestCase):
                 self.assertTrue(EVIDENCE_ILLEGAL[field])
 
 
+#: THE OUTER BOUNDARY, WHICH NEITHER THE SWEEP NOR THE CANDIDATE TABLE VARIES.
+#: Every document in both of those is built by `evidence_text`, which always
+#: emits one leading marker line and exactly one trailing `\n` -- so the whole
+#: of the coverage above is over CELLS, and the ENVELOPE around them was pinned
+#: by nothing. Measured: two mutants of the byte comparison in
+#: `parse_verification_evidence` -- `.rstrip("\n") != text.rstrip("\n")` and
+#: `.strip() != text.strip()` -- accepted the canonical document, the same
+#: document with no trailing newline, and the same document with three, for
+#: THREE different sha256s, with the full suite green. One record, three legal
+#: spellings, three identities, in a codec whose whole purpose is that a record
+#: has exactly one of each.
+#:
+#: This is the generalisation of the master plan's symmetric-property rule: a
+#: candidate table of VALUES does not reach a screen whose subject is the
+#: DOCUMENT. Each entry below differs from the canonical bytes only outside the
+#: field cells.
+def evidence_envelopes() -> tuple:
+    """`(label, document)` for every non-canonical spelling of one record."""
+    canonical = evidence_text()
+    body = canonical.rstrip("\n")
+    return (
+        ("no trailing newline", body),
+        ("two trailing newlines", body + "\n\n"),
+        ("three trailing newlines", body + "\n\n\n"),
+        ("a leading blank line", "\n" + canonical),
+        ("a leading space before the marker", " " + canonical),
+        ("a blank line after the marker",
+         canonical.replace(state.EVIDENCE_MARKER,
+                           state.EVIDENCE_MARKER + "\n", 1)),
+        ("a trailing space on the last row", body + " \n"),
+        ("a trailing space on the marker line",
+         canonical.replace(state.EVIDENCE_MARKER,
+                           state.EVIDENCE_MARKER + " ", 1)),
+        ("a line of spaces after the table", canonical + "   \n"),
+        ("a CRLF copy", canonical.replace("\n", "\r\n")),
+        ("a BOM in front of the marker", "﻿" + canonical),
+        ("the table indented by one space",
+         canonical.replace("\n| ", "\n | ")),
+    )
+
+
+class EvidenceEnvelopeTests(unittest.TestCase):
+    """One record, ONE spelling -- asserted over the document, not the cells."""
+
+    def test_the_canonical_document_is_exactly_these_bytes(self):
+        """THE SPECIMEN, and it is deliberately a literal rather than a call.
+
+        There was no valid example record anywhere: the template is
+        intentionally unparseable, so a later task wiring `publish_immutable`
+        to this codec had nothing to copy and nothing to diff against. Writing
+        the bytes out means the envelope -- one marker line, the title, one
+        blank line, the header, the rule, nine rows, one trailing newline --
+        is pinned by a comparison a reader can check by eye, and a renderer
+        that grew a second blank line fails HERE rather than in an unrelated
+        round-trip assertion three classes away.
+        """
+        specimen = (
+            "<!-- pipeline-auto-verification-evidence/v1 -->\n"
+            "# Pipeline Auto — Verification Evidence\n"
+            "\n"
+            "| Field | Value |\n"
+            "| --- | --- |\n"
+            "| purpose | task-test |\n"
+            "| run_id | run-1 |\n"
+            "| subject | task/T1 |\n"
+            "| attempt | attempt-001 |\n"
+            f"| code_state | {COMMIT} |\n"
+            "| outcome | PASS |\n"
+            f"| commands | [\"{EVIDENCE_COMMAND}\"] |\n"
+            "| environment | python3.11-linux |\n"
+            "| inputs | - |\n"
+        )
+        self.assertEqual(
+            state.render_verification_evidence(evidence_record()), specimen)
+        self.assertEqual(state.parse_verification_evidence(specimen),
+                         evidence_record())
+        self.assertEqual(evidence_text(), specimen)
+
+    def test_every_other_spelling_of_the_same_record_is_refused(self):
+        """Refused, and refused by one of the three STRUCTURAL screens -- the
+        marker line, the field-name sequence, or the byte comparison against
+        the renderer. Those are the only three that can see a document rather
+        than a cell. A refusal carrying a FIELD screen's diagnosis would mean
+        the fixture had mangled a value as well, and would pin nothing about
+        the boundary; the indented-table case is here because it lands on the
+        second of the three, an indented row being invisible to the row reader
+        rather than a differently spelled one."""
+        structural = (CANONICAL_DIAGNOSIS, REORDER_DIAGNOSIS, MARKER_DIAGNOSIS)
+        for label, document in evidence_envelopes():
+            with self.subTest(envelope=label):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state.parse_verification_evidence(document)
+                message = str(caught.exception)
+                self.assertTrue(
+                    any(phrase in message for phrase in structural),
+                    f"{label} was refused by a field screen: {message}")
+
+    def test_each_refused_envelope_would_have_been_a_second_identity(self):
+        """Why the refusals matter rather than merely being tidy. Each document
+        above carries the same nine field values and hashes to something else,
+        so a parser that accepted any of them would let one record be published
+        under two digests -- and a digest-bound reference names one of them."""
+        canonical = evidence_text()
+        digests = {hashlib.sha256(canonical.encode("utf-8")).hexdigest()}
+        for label, document in evidence_envelopes():
+            with self.subTest(envelope=label):
+                self.assertNotEqual(document, canonical)
+                digest = hashlib.sha256(document.encode("utf-8")).hexdigest()
+                self.assertNotIn(digest, digests)
+                digests.add(digest)
+        self.assertEqual(len(digests), len(evidence_envelopes()) + 1)
+
+    def test_the_envelope_arm_is_not_empty(self):
+        """An arm that generated nothing would make the two tests above pass by
+        iterating over no cases at all."""
+        self.assertGreaterEqual(len(evidence_envelopes()), 10)
+
+
+class EvidenceRenderOnlyScreenTests(unittest.TestCase):
+    """The screens only the RENDER direction can reach, because the parse
+    direction hands `_validate_verification_evidence` values a reader built.
+
+    A candidate table drives both directions, so by construction it can only
+    carry values a cell can spell. These are the ones it cannot: an `inputs`
+    that is not a sequence at all, and a `commands` member that `json` will
+    happily write and RFC 8259 has no literal for.
+    """
+
+    def render(self, **overrides):
+        return state.render_verification_evidence(evidence_record(**overrides))
+
+    def test_an_inputs_that_is_not_a_sequence_stays_inside_the_family(self):
+        """`_evidence_inputs`'s `isinstance` guard, which review read as the
+        unreachable pattern removed from `_json_array_cell`. Measured with it
+        bypassed: `inputs=5` raises `TypeError: 'int' object is not iterable`
+        from `tuple()`, OUTSIDE `TrackerError` -- so a controller that wrapped
+        an evidence render in `except TrackerError` dies on it -- and
+        `inputs=iter(())` is ACCEPTED, rendering `-` for a record whose author
+        handed over an iterator that a retry would find empty."""
+        for value in (5, None, object(), 3.5, True, {"a": 1}.keys()):
+            with self.subTest(inputs=type(value).__name__):
+                with self.assertRaises(state.TrackerValidationError):
+                    self.render(inputs=value)
+        for label, value in (("an exhausted iterator", iter(())),
+                             ("a generator", (x for x in (INPUT_REF,))),
+                             ("a bare string", INPUT_REF),
+                             ("a set", {INPUT_REF})):
+            with self.subTest(inputs=label):
+                with self.assertRaises(state.TrackerValidationError):
+                    self.render(inputs=value)
+
+    def test_a_commands_that_is_not_a_sequence_stays_inside_the_family(self):
+        """The same guard on the sibling field, for the same two reasons."""
+        for value in (5, None, object(), "make check", iter(()),
+                      (x for x in ("a",))):
+            with self.subTest(commands=type(value).__name__):
+                with self.assertRaises(state.TrackerValidationError):
+                    self.render(commands=value)
+
+    def test_the_json_array_cell_never_writes_a_token_rfc_8259_lacks(self):
+        """`json.dumps` emits `NaN`, `Infinity` and `-Infinity` as BARE TOKENS
+        by default, and RFC 8259 has no literal for any of them: a cell holding
+        one is a document only Python can read back, bound by a digest, in an
+        audit trail a human's `jq` cannot open. `_dumps` was spelled out for
+        exactly this and cannot be called here -- it writes an indented,
+        newline-terminated FILE and a cell is one line -- so the default is
+        corrected in place. No AST guard covers `json.dumps`, only `json.loads`.
+        """
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(member=repr(value)):
+                with self.assertRaises(state.TrackerValidationError):
+                    self.render(commands=(value,))
+                with self.assertRaises(ValueError):
+                    state._json_array_cell((value,))
+        self.assertEqual(state._json_array_cell(("a", "b")), '["a", "b"]')
+
+
 def module_function_source(name: str) -> str:
     """The source text of one module-level function, by name."""
     source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
@@ -5907,15 +6084,137 @@ class EvidenceResolutionTests(TempDirTestCase):
             self.resolve(f"evidence/T1.md#sha256={'c' * 64}")
         self.assertEqual(path.read_bytes(), before)
 
-    def test_a_directory_where_the_file_should_be_is_not_an_os_error(self):
-        """`is_file()` then `read_bytes()` is a check and a use; asking for the
-        bytes answers both at once, so a directory, a vanished file and an
-        unreadable one all arrive as the same 'keep looking'."""
-        (self.run_dir / "evidence" / "T1.md").mkdir(parents=True)
+    # -- the door, and the split between absence and corruption -----------
+
+    @contextlib.contextmanager
+    def _deadline(self, seconds: int):
+        """Turn a hang into a NAMED failure, where the platform allows it.
+
+        A hang is not a test failure. It is a suite that never finishes and a
+        CI job killed with nothing to read, so a regression in the door below
+        has to arrive as this assertion and not as a timeout somebody bisects.
+        """
+        if not hasattr(signal, "SIGALRM"):  # pragma: no cover - POSIX only
+            yield
+            return
+
+        def expire(signum, frame):
+            raise AssertionError(
+                "resolve_evidence blocked: the read reached a FIFO, which is "
+                "the deadlock _require_regular_file exists to prevent -- and "
+                "it happens under the run lock, so the run does not fail, it "
+                "stops")
+
+        previous = signal.signal(signal.SIGALRM, expire)
+        signal.alarm(seconds)
+        try:
+            yield
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "POSIX FIFOs only")
+    def test_a_fifo_under_a_search_root_is_refused_before_the_open(self):
+        """THE DEADLOCK, AND IT IS WORSE THAN THE BRIEF'S FORM. `is_file()` is
+        false for a FIFO, so the brief's `is_file()`-then-read merely SKIPPED
+        one; a bare `read_bytes` inside `except OSError: continue` BLOCKS in
+        `open` until a writer that is never coming. Measured before the fix, on
+        a daemon thread with a five-second join: still alive, holding whatever
+        lock the caller holds, with no diagnostic and no timeout.
+
+        The repository copy below is valid and its digest is the one asked for,
+        so this also pins the second half: a FIFO is corruption, and corruption
+        does not fall through to the other root.
+        """
+        (self.run_dir / "evidence").mkdir(parents=True)
+        os.mkfifo(self.run_dir / "evidence" / "T1.md")
+        self.assertFalse((self.run_dir / "evidence" / "T1.md").is_file())
+        self.assertTrue(os.path.lexists(self.run_dir / "evidence" / "T1.md"))
         digest = write_evidence(self.repo_dir / "evidence")
-        self.assertEqual(
-            self.resolve(f"evidence/T1.md#sha256={digest}")["subject"],
-            "task/T1")
+        with self._deadline(5):
+            exception = self.refusal(f"evidence/T1.md#sha256={digest}")
+        self.assertIn("exists and cannot be read", str(exception))
+        self.assertIsInstance(exception.__cause__, state.QuorumError)
+
+    def test_a_name_that_is_not_a_regular_file_is_corruption_never_absence(self):
+        """`is_file()` NEVER means "there is nothing here". Each shape below
+        exists under the run directory and cannot be read, and for each one the
+        repository copy is VALID and hashes to the digest being asked for -- so
+        a run that folded these into absence would resolve the repository copy
+        and report a clean PASS. That is the fail-open, and it is the same one
+        `_require_regular_file` was written for two tasks earlier."""
+        shapes = [
+            ("a directory", lambda p: p.mkdir(parents=True)),
+            ("a dangling symlink",
+             lambda p: p.symlink_to(self.tmp / "nowhere-at-all")),
+            ("a symlink loop", lambda p: os.symlink(p, p)),
+        ]
+        digest = write_evidence(self.repo_dir / "evidence")
+        for label, make in shapes:
+            with self.subTest(shape=label):
+                run = self.run_dir / label.replace(" ", "-")
+                (run / "evidence").mkdir(parents=True)
+                make(run / "evidence" / "T1.md")
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state.resolve_evidence(run, self.repo_dir,
+                                           f"evidence/T1.md#sha256={digest}")
+                self.assertIn("exists and cannot be read",
+                              str(caught.exception))
+
+    def test_an_unreadable_run_copy_is_corruption_never_absence(self):
+        """THE CASE THE DOOR ALONE DOES NOT CLOSE, and the reason the residual
+        `OSError` is split rather than swallowed. `is_file()` is TRUE for a
+        mode-000 regular file -- `stat` needs `+x` on the parent, not `+r` on
+        the file -- so `_require_regular_file` passes it and the read raises
+        `PermissionError`. Measured against an undifferentiated
+        `except OSError: continue`: the run copy went unread and the REPOSITORY
+        copy was resolved silently, which defeats "the run directory is
+        searched first and a mismatch stops there" by making the run copy
+        unreadable instead of mismatching."""
+        run_digest = write_evidence(self.run_dir / "evidence", subject="task/T1")
+        repo_digest = write_evidence(self.repo_dir / "evidence",
+                                     subject="task/T2")
+        self.assertNotEqual(run_digest, repo_digest)
+        path = self.run_dir / "evidence" / "T1.md"
+        os.chmod(path, 0o000)
+        self.addCleanup(os.chmod, path, 0o644)
+        if os.access(path, os.R_OK):  # pragma: no cover - root reads anything
+            self.skipTest("this user can read a mode-000 file")
+        self.assertTrue(path.is_file())
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            self.resolve(f"evidence/T1.md#sha256={repo_digest}")
+        self.assertIn("cannot read", str(caught.exception))
+        self.assertIsInstance(caught.exception.__cause__, OSError)
+
+    def test_a_file_that_vanishes_after_the_door_is_still_absence(self):
+        """THE RESIDUAL RACE, AND THE ONE `OSError` THAT STILL KEEPS LOOKING.
+        Asking the shape before the open re-opens the time-of-check/time-of-use
+        gap the shipped code had closed by not checking at all, and the loser
+        is a `FileNotFoundError` out of the read. That is absence -- the run
+        copy is not there any more -- so the repository copy answers, exactly
+        as it does for a run copy that was never written.
+
+        The race is not hoped for, it is CAUSED: the door is wrapped so the run
+        copy is unlinked between the `stat` and the `open`. A test that merely
+        omitted the file would pin the door's own `FileNotFoundError` and not
+        the read's, and the two arrive from different lines.
+        """
+        write_evidence(self.run_dir / "evidence", subject="task/T1")
+        digest = write_evidence(self.repo_dir / "evidence", subject="task/T2")
+        original = state._require_regular_file
+        raced = []
+
+        def unlink_between_the_stat_and_the_open(path, what):
+            original(path, what)
+            if path.is_file() and not raced:
+                raced.append(path)
+                path.unlink()
+
+        state._require_regular_file = unlink_between_the_stat_and_the_open
+        self.addCleanup(setattr, state, "_require_regular_file", original)
+        record = self.resolve(f"evidence/T1.md#sha256={digest}")
+        self.assertEqual(raced, [self.run_dir / "evidence" / "T1.md"])
+        self.assertEqual(record["subject"], "task/T2")
 
     def test_a_matching_file_that_is_not_utf8_stays_inside_the_family(self):
         """`UnicodeDecodeError` is a `ValueError`, outside `TrackerError`. The
@@ -5950,12 +6249,43 @@ class EvidenceResolutionTests(TempDirTestCase):
         """`Path(None)` is a `TypeError`, and a controller that wrapped an
         evidence read in `except TrackerError` would not catch it."""
         for run_dir, repo_dir in ((None, self.repo_dir), (self.run_dir, 5),
-                                  (object(), self.repo_dir)):
+                                  (object(), self.repo_dir),
+                                  (b"/tmp", self.repo_dir)):
             with self.subTest(run_dir=type(run_dir).__name__,
                               repo_dir=type(repo_dir).__name__):
                 with self.assertRaises(state.TrackerValidationError):
                     state.resolve_evidence(
                         run_dir, repo_dir, f"evidence/T1.md#sha256={DIGEST}")
+
+    def test_a_search_root_whose_SPELLING_is_unusable_stays_in_the_family(self):
+        """A PATH CORPUS IS NOT A TYPE CORPUS, and the type check is where the
+        first version of this test stopped. Measured against the type-check-only
+        form, on this Python: a NUL in either root reached the syscall as
+        `ValueError: embedded null byte`, from outside `TrackerError`, and it
+        got there SILENTLY -- `is_file()` and `os.path.lexists` are both False
+        for that spelling, so no door upstream could have seen it. `_cell_safe`
+        before `Path()` is the same screen `_plan_text` puts on a plan path.
+
+        The lone surrogate is here for a different reason and is asserted the
+        same way on purpose: on Linux a surrogate is the `surrogateescape`
+        spelling of a real filename byte, so it does NOT escape today -- it
+        names a file that merely does not exist. It is the encoder, not a
+        remembered list, that has to decide which spellings are which, and a
+        screen that admitted it would be one `PurePath` release away from the
+        NUL case.
+        """
+        roots = (str(self.tmp) + "/\x00run", str(self.tmp) + "/\udcffrun",
+                 str(self.tmp) + "/a|b", str(self.tmp) + "/run ", "")
+        reference = f"evidence/T1.md#sha256={DIGEST}"
+        for spelling in roots:
+            with self.subTest(spelling=spelling.encode(
+                    "utf-8", "backslashreplace")):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state.resolve_evidence(spelling, self.repo_dir, reference)
+                self.assertIn("run_dir", str(caught.exception))
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state.resolve_evidence(self.run_dir, spelling, reference)
+                self.assertIn("repo_dir", str(caught.exception))
 
     def test_a_resolved_record_is_the_whole_validated_record(self):
         digest = write_evidence(self.run_dir / "evidence")

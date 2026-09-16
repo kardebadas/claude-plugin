@@ -5685,6 +5685,122 @@ def rung_defaulting_nodes(source: str) -> list[str]:
     return found
 
 
+#: The tables a rung VALUE can be read out of. A rung's NAME is a position on
+#: the ladder and comparing two of them is rule 1 obeyed; a rung's value is a
+#: float, and comparing two of THOSE is the numeric threshold this phase is
+#: built to keep out.
+_RUNG_VALUE_TABLES = ("RUNGS", "_RUNG_VALUES")
+
+#: The floor as a NUMBER, under both spellings: the module constant and the
+#: cell ``current_floor`` reports for the human to read. Either one on the far
+#: side of a ``<`` is the same comparison.
+_RUNG_VALUE_NAMES = ("ADOPTION_FLOOR",)
+_RUNG_VALUE_KEYS = ("floor_value",)
+
+#: The corpus the rule-1 detector is proven against — the two shapes it refuses
+#: and, for each, a spelling per table and per floor spelling, so that dropping
+#: any one name from the tuples above fails the suite instead of silently
+#: reopening the door it names.
+_FLOAT_COMPARISON_SPELLINGS = (
+    #: The mutant this guard exists for: rule 1 restored as a value test. It is
+    #: behaviourally equivalent TODAY -- ``RUNGS`` is monotone in
+    #: ``RUNG_ORDER`` -- which is exactly why no runtime probe can catch it.
+    "def f(winner, floor):\n    return RUNGS[winner] < floor['floor_value']\n",
+    "def f(winner, floor):\n    return RUNGS[winner] < ADOPTION_FLOOR\n",
+    "def f(winner):\n    return _RUNG_VALUES[winner] >= ADOPTION_FLOOR\n",
+    "def f(a, b):\n    return RUNGS[a] > RUNGS[b]\n",
+    "def f(winner, floor):\n    return floor['floor_value'] <= RUNGS[winner]\n",
+    #: The sort-key spelling. ``min`` performs the comparison, so there is no
+    #: ``<`` anywhere in the source -- and ``_best_member`` and ``cluster_rung``
+    #: both document in prose that they rank by position and never by value,
+    #: which until this detector existed was a claim nothing held them to.
+    "def f(cluster):\n"
+    "    return min(cluster, key=lambda m: RUNGS[m['effective_rung']])\n",
+    "def f(cluster):\n"
+    "    return sorted(cluster, key=lambda m: _RUNG_VALUES[m['rung']])\n",
+)
+
+
+def rung_float_comparison_nodes(source: str) -> list[str]:
+    """Every place a DECISION is made by comparing rung values. Rule 1, in the source.
+
+    Rule 1 is that the ladder is ordinal: a rung is a POSITION and every
+    comparison between two rungs is a comparison between two positions. The
+    values exist for one purpose -- reporting a number to a human -- and the
+    moment one reaches a ``<`` the phase has a numeric threshold in it, which
+    is the single thing this design is built to exclude.
+
+    THERE IS NO RUNTIME PROBE. ``RUNGS`` is monotone in ``RUNG_ORDER``, so a
+    value comparison gives the same answer as a position comparison on every
+    input that exists today; restoring the float comparison at the floor gate
+    survived the entire suite. It becomes wrong only when someone adds a sixth
+    rung, re-prices an existing one, or makes the floor configurable -- and at
+    that point every gate in this phase silently means something else. It is
+    detectable in the source and nowhere else, so that is where it is refused.
+    This is rule 2's guard, ``rung_defaulting_nodes``, applied to rule 1, which
+    until now had nothing at all.
+
+    TWO SHAPES, because a comparison need not be spelled with an operator:
+
+    * an ordering comparison -- ``<``, ``<=``, ``>``, ``>=`` -- either side of
+      which reads a rung value;
+    * a rung value read inside a ``lambda``, which is the ``key=`` spelling:
+      ``min``/``max``/``sorted`` then do the comparing and the source holds no
+      operator at all. ``_best_member`` and ``cluster_rung`` are both one
+      keyword from this mistake and both only said so in prose.
+
+    MODULE LEVEL IS EXEMPT, and the exemption is the distinction rather than a
+    hole in it. ``ADOPTABLE`` and ``_FLOOR_RUNG`` compare values ONCE, at
+    import, over the whole enum, to DERIVE the ladder's own shape -- that is
+    where a value comparison is the definition. Inside a function the same
+    comparison is a judgement about one brain's answer, and that is the thing
+    forbidden. So the detector walks function bodies only.
+
+    NOT CAUGHT, and stated rather than implied: arithmetic on rung values that
+    never reaches a comparison in the same function -- ``current_floor``
+    computes the inflation mean from ``RUNGS`` and compares it against
+    ``_INFLATION_MEAN``, which is a bar on a DISTRIBUTION and not on an answer,
+    and is deliberately legal.
+    """
+    def reads_a_rung_value(node) -> bool:
+        for inner in ast.walk(node):
+            if (isinstance(inner, ast.Subscript)
+                    and isinstance(inner.value, ast.Name)
+                    and inner.value.id in _RUNG_VALUE_TABLES):
+                return True
+            if (isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Attribute)
+                    and isinstance(inner.func.value, ast.Name)
+                    and inner.func.value.id in _RUNG_VALUE_TABLES):
+                return True
+            if (isinstance(inner, ast.Name)
+                    and inner.id in _RUNG_VALUE_NAMES):
+                return True
+            if (isinstance(inner, ast.Subscript)
+                    and isinstance(inner.slice, ast.Constant)
+                    and inner.slice.value in _RUNG_VALUE_KEYS):
+                return True
+            if (isinstance(inner, ast.Attribute)
+                    and inner.attr in _RUNG_VALUE_KEYS):
+                return True
+        return False
+
+    found = []
+    for outer in ast.walk(ast.parse(source)):
+        if not isinstance(outer, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(outer):
+            if isinstance(node, ast.Compare) and any(
+                isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE))
+                for op in node.ops
+            ) and any(reads_a_rung_value(side)
+                      for side in [node.left] + list(node.comparators)):
+                found.append(f"rung-value comparison at line {node.lineno}")
+            elif isinstance(node, ast.Lambda) and reads_a_rung_value(node.body):
+                found.append(f"rung-value sort key at line {node.lineno}")
+    return sorted(set(found))
+
+
 def assignment_subtree(source: str, name: str) -> ast.AST:
     """The value expression of the one module-level assignment to ``name``."""
     matches = [node for node in ast.parse(source).body
@@ -5848,6 +5964,52 @@ class QuorumRungLadderTests(unittest.TestCase):
         in the source, so that is where it is refused.
         """
         self.assertEqual(rung_defaulting_nodes(module_source()), [])
+
+    def test_no_decision_in_this_module_is_made_by_comparing_rung_values(self):
+        """RULE 1, AT THE ONLY PLACE IT CAN BE HELD. The ladder is ordinal: a
+        rung is a position, and every gate in this phase compares positions.
+
+        There is no runtime probe. `RUNGS` is monotone in `RUNG_ORDER`, so
+        restoring the float comparison at the floor gate — `RUNGS[winner] <
+        floor['floor_value']` — gives the same answer on every input that
+        exists and survives the entire suite. It starts meaning something else
+        the day a sixth rung is added, a rung is re-priced, or the floor
+        becomes configurable, and by then every gate has quietly changed.
+
+        Rule 2 has had `rung_defaulting_nodes` since it was written. This is
+        the same guard for rule 1, which had nothing.
+        """
+        self.assertEqual(rung_float_comparison_nodes(module_source()), [])
+
+    def test_the_rung_value_comparison_detector_catches_the_fault_it_claims_to(self):
+        """A test of the test, for `rung_defaulting_nodes`' reason: an
+        assertion that a pattern is ABSENT passes when the detector is broken,
+        when the source it reads is empty, and when the pattern was never
+        findable. Every spelling is put in front of it — including the two
+        `key=lambda` ones, where `min` does the comparing and the source holds
+        no operator at all."""
+        for spelling in _FLOAT_COMPARISON_SPELLINGS:
+            with self.subTest(spelling=spelling.splitlines()[-1].strip()):
+                self.assertNotEqual(rung_float_comparison_nodes(spelling), [])
+
+    def test_deriving_the_ladders_own_shape_by_value_is_not_the_forbidden_shape(self):
+        """The exemption, stated as an input rather than left to the docstring.
+
+        `ADOPTABLE` and `_FLOOR_RUNG` compare rung values at MODULE level, once,
+        over the whole enum, to derive the ladder's own shape — that is where a
+        value comparison is the definition rather than a judgement about one
+        brain's answer. A detector that refused those would be unsatisfiable,
+        and one whose exemption was accidental would stop being an exemption
+        the moment somebody moved the derivation into a function.
+        """
+        derivation = ("ADOPTABLE = frozenset(\n"
+                      "    name for name in RUNG_ORDER "
+                      "if RUNGS[name] >= ADOPTION_FLOOR)\n")
+        self.assertEqual(rung_float_comparison_nodes(derivation), [])
+        #: The same expression, one `def` further in, IS refused.
+        self.assertNotEqual(rung_float_comparison_nodes(
+            "def f():\n    return [name for name in RUNG_ORDER\n"
+            "            if RUNGS[name] >= ADOPTION_FLOOR]\n"), [])
 
     def test_the_rung_defaulting_detector_catches_the_fault_it_claims_to(self):
         """A test of the test. The guard above is an assertion that a pattern is
@@ -16634,6 +16796,115 @@ class FinalizeQuorumTests(unittest.TestCase):
         self.assertIsNone(result["runner_up_rung"])
         self.assertEqual(result["clusters"], [list(QUORUM_OWNERS)])
 
+    def test_a_legal_response_that_cannot_be_clustered_escalates_rather_than_halting(self):
+        """THE WEDGE. `_candidate_consequences` refuses a response asserting one
+        `(kind, subject)` twice — and `_consequence_problems`, which is the gate
+        `validate_brain_response` puts a real response through, does NOT screen
+        for the repeat. So such a response is SCHEMA-VALID, is accepted by
+        `record_brain_response`, and a brain whose first answer was legal can
+        never be re-asked.
+
+        Unwrapped, the grouping call therefore raises out of EVERY finalisation
+        of this quorum for ever: no `final.json` is ever published, the quorum
+        stays at `ready-to-finalise` with no re-dispatch owed, and the
+        controller spins. ONE BRAIN'S LEGAL ANSWER HALTS THE RUN — the exact
+        inversion of the rule that a brain may force a human look and must
+        never be able to force an outcome.
+
+        The prose question is what reaches the grouping call: with options
+        supplied, answers compare by KEY and the duplicate is seen first by the
+        contradiction check, which has been wrapped since it was written. This
+        is the same raise arriving eight lines earlier.
+        """
+        wedge = graded("postgres", "specified")
+        wedge["consequences"] = [
+            {"kind": "file-exists", "subject": SESSION_SUBJECT,
+             "value": "present"},
+            {"kind": "file-exists", "subject": SESSION_SUBJECT,
+             "value": "absent"}]
+        #: The half that makes this a wedge rather than a malformed response:
+        #: the schema accepts it, so the brain is never re-asked.
+        self.assertEqual(pas.validate_brain_response(dict(wedge, qid="x" * 12)),
+                         [])
+        qid = open_question(self, self.run_dir, options_supplied="no")
+        answer_quorum(self.run_dir, qid,
+                      [wedge, graded("sqlite", "speculation"),
+                       graded("duckdb", "speculation")])
+        result = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "uncomparable-answer")
+        self.assertIn("twice", result["refusal"])
+        #: AND THE QUORUM IS SETTLED. A raise leaves no `final.json` at all, so
+        #: this is the assertion that separates "escalated" from "escalates and
+        #: is asked again for ever".
+        self.assertTrue(
+            (self.run_dir / "quorum" / qid / "final.json").exists())
+        self.assertEqual(
+            pas.classify_quorum(str(self.run_dir), qid=qid,
+                                live_owners=list(QUORUM_OWNERS))["state"],
+            "finalised")
+        self.assertEqual(self.trail(), UNRELATED_HUMAN)
+
+    def test_the_runner_up_is_the_second_best_cluster_and_not_the_worst(self):
+        """THE FIXTURE CLASS'S FOURTH SURVIVOR. Every other case here has at
+        most TWO clusters, so `ranked[1]` and `ranked[-1]` are the same element
+        and nothing distinguishes "second-best" from "worst".
+
+        Three clusters at three DISTINCT rungs tell them apart, and they
+        disagree about the outcome itself: against the second-best the winner
+        is not strictly higher and the rule says escalate; against the worst it
+        is, and the run adopts a question two brains answered at the same
+        grounding — and writes the wrong `Runner-up rung` into an append-only
+        record on the way.
+        """
+        result = self.finalize([graded("postgres", "specified"),
+                                graded("sqlite", "specified"),
+                                graded("duckdb", "speculation")])
+        self.assertEqual(result["clusters"],
+                         [["qq"], ["alpha"], ["mm"]])
+        self.assertEqual(result["winner_rung"], "specified")
+        self.assertEqual(result["runner_up_rung"], "specified")
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "equal-or-inverted-rung")
+        self.assertEqual(self.trail(), UNRELATED_HUMAN)
+
+    def test_three_distinct_rungs_adopt_against_the_second_best(self):
+        """The positive control for the case above, and the other half of the
+        same pin: with the second-best strictly below the winner the run
+        adopts, and the runner-up it REPORTS is the middle rung and not the
+        bottom one."""
+        result = self.finalize([graded("postgres", "specified"),
+                                graded("sqlite", "code-evidenced"),
+                                graded("duckdb", "speculation")])
+        self.assertEqual(result["status"], "adopted")
+        self.assertEqual(result["winner_rung"], "specified")
+        self.assertEqual(result["runner_up_rung"], "code-evidenced")
+        self.assertIn("- **Runner-up rung:** code-evidenced", self.trail())
+
+    def test_a_tie_at_the_top_rung_records_the_first_dispatched_member(self):
+        """`_best_member` takes `min` over ladder position, and `min` keeps the
+        FIRST of equals — which is the dispatch order the docstring claims and
+        which no fixture held it to: no cluster anywhere else has two members
+        at the same top rung, so which member's answer text and anchors reach
+        the audit trail was never asserted.
+
+        The two members differ in BOTH recorded cells: the answer prose and the
+        `Consistent with` list, which the second member does not have at all.
+        """
+        first = graded("postgres", "specified")
+        first["answer"] = "The specification names postgres for the session table."
+        second = graded("postgres", "specified")
+        second["answer"] = "A second reading of the same specification line."
+        second["consistent_with"] = [{"kind": "spec", "id": "spec.md:1"}]
+        result = self.finalize([first, second, graded("sqlite", "speculation")])
+        self.assertEqual(result["status"], "adopted")
+        self.assertEqual(result["clusters"], [["qq", "alpha"], ["mm"]])
+        self.assertEqual(result["winner"]["owner"], "qq")
+        self.assertEqual(result["winner"]["answer"],
+                         "The specification names postgres for the session table.")
+        self.assertIn("The specification names postgres", self.trail())
+        self.assertIn("- **Consistent with:** H-001", self.trail())
+
     def test_the_floor_that_was_applied_is_reported(self):
         result = self.finalize([graded("postgres", "convention-cited")] * 3)
         self.assertEqual(result["floor_rung"], "code-evidenced")
@@ -16949,6 +17220,34 @@ class AdoptionChargesTheDriftBudgetTests(unittest.TestCase):
         result = pas.finalize_quorum(str(self.run_dir), qid=qid)
         self.assertEqual(result["reason"], "below-floor")
 
+    def test_a_contradiction_reports_itself_and_not_the_spent_budget(self):
+        """THE ORDERING CLAIM, which had no input. The budget is re-checked
+        LAST, after every gate, so that a question which would have been
+        rejected for contradicting a human is reported as THAT and not as a
+        budget that happened to be spent.
+
+        Moving the re-check ahead of `_apply_adoption_gates` weakens nothing —
+        neither ordering adopts — and it silently relabels the run's earliest
+        drift warning. A run whose brains keep pulling away from what the user
+        asked for shows up as a count of `rejected-contradicts-*` events; under
+        the other ordering those events are never recorded at all, and the
+        terminal report says the cap was hit.
+
+        The case above is the other half of the same pin: with no gate to
+        refuse it, the same spent budget IS what gets reported.
+        """
+        (self.run_dir / "decisions.md").write_text(DECISION_HUMAN,
+                                                   encoding="utf-8")
+        qid = self.answered()
+        self.spend(3)
+        result = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(result["status"], "rejected-contradicts-human")
+        self.assertEqual(result["contradicted_decision"], "H-001")
+        self.assertNotEqual(result["reason"], "phase-budget-exhausted")
+        self.assertIn("rejected-contradicts-human",
+                      [event["status"] for event
+                       in pas.quorum_events(str(self.run_dir))])
+
     def test_the_adoption_the_budget_allows_still_lands(self):
         """The positive control. A cap that refused everything would satisfy
         every case above and decide nothing."""
@@ -17107,6 +17406,109 @@ class AdoptedDecisionRecordTests(unittest.TestCase):
         self.assertIn(f"## Q-{qid}", self.trail())
         self.assertEqual(sorted(self.parsed()["decisions"]),
                          ["H-001", f"Q-{qid}"])
+
+    def test_a_repair_never_lets_an_older_decision_supersede_a_newer_one(self):
+        """THE INVERTED TRAIL. `final.json` is published before the decision is
+        appended, and the repair on the next call re-renders against the trail
+        AS IT STANDS — `_rendered_decisions` supersedes whatever is standing on
+        the axis NOW and has no notion of which of the two decisions is newer.
+
+        1. quorum A adopts `postgres`; the append is cut short;
+        2. quorum B adopts `duckdb` on the same axis — the axis LOOKS
+           unoccupied, so B is not even contradiction-checked against A;
+        3. A is repaired, and A supersedes B.
+
+        The run's binding decision is silently reversed to the OLDER answer, B
+        is retired by a decision made before it, and the file parses so nothing
+        complains. `context_digest` is the clock that tells the two apart: the
+        trail A was decided against is not the trail in front of the repair.
+        """
+        first, _ = self.adopt()
+        #: The interruption, exactly as the repair case below stages it —
+        #: except that here the trail does not stay where A left it.
+        (self.run_dir / "decisions.md").write_text(UNRELATED_HUMAN,
+                                                   encoding="utf-8")
+        second, later = self.adopt(
+            payloads=[graded("duckdb", "specified"),
+                      graded("duckdb", "speculation"),
+                      graded("sqlite", "speculation")],
+            question="Which engine stores the session table for good?")
+        self.assertEqual(later["status"], "adopted")
+        self.assertEqual(later["winner"]["answer_key"], "duckdb")
+        moved = self.trail()
+        with self.assertRaises(pas.TrackerValidationError) as raised:
+            pas.finalize_quorum(str(self.run_dir), qid=first)
+        self.assertIn(f"Q-{first}", str(raised.exception))
+        self.assertIn("storage-engine", str(raised.exception))
+        #: NOTHING WAS WRITTEN, and the later decision still binds the run.
+        self.assertEqual(self.trail(), moved)
+        decisions = self.parsed()
+        self.assertEqual(decisions["decisions"][f"Q-{second}"]["status"],
+                         "Adopted")
+        self.assertNotIn(f"Q-{first}", decisions["decisions"])
+
+    def test_the_scope_names_every_task_the_decision_binds(self):
+        """`Scope` is the cell a task reads to decide whether a decision binds
+        it, and every other fixture in this file blocks exactly ONE task — so
+        `', '.join(blocks)` and `blocks[0]` are indistinguishable everywhere
+        else, and the second silently unbinds every task after the first."""
+        qid, result = self.adopt(blocks="T04, T05")
+        self.assertEqual(result["blocks"], ["T04", "T05"])
+        self.assertEqual(self.parsed()["decisions"][f"Q-{qid}"]["scope"],
+                         "T04, T05")
+
+    def test_a_unanimous_adoption_writes_a_runner_up_the_parser_accepts(self):
+        """Unanimity has no runner-up, and the record still has the field. The
+        dict value is `None`, which rendered straight into the trail reads
+        `Runner-up rung: None` — a rung the ladder does not contain, written
+        into an append-only file. Every other case here has a runner-up, so the
+        placeholder is reached by this input and no other."""
+        qid, result = self.adopt(
+            payloads=[graded("postgres", "code-evidenced")] * 3)
+        self.assertEqual(result["status"], "adopted")
+        self.assertIsNone(result["runner_up_rung"])
+        self.assertIn("- **Runner-up rung:** -", self.trail())
+        self.assertNotIn("Runner-up rung:** None", self.trail())
+        self.assertIn(f"Q-{qid}", self.parsed()["decisions"])
+
+    def test_an_anchor_cited_twice_is_recorded_once(self):
+        """A repeated anchor is SCHEMA-VALID — the response validator judges
+        the shape of each entry and not the set — and `_decision_anchors`
+        refuses a repeat outright, because one citation is one claim of
+        grounding and a repeat weights it double. Without the de-duplication
+        the rendered record is refused and a legal answer becomes
+        `unrecordable-decision`: a real behaviour change, and one no case
+        reached."""
+        payload = graded("postgres", "specified", consistent_with=[
+            {"kind": "decision", "id": "H-001"},
+            {"kind": "decision", "id": "H-001"}])
+        self.assertEqual(
+            pas.validate_brain_response(dict(payload, qid="a" * 12)), [])
+        qid, result = self.adopt([payload, graded("postgres", "speculation"),
+                                  graded("sqlite", "speculation")])
+        self.assertEqual(result["status"], "adopted")
+        self.assertEqual(self.trail().count("- **Consistent with:**"), 1)
+        self.assertIn("- **Consistent with:** H-001", self.trail())
+        self.assertEqual(
+            self.parsed()["decisions"][f"Q-{qid}"]["consistent_with"], ["H-001"])
+
+    def test_the_blast_radius_is_reported_in_a_stable_order(self):
+        """The radius is collected by walking the cluster in DISPATCH order, so
+        an unsorted report hands the human a list ordered by which brain
+        happened to be asked first — two runs of the same three answers print
+        two different escalations. Every other blast fixture names a single
+        axis, where sorted and unsorted are the same list."""
+        qid = open_question(self, self.run_dir)
+        answer_quorum(self.run_dir, qid, [
+            dict(graded("postgres", "specified"), blast=["schema-migration"]),
+            dict(graded("postgres", "speculation"), blast=["external-service"]),
+            graded("sqlite", "speculation")])
+        result = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "irreversible-axis")
+        self.assertEqual(result["blast"],
+                         ["external-service", "schema-migration"])
+        self.assertEqual(self.trail(), UNRELATED_HUMAN)
 
     def test_a_superseding_adoption_is_replay_inert(self):
         first, _ = self.adopt()

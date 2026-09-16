@@ -8691,8 +8691,26 @@ def _compute_quorum_result(run_dir: Path, qid: str, tracker: dict) -> dict:
 
     ordered = [owner for owner, _payload in latest]
     payloads = [payload for _owner, payload in latest]
-    clusters, verdicts = group_responses(payloads,
-                                         options_supplied=options_supplied)
+    try:
+        clusters, verdicts = group_responses(payloads,
+                                             options_supplied=options_supplied)
+    except QuorumSchemaInvalid as exc:
+        #: THE RESPONSES, never the run, for the reason the contradiction check
+        #: below is wrapped -- and this is the call that reaches them FIRST.
+        #: ``_candidate_consequences`` refuses a response asserting one
+        #: ``(kind, subject)`` twice, and ``_consequence_problems`` -- the gate
+        #: ``validate_brain_response`` puts a real response through -- does not
+        #: screen for the repeat. So that response is SCHEMA-VALID, is accepted
+        #: by ``record_brain_response``, and a brain whose first answer was
+        #: legal can never be re-asked: unwrapped, one brain's legal answer
+        #: raises out of every finalisation for ever, publishes no
+        #: ``final.json``, and leaves the quorum at ``ready-to-finalise`` with
+        #: nothing that can move it. A brain may force a human look and must
+        #: never be able to halt the run, which is the same rule the malformed
+        #: -response path is built on, and ``uncomparable-answer`` is already
+        #: the token for an answer this stage cannot compare.
+        return dict(base, status=_ESCALATED, reason="uncomparable-answer",
+                    refusal=str(exc))
     if verdicts and all(verdict is None for verdict in verdicts.values()):
         #: No two answers spoke about the same thing. That is not a tie and not
         #: a disagreement -- there is nothing here to decide between.
@@ -8866,6 +8884,58 @@ def _apply_adoption_gates(base: dict, winner: list, winner_rung: str,
                         "blast": payload["blast"]})
 
 
+def _repair_decision_record(run_dir: Path, settled: dict) -> None:
+    """Finish the interrupted append -- ONLY ONTO THE TRAIL IT WAS DECIDED AGAINST.
+
+    ``final.json`` is published before the decision is appended, so an
+    interruption between the two leaves a finalised quorum with no record and
+    the next call repairs it. The repair re-renders against the trail AS IT
+    STANDS, and ``_rendered_decisions`` supersedes whatever stands on the axis
+    NOW -- it has no notion of which of the two decisions is newer. Unguarded
+    that inverts the audit trail:
+
+    1. quorum A adopts; ``final.json`` is written and the append is cut short;
+    2. quorum B adopts on the same axis -- the axis LOOKS unoccupied, so B is
+       not even contradiction-checked against A -- and appends;
+    3. A is repaired, and A supersedes B.
+
+    The run's binding decision silently becomes the OLDER answer, B is retired
+    by a decision made before it, and the file parses so nothing complains.
+
+    ``context_digest`` IS THE CLOCK, and it is exact rather than approximate.
+    ``_stale_moves`` already refused to finalise A at all unless the trail
+    still digested to the value bound at dispatch, so at the instant A adopted
+    the two were equal: on this path they differ if and only if the trail moved
+    AFTER a settled outcome. A byte-identical restoration -- the interrupted
+    write itself -- digests equal and repairs normally.
+
+    CHECKED ONLY WHEN THE APPEND IS STILL OWED. A run whose record is already
+    on file has moved the trail BY LANDING IT, so the digests differ on every
+    replay of every adoption, and testing before that would turn the idempotent
+    no-op into a stop.
+
+    A STOP, NOT AN ESCALATION. ``final.json`` is a single-assignment cell and
+    this quorum is already settled-adopted and already charged to the budget;
+    there is no second outcome to report and no machine answer that is not a
+    silent reversal of one of the two decisions. Which of them binds is the
+    human's call, and the file is append-only, so the remedy is a hand edit.
+    """
+    text = _decisions_text(run_dir)
+    if settled["decision_id"] in parse_decisions(text)["decisions"]:
+        return
+    current = _context_digest(run_dir)
+    if settled.get("context_digest") != current:
+        raise TrackerValidationError(
+            f"{settled['decision_id']} was adopted against a decisions trail "
+            f"digesting to {settled.get('context_digest')!r} and the trail now "
+            f"digests to {current!r}; appending it here would supersede "
+            f"whatever stands on {settled['decision_axis']} now, which is a "
+            "decision made LATER being retired by one made earlier, and "
+            "decisions.md is append-only. Which of the two binds this run is "
+            "not a question this stage can answer")
+    _ensure_decision_recorded(run_dir, settled)
+
+
 def finalize_quorum(run_dir: str, *, qid: str) -> dict:
     """Phase 3 of the record, through the tracker lock as ``quorum-<qid>``.
 
@@ -8910,7 +8980,7 @@ def finalize_quorum(run_dir: str, *, qid: str) -> dict:
         _event, settled = _final_event(final_path, qid)
         if settled.get("status") == _CHARGED_STATUS:
             with _exclusive_lock(run_dir):
-                _ensure_decision_recorded(run_dir, settled)
+                _repair_decision_record(run_dir, settled)
         return settled
     holder: dict = {}
 

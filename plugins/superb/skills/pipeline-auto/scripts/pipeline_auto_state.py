@@ -10966,3 +10966,483 @@ def _parse_phase_header(lines) -> dict:
         "review_reason": review_reason,
         "commands": _parse_command_suite(raw_commands),
     }
+
+
+#: The task comment names, spelled once. ``pipeline-auto-task`` is a PREFIX of
+#: ``pipeline-auto-task-suite``, so -- exactly as ``_PHASE_COMMENT`` is a prefix
+#: of ``_PHASE_SUITE_COMMENT`` -- every predicate below goes through
+#: ``_comment_indexes``, whose opening carries the trailing ``:``. Without it a
+#: suite line is detected as a malformed task line and the count check fires on
+#: the wrong comment.
+_TASK_COMMENT = "pipeline-auto-task"
+_TASK_SUITE_COMMENT = "pipeline-auto-task-suite"
+
+#: THE PIN, the task half. A tuple for ``_PHASE_KEYS``' reason: the POSITION of
+#: each key is as much a part of the grammar as its name, and F8 is a plan whose
+#: keys were reordered, renamed or dropped. Seven keys, checked positionally by
+#: ``_comment_fields``, so a reorder fails at the position that should have held
+#: the key, a rename fails at its own position, a drop shifts every later key
+#: onto the wrong position, and an extra key makes the field count wrong.
+_TASK_KEYS = ("id", "deps", "kind", "batch", "order", "write_scope", "outputs")
+_TASK_SUITE_KEYS = ("id", "commands")
+
+#: What a task PRODUCES, and the reason the plan says it rather than the worker.
+#: A ``source`` task changes the repository and is proved by running its
+#: verification suite; an ``artifact`` task writes documents and is proved by
+#: those documents existing. A worker may not demote itself from ``source`` to
+#: ``artifact`` because its implementation happened to produce no diff -- "I
+#: changed nothing" and "I was never asked to change anything" are different
+#: claims, and only the second is one the plan made.
+TASK_KINDS = ("source", "artifact")
+
+#: The two typed write-scope forms. ``file:`` is one exact path; ``tree:`` is a
+#: directory and everything under it. Task 3's ``scopes_overlap`` reads this
+#: tuple rather than re-typing the pair.
+_WRITE_SCOPE_TYPES = ("file", "tree")
+
+#: A phase plan holds between one and twelve tasks. Zero means the phase plan is
+#: prose a worker would have to interpret into work, which is the thing this
+#: grammar exists to stop; the ceiling is here because every task in a phase is
+#: reconciled, integrated and range-checked against the same baseline, and a
+#: plan that needs more than twelve is two phases that were not split.
+MAX_TASKS_PER_PHASE = 12
+
+
+def _declared_members(raw: str, what: str) -> tuple[str, ...]:
+    """A comma-separated metadata field, or the literal ``none`` meaning empty.
+
+    ``none`` IS A WHOLE VALUE AND NEVER A MEMBER, which is the guard Task 1
+    wrote for phase ``deps`` and which the task grammar needs three times over.
+    Without it ``outputs=none,docs/a.md`` reads as two members, the first of
+    which is a perfectly legal repository-relative path spelled ``none`` -- so
+    an artifact task declaring "no outputs, and also this one" is accepted and
+    the run later looks for a file called ``none``. "Declares nothing" and
+    "declares a thing called none" cannot both be spelled the same way.
+
+    An EMPTY member is refused for the same reason a trailing comma is a typo
+    rather than a value: ``file:src/a.py,`` would otherwise reach the type check
+    as ``''`` and be diagnosed as an untyped scope, which names the wrong line
+    of the plan.
+
+    THE DUPLICATE CHECK IS HERE, ON THE RAW MEMBERS, and deliberately not
+    repeated on the canonical forms downstream. ``_safe_relative`` admits
+    exactly one spelling per path -- ``.``-segments, ``//``, a trailing ``/``
+    and a backslash are all refused -- so two raw members that canonicalise
+    equal are two raw members that were already equal, and a second check over
+    the canonical list would be a screen no input can reach.
+    """
+    if raw == _NO_DEPS:
+        return ()
+    members = tuple(raw.split(","))
+    for member in members:
+        if not member:
+            raise PlanMetadataError(
+                f"{what}={raw!r} has an empty member: a comma separates two "
+                "values and a dangling one separates a value from nothing")
+        if member == _NO_DEPS:
+            raise PlanMetadataError(
+                f"{what}={raw!r} mixes {_NO_DEPS!r} with real members; "
+                f"'declares nothing' and 'declares a thing called {_NO_DEPS}' "
+                "cannot both be spelled the same way")
+    if len(members) != len(set(members)):
+        raise PlanMetadataError(
+            f"{what}={raw!r} names a member twice; a repeat makes the field's "
+            "length disagree with the number of things it names")
+    return members
+
+
+def _validate_acyclic_dependencies(dependencies, *, error_type, subject) -> None:
+    """Refuse a dependency graph that is not closed, or that holds a cycle.
+
+    THE CLOSURE CHECK IS PART OF THIS FUNCTION, not an assumption about the
+    caller. A depth-first walk that indexes ``dependencies[node]`` raises
+    ``KeyError`` on an edge to a node that is not a key -- and ``KeyError`` is
+    outside ``TrackerError``, so a graph one edge short of closed would kill the
+    run instead of stopping it. This helper is parameterised by ``error_type``
+    precisely so later phases can hand it their own graphs, and a later caller
+    is exactly the one that will not have pre-filtered its edges.
+
+    ``error_type`` and ``subject`` rather than a hard-wired
+    ``PlanMetadataError``: the same walk answers "do these tasks deadlock" and
+    "do these phases deadlock", and the two stop the run under different names.
+    """
+    unknown = sorted({dependency for edges in dependencies.values()
+                      for dependency in edges if dependency not in dependencies})
+    if unknown:
+        raise error_type(
+            f"{subject} dependency graph is not closed: {unknown} "
+            f"{'are' if len(unknown) > 1 else 'is'} depended on and never "
+            "declared, so nothing will ever satisfy the wait")
+    visiting: set = set()
+    visited: set = set()
+
+    def visit(node) -> None:
+        if node in visiting:
+            raise error_type(
+                f"{subject} dependency graph contains a cycle through {node!r}; "
+                "every member of a cycle waits on a member of the same cycle, "
+                "so none of them ever becomes dispatchable")
+        if node in visited:
+            return
+        visiting.add(node)
+        for dependency in dependencies[node]:
+            visit(dependency)
+        visiting.remove(node)
+        visited.add(node)
+
+    for node in dependencies:
+        visit(node)
+
+
+def _parse_write_scope(raw: str):
+    """``file:src/a.py,tree:docs`` -> canonical strings plus typed pairs.
+
+    THE TYPE IS MANDATORY, and an untyped scope is refused rather than guessed
+    at. ``src/a`` could be one file or a whole subtree, and the two reserve
+    differently: under ``scopes_overlap`` a tree collides with every path
+    beneath it and a file collides only with itself, so guessing wrong either
+    serialises work that could have run concurrently or lets two implementers
+    write the same file. A plan that did not say is a plan that has to say.
+
+    Returns ``(canonical, parsed)``. ``canonical`` is what a tracker cell
+    records -- one string per scope, in the order the plan wrote them, because
+    the declaration order is the plan's and sorting it would record something
+    the plan did not say. ``parsed`` is ``(type, PurePosixPath)`` pairs, which
+    is what the containment check below and Task 3's overlap algebra want.
+    """
+    members = _declared_members(raw, "write_scope")
+    if not members:
+        raise PlanMetadataError(
+            "a task declares at least one write scope; a task that writes "
+            f"nowhere cannot be reserved against anything, and {_NO_DEPS!r} is "
+            "the spelling of an empty LIST, not of 'this task touches no files'")
+    canonical: list = []
+    parsed: list = []
+    for scope in members:
+        scope_type, separator, raw_path = scope.partition(":")
+        if not separator:
+            raise PlanMetadataError(
+                f"write scope {scope!r} is untyped: every scope is spelled "
+                f"{_WRITE_SCOPE_TYPES[0]}:<path> or {_WRITE_SCOPE_TYPES[1]}:"
+                "<path>, because one exact file and a whole subtree reserve "
+                "against each other differently")
+        if not _member(scope_type, _WRITE_SCOPE_TYPES):
+            raise PlanMetadataError(
+                f"unsupported write scope type {scope_type!r} in {scope!r}; "
+                f"the types are {list(_WRITE_SCOPE_TYPES)!r}. A pattern type "
+                "would name a set whose membership depends on when it is "
+                "expanded, which two implementers cannot be checked against")
+        path = _safe_relative(raw_path)
+        canonical.append(f"{scope_type}:{path.as_posix()}")
+        parsed.append((scope_type, path))
+    return tuple(canonical), parsed
+
+
+def _within_scope(output: PurePosixPath, parsed_scopes) -> bool:
+    """Is ``output`` inside one of these typed scopes?
+
+    ASKED THROUGH ``.parents``, NEVER THROUGH A STRING PREFIX. ``tree:docs``
+    does not contain ``docsx/a.md``, and ``"docsx/a.md".startswith("docs")`` is
+    ``True`` -- so the prefix spelling hands an artifact task a sibling
+    directory it never declared, and the reservation algebra that was supposed
+    to keep two implementers apart has already been told the wrong thing.
+
+    A ``tree:`` scope does not contain ITSELF: the scope is a directory and an
+    output is a file the task promises to produce, so ``tree:docs`` with
+    ``outputs=docs`` is a task promising to produce a directory.
+    """
+    return any(
+        (scope_type == "file" and output == scope)
+        or (scope_type == "tree" and scope in output.parents)
+        for scope_type, scope in parsed_scopes)
+
+
+def _task_heading(lines, index: int, task_id: str) -> None:
+    """The task metadata must sit under the heading of the task it describes.
+
+    DETECTED ON THE STRIPPED LINE, for ``_parse_phase_header``'s reason:
+    CommonMark allows up to three leading spaces on an ATX heading, so a raw
+    ``startswith`` lets a plan indent the heading and lose the binding
+    silently. Seven hashes is not a heading at all, and a level-one heading is
+    the document title, so the levels that may carry a task are two to six.
+
+    THE ID MUST BE ONE OF THE HEADING'S WORDS, not a substring of it. A
+    substring test binds ``## Task T1`` to a metadata comment for ``T12``, and
+    a plan whose two tasks are ``T1`` and ``T12`` is not exotic. Splitting on
+    whitespace is what makes ``T1`` and ``T12`` different answers.
+
+    ADJACENCY IS "THE PREVIOUS NONEMPTY LINE", not "the previous line": a blank
+    line between a heading and its metadata is markdown, and prose between them
+    is a second thing claiming to be under that heading.
+    """
+    previous = next((candidate for candidate in reversed(lines[:index])
+                     if candidate.strip()), "")
+    stripped = previous.strip()
+    hashes = len(stripped) - len(stripped.lstrip("#"))
+    body = stripped[hashes:]
+    if not 2 <= hashes <= 6 or not body.startswith(" ") or task_id not in body.split():
+        raise PlanMetadataError(
+            f"the metadata for task {task_id!r} must sit under that task's own "
+            f"heading, with nothing but blank lines between them; the nearest "
+            f"nonempty line above it is {previous!r}. A heading is two to six "
+            "'#' then a space, and the task id is one of its WORDS -- a "
+            "substring test would bind '## Task T1' to the metadata for 'T12'")
+
+
+def _parse_task_metadata(lines, index: int) -> dict:
+    """One task definition: the metadata comment at ``index`` and its suite.
+
+    Returns the eight keys ``id``, ``deps``, ``kind``, ``batch``, ``order``,
+    ``write_scope``, ``outputs``, ``commands`` -- the seven the plan declares
+    plus the verification suite that belongs to the task rather than to the
+    line. Raises ``PlanMetadataError`` and nothing else.
+
+    THE KEY ORDER IS THE GRAMMAR. ``_comment_fields`` matches the seven keys
+    positionally against ``_TASK_KEYS``, which is what makes a reorder, a
+    rename, a drop and an extra key four distinct defects refused by one
+    mechanism. ``tail=False``: no task field may absorb the field separator, so
+    an eighth key appended after ``outputs`` is a field COUNT error rather than
+    something quietly swallowed into the outputs list.
+    """
+    (task_id, raw_deps, kind, batch, raw_order, raw_scopes,
+     raw_outputs) = _comment_fields(lines[index], _TASK_COMMENT, _TASK_KEYS,
+                                    tail=False)
+
+    if not _TOKEN.fullmatch(task_id):
+        raise PlanMetadataError(
+            f"invalid task id {task_id!r}: a task id is one token, because it "
+            "is written into a tracker cell, a branch name and a checkpoint "
+            "marker, none of which can carry a sentence")
+    _task_heading(lines, index, task_id)
+    if not _member(kind, TASK_KINDS):
+        raise PlanMetadataError(
+            f"task {task_id!r} declares kind={kind!r}, outside "
+            f"{list(TASK_KINDS)!r}. The kind is the PLAN's claim about what "
+            "this task produces and what proves it; a worker does not get to "
+            "restate it because its implementation happened to produce no diff")
+    if not _TOKEN.fullmatch(batch):
+        raise PlanMetadataError(
+            f"invalid batch {batch!r} on task {task_id!r}: a batch name is one "
+            "token, for the reason a task id is")
+
+    #: ``int(raw_order)`` ALONE IS NOT THE GRAMMAR, and the module has already
+    #: written this defect down once, in ``_Numbered``: ``int(chr(0x0661))`` is 1
+    #: and ``int('1_0')`` is 10, so a plan can spell an order in Arabic-Indic
+    #: digits or with a separator and the tracker records a number nobody
+    #: wrote. ``isascii() and isdigit()`` is the ten characters intended.
+    #: The round trip through ``str`` then refuses ``order=01``, which is a
+    #: second spelling of a number the plan already has one spelling for.
+    if (not raw_order.isascii() or not raw_order.isdigit()
+            or raw_order != str(int(raw_order))):
+        raise PlanMetadataError(
+            f"task {task_id!r} declares order={raw_order!r}: an order is ASCII "
+            "digits with no sign, no separator and no leading zero. "
+            "'isdigit' alone is true of chr(0x0661) and 'int' accepts '1_0', "
+            "so "
+            "either would record a number the plan does not say")
+    order = int(raw_order)
+    if order <= 0:
+        raise PlanMetadataError(
+            f"task {task_id!r} declares order={order}: tasks are integrated in "
+            "declared order and the count starts at 1, so there is no zeroth "
+            "or negative position to integrate into")
+
+    deps = _declared_members(raw_deps, f"task {task_id} deps")
+    for dependency in deps:
+        if not _TOKEN.fullmatch(dependency):
+            raise PlanMetadataError(
+                f"invalid task dependency id {dependency!r} in deps={raw_deps!r} "
+                f"on task {task_id!r}; a task that depends on nothing spells it "
+                f"{_NO_DEPS!r}")
+        if dependency == task_id:
+            raise PlanMetadataError(
+                f"task {task_id!r} lists itself in deps={raw_deps!r}; a task "
+                "waiting on itself never becomes dispatchable")
+
+    write_scope, parsed_scopes = _parse_write_scope(raw_scopes)
+    declared = _declared_members(raw_outputs, f"task {task_id} outputs")
+    #: THE TWO HALVES ARE ONE RULE, stated as an equivalence rather than as two
+    #: independent checks, because the defect is the plan being able to have it
+    #: both ways. A source task proves itself by running its suite, so naming
+    #: outputs would be a second, unverified claim; an artifact task proves
+    #: itself by its documents existing, so declaring none leaves nothing to
+    #: check and "done" becomes whatever the worker says it is.
+    if (kind == "source") != (not declared):
+        raise PlanMetadataError(
+            f"task {task_id!r} is kind={kind!r} with outputs={raw_outputs!r}: a "
+            f"source task declares outputs={_NO_DEPS} and is proved by its "
+            "verification suite; an artifact task names its exact approved "
+            "outputs and is proved by them existing")
+    outputs: list = []
+    for raw_output in declared:
+        output = _safe_relative(raw_output)
+        if not _within_scope(output, parsed_scopes):
+            raise PlanMetadataError(
+                f"task {task_id!r} declares the output {raw_output!r}, which is "
+                f"outside its write scope {list(write_scope)!r}. An output the "
+                "task may not write is an output another task's implementer is "
+                "entitled to be holding")
+        outputs.append(output.as_posix())
+
+    #: DETECTED ON THE STRIPPED LINE, exactly as ``_comment_indexes`` detects,
+    #: and then validated on the RAW one. A raw ``startswith`` here would make
+    #: an INDENTED suite comment invisible, and invisible is the dangerous
+    #: direction for the artifact half: the artifact task would be accepted
+    #: carrying a source-task suite that this grammar claims to forbid.
+    following = lines[index + 1] if index + 1 < len(lines) else ""
+    carries_suite = following.strip().startswith(f"<!-- {_TASK_SUITE_COMMENT}:")
+    if kind != "source":
+        if carries_suite:
+            raise PlanMetadataError(
+                f"task {task_id!r} is kind={kind!r} and carries a "
+                f"{_TASK_SUITE_COMMENT!r} comment. An artifact task is proved "
+                "by its exact approved outputs; a suite beside them would be a "
+                "second definition of done, and the two can disagree")
+        return {
+            "id": task_id, "deps": deps, "kind": kind, "batch": batch,
+            "order": order, "write_scope": write_scope,
+            "outputs": tuple(outputs), "commands": (),
+        }
+    if not carries_suite:
+        raise PlanMetadataError(
+            f"source task {task_id!r} needs exactly one {_TASK_SUITE_COMMENT!r} "
+            "comment on the line IMMEDIATELY below its metadata. A source task "
+            "is proved by running something, and a task that names nothing to "
+            "run declares that nothing verifies it")
+    suite_id, raw_commands = _comment_fields(
+        lines[index + 1], _TASK_SUITE_COMMENT, _TASK_SUITE_KEYS, tail=True)
+    if suite_id != task_id:
+        raise PlanMetadataError(
+            f"the suite below task {task_id!r} names {suite_id!r}: a suite "
+            "belonging to another task would verify that task and report the "
+            "result against this one")
+    return {
+        "id": task_id, "deps": deps, "kind": kind, "batch": batch,
+        "order": order, "write_scope": write_scope,
+        "outputs": tuple(outputs), "commands": _parse_command_suite(raw_commands),
+    }
+
+
+def _plan_text(path) -> str:
+    """Open one phase plan and return its text, or refuse inside the family.
+
+    RULE 11 LANDS HERE, because this is the first line of the plan grammar that
+    touches a filesystem. ``is_file()`` NEVER MEANS "there is nothing here": it
+    is false for a directory, for a dangling symlink, for a symlink LOOP and
+    for a FIFO, and all four are names that exist. ``_require_regular_file`` is
+    the door, and a bare ``read_text`` is not merely a missing check -- opening
+    a FIFO for reading BLOCKS until a writer arrives, and on a plan path a
+    controller supplies no writer is coming. That is a deadlock with no
+    diagnostic and no timeout, not an error.
+
+    ``.resolve()`` IS NEVER CALLED. On a symlink loop it raises ``RuntimeError``
+    -- measured, on this Python, from ``resolve`` itself and with
+    ``strict=False`` too -- and ``RuntimeError`` is not a ``TrackerError``.
+    ``is_file()`` plus ``os.path.lexists`` answer the same question without it.
+
+    THE SPELLING IS SCREENED BEFORE THE FILESYSTEM IS ASKED, and this is a
+    DIFFERENT corpus from a field value's. Measured: for a path holding ``\\x00``
+    -- and for one holding a lone surrogate -- ``is_file()`` is False AND
+    ``os.path.lexists`` is False, so the door is silent and ``read_text``
+    raises ``ValueError: embedded null byte`` / ``UnicodeEncodeError`` from
+    outside the family. ``_cell_safe`` is the screen because a plan path is
+    also recorded in ``## Run``'s ``phase_plans`` cell, so its union of the
+    listed half (NUL and the rest of ``range(0x20)``) and the derived half
+    (``\\x85``, ``\\u2028``, ``\\u2029`` -- which name files that really exist
+    and really read, and would pass any closed ASCII list) is exactly the bar
+    this argument needs.
+    """
+    if isinstance(path, Path):
+        spelling = str(path)
+    elif isinstance(path, str):
+        spelling = path
+    else:
+        raise PlanMetadataError(
+            f"a phase plan path is a str or a pathlib.Path; got "
+            f"{type(path).__name__}. bytes would raise TypeError from Path and "
+            "an os.PathLike would hide an arbitrary __fspath__ behind the read")
+    if not spelling or not _cell_safe(spelling):
+        raise PlanMetadataError(
+            f"unusable phase plan path {spelling!r}: it must be a nonempty "
+            "string a tracker cell can carry back out unchanged -- no NUL or "
+            "other control character, nothing the section reader breaks a line "
+            "on, nothing the UTF-8 encoder refuses, no '|', and no surrounding "
+            "whitespace. A NUL here reaches the syscall as ValueError and a "
+            "lone surrogate as UnicodeEncodeError, both outside TrackerError")
+    plan = Path(spelling)
+    try:
+        _require_regular_file(plan, "a phase plan")
+    except QuorumError as exc:
+        raise PlanMetadataError(
+            f"the phase plan at {spelling!r} is a name that exists and cannot "
+            f"be read ({exc}); a directory, a dangling link, a symlink loop or "
+            "a FIFO is corruption and never an absent plan -- and the FIFO is "
+            "why the shape is asked before the open rather than by it, because "
+            "that open blocks for a writer that never comes") from exc
+    try:
+        return plan.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise PlanMetadataError(
+            f"unreadable phase plan at {spelling!r}: {type(exc).__name__}: "
+            f"{exc}. A plan that is missing, unreadable or not UTF-8 is input, "
+            "and input stops the run inside this module's exception family") from exc
+
+
+def parse_plan_metadata(path) -> dict:
+    """One approved phase plan's strict metadata: the phase header and its tasks.
+
+    Returns ``{"phase": {...}, "tasks": [{...}, ...]}``. Raises
+    ``PlanMetadataError`` and nothing else, for every input -- a plan grammar
+    that can throw ``OSError``, ``ValueError`` or ``RuntimeError`` at a
+    controller has not refused the plan, it has crashed on it.
+
+    IT READS AND CHANGES NOTHING ELSE. A refused plan is byte-identical after
+    the refusal, which is the read-only-stop rule this whole module is built to
+    keep.
+    """
+    lines = _plan_text(path).splitlines()
+    phase = _parse_phase_header(lines)
+
+    indexes = _comment_indexes(lines, _TASK_COMMENT)
+    tasks = [_parse_task_metadata(lines, index) for index in indexes]
+    if not 1 <= len(tasks) <= MAX_TASKS_PER_PHASE:
+        raise PlanMetadataError(
+            f"a phase plan declares between 1 and {MAX_TASKS_PER_PHASE} tasks; "
+            f"this one declares {len(tasks)}. Zero means the plan is prose a "
+            "worker would have to interpret into work; more than the ceiling "
+            "is two phases that were not split")
+
+    #: EVERY SUITE COMMENT IN THE DOCUMENT IS ACCOUNTED FOR, not just the one
+    #: below each task. Checking only adjacency leaves an ORPHAN suite -- a
+    #: second copy, or one left behind by an edit that moved its task --
+    #: sitting in the plan, claiming to verify a task, verifying nothing, and
+    #: visible to a human reader as though it did.
+    expected = [index + 1 for index, task in zip(indexes, tasks)
+                if task["kind"] == "source"]
+    suite_indexes = _comment_indexes(lines, _TASK_SUITE_COMMENT)
+    if suite_indexes != expected:
+        raise PlanMetadataError(
+            f"every {_TASK_SUITE_COMMENT!r} comment belongs immediately below "
+            f"the metadata of its own source task; expected them on lines "
+            f"{expected} and found them on {suite_indexes}. A suite anywhere "
+            "else names a task nothing will run it for")
+
+    ids = [task["id"] for task in tasks]
+    if len(ids) != len(set(ids)):
+        raise PlanMetadataError(
+            f"a phase plan names each task once; {ids} repeats one. Two "
+            "definitions under one id give every later lookup two answers and "
+            "nothing to choose between them")
+    orders = [task["order"] for task in tasks]
+    if any(left >= right for left, right in zip(orders, orders[1:])):
+        raise PlanMetadataError(
+            f"task orders {orders} must strictly increase down the document. "
+            "Worktrees are merged --no-ff IN TASK ORDER, so a repeat leaves two "
+            "tasks with equal claim to the same position and a document that "
+            "disagrees with its own order field is two answers to 'which is "
+            "integrated first'")
+
+    _validate_acyclic_dependencies(
+        {task["id"]: task["deps"] for task in tasks},
+        error_type=PlanMetadataError, subject="task")
+    return {"phase": phase, "tasks": tasks}

@@ -3237,6 +3237,95 @@ def derive_qid(question: str, axis: str) -> str:
     return hashlib.sha256(payload).hexdigest()[:12]
 
 
+#: The tag that separates the two halves of a re-open's identity input. A
+#: constant rather than a literal because ``_reopen_lineage_root`` below
+#: reproduces the same derivation and the two must not drift.
+_REOPEN_TAG = b"reopen"
+
+
+def derive_reopen_qid(question: str, axis: str, original_decision_id: str) -> str:
+    """Stable identity for a RE-ASK of one question, namespaced by its authority.
+
+    A RE-OPEN NEEDS ITS OWN IDENTITY OR IT HAS NO DOOR. ``final.json`` is a
+    single-assignment cell and ``_open_under_lock`` returns it for ever, so a
+    re-ask filed under the original qid is not a second quorum -- it is the
+    first one's outcome handed back. That is the correct answer to a question
+    being asked twice and the wrong answer to a question a human has since
+    authorized to be asked again, and the two cannot be told apart from one
+    identity.
+
+    SO THE AUTHORITY IS IN THE HASH. ``original_decision_id`` is the D-ID of
+    the fact that licenses this re-ask -- the quorum decision being challenged,
+    or the human budget grant that restored the headroom the first raise was
+    refused for. A re-ask with no such fact cannot mint an identity at all, and
+    a re-ask against a DIFFERENT fact is a different quorum. That is the whole
+    of what distinguishes a legitimate re-ask from a run asking again until it
+    likes the answer: the second has nothing new to name.
+
+    DERIVED FROM ``derive_qid`` RATHER THAN BESIDE IT. The original qid is the
+    first field, so every rule that identity rests on -- the squash, the NUL
+    refusal, the axis grammar, the exclusion of the decisions digest -- holds
+    here unchanged and is not restated. It also makes the LINEAGE recoverable:
+    the qid this re-ask hangs off is literally an input, so
+    ``_reopen_lineage_root`` recomputes it rather than walking a chain of
+    records that may have been compacted away.
+
+    THE AXIS IS NOT NAMESPACED WITH THE D-ID, which was the obvious spelling
+    and does not work: ``derive_qid`` requires its axis to satisfy ``_TOKEN``,
+    which admits no ``#``, so ``derive_qid(question, f"{axis}#reopen:{did}")``
+    raises rather than deriving anything.
+    """
+    if not isinstance(original_decision_id, str):
+        raise QuorumSchemaInvalid(
+            f"original_decision_id is {type(original_decision_id).__name__}, "
+            "not str; a re-ask is identified by the record that authorizes it, "
+            "and a repr names no record")
+    challenged = original_decision_id.strip()
+    if _id_provenance(challenged) is None:
+        raise QuorumSchemaInvalid(
+            f"original_decision_id {original_decision_id!r} is not a decision "
+            "id (H-<n> or Q-<qid>); a re-ask namespaced by something the audit "
+            "trail cannot hold is a re-ask whose authority nothing can be "
+            "asked to produce")
+    payload = (derive_qid(question, axis).encode("utf-8") + b"\x00"
+               + _REOPEN_TAG + b"\x00" + challenged.encode("utf-8"))
+    return hashlib.sha256(payload).hexdigest()[:12]
+
+
+def _record_qid(record: dict) -> str:
+    """WHICH identity one question record has, said in ONE place.
+
+    ``open_quorum`` files the record under this and ``_question_record``
+    re-derives it from the record's own fields and compares. Two spellings of
+    that rule is one too many: the comparison exists to catch a directory that
+    was copied, renamed or half-restored, and a reader that derived the
+    identity a different way from the writer would report every re-open as
+    exactly that corruption -- with the run lock held, inside the open.
+    """
+    challenged = record.get("reopen_of") or ""
+    if challenged:
+        return derive_reopen_qid(record["question"], record["axis"], challenged)
+    return derive_qid(record["question"], record["axis"])
+
+
+def _reopen_lineage_root(record: dict) -> str:
+    """The qid a re-ask hangs off: the ORIGINAL question's own identity.
+
+    THE LINEAGE IS THE QUESTION, NEVER THE AUTHORITY. Keyed on the authorizing
+    D-ID instead, two unrelated questions refused by one budget grant would
+    share a lineage and the second would be halted as an oscillation it had no
+    part in. Keyed on the question, a re-ask of one question is bounded however
+    it was authorized, which is the rule the anti-oscillation cap is for.
+
+    RECOMPUTED, NEVER WALKED BACK THROUGH THE RECORDS. A chain walk over
+    finalised quorums answers nothing after a compaction has removed the middle
+    of the chain, and it is the shape that made the anti-oscillation rule a
+    silent no-op in the first place -- ``quorum_events`` is a four-cell budget
+    projection and carries no lineage at all.
+    """
+    return derive_qid(record["question"], record["axis"])
+
+
 # --- the brain-response schema -------------------------------------------
 #
 # A brain's response is the only thing standing between "three agents were
@@ -5464,6 +5553,36 @@ def check_admissible(record: dict) -> list[str]:
             problems.append("fewer-than-two-options")
         if len(set(keys)) != len(keys):
             problems.append("duplicate-options")
+    #: CRITERION 6 -- A RE-ASK NAMES WHAT IS NEW. This is the whole mechanical
+    #: difference between a legitimate re-open and a run asking the same
+    #: question again until it likes the answer: the re-ask must name the
+    #: record that authorizes it AND carry the evidence that was not in front
+    #: of the first three brains. A ``Reopen of`` with an empty ``Challenge``
+    #: is the same question, the same context and a second roll of the dice;
+    #: a ``Challenge`` with no ``Reopen of`` is evidence aimed at nothing,
+    #: which would travel into three payloads while the bar stayed where it
+    #: was.
+    #:
+    #: WHETHER A CHALLENGE IS OWED IS NOT DECIDED HERE, and that is the one
+    #: half this function cannot do: it takes a record and no run, so it cannot
+    #: tell a CHALLENGE (which must carry evidence) from a POST-EXTENSION
+    #: RE-RAISE (which must carry none -- nothing was ever answered, so there
+    #: is nothing to argue with, and what a raiser would write there at that
+    #: moment is the budget, which no brain may see). ``_open_under_lock``
+    #: asks it once the authority has named which kind this is.
+    #:
+    #: WHAT NOTHING HERE CAN CHECK is whether the evidence is any good. That is
+    #: what the RAISED BAR is for, two gates further on: the re-open adopts
+    #: only on a rung strictly better than the decision it challenges, so
+    #: challenging evidence that changes nothing changes nothing.
+    challenged = record.get("reopen_of")
+    if challenged is not None and not isinstance(challenged, str):
+        problems.append("reopen-of-is-not-a-decision-id")
+    elif _text(challenged):
+        if _id_provenance(challenged.strip()) is None:
+            problems.append("reopen-of-is-not-a-decision-id")
+    elif _entries(record.get("challenge")):
+        problems.append("challenge-without-reopen")
     deduped: list[str] = []
     for problem in problems:
         if problem not in deduped:
@@ -5482,7 +5601,15 @@ _QUESTION_FILE = "question.md"
 _PROJECTION_FILE = "decisions-effective.md"
 
 #: Record fields that are one string.
-_QUESTION_TEXT_FIELDS = ("question", "axis", "phase", "raiser", "recommendation")
+#:
+#: ``reopen_of`` IS HERE AND IS NOT IN ``_record_projection``. It is the D-ID
+#: of the fact that authorizes this re-ask, and it is read by the admission
+#: check and by the identity derivation -- never by a payload. A brain told
+#: WHICH decision is under challenge is a brain told that the ground is soft;
+#: what it gets instead is the challenging evidence and the question, and it
+#: prices both on their merits.
+_QUESTION_TEXT_FIELDS = ("question", "axis", "phase", "raiser",
+                         "recommendation", "reopen_of")
 
 #: Record fields that are a comma-separated list of strings.
 _QUESTION_LIST_FIELDS = ("blocks", "owners", "candidate_answers", "challenge")
@@ -5717,7 +5844,7 @@ def _question_record(run_dir, qid: str) -> dict:
             f"the question record for {qid} is inadmissible ({problems}); a "
             "payload built from it would dispatch brains at a question the run "
             "had already decided it may not ask")
-    derived = derive_qid(record["question"], record["axis"])
+    derived = _record_qid(record)
     if derived != qid.strip():
         raise QuorumSchemaInvalid(
             f"the question record filed under {qid} derives {derived}; a record "
@@ -7028,6 +7155,132 @@ def _budget_escalation(qid: str, record: dict, budget: dict) -> dict:
     }
 
 
+#: The action an adoption writes, named once so the authority check below and
+#: ``_decision_record`` cannot come to disagree about what an adoption is.
+_QUORUM_ADOPT_ACTION = "quorum.adopt"
+
+#: The two kinds of fact that may authorize a re-ask, and the whole of them.
+#: A CHALLENGE aims at a decision this run's own brains adopted and raises the
+#: bar to that decision's rung; a RE-RAISE aims at a human grant that restored
+#: headroom the first raise was refused for, and raises nothing, because a
+#: budget refusal measured no answer at all.
+_REOPEN_CHALLENGE = "challenge"
+_REOPEN_RERAISE = "re-raise"
+
+
+def _reopen_authority(run_dir: Path, decision_id: str) -> tuple:
+    """``(kind, raised_bar_rung)`` for the record that authorizes a re-ask.
+
+    THE DOOR TASK 8 LEFT SHUT, OPENED EXPLICITLY AND NARROWLY. An escalated
+    ``final.json`` is terminal, so without this a question the budget refused
+    can never be asked again however much headroom a human grants, and a
+    decision this run adopted on thin evidence can never be revisited. Falling
+    THROUGH the terminal record was the other option and it is fail-open: it
+    turns every re-ask into a re-roll and the replay guard into a comment.
+
+    SO A RE-ASK IS ADMITTED ONLY AGAINST A FACT ON THE APPEND-ONLY TRAIL THAT
+    WAS NOT THERE WHEN THE FIRST ANSWER WAS RECORDED, and there are exactly
+    two:
+
+    * an ADOPTED QUORUM DECISION. The re-ask challenges it, and the bar becomes
+      that decision's own grounding rung -- see ``_compute_quorum_result``,
+      where clearing it means STRICTLY better evidence, not equal evidence.
+    * a HUMAN BUDGET GRANT. The first raise was refused before a single brain
+      was dispatched, so nothing about the answer was ever measured; the grant
+      is the headroom, the standing floor is the bar, and there is no raised
+      bar to clear.
+
+    A HUMAN DECISION ON THE AXIS IS REFUSED OUTRIGHT, and it is the refusal
+    that keeps the exemption in ``_apply_adoption_gates`` safe. A quorum may
+    decide an open question and may revisit its OWN answer at a higher bar; it
+    may never overrule the user. Admitted here, ``Reopen of: H-001`` would
+    exempt the user's own decision from the contradiction check and the run
+    would adopt straight over it, with every record on disk well-formed.
+
+    A SUPERSEDED OR OPEN RECORD IS REFUSED TOO. A superseded decision is not
+    what the run is standing on, so challenging it raises a bar nothing is
+    measured against; an Open record decided nothing to challenge.
+    """
+    decisions = parse_decisions(_decisions_text(run_dir))
+    record = decisions["decisions"].get(decision_id)
+    if record is None:
+        raise QuorumError(
+            f"cannot re-open {decision_id}: this run's audit trail holds no "
+            "such decision. A re-ask is admitted only against a record that "
+            "authorizes it, and a citation nothing resolves is the run "
+            "authorizing itself")
+    if record["status"] != "Adopted":
+        raise QuorumError(
+            f"cannot re-open {decision_id}: its status is {record['status']!r}, "
+            "not 'Adopted'. A superseded record is not what the run is "
+            "standing on and an open one decided nothing, so neither states a "
+            "bar and neither is a fact that has changed")
+    if (record["provenance"] == "quorum"
+            and record["action"] == _QUORUM_ADOPT_ACTION):
+        rung = record.get("grounding_rung")
+        rung = rung.strip() if isinstance(rung, str) else rung
+        #: HELD TO ``ADOPTABLE``, NOT MERELY TO THE LADDER. Only those two
+        #: rungs can ever have been adopted, so a record claiming Adopted at
+        #: anything lower is a trail that disagrees with itself -- and read as
+        #: a bar it would be a bar BELOW the floor, which every answer clears.
+        #: That is the self-serving move arriving through the audit trail
+        #: instead of through the code.
+        if not _member(rung, ADOPTABLE):
+            raise QuorumError(
+                f"cannot re-open {decision_id}: it records grounding rung "
+                f"{rung!r}, and only {sorted(ADOPTABLE)} can have been adopted. "
+                "The raised bar IS that rung, so a bar read off a record that "
+                "disagrees with itself is a bar below the floor -- every "
+                "answer clears it and the decision is re-taken at the same "
+                "quality of evidence, which is the dice rolled again")
+        return _REOPEN_CHALLENGE, rung
+    if (record["provenance"] == "human"
+            and record["action"] == _DRIFT_EXTENSION_ACTION):
+        return _REOPEN_RERAISE, None
+    raise QuorumError(
+        f"cannot re-open {decision_id}: it is a {record['provenance']} decision "
+        f"whose action is {record['action']!r}, and the only facts that "
+        "authorize a re-ask are a quorum adoption (challenged at a raised bar) "
+        "and a human drift-budget grant (the headroom the first raise was "
+        "refused for). A human's answer on the axis is not one of them -- a "
+        "quorum may revisit its own answer and may never overrule the user")
+
+
+def _prior_reopens(run_dir: Path, lineage_root: str) -> list:
+    """Every re-ask already OPENED on this lineage, by qid.
+
+    AT MOST ONE RE-OPEN PER LINEAGE PER RUN. Without the cap a run spends its
+    whole drift budget arguing with itself: each answer is challenged by the
+    next, every challenge is admissible on its own terms, and the run
+    oscillates until the ceiling stops it -- having decided nothing and spent
+    everything.
+
+    BOTH FILES ARE READ, AND ``open.json`` IS THE ONE THAT MATTERS. A re-ask
+    still in flight has no ``final.json`` at all, so a scan over outcomes alone
+    would admit a second challenge while the first was still being answered --
+    six brains on one question, which is the oscillation arriving in parallel
+    instead of in sequence.
+
+    ``lexists`` RATHER THAN ``exists`` and the shape asked before the open, for
+    ``_require_regular_file``'s reason: this runs with the run lock held.
+    """
+    root = run_dir / _QUORUM_DIRNAME
+    if not root.is_dir():
+        return []
+    found = []
+    for directory in sorted(root.iterdir()):
+        for name in (_OPEN_FILE, _FINAL_FILE):
+            path = directory / name
+            if not os.path.lexists(path):
+                continue
+            record = _read_json(path, f"the {name} of {directory.name}")
+            if (isinstance(record, dict)
+                    and record.get("lineage_root") == lineage_root):
+                found.append(directory.name)
+                break
+    return found
+
+
 def _open_under_lock(run_dir: Path, qid: str, record: dict, text: str) -> dict:
     """``open_quorum``'s body, with the run lock already held.
 
@@ -7096,6 +7349,78 @@ def _open_under_lock(run_dir: Path, qid: str, record: dict, text: str) -> dict:
         #: to ``publish_immutable``: a re-raise must not re-enter the budget.
         return dict(_opened_record(open_path, qid), replay=True, qid=qid)
 
+    #: THE RE-ASK DOOR, AHEAD OF THE BUDGET AND AHEAD OF THE FIRST BYTE. It is
+    #: an AUTHORITY check, not a spend check: a re-ask the trail does not
+    #: authorize is refused whatever headroom the run has left.
+    challenged = record["reopen_of"]
+    lineage_root = None
+    raised_bar_rung = None
+    if challenged:
+        lineage_root = _reopen_lineage_root(record)
+        #: RAISES rather than escalates, exactly as an inadmissible question
+        #: does: a re-ask citing a record the trail does not hold is a raiser
+        #: fault, and writing a terminal record for it would spend this
+        #: question's one identity on somebody's typo.
+        kind, raised_bar_rung = _reopen_authority(run_dir, challenged)
+        #: THE EVIDENCE RULE, ASKED WHERE THE KIND IS KNOWN. A challenge with
+        #: an empty ``Challenge`` is the same question, the same context and a
+        #: second roll of the dice -- the laundering this whole door is built
+        #: to refuse. A re-raise with a NON-empty one is the other error and it
+        #: is the one that leaks: nothing was measured, so the only thing a
+        #: raiser has to write there is why the budget moved, and ``challenge``
+        #: reaches all three brains verbatim.
+        stated = [entry for entry in record["challenge"] if _text(entry)]
+        if kind == _REOPEN_CHALLENGE and not stated:
+            raise QuorumError(
+                f"the re-open of {challenged} states no challenge; a re-ask "
+                "carrying no evidence is the same question against the same "
+                "trail, and the only thing a second answer to it can measure "
+                "is which way the dice fell")
+        if kind == _REOPEN_RERAISE and stated:
+            raise QuorumError(
+                f"the re-raise authorized by {challenged} states a challenge; "
+                "the first raise was refused before a brain was dispatched, so "
+                "no answer was ever measured and there is nothing to challenge "
+                "-- and what a raiser writes there at that moment is why the "
+                "budget moved, which travels verbatim into all three payloads")
+        prior = _prior_reopens(run_dir, lineage_root)
+        if prior:
+            #: ASSIGNED TO A LOCAL rather than written inline, and that is not
+            #: a style choice: the suite derives the phase's reason vocabulary
+            #: from this module's own source, collecting ``reason=`` keywords
+            #: and assignments to a name called ``reason``. A token spelled
+            #: any other way is a token ``_ESCALATION_BLAST`` is never asked
+            #: about, and the batching human reads a ``-``.
+            reason = "second-challenge"
+            halt = {
+                "qid": qid,
+                "status": _ESCALATED,
+                "reason": reason,
+                "phase": record["phase"],
+                "axis": record["axis"],
+                "question": record["question"],
+                "blocks": list(record["blocks"]),
+                "owners": list(record["owners"]),
+                "decision_id": None,
+                "winner": None,
+                "dispatched": False,
+                "reopen_of": challenged,
+                "lineage_root": lineage_root,
+                "already_reopened_by": prior,
+            }
+            #: TERMINAL AND LEGAL, not a status of its own. ``_final_event``
+            #: admits five statuses and nothing else, and every reader of this
+            #: run walks every ``final.json`` -- ``quorum_events``,
+            #: ``current_floor``, ``quorum_tracker_rows`` and therefore every
+            #: budget check and every finalisation. A record carrying
+            #: ``halted-second-challenge`` would raise in all of them for ever:
+            #: one halt would brick the run. It is an escalation, which is what
+            #: a halt IS here -- the question stops being the machine's and
+            #: goes to a human -- and ``dispatched: False`` says no brain was
+            #: asked, which is what keeps it out of the ``## Quorum`` mirror.
+            publish_immutable(final_path, _dumps(halt))
+            return halt
+
     #: THE BUDGET TRIPS HERE, AHEAD OF THE FIRST BYTE. Nothing above this line
     #: has written anything, and a trip writes exactly one file -- so a
     #: question the run had no authority to ask leaves a terminal record and no
@@ -7163,6 +7488,22 @@ def _open_under_lock(run_dir: Path, qid: str, record: dict, text: str) -> dict:
         #: a budget grant -- which is a context change the brains could not see
         #: and a later contradiction check must.
         "context_digest": _digest(decisions_text),
+        #: THE LINEAGE, PERSISTED BEFORE DISPATCH like everything else in this
+        #: record. ``reopen_of`` is what licenses the finaliser to supersede
+        #: the decision this challenges; ``raised_bar_rung`` is the bar that
+        #: adoption must clear STRICTLY; ``lineage_root`` is what a later
+        #: challenge to the same question finds so that it halts instead of
+        #: opening a third quorum. All three are ``None`` on an ordinary raise,
+        #: and the ``None`` is the fact -- there is no bar, and nothing to
+        #: supersede.
+        #:
+        #: NONE OF THE THREE REACHES A PAYLOAD. ``build_payload`` is built from
+        #: ``_record_projection``, which names the record's whole contribution
+        #: and names none of these; a brain that learned the bar would be a
+        #: brain told what to beat.
+        "reopen_of": challenged or None,
+        "raised_bar_rung": raised_bar_rung,
+        "lineage_root": lineage_root,
     }
     publish_immutable(open_path, _dumps(opened))
     return opened
@@ -7291,7 +7632,7 @@ def open_quorum(run_dir: str, *, question_record: str,
                 "look for it, one ending in a dot is a second owner's file on "
                 f"Windows, and one longer than {_OWNER_MAX} characters fails at "
                 "the write with the question record already published")
-    qid = derive_qid(record["question"], record["axis"])
+    qid = _record_qid(record)
     with _exclusive_lock(run_dir, timeout_s=timeout_s):
         return _open_under_lock(run_dir, qid, record, text)
 
@@ -8482,6 +8823,63 @@ def _opened_token(opened: dict, qid: str, field: str, cost: str) -> str:
     return value.strip()
 
 
+def _opened_lineage(opened: dict, qid: str, field: str) -> str | None:
+    """One ``open.json`` lineage cell, read back as a token or as absent.
+
+    ``None`` IS A FIRST-CLASS ANSWER HERE and is what every ordinary quorum
+    records, which is why this is not ``_opened_token``: that helper refuses an
+    absent value, and absence is the normal case for a question nobody
+    challenged. What is refused is a value that is PRESENT and not a token --
+    the shape that would be copied into ``final.json`` and stop every later
+    read of the run.
+    """
+    value = opened.get(field)
+    if value is None:
+        return None
+    if not _text(value) or not _TOKEN.fullmatch(value.strip()):
+        raise QuorumSchemaInvalid(
+            f"the open record for {qid} states {field} {value!r}, which is "
+            "neither absent nor one token; a lineage cell that cannot be read "
+            "is a challenge whose target nothing can resolve")
+    return value.strip()
+
+
+def _opened_bar(opened: dict, qid: str) -> str | None:
+    """The raised bar this quorum was opened against, or ``None``.
+
+    THE ONE CELL A RUN WOULD GAIN BY LYING ABOUT. ``open.json`` sits inside the
+    run directory, and ``{"raised_bar_rung": "speculation"}`` is the whole of
+    the self-serving move: a challenge judged against a bar below the floor
+    adopts on anything. So the value is held to the ladder rather than read for
+    truthiness, exactly as ``_persisted_floor`` holds ``floor.json`` -- and,
+    like that file, it is REFUSED rather than clamped, because a clamped record
+    says one thing while the run does another.
+
+    IT IS NOT RE-DERIVED FROM ``decisions.md`` HERE, and that is a ruling
+    rather than an omission: the bar is a fact about the trail AS IT STOOD when
+    the three brains were dispatched, and a trail that has moved since is
+    already caught -- ``_stale_moves`` compares ``context_digest`` against
+    ``decisions.md`` and escalates the whole finalisation before any bar is
+    consulted. Re-reading it here would answer a question staleness has
+    already refused to let be asked.
+    """
+    rung = opened.get("raised_bar_rung")
+    if rung is None:
+        return None
+    #: ``ADOPTABLE``, NOT THE WHOLE LADDER, and the difference is the whole
+    #: point of asking. ``speculation`` IS a legal rung, so a ladder check
+    #: passes it -- and a bar of ``speculation`` is below the floor, which
+    #: every answer clears. The bar is the rung of a decision that was
+    #: ADOPTED, and only two rungs can ever have been.
+    if not _member(rung, ADOPTABLE):
+        raise QuorumSchemaInvalid(
+            f"the open record for {qid} states raised_bar_rung {rung!r}, and "
+            f"only {sorted(ADOPTABLE)} can have been adopted; a bar below the "
+            "floor is cleared by every answer, which is a run writing itself "
+            "permission in the one file that says what it must beat")
+    return rung
+
+
 def _opened_blocks(opened: dict, qid: str) -> list:
     """What this question BLOCKS, read back off the open record.
 
@@ -8636,6 +9034,14 @@ def _finalisation_base(run_dir: Path, qid: str, tracker: dict) -> tuple:
         "demotion_reasons": {},
         "reason": None,
         "dispatched": True,
+        #: THE LINEAGE TRAVELS INTO ``final.json``, which is what makes it
+        #: durable: ``_prior_reopens`` reads ``lineage_root`` back off the
+        #: settled record to cap the next challenge, and ``reopen_of`` is what
+        #: licenses ``_apply_adoption_gates`` to supersede exactly one standing
+        #: decision and no other.
+        "reopen_of": _opened_lineage(opened, qid, "reopen_of"),
+        "lineage_root": _opened_lineage(opened, qid, "lineage_root"),
+        "raised_bar_rung": _opened_bar(opened, qid),
     }
     return base, opened, mint_refusal
 
@@ -8847,6 +9253,29 @@ def _compute_quorum_result(run_dir: Path, qid: str, tracker: dict) -> dict:
             return dict(base, status=_ESCALATED,
                         reason="equal-or-inverted-rung")
 
+    #: THE RAISED BAR, CONSUMED. Everything above this line was already true of
+    #: an ordinary quorum; this is the one place a re-open is judged differently
+    #: from the question it challenges, and until it existed the bar was
+    #: recorded in ``open.json``, mirrored into the row, and read by nothing --
+    #: every assertion about the record's CONTENTS passed while the guardrail
+    #: did nothing at all. That is the worst shape a guardrail defect takes,
+    #: because an absent guardrail gets noticed.
+    #:
+    #: STRICTLY BETTER, NOT MERELY GOOD ENOUGH. A ``code-evidenced`` answer
+    #: re-opening a ``code-evidenced`` decision does not adopt, unanimous or
+    #: not, floor or no floor: re-deciding at the same quality of evidence is
+    #: not new information, it is the run rolling the dice again -- and the
+    #: re-ask was admitted precisely on the claim that something new had been
+    #: found. Spelled as the NEGATION of the rule, for the reason the spread
+    #: test above is: relaxing it in either direction fails the suite.
+    #:
+    #: ``None`` IS THE ORDINARY QUORUM and also the post-extension re-raise,
+    #: where a budget refusal measured no answer at all and there is therefore
+    #: nothing to be better than. The standing floor governs both.
+    raised = base["raised_bar_rung"]
+    if raised is not None and not RUNG_ORDER.index(winner_rung) < RUNG_ORDER.index(raised):
+        return dict(base, status=_ESCALATED, reason="raised-bar-not-cleared")
+
     decisions_text = _decisions_text(run_dir)
     #: THE AUDIT TRAIL IS PARSED BEFORE ANY GATE READS IT, and a trail that
     #: does not parse is a read-only stop here exactly as it is everywhere
@@ -8947,6 +9376,21 @@ def _apply_adoption_gates(base: dict, winner: list, winner_rung: str,
         #: adopts; a brain typing ``yes`` must reach a human, not halt the run.
         return dict(base, status=_ESCALATED, reason="uncomparable-answer",
                     refusal=str(exc))
+    if contradicted is not None and contradicted == base.get("reopen_of"):
+        #: THE ONE DECISION THIS QUORUM IS LICENSED TO REPLACE, and it is not a
+        #: hole in the contradiction check -- it is what a re-open IS. The
+        #: challenged decision is Adopted on this axis, so it contradicts every
+        #: answer that differs from it; without this exemption a re-open could
+        #: only ever re-affirm what it was raised to question, and the raised
+        #: bar above would gate a path nothing could reach.
+        #:
+        #: BOUNDED BY THE ADMISSION, NOT BY THIS LINE. ``_reopen_authority``
+        #: has already refused any ``reopen_of`` that is not a quorum adoption
+        #: or a human budget grant, so this can never exempt a HUMAN answer on
+        #: the axis; and it names exactly one D-ID, so a second standing
+        #: decision still rejects. The price of the exemption is the strictly
+        #: higher rung, which was paid two gates up.
+        contradicted = None
     if contradicted is not None:
         provenance = decisions["decisions"][contradicted]["provenance"]
         return dict(
@@ -9110,6 +9554,8 @@ _ESCALATION_BLAST = MappingProxyType({
     "phase-budget-exhausted": _BLAST_FROM_AXIS,
     "run-budget-exhausted": _BLAST_FROM_AXIS,
     "answers-describe-different-things": _BLAST_FROM_AXIS,
+    "raised-bar-not-cleared": _BLAST_FROM_AXIS,
+    "second-challenge": _BLAST_FROM_AXIS,
 })
 
 

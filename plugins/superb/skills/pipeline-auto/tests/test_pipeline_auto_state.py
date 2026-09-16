@@ -10907,6 +10907,11 @@ QUESTION = {
     },
     "owners": ["brain-a", "brain-b", "brain-c"],
     "challenge": [],
+    #: An ORDINARY question, so it names no authority and carries no challenge.
+    #: The two travel together: Task 13 makes a `Challenge` with no `Reopen of`
+    #: inadmissible, because evidence aimed at nothing raises no bar while
+    #: still reaching all three brains.
+    "reopen_of": "",
 }
 
 #: Every JSON value a field may legally hold that is NOT the shape the reader
@@ -11222,7 +11227,8 @@ class CheckAdmissible(unittest.TestCase):
         """
         self.assertEqual(
             self.record_fields_read(),
-            {"blocks", "axis", "question", "owners", "options_supplied", "options"})
+            {"blocks", "axis", "question", "owners", "options_supplied",
+             "options", "reopen_of", "challenge"})
 
     def test_no_value_in_any_field_it_reads_escapes_the_tracker_error_family(self):
         """Every field from the sweep above, crossed with every hostile value.
@@ -11483,12 +11489,23 @@ class BuildPayload(unittest.TestCase):
         refusals claim to close it.
         """
         clean = "the earlier answer cited no test and no spec section"
+        #: A CHALLENGE TRAVELS ONLY ON A RE-OPEN, so the accept half states the
+        #: authority too — and it therefore has to be filed under the RE-OPEN
+        #: identity, because `_question_record` re-derives the qid from the
+        #: record's own fields and a re-open derives a different one.
+        challenged = "Q-cccccccccccc"
+        reopen_qid = pas.derive_reopen_qid(QUESTION["question"],
+                                           QUESTION["axis"], challenged)
+        self.assertNotEqual(reopen_qid, self.qid)
         for index in range(3):
             payload = self.rebuild(
-                text=question_text(extra=(f"- **Challenge:** {clean}",)),
-                index=index)
+                text=question_text(extra=(f"- **Reopen of:** {challenged}",
+                                          f"- **Challenge:** {clean}")),
+                qid=reopen_qid, index=index)
             with self.subTest(brain=index):
                 self.assertEqual(payload["challenge"], [clean])
+                self.assertNotIn("reopen_of", payload)
+                self.assertNotIn(challenged, json.dumps(payload))
         for spelling in ("the earlier answer was only convention-cited",
                          "the earlier answer reached 0.70 and no further",
                          "beaten on evidence, not on the .85 bar"):
@@ -18581,6 +18598,552 @@ class QuorumTrackerRowsTests(unittest.TestCase):
     def test_a_run_that_has_opened_no_quorum_reports_no_rows(self):
         """The accept case every stricter bar above is paired with."""
         self.assertEqual(self.rows(), [])
+
+
+# --- a re-open's raised bar, and the door that lets a re-ask exist ---------
+
+#: The original question's three brains and the re-open's three, DISJOINT and
+#: distinctively spelled. Sharing an owner set would make "the re-open's
+#: owners" and "the original's owners" the same string, so a row cell or a
+#: payload that named the wrong one of the two would read correct.
+ORIGINAL_OWNERS = ("brain-orig-one", "brain-orig-two", "brain-orig-three")
+REOPEN_OWNERS = ("brain-again-one", "brain-again-two", "brain-again-three")
+
+#: The phase the re-open is raised in, which is NEVER the original's. A bar or
+#: a lineage read off the wrong record would still land in the right phase if
+#: the two matched, and the cell would be pinned by the fixture rather than by
+#: the code.
+REOPEN_PHASE = "P05"
+
+#: A second stage-03 axis, for the control question nobody ever re-opened.
+CONTROL_AXIS = "log-format"
+
+#: The anchor that puts a re-open's answers one layer further out than the
+#: original's. `response()` anchors on `H-001` and lands at depth 1; anchoring
+#: on the depth-1 quorum record lands at depth 2, so "the re-open's depth" and
+#: "the original's depth" are different numbers in the same run.
+DEEPER_ANCHOR = [{"kind": "decision", "id": "Q-cccccccccccc"}]
+
+#: THE CHALLENGING EVIDENCE, and the whole of what a re-open's brains learn
+#: that the original's did not. It names WHERE to look. It does not name the
+#: earlier answer's rung, its value, its owner, or how close it came to the
+#: floor: a brain told the previous attempt scored 0.70 is a brain told what to
+#: beat, and the re-open stops being an independent measurement. It also
+#: carries no comma, because `_csv` reads this field as a list.
+CHALLENGE_EVIDENCE = "db/pool.py names a second engine and no answer cited it"
+
+
+def reopen_answer(answer_key, rung):
+    """One re-open response, anchored a layer deeper than the original's."""
+    return graded(answer_key, rung, consistent_with=[dict(anchor)
+                                                     for anchor in DEEPER_ANCHOR])
+
+
+class ReopenRaisedBar(unittest.TestCase):
+    """A re-open records a raised bar; this is where something reads it.
+
+    THE DEFECT THIS CLOSES IS THE SILENT KIND. The bar was written into
+    `open.json`, carried into `final.json` and mirrored into the row, and
+    adoption never consulted it — so every assertion about the record's
+    CONTENTS passed while the guardrail did nothing. An absent guardrail gets
+    noticed; a no-op one does not.
+
+    THE THREE RULES, each with its own failure if dropped:
+
+    * a re-opened question adopts only on a rung STRICTLY higher than the one
+      originally adopted, not merely at or above the floor. Re-deciding at the
+      same quality of evidence is not new information;
+    * at most one re-open per decision lineage per run, or the run spends its
+      budget arguing with itself;
+    * the re-open payload carries the challenging evidence and never the prior
+      rung, its value or its owner.
+
+    AND THE DOOR. An escalated `final.json` is terminal, so without an explicit
+    re-ask identity a question the budget refused could never be asked again
+    and a decision adopted on thin evidence could never be revisited. Falling
+    through the terminal record instead is fail-open: it turns every re-ask
+    into a re-roll. What separates a legitimate re-ask from a question asked
+    twice to get a different answer is that the legitimate one NAMES A FACT ON
+    THE APPEND-ONLY TRAIL THAT WAS NOT THERE WHEN THE FIRST ANSWER WAS
+    RECORDED — a quorum decision it challenges with evidence, or a human
+    budget grant that restored headroom — and that fact is hashed into its
+    identity, so a re-ask with nothing new to name cannot mint one.
+    """
+
+    def setUp(self):
+        self.root, self.run_dir = adoption_repo(
+            self, decisions=UNRELATED_HUMAN + DERIVED_DEPTH_ONE)
+        register_questions(self.run_dir, CONTROL_AXIS)
+        register_phases(self.run_dir, REOPEN_PHASE)
+
+    # --- fixture construction ---------------------------------------------
+
+    def raise_question(self, **fields):
+        index = len(list(Path(self.run_dir).glob("question-*.md")))
+        path = Path(self.run_dir) / f"question-{index}.md"
+        path.write_text(question_text(**fields), encoding="utf-8")
+        return pas.open_quorum(str(self.run_dir), question_record=str(path))
+
+    def answer(self, opened, owners, payloads):
+        answer_quorum(self.run_dir, opened["qid"], payloads, owners=owners)
+        return pas.finalize_quorum(str(self.run_dir), qid=opened["qid"])
+
+    def settle(self, rung, *, axis=None, answer_key="postgres"):
+        """An ADOPTED quorum decision on `axis`, at exactly `rung`."""
+        opened = self.raise_question(axis=QUESTION["axis"] if axis is None else axis,
+                                     owners=", ".join(ORIGINAL_OWNERS))
+        result = self.answer(opened, ORIGINAL_OWNERS,
+                             [graded(answer_key, rung), graded(answer_key, rung),
+                              graded("duckdb", "speculation")])
+        self.assertEqual(result["status"], "adopted", result)
+        self.assertEqual(result["winner"]["rung"], rung)
+        self.assertEqual(result["phase"], QUESTION["phase"])
+        self.assertEqual(result["depth"], 1)
+        self.assertIsNone(result["reopen_of"])
+        self.assertIsNone(result["raised_bar_rung"])
+        return result
+
+    def open_reopen(self, challenged, *, challenge=CHALLENGE_EVIDENCE,
+                    owners=REOPEN_OWNERS, axis=None):
+        extra = [f"- **Reopen of:** {challenged}"]
+        if challenge is not None:
+            extra.append(f"- **Challenge:** {challenge}")
+        return self.raise_question(
+            axis=QUESTION["axis"] if axis is None else axis,
+            phase=REOPEN_PHASE, owners=", ".join(owners), extra=tuple(extra))
+
+    def grant_extension(self):
+        """A human drift-budget grant on record, signed against what this run
+        has actually adopted. `_live_grant` requires a non-empty `Granted
+        against` matching the adopted set exactly, so the grant is written
+        AFTER an adoption and names it — a grant naming nothing is a human on
+        record as having reviewed something else.
+        """
+        original = self.settle("code-evidenced")
+        path = self.run_dir / "decisions.md"
+        path.write_text(
+            path.read_text(encoding="utf-8")
+            + budget_grant(scope=REOPEN_PHASE, axis="drift-budget-p05",
+                           granted=(original["decision_id"],)),
+            encoding="utf-8")
+        return "H-900"
+
+    def reopen(self, challenged, payloads, **kwargs):
+        opened = self.open_reopen(challenged, **kwargs)
+        if opened["status"] != "in_flight":
+            return opened
+        return self.answer(opened, kwargs.get("owners", REOPEN_OWNERS), payloads)
+
+    # --- the fixture states its own properties ----------------------------
+
+    def test_the_fixture_cannot_confound_the_original_with_its_reopen(self):
+        """EVERY CELL THE TWO COULD SHARE, ASSERTED DIFFERENT.
+
+        A re-open has an original and a successor, a floor and a raised bar, a
+        first qid and a derived one. If the fixture let the two share a phase,
+        a depth, an owner set or a qid, no case below could tell "the
+        re-open's bar" from "the standing bar" — the right cell and an
+        incidental one would be the same string. The axis is the one thing
+        they MUST share: a re-open of a different axis is a different question.
+        """
+        original = self.settle("code-evidenced")
+        opened = self.open_reopen(original["decision_id"])
+        self.assertEqual(opened["status"], "in_flight")
+        self.assertNotEqual(opened["qid"], original["qid"])
+        self.assertNotEqual(opened["phase"], original["phase"])
+        self.assertEqual(opened["axis"], original["axis"])
+        self.assertEqual(set(ORIGINAL_OWNERS) & set(REOPEN_OWNERS), set())
+        self.assertEqual(opened["owners"], list(REOPEN_OWNERS))
+        self.assertEqual(sorted(pas.parse_tracker(
+            (self.run_dir / "progress.md").read_text(encoding="utf-8"))["quorum"][0]
+            ["owners"].split(",")), sorted(ORIGINAL_OWNERS))
+        #: The bar and the floor are DIFFERENT FACTS and the cases below need
+        #: to be able to tell them apart, so both are named here.
+        self.assertEqual(opened["raised_bar_rung"], "code-evidenced")
+        self.assertEqual(pas.current_floor(str(self.run_dir))["floor_rung"],
+                         "code-evidenced")
+        self.assertEqual(opened["lineage_root"],
+                         pas.derive_qid(QUESTION["question"], QUESTION["axis"]))
+        self.assertEqual(opened["lineage_root"], original["qid"])
+
+    # --- case 1: the same rung does not clear a raised bar -----------------
+
+    def test_code_evidenced_unanimity_does_not_adopt_on_a_reopened_question(self):
+        """Even unanimous. Even clearing the floor. Re-deciding at the same
+        quality of evidence is not new information; it is the run rolling the
+        dice again, and the re-ask was admitted on the claim that it was not.
+        """
+        original = self.settle("code-evidenced")
+        result = self.reopen(original["decision_id"],
+                             [reopen_answer("sqlite", "code-evidenced")] * 3)
+        self.assertEqual(result["status"], "escalated", result)
+        self.assertEqual(result["reason"], "raised-bar-not-cleared")
+        self.assertEqual(result["raised_bar_rung"], "code-evidenced")
+        self.assertEqual(result["winner_rung"], "code-evidenced")
+        self.assertEqual(result["reopen_of"], original["decision_id"])
+        self.assertIsNone(result["decision_id"])
+        #: The decision it challenged is UNTOUCHED — still Adopted, still the
+        #: record the run stands on.
+        decisions = pas.parse_decisions(
+            (self.run_dir / "decisions.md").read_text(encoding="utf-8"))
+        self.assertEqual(
+            decisions["decisions"][original["decision_id"]]["status"], "Adopted")
+
+    def test_a_bar_above_the_floor_refuses_an_answer_the_floor_would_admit(self):
+        """THE CASE THAT PROVES THE BAR IS NOT THE FLOOR WEARING A NEW NAME.
+
+        The original adopted at `specified`, so the bar is STRICTLY above the
+        standing floor. The re-open comes back unanimous at `code-evidenced` —
+        which the floor admits, as the control below proves by adopting
+        exactly that on a question nobody re-opened — and it is still refused.
+        An implementation that had wired the bar to `current_floor` passes
+        every other case here and fails this one.
+        """
+        original = self.settle("specified")
+        floor = pas.current_floor(str(self.run_dir))["floor_rung"]
+        opened = self.open_reopen(original["decision_id"])
+        self.assertLess(pas.RUNG_ORDER.index(opened["raised_bar_rung"]),
+                        pas.RUNG_ORDER.index(floor),
+                        "the bar must be provably HIGHER than the floor it "
+                        "replaces, or this case is testing the floor")
+        result = self.answer(opened, REOPEN_OWNERS,
+                             [reopen_answer("sqlite", "code-evidenced")] * 3)
+        self.assertEqual(result["status"], "escalated", result)
+        self.assertEqual(result["reason"], "raised-bar-not-cleared")
+        self.assertEqual(result["raised_bar_rung"], "specified")
+        self.assertEqual(result["winner_rung"], "code-evidenced")
+        self.assertNotEqual(result["reason"], "below-floor")
+
+    # --- case 2: a strictly higher rung does clear it ----------------------
+
+    def test_specified_adopts_on_the_same_reopened_question(self):
+        """And the decision it challenged is the ONE record it may replace."""
+        original = self.settle("code-evidenced")
+        result = self.reopen(original["decision_id"],
+                             [reopen_answer("sqlite", "specified"),
+                              reopen_answer("sqlite", "specified"),
+                              reopen_answer("duckdb", "speculation")])
+        self.assertEqual(result["status"], "adopted", result)
+        self.assertEqual(result["winner"]["rung"], "specified")
+        self.assertEqual(result["raised_bar_rung"], "code-evidenced")
+        self.assertEqual(result["reopen_of"], original["decision_id"])
+        self.assertEqual(result["phase"], REOPEN_PHASE)
+        self.assertEqual(result["depth"], 2)
+        self.assertNotEqual(result["decision_id"], original["decision_id"])
+
+    def test_an_adopted_reopen_supersedes_exactly_what_it_challenged(self):
+        """WITHOUT THE EXEMPTION THIS PATH IS UNREACHABLE. The challenged
+        record is Adopted on the axis, so it contradicts every answer that
+        differs from it — and a re-open that could only ever re-affirm what it
+        was raised to question is a re-open in name. The exemption names ONE
+        D-ID and is bounded by the admission check, which refuses any
+        `Reopen of` that is not a quorum adoption or a human budget grant.
+        """
+        original = self.settle("code-evidenced")
+        result = self.reopen(original["decision_id"],
+                             [reopen_answer("sqlite", "specified"),
+                              reopen_answer("sqlite", "specified"),
+                              reopen_answer("duckdb", "speculation")])
+        self.assertEqual(result["status"], "adopted", result)
+        decisions = pas.parse_decisions(
+            (self.run_dir / "decisions.md").read_text(encoding="utf-8"))
+        self.assertEqual(
+            decisions["decisions"][original["decision_id"]]["status"], "Superseded")
+        successor = decisions["decisions"][result["decision_id"]]
+        self.assertEqual(successor["status"], "Adopted")
+        self.assertEqual(successor["supersedes"].strip(), original["decision_id"])
+        self.assertEqual(successor["answer_key"], "sqlite")
+        #: The HUMAN record on its own axis is untouched by any of this.
+        self.assertEqual(decisions["decisions"]["H-001"]["status"], "Adopted")
+
+    def test_the_settled_record_carries_the_lineage_without_a_second_read(self):
+        """`final.json` IS THE EVIDENCE and the tracker is only the index, so
+        the outcome has to say what it was a re-open OF, what bar it was judged
+        against, and which question's lineage it belongs to — on its own, from
+        one read. P06's terminal report and `_prior_reopens`' cap are both
+        downstream of that, and a field carried only in `open.json` would make
+        the run's account of itself depend on a file the outcome does not name.
+
+        MUTATION FOUND THIS ONE: blanking `lineage_root` in the finalisation
+        base left the whole suite green, because `_prior_reopens` reads
+        `open.json` first and a dispatched quorum always has one. An unread
+        field is the same silent shape this task exists to close.
+        """
+        original = self.settle("code-evidenced")
+        result = self.reopen(original["decision_id"],
+                             [reopen_answer("sqlite", "specified"),
+                              reopen_answer("sqlite", "specified"),
+                              reopen_answer("duckdb", "speculation")])
+        settled = json.loads(
+            (self.run_dir / "quorum" / result["qid"] / "final.json")
+            .read_text(encoding="utf-8"))
+        self.assertEqual(settled["reopen_of"], original["decision_id"])
+        self.assertEqual(settled["raised_bar_rung"], "code-evidenced")
+        self.assertEqual(settled["lineage_root"], original["qid"])
+        self.assertNotEqual(settled["lineage_root"], settled["qid"])
+        #: And the ordinary quorum's own record says all three are absent,
+        #: rather than omitting the keys and leaving a reader to guess.
+        first = json.loads(
+            (self.run_dir / "quorum" / original["qid"] / "final.json")
+            .read_text(encoding="utf-8"))
+        self.assertIsNone(first["reopen_of"])
+        self.assertIsNone(first["raised_bar_rung"])
+        self.assertIsNone(first["lineage_root"])
+
+    # --- case 3: THE CONTROL --------------------------------------------
+
+    def test_the_same_code_evidenced_answer_adopts_on_a_question_never_reopened(self):
+        """WITHOUT THIS, CASES 1 AND 2 ARE SATISFIED BY AN IMPLEMENTATION THAT
+        ESCALATES EVERYTHING. A one-sided assertion proves the strict path
+        rejects and never proves the lenient path accepts. Same run, same
+        floor, same rung, same answer — and no re-open.
+        """
+        result = self.answer(
+            self.raise_question(axis=CONTROL_AXIS,
+                                owners=", ".join(ORIGINAL_OWNERS)),
+            ORIGINAL_OWNERS, [graded("sqlite", "code-evidenced")] * 3)
+        self.assertEqual(result["status"], "adopted", result)
+        self.assertEqual(result["winner"]["rung"], "code-evidenced")
+        self.assertIsNone(result["raised_bar_rung"])
+        self.assertIsNone(result["reopen_of"])
+        self.assertIsNone(result["lineage_root"])
+
+    # --- anti-oscillation -------------------------------------------------
+
+    def test_a_second_challenge_in_one_lineage_halts_without_dispatch(self):
+        """A adopted, challenged, B adopted — and a challenge to B halts.
+
+        Without the cap a run spends its whole drift budget arguing with
+        itself: every challenge is admissible on its own terms and the run
+        oscillates until the ceiling stops it, having decided nothing.
+        """
+        original = self.settle("code-evidenced")
+        first = self.reopen(original["decision_id"],
+                            [reopen_answer("sqlite", "specified"),
+                             reopen_answer("sqlite", "specified"),
+                             reopen_answer("duckdb", "speculation")])
+        self.assertEqual(first["status"], "adopted", first)
+        second = self.open_reopen(first["decision_id"])
+        self.assertEqual(second["status"], "escalated", second)
+        self.assertEqual(second["reason"], "second-challenge")
+        self.assertFalse(second["dispatched"])
+        self.assertEqual(second["lineage_root"], original["qid"])
+        self.assertEqual(second["already_reopened_by"], [first["qid"]])
+        directory = self.run_dir / "quorum" / second["qid"]
+        self.assertEqual(list(directory.glob("payload-*.json")), [])
+        self.assertFalse((directory / "open.json").exists())
+        self.assertFalse((directory / "question.md").exists())
+
+    def test_the_halt_is_a_status_every_later_reader_of_this_run_can_hold(self):
+        """`halted-second-challenge` was the obvious spelling and it BRICKS THE
+        RUN: `_final_event` admits five statuses, and every reader walks every
+        `final.json` — the budget, the floor, the row mirror, and therefore
+        every later finalisation. One halt would raise in all of them for ever.
+        """
+        original = self.settle("code-evidenced")
+        first = self.reopen(original["decision_id"],
+                            [reopen_answer("sqlite", "specified"),
+                             reopen_answer("sqlite", "specified"),
+                             reopen_answer("duckdb", "speculation")])
+        halt = self.open_reopen(first["decision_id"])
+        self.assertIn(halt["status"], pas._FINAL_STATUSES)
+        statuses = {event["qid"]: event["status"]
+                    for event in pas.quorum_events(str(self.run_dir))}
+        self.assertEqual(statuses[halt["qid"]], "escalated")
+        self.assertEqual(pas.current_floor(str(self.run_dir))["floor_rung"],
+                         "code-evidenced")
+        #: It dispatched nothing, so it has no `## Quorum` row to hold.
+        self.assertNotIn(halt["qid"],
+                         [row["qid"] for row in pas.quorum_tracker_rows(str(self.run_dir))])
+        self.assertIn(halt["reason"], pas._ESCALATION_BLAST)
+
+    def test_challenging_the_same_decision_twice_replays_rather_than_re_asking(self):
+        """The SAME authority derives the SAME identity, so the second attempt
+        meets the compaction-replay guard rather than the oscillation cap —
+        and gets back the outcome it already has, with nothing re-dispatched.
+        """
+        original = self.settle("code-evidenced")
+        first = self.reopen(original["decision_id"],
+                            [reopen_answer("sqlite", "code-evidenced")] * 3)
+        self.assertEqual(first["reason"], "raised-bar-not-cleared")
+        again = self.open_reopen(original["decision_id"])
+        self.assertTrue(again["replay"])
+        self.assertEqual(again["qid"], first["qid"])
+        self.assertEqual(again["reason"], "raised-bar-not-cleared")
+
+    # --- the identity -----------------------------------------------------
+
+    def test_a_reopen_gets_its_own_deterministic_identity(self):
+        first = pas.derive_reopen_qid("q", "axis", "Q-aaaaaaaaaaaa")
+        self.assertEqual(first, pas.derive_reopen_qid("q", "axis", "Q-aaaaaaaaaaaa"))
+        self.assertNotEqual(first, pas.derive_qid("q", "axis"))
+        self.assertNotEqual(first, pas.derive_reopen_qid("q", "axis", "Q-bbbbbbbbbbbb"))
+        self.assertNotEqual(first, pas.derive_reopen_qid("q", "other", "Q-aaaaaaaaaaaa"))
+        self.assertNotEqual(first, pas.derive_reopen_qid("r", "axis", "Q-aaaaaaaaaaaa"))
+        self.assertTrue(pas._QID.fullmatch(first), first)
+
+    def test_an_identity_cannot_be_minted_without_naming_an_authority(self):
+        """The whole of what separates a re-ask from a re-roll: a re-ask with
+        nothing new to name cannot mint an identity at all, so it meets the
+        settled record and is handed its own answer back.
+        """
+        for bogus in ("", "   ", "nope", "H-01x", "Q-zzzzzzzzzzzz", "H-", 7, None, []):
+            with self.subTest(authority=bogus):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.derive_reopen_qid("q", "axis", bogus)
+
+    # --- what the brains may and may not see ------------------------------
+
+    def test_the_reopen_payload_carries_the_challenge_but_never_the_prior_rung(self):
+        """A brain that learns the previous attempt scored 0.70 is a brain told
+        what to beat, and the re-open stops being an independent measurement.
+
+        THE LADDER IS LIFTED OUT BEFORE THE SCAN, and that is the correction a
+        blanket `assertNotIn("code-evidenced", rendered)` needs: `rungs` is the
+        NAMES list every payload carries by design, so the blanket assertion
+        fails on the honest payload. What must not appear is a rung name
+        anywhere ELSE, any rung VALUE anywhere at all, the prior owner, the
+        challenged decision's id, or the bar itself.
+        """
+        original = self.settle("code-evidenced")
+        opened = self.open_reopen(original["decision_id"])
+        for index in range(3):
+            with self.subTest(brain=index):
+                payload = pas.build_payload(opened["qid"], index,
+                                            run_dir=str(self.run_dir))
+                self.assertEqual(payload["challenge"], [CHALLENGE_EVIDENCE])
+                self.assertIn("db/pool.py", json.dumps(payload))
+                ladder = payload.pop("rungs")
+                self.assertEqual(ladder, list(pas.RUNG_ORDER))
+                rendered = json.dumps(payload)
+                for name in pas.RUNG_ORDER:
+                    self.assertNotIn(name, rendered)
+                for value in ("0.95", "0.85", "0.70", "0.55", "0.30"):
+                    self.assertNotIn(value, rendered)
+                for owner in ORIGINAL_OWNERS:
+                    self.assertNotIn(owner, rendered)
+                self.assertNotIn(original["decision_id"], rendered)
+                self.assertNotIn(original["winner"]["answer"], rendered)
+                for leak in ("raised_bar", "reopen_of", "lineage_root",
+                             "floor", "budget"):
+                    self.assertNotIn(leak, rendered)
+
+    def test_the_bar_is_never_read_off_a_record_that_could_lower_it(self):
+        """`speculation` IS a legal rung, so a ladder check passes it — and a
+        bar of `speculation` is below the floor, which every answer clears.
+        Only two rungs can ever have been adopted, so only two can be a bar.
+        """
+        qid = "a" * 12
+        self.assertIsNone(pas._opened_bar({}, qid))
+        self.assertIsNone(pas._opened_bar({"raised_bar_rung": None}, qid))
+        for legal in sorted(pas.ADOPTABLE):
+            self.assertEqual(pas._opened_bar({"raised_bar_rung": legal}, qid), legal)
+        for refused in ("convention-cited", "engineering-judgement",
+                        "speculation", "high", 0.85, "", "  ", [], {}, True, 0):
+            with self.subTest(bar=refused):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas._opened_bar({"raised_bar_rung": refused}, qid)
+
+    # --- who may be re-opened at all --------------------------------------
+
+    def test_a_quorum_may_revisit_its_own_answer_and_never_the_users(self):
+        """The refusal that keeps the contradiction exemption safe. Admitted,
+        `Reopen of: H-001` would exempt the user's own decision from the check
+        and the run would adopt straight over it, every record well-formed.
+        """
+        with self.assertRaises(pas.QuorumError) as caught:
+            self.open_reopen("H-001")
+        self.assertIn("overrule the user", str(caught.exception))
+
+    def test_a_reopen_naming_a_record_the_trail_does_not_hold_is_refused(self):
+        with self.assertRaises(pas.QuorumError) as caught:
+            self.open_reopen("Q-ffffffffffff")
+        self.assertIn("no such decision", str(caught.exception))
+
+    def test_a_reopen_of_a_superseded_record_is_refused(self):
+        """A superseded decision is not what the run is standing on, so
+        challenging it raises a bar nothing is measured against.
+
+        THE AUTHORITY READER IS ASKED DIRECTLY, because the public path cannot
+        reach this state: the same D-ID derives the same identity, so a second
+        attempt on it meets the compaction-replay guard first — which is the
+        ordering the case above pins.
+        """
+        original = self.settle("code-evidenced")
+        self.assertEqual(
+            pas._reopen_authority(self.run_dir, original["decision_id"]),
+            ("challenge", "code-evidenced"))
+        self.reopen(original["decision_id"],
+                    [reopen_answer("sqlite", "specified"),
+                     reopen_answer("sqlite", "specified"),
+                     reopen_answer("duckdb", "speculation")])
+        with self.assertRaises(pas.QuorumError) as caught:
+            pas._reopen_authority(self.run_dir, original["decision_id"])
+        self.assertIn("Superseded", str(caught.exception))
+
+    def test_a_challenge_carrying_no_evidence_is_the_same_question_twice(self):
+        """The mechanical core of the anti-laundering rule: the re-ask must
+        carry something the first three brains did not have in front of them.
+        """
+        original = self.settle("code-evidenced")
+        for empty in (None, "   "):
+            with self.subTest(challenge=empty):
+                with self.assertRaises(pas.QuorumError) as caught:
+                    self.open_reopen(original["decision_id"], challenge=empty)
+                self.assertIn("no challenge", str(caught.exception))
+
+    def test_evidence_aimed_at_nothing_is_inadmissible(self):
+        """A `Challenge` with no `Reopen of` travels to all three brains while
+        the bar stays exactly where it was."""
+        self.assertEqual(pas.check_admissible(QUESTION), [])
+        self.assertEqual(
+            pas.check_admissible(dict(QUESTION, challenge=[CHALLENGE_EVIDENCE])),
+            ["challenge-without-reopen"])
+        self.assertEqual(
+            pas.check_admissible(dict(QUESTION, reopen_of="Q-aaaaaaaaaaaa",
+                                      challenge=[CHALLENGE_EVIDENCE])), [])
+        for bad in ("nope", "H-01x", 7, [], {"id": "Q-aaaaaaaaaaaa"}):
+            with self.subTest(reopen_of=bad):
+                self.assertIn("reopen-of-is-not-a-decision-id",
+                              pas.check_admissible(dict(QUESTION, reopen_of=bad)))
+
+    # --- the OTHER door: a question the budget refused ---------------------
+
+    def test_a_human_budget_grant_re_opens_a_question_that_was_never_answered(self):
+        """THE POST-EXTENSION RE-RAISE, which Task 8 deliberately left shut.
+
+        A budget trip writes a terminal `final.json` before a single brain is
+        dispatched, so nothing about the answer was ever measured — and with
+        no door the question stays unaskable however much headroom a human
+        then grants. The grant is the fact that was not there before, so it
+        namespaces the re-ask exactly as a challenged decision does. There is
+        NO raised bar: there is no earlier measurement to be better than, and
+        inventing one would refuse a question nobody has answered.
+        """
+        grant = self.grant_extension()
+        opened = self.open_reopen(grant, challenge=None, axis=CONTROL_AXIS)
+        self.assertEqual(opened["status"], "in_flight")
+        self.assertEqual(opened["reopen_of"], grant)
+        self.assertIsNone(opened["raised_bar_rung"])
+        self.assertNotEqual(opened["qid"],
+                            pas.derive_qid(QUESTION["question"], CONTROL_AXIS))
+        result = self.answer(opened, REOPEN_OWNERS,
+                             [reopen_answer("sqlite", "code-evidenced")] * 3)
+        self.assertEqual(result["status"], "adopted", result)
+        self.assertEqual(result["winner"]["rung"], "code-evidenced")
+        self.assertIsNone(result["raised_bar_rung"])
+        self.assertEqual(result["reopen_of"], grant)
+
+    def test_a_re_raise_may_not_smuggle_the_budget_in_through_the_challenge(self):
+        """Nothing was measured, so there is nothing to challenge — and the
+        only thing a raiser has to write there is why the budget moved, which
+        travels verbatim into all three payloads.
+        """
+        grant = self.grant_extension()
+        with self.assertRaises(pas.QuorumError) as caught:
+            self.open_reopen(grant, challenge="the ceiling was raised",
+                             axis=CONTROL_AXIS)
+        self.assertIn("nothing to challenge", str(caught.exception))
 
 
 if __name__ == "__main__":

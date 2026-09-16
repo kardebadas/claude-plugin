@@ -4063,16 +4063,33 @@ class SuiteIsWhollyCollectedTests(unittest.TestCase):
         """Catches re-introducing the fault by appending below the main block.
         Asserts the structural fact rather than a symptom: the guard holds for a
         helper, a constant or a whole ``TestCase``, and it holds whether or not
-        anyone happens to run the file directly afterwards."""
-        body = ast.parse(self.module_source()).body
-        guards = [index for index, node in enumerate(body)
-                  if isinstance(node, ast.If) and "__main__" in ast.dump(node.test)]
-        self.assertEqual(len(guards), 1, "expected exactly one __main__ guard")
-        trailing = [type(node).__name__ for node in body[guards[0] + 1:]]
-        self.assertEqual(
-            trailing, [],
-            "definitions follow the __main__ guard; a direct run of this file "
-            f"will silently skip them: {trailing}")
+        anyone happens to run the file directly afterwards.
+
+        EVERY TEST FILE IN THIS DIRECTORY, not merely this one. The first
+        version of this guard read ``Path(__file__)`` and so protected only the
+        file the original incident happened in -- and the fault then recurred
+        verbatim one file over, in ``test_task_lifecycle.py``, where a new
+        phase appended 1,200 lines below a guard sitting at line 3637 of 4849.
+        A direct run reported ``Ran 252 tests ... OK`` while discovery found
+        365: a green run that silently omitted the entire commit under test,
+        and a per-file parity check that was reported as passing by three
+        separate readers because each took the number from the one before.
+        A rule scoped to the place it was learned is not a rule.
+        """
+        for path in sorted(Path(__file__).resolve().parent.glob("test_*.py")):
+            with self.subTest(module=path.name):
+                body = ast.parse(path.read_text(encoding="utf-8")).body
+                guards = [index for index, node in enumerate(body)
+                          if isinstance(node, ast.If)
+                          and "__main__" in ast.dump(node.test)]
+                self.assertEqual(
+                    len(guards), 1,
+                    f"{path.name}: expected exactly one __main__ guard")
+                trailing = [type(node).__name__ for node in body[guards[0] + 1:]]
+                self.assertEqual(
+                    trailing, [],
+                    f"{path.name}: definitions follow the __main__ guard; a "
+                    f"direct run of that file will silently skip them: {trailing}")
 
     def test_a_direct_run_collects_the_same_tests_as_discovery(self):
         """The symptom itself, asserted as a count. Loads a second, complete

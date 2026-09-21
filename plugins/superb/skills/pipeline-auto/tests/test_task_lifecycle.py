@@ -10928,5 +10928,995 @@ class RangeGrammarDivergenceTests(unittest.TestCase):
         self.assertIsNone(sys.modules["pipeline_auto_state"].__dict__.get("re"))
 
 
+# --------------------------------------------------------------------------
+# Task 9 -- immutable worker-result publication.
+#
+# THE TREE IS `agent-output/`, AND THAT IS A CROSS-PHASE CONTRACT rather than
+# a local naming choice. P06's `owner_history` scans this tree for owners the
+# tracker no longer names and decides master-reviewer independence on what it
+# finds; P07 publishes the same tree in `SKILL.md` as the run layout a user
+# reads. A scan pointed at a directory nobody writes contributes the EMPTY SET
+# and `owner_history` returns only the owners it already had from tracker rows
+# -- a fail-open in the one direction this check exists to close, because a
+# worker released after finishing a task can then be drawn to review its own
+# work. So the directory name is pinned as a module constant here and cited
+# there, exactly as the owner LINE is pinned as `_OWNER_LINE_PREFIX` and cited
+# there, and for the same reason: one spelling, in one place.
+#
+# THE OWNER GRAMMAR IS NOT RESTATED BY THIS TASK. `render_worker_result`
+# already emits `_owner_line`, whose docstring names itself the single
+# conversion point in both directions; Task 9 renders THROUGH it and adds no
+# second spelling. The tests below assert the absence of one.
+# --------------------------------------------------------------------------
+
+#: `st_mode` type bits, spelled here rather than by importing `stat`, whose
+#: name is one character from this file's `state` alias.
+_IFMT = 0o170000
+_IFIFO = 0o010000
+_IFDIR = 0o040000
+_IFREG = 0o100000
+_IFLNK = 0o120000
+
+
+@contextlib.contextmanager
+def publication_deadline(seconds: int, what: str):
+    """Turn a hang into a named failure, where the platform allows it.
+
+    A FIFO under `agent-output/` is the C1 shape: `is_file()` is False for it,
+    so an existence test reads it as absence, and the `read` that follows
+    BLOCKS until a writer arrives. Under the run lock no writer is coming, so
+    the run stops dead with no diagnostic and no timeout. An `assertRaises`
+    that never returns is not an assertion, which is why every call in the
+    cross-product below is bounded.
+    """
+    if not hasattr(signal, "SIGALRM"):  # pragma: no cover - POSIX only
+        yield
+        return
+
+    def expire(signum, frame):
+        raise AssertionError(
+            f"{what} blocked: the open reached a name that never answers, "
+            "which is the deadlock `_require_regular_file` exists to prevent")
+
+    previous = signal.signal(signal.SIGALRM, expire)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def name_state(path) -> tuple:
+    """Everything observable about whatever is at `path`, FIFO included.
+
+    `read_bytes` alone cannot express "unchanged" for the shapes this task has
+    to refuse -- a FIFO cannot be read at all, a dangling symlink has no
+    contents, and a directory's contents are its entries. The snapshot is taken
+    with `lstat`, so a symlink is compared as a symlink rather than as the file
+    it points at, and a refusal that quietly replaced the link with a regular
+    file of the right bytes would be caught.
+    """
+    try:
+        info = os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        #: NotADirectoryError is the other spelling of "not there": it is what
+        #: `lstat` reports when a PARENT component is a regular file, and
+        #: `_require_regular_file` folds exactly these two into absence.
+        return ("absent",)
+    kind = info.st_mode & _IFMT
+    mode = info.st_mode & 0o7777
+    if kind == _IFLNK:
+        return ("symlink", os.readlink(path), mode)
+    if kind == _IFIFO:
+        return ("fifo", mode)
+    if kind == _IFDIR:
+        return ("directory", tuple(sorted(os.listdir(path))), mode)
+    try:
+        return ("regular", Path(path).read_bytes(), mode, info.st_ino)
+    except OSError as exc:
+        return ("regular-unreadable", type(exc).__name__, mode, info.st_ino)
+
+
+def make_run_in(repo, relative: str, *, worker_limit: int = 6,
+                import_plan: bool = True, repo_root=None, run_id: str = "run-1"):
+    """A run at `repo / relative`, so a test can choose the run directory's own
+    spelling -- which is precisely what ends up inside the repository-relative
+    path `publish_worker_result` returns and Task 10 must be able to cite.
+
+    `make_run` hardcodes `docs/superpowers/runs/run-1`, which is the layout and
+    is exactly the thing these tests must be able to vary.
+    """
+    run_dir = Path(repo) / relative
+    run_dir.mkdir(parents=True)
+    plan = write_phase_plan(run_dir, three_disjoint_tasks())
+    state.initialize_run(
+        run_dir, run_id=run_id, base_commit=git(repo, "rev-parse", "HEAD"),
+        target_branch="target", worker_limit=worker_limit,
+        repo_root=repo_root if repo_root is not None else str(repo))
+    if import_plan:
+        state.import_phase_plan(run_dir, phase_plan=plan)
+    return run_dir
+
+
+def module_function_code(name: str) -> str:
+    """One module-level function's EXECUTABLE source: no docstring, no comments.
+
+    `module_function_source` returns the text, and the text of a function that
+    explains at length why it does NOT re-spell a grammar contains the grammar
+    it is refusing to re-spell. A discriminator that fires on the function's
+    own argument against the defect discriminates nothing -- the ruling
+    `CANONICAL_DIAGNOSIS` already records, arriving through source text rather
+    than through a diagnosis string. `ast.unparse` drops comments too, so what
+    is left is exactly what runs.
+    """
+    source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+        encoding="utf-8")
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            body = node.body
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                body = body[1:]
+            return "\n".join(ast.unparse(statement) for statement in body)
+    raise AssertionError(f"pipeline_auto_state has no function {name!r}")
+
+
+class Task9ProducesBlockTests(unittest.TestCase):
+    """The brief's Produces block is a claim to CHECK, not a list to implement.
+
+    Two of its names are new; every other name the Step-3 code touches already
+    exists, and a module-level redefinition of any of them rebinds the global
+    for every existing caller. Task 6 found three such names and Task 7 two
+    more, so this is the fifth task to have to run the check.
+    """
+
+    def test_the_two_new_names_are_the_only_two_this_task_defines(self):
+        self.assertTrue(callable(state.worker_result_path))
+        self.assertTrue(callable(state.publish_worker_result))
+
+    def test_no_module_level_name_is_bound_twice(self):
+        """The mechanical form. `Task6ModuleBoundaryTests` asserts this for the
+        whole module; repeating it here is what makes a Task 9 rebinding fail
+        in Task 9's own sub-suite rather than only in somebody else's."""
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        counts = module_bindings(ast.parse(source).body)
+        self.assertEqual(
+            sorted(name for name, count in counts.items() if count > 1), [])
+
+    def test_the_attempt_grammar_is_still_task_4s_single_conversion_point(self):
+        """The brief's Step-3 code spells the attempt as `attempt-{attempt}.md`,
+        which is a SECOND spelling of a conversion `_attempt_token` documents
+        itself as the single point of -- and the two disagree on every input:
+        `attempt-1` against `attempt-001`. The plan pins `attempt-%03d` for
+        'every tracker cell, checkpoint marker, and result document'.
+        """
+        for name in ("worker_result_path", "publish_worker_result"):
+            with self.subTest(function=name):
+                self.assertNotIn("attempt-", module_function_code(name))
+        self.assertEqual(state._attempt_token(1), "attempt-001")
+        self.assertTrue(
+            state.worker_result_path(
+                "/run", task_id="T1", attempt=1).name.startswith(
+                    state._attempt_token(1)))
+
+    def test_the_owner_grammar_is_not_respelled_by_this_task(self):
+        """P06 reads the owner line through P04's own `_OWNER_LINE_PREFIX`. A
+        second spelling here would be the two-answers defect `_owner_line` was
+        written to prevent, and it would silently change the
+        reviewer-independence check in another phase."""
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        self.assertEqual(source.count('_OWNER_LINE_PREFIX = '), 1)
+        for name in ("worker_result_path", "publish_worker_result"):
+            with self.subTest(function=name):
+                self.assertNotIn("Owner", module_function_code(name))
+
+    def test_the_directory_name_has_exactly_one_spelling_in_the_module(self):
+        """P06 and P07 both name this tree. A literal written at the use site
+        is a second definition of a cross-phase contract."""
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        self.assertEqual(state.AGENT_OUTPUT_DIRNAME, "agent-output")
+        self.assertEqual(source.count('"agent-output"'), 1)
+        self.assertEqual(source.count("'agent-output'"), 0)
+        self.assertNotIn('"results"', source)
+
+    def test_the_path_segment_grammar_is_p03s_owner_grammar_aliased(self):
+        """`_OWNER` is this module's pinned 'identifier that becomes a name on
+        a filesystem' grammar -- bounded, no trailing dot, and no `/`, `:`,
+        `@` or `+`. `_validate_assignment` already states that argument for the
+        owner; a task id that becomes a DIRECTORY name raises exactly it. An
+        alias keeps one definition; a second `_CharClass` would be two."""
+        self.assertIs(state._PATH_SEGMENT, state._OWNER)
+
+    def test_the_module_still_imports_nothing_outside_the_twelve(self):
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        tree = ast.parse(source)
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imported.add((node.module or "").split(".")[0])
+        self.assertEqual(imported, {
+            "__future__", "contextlib", "copy", "errno", "fcntl", "hashlib",
+            "json", "msvcrt", "os", "pathlib", "time", "types"})
+        self.assertNotIn("re", imported)
+        self.assertNotIn("subprocess", imported)
+        self.assertNotIn("zlib", imported)
+        self.assertNotIn("tempfile", imported)
+
+
+class WorkerResultPathTests(unittest.TestCase):
+    """The path is an IDENTITY, so it is pinned shape by shape."""
+
+    def test_the_shape_is_agent_output_task_attempt(self):
+        path = state.worker_result_path("/runs/r", task_id="T1", attempt=7)
+        self.assertEqual(path.name, "attempt-007.md")
+        self.assertEqual(path.parent.name, "T1")
+        self.assertEqual(path.parent.parent.name, state.AGENT_OUTPUT_DIRNAME)
+        self.assertEqual(path.parent.parent.parent, Path("/runs/r"))
+
+    def test_the_attempt_is_rendered_by_the_single_conversion_point(self):
+        """`attempt-1.md` and `attempt-001.md` are one attempt with two
+        identities, in a record whose identity is the sha256 of its bytes."""
+        for attempt in (1, 2, 12, 999999999):
+            with self.subTest(attempt=attempt):
+                self.assertEqual(
+                    state.worker_result_path(
+                        "/r", task_id="T1", attempt=attempt).name,
+                    f"{state._attempt_token(attempt)}.md")
+
+    def test_result_path_is_attempt_scoped(self):
+        """The brief's own test: a resumed task's second attempt is a second
+        immutable record, not an overwrite of the first."""
+        first = state.worker_result_path("/r", task_id="T1", attempt=1)
+        second = state.worker_result_path("/r", task_id="T1", attempt=2)
+        self.assertNotEqual(first, second)
+        self.assertEqual(first.parent, second.parent)
+
+    def test_the_map_from_a_task_id_to_a_directory_is_injective(self):
+        """THE BRIEF'S `task_id.replace("/", "-")` IS NOT. `T/1` and `T-1` are
+        two tasks and one directory under it, so the second task to publish is
+        refused as 'conflicting evidence' about the first -- or, if the two
+        rendered the same bytes, accepted as an idempotent replay of a result
+        it never wrote. A mangling is the wrong answer for an identity; a
+        refusal is the right one, and the screen below is what makes it one."""
+        seen = {}
+        for task_id in ("T1", "T-1", "T.1", "T_1", "t1", "T11"):
+            path = state.worker_result_path("/r", task_id=task_id, attempt=1)
+            self.assertNotIn(path, seen, f"{task_id} collides with {seen.get(path)}")
+            seen[path] = task_id
+        with self.assertRaises(state.TrackerValidationError):
+            state.worker_result_path("/r", task_id="T/1", attempt=1)
+
+    def test_the_run_directory_is_never_coerced_from_a_repr(self):
+        for run_dir in ("/r", Path("/r")):
+            with self.subTest(run_dir=run_dir):
+                self.assertEqual(
+                    state.worker_result_path(run_dir, task_id="T1", attempt=1),
+                    Path("/r") / state.AGENT_OUTPUT_DIRNAME / "T1"
+                    / "attempt-001.md")
+
+
+#: THE ARGUMENT CORPUS, DERIVED FROM THE CALL TREE rather than from a fixture.
+#: `worker_result_path` reaches exactly three screens -- `_run_path` over
+#: `run_dir`, an `isinstance` plus `_PATH_SEGMENT` over `task_id`, and
+#: `_attempt_token` over `attempt` -- so the corpus is the union of what each
+#: of those three can be handed. Every path-shaped argument carries a NUL and a
+#: lone surrogate, the two values that leave the exception family by a route
+#: `pathlib` hides.
+RUN_DIR_CASES = (
+    ("str", "/runs/r", True),
+    ("path", Path("/runs/r"), True),
+    ("none", None, False),
+    ("int", 5, False),
+    ("bytes", b"/runs/r", False),
+    ("list", ["/runs/r"], False),
+    #: A NUL and a lone surrogate are LEGAL to spell as a `Path` and illegal to
+    #: resolve. `worker_result_path` builds a name and opens nothing, so it
+    #: answers; `publish_worker_result` is where they have to be refused.
+    ("nul", "/runs/r\x00x", True),
+    ("surrogate", "/runs/r\ud800", True),
+)
+
+TASK_ID_CASES = (
+    ("plain", "T1", True),
+    ("dotted", "T.1", True),
+    ("underscored", "T_1", True),
+    ("hyphenated", "T-1", True),
+    ("at-the-length-bound", "a" * 64, True),
+    ("past-the-length-bound", "a" * 65, False),
+    ("slash", "a/b", False),
+    ("leading-slash", "/abs", False),
+    ("colon", "T:1", False),
+    ("at", "T@1", False),
+    ("plus", "T+1", False),
+    ("trailing-dot", "T1.", False),
+    ("dot", ".", False),
+    ("dotdot", "..", False),
+    ("empty", "", False),
+    ("leading-hyphen", "-T1", False),
+    ("nul", "T\x001", False),
+    ("surrogate", "T\ud800", False),
+    ("arabic-indic-digit", "T١", False),
+    ("space", "T 1", False),
+    ("newline", "T\n1", False),
+    ("none", None, False),
+    ("int", 1, False),
+    ("bytes", b"T1", False),
+    ("path", Path("T1"), False),
+)
+
+ATTEMPT_CASES = (
+    ("one", 1, True),
+    ("two", 2, True),
+    ("at-the-ceiling-minus-one", 999999999, True),
+    ("at-the-ceiling", 1000000000, False),
+    ("zero", 0, False),
+    ("negative", -1, False),
+    ("true", True, False),
+    ("false", False, False),
+    ("float", 1.0, False),
+    ("str", "1", False),
+    ("token", "attempt-001", False),
+    ("none", None, False),
+)
+
+
+class WorkerResultPathTotalityTests(unittest.TestCase):
+    """Every argument the call tree admits, answered or refused IN FAMILY.
+
+    The claim is totality, so the case list comes from the three screens the
+    function reaches and not from the shapes that happened to break it.
+    """
+
+    def _answer(self, run_dir, task_id, attempt):
+        try:
+            return ("path", state.worker_result_path(
+                run_dir, task_id=task_id, attempt=attempt))
+        except state.TrackerError as exc:
+            return ("refused", type(exc).__name__)
+
+    def test_every_run_directory_shape_is_answered_or_refused_in_family(self):
+        for label, run_dir, accepted in RUN_DIR_CASES:
+            with self.subTest(run_dir=label):
+                kind, value = self._answer(run_dir, "T1", 1)
+                self.assertEqual(kind, "path" if accepted else "refused")
+                if accepted:
+                    self.assertEqual(value.name, "attempt-001.md")
+
+    def test_every_task_id_shape_is_answered_or_refused_in_family(self):
+        for label, task_id, accepted in TASK_ID_CASES:
+            with self.subTest(task_id=label):
+                kind, value = self._answer("/r", task_id, 1)
+                self.assertEqual(kind, "path" if accepted else "refused")
+                if accepted:
+                    #: One segment, spelled exactly as it was handed in. A
+                    #: mangling would make the map non-injective.
+                    self.assertEqual(value.parent.name, task_id)
+                    self.assertEqual(
+                        value.parent.parent.name, state.AGENT_OUTPUT_DIRNAME)
+
+    def test_every_attempt_shape_is_answered_or_refused_in_family(self):
+        for label, attempt, accepted in ATTEMPT_CASES:
+            with self.subTest(attempt=label):
+                kind, value = self._answer("/r", "T1", attempt)
+                self.assertEqual(kind, "path" if accepted else "refused")
+                if accepted:
+                    self.assertEqual(
+                        value.name, f"{state._attempt_token(attempt)}.md")
+
+    def test_the_cross_product_never_leaves_the_exception_family(self):
+        """The three screens compose, and a screen hidden behind a short
+        circuit is a screen nobody runs. 8 x 25 x 12 = 2400 calls, of which
+        4 x 5 x 3 = 60 are the ones every screen admits."""
+        accepted = 0
+        for _, run_dir, run_ok in RUN_DIR_CASES:
+            for _, task_id, task_ok in TASK_ID_CASES:
+                for _, attempt, attempt_ok in ATTEMPT_CASES:
+                    kind, _value = self._answer(run_dir, task_id, attempt)
+                    expected = run_ok and task_ok and attempt_ok
+                    self.assertEqual(kind, "path" if expected else "refused")
+                    accepted += expected
+        self.assertEqual(accepted, 4 * 5 * 3)
+
+    def test_a_bool_attempt_is_refused_although_it_is_an_int(self):
+        """`isinstance(True, int)` is true and `True` renders as `attempt-001`,
+        so a controller that lost an attempt number and passed a flag would
+        publish attempt one under a name nothing reserved."""
+        with self.assertRaises(state.TrackerValidationError):
+            state.worker_result_path("/r", task_id="T1", attempt=True)
+
+
+class PublishWorkerResultTests(TempDirTestCase):
+    """The brief's six, kept verbatim in intent."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo, self.run_dir, _ = make_run(
+            self.tmp, three_disjoint_tasks(), worker_limit=6)
+
+    def test_writes_a_canonical_immutable_file(self):
+        relative = state.publish_worker_result(
+            self.run_dir, result=worker_result())
+        self.assertFalse(Path(relative).is_absolute())
+        self.assertIn(state.AGENT_OUTPUT_DIRNAME, relative)
+        published = self.repo / relative
+        self.assertTrue(published.is_file())
+        self.assertEqual(
+            state.parse_worker_result(published.read_text(encoding="utf-8")),
+            worker_result())
+
+    def test_content_digest_matches_what_publish_immutable_reported(self):
+        relative = state.publish_worker_result(
+            self.run_dir, result=worker_result())
+        expected = hashlib.sha256(
+            (self.repo / relative).read_bytes()).hexdigest()
+        rendered = state.render_worker_result(worker_result())
+        self.assertEqual(
+            hashlib.sha256(rendered.encode("utf-8")).hexdigest(), expected)
+
+    def test_is_idempotent_for_identical_content(self):
+        first = state.publish_worker_result(self.run_dir, result=worker_result())
+        before = name_state(self.repo / first)
+        second = state.publish_worker_result(self.run_dir, result=worker_result())
+        self.assertEqual(second, first)
+        #: The INODE is compared, not only the bytes. An unlink-and-recreate
+        #: satisfies every content check while breaking each hard link an audit
+        #: trail holds to the record.
+        self.assertEqual(name_state(self.repo / first), before)
+
+    def test_a_replay_into_a_directory_that_has_become_read_only_succeeds(self):
+        """A REPLAY READS; IT DOES NOT WRITE, and the early return is what
+        makes that true rather than incidental.
+
+        `_link_publish` states the requirement itself: "a controller that
+        crashed between the link and recording that it had linked must find its
+        own work on the retry, not a refusal it cannot act on". Falling through
+        to `publish_immutable` on a replay looks harmless -- it is inert for
+        identical bytes -- but it first CREATES a temporary file in the
+        record's own directory, so the retry needs write permission on a
+        directory the publication is not going to change. This is the one
+        observable that separates the early return from its removal, and
+        without it that mutant is equivalent.
+        """
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("root writes into a read-only directory")
+        first = state.publish_worker_result(self.run_dir, result=worker_result())
+        directory = (self.repo / first).parent
+        before = name_state(self.repo / first)
+        directory.chmod(0o555)
+        self.addCleanup(directory.chmod, 0o755)
+        self.assertEqual(
+            state.publish_worker_result(self.run_dir, result=worker_result()),
+            first)
+        self.assertEqual(name_state(self.repo / first), before)
+
+    def test_refuses_to_overwrite_conflicting_content(self):
+        relative = state.publish_worker_result(
+            self.run_dir, result=worker_result())
+        before = name_state(self.repo / relative)
+        with self.assertRaises(state.TrackerValidationError):
+            state.publish_worker_result(
+                self.run_dir, result=worker_result(concerns="changed my mind"))
+        self.assertEqual(name_state(self.repo / relative), before)
+
+    def test_validates_before_writing_anything(self):
+        with self.assertRaises(state.TrackerValidationError):
+            state.publish_worker_result(
+                self.run_dir,
+                result=quorum_result("NEEDS_CONTEXT", question_record="-"))
+        self.assertFalse(
+            (self.run_dir / state.AGENT_OUTPUT_DIRNAME).exists())
+
+    def test_a_second_attempt_is_a_second_record_not_an_overwrite(self):
+        first = state.publish_worker_result(
+            self.run_dir, result=worker_result(attempt=1))
+        second = state.publish_worker_result(
+            self.run_dir, result=worker_result(attempt=2))
+        self.assertNotEqual(first, second)
+        self.assertTrue((self.repo / first).is_file())
+        self.assertTrue((self.repo / second).is_file())
+
+    def test_a_result_naming_a_task_id_no_directory_can_hold_is_refused(self):
+        """`_TOKEN` admits `/`, `:`, `@` and `+`, so a plan may legally declare
+        a task id that cannot be one directory name. The refusal is loud and
+        happens before any write."""
+        with self.assertRaises(state.TrackerValidationError):
+            state.publish_worker_result(
+                self.run_dir, result=worker_result(task_id="T/1"))
+        self.assertFalse((self.run_dir / state.AGENT_OUTPUT_DIRNAME).exists())
+
+    def test_a_run_whose_tracker_is_not_ours_publishes_nothing(self):
+        """A read-only stop: an immutable record must not appear inside a
+        directory this skill has not established is its own."""
+        foreign = self.repo / "docs" / "superpowers" / "runs" / "foreign"
+        foreign.mkdir(parents=True)
+        (foreign / "progress.md").write_text(
+            "<!-- pipeline-run/v2 -->\n", encoding="utf-8")
+        with self.assertRaises(state.ForeignSchemaError):
+            state.publish_worker_result(foreign, result=worker_result())
+        self.assertEqual(
+            sorted(entry.name for entry in foreign.iterdir()), ["progress.md"])
+
+
+#: AXIS ONE OF THE CROSS-PRODUCT: every shape a name under `agent-output/` can
+#: have when publication reaches it. It is derived from the SCREEN, not from a
+#: list of mutants: `_require_regular_file` splits every name into "absent",
+#: "a regular file" and "corruption", and each of those three has more than one
+#: spelling on a POSIX filesystem. `is_file()` alone answers False for four of
+#: them and one of the four -- the FIFO -- does not fail an open, it blocks it.
+#:
+#: Each entry is (label, class, build). `build` is handed the target path and
+#: the two candidate documents' bytes.
+def _publication_shapes(euid_is_root: bool) -> tuple:
+    def regular(payload):
+        def build(path, first, second):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload(first, second))
+        return build
+
+    def link_to(payload):
+        def build(path, first, second):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            target = path.parent / "elsewhere.md"
+            target.write_bytes(payload(first, second))
+            path.symlink_to(target)
+        return build
+
+    def directory(entries):
+        def build(path, first, second):
+            path.mkdir(parents=True)
+            for name in entries:
+                (path / name).write_text("x", encoding="utf-8")
+        return build
+
+    def dangling(path, first, second):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(path.parent / "nowhere.md")
+
+    def loop(path, first, second):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        other = path.parent / "other.md"
+        path.symlink_to(other)
+        other.symlink_to(path)
+
+    def fifo(path, first, second):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(path)
+
+    def unreadable(path, first, second):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(first)
+        path.chmod(0o000)
+
+    def parent_is_a_file(path, first, second):
+        path.parent.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.write_text("not a directory\n", encoding="utf-8")
+
+    shapes = [
+        ("absent", "absent", lambda path, first, second: None),
+        ("identical-regular", "content", regular(lambda a, b: a)),
+        ("the-other-result", "content", regular(lambda a, b: b)),
+        ("foreign-bytes", "content", regular(lambda a, b: b"nothing to do\n")),
+        ("empty-regular", "content", regular(lambda a, b: b"")),
+        ("truncated", "content", regular(lambda a, b: a[:-1])),
+        ("one-byte-longer", "content", regular(lambda a, b: a + b"\n")),
+        #: A `read_text(encoding="utf-8")` pre-check raises `UnicodeDecodeError`
+        #: here, which is not a `TrackerError`, so the comparison is made on
+        #: BYTES.
+        ("invalid-utf8", "content", regular(lambda a, b: b"\xff\xfe\x00bad")),
+        ("symlink-to-identical", "content", link_to(lambda a, b: a)),
+        ("symlink-to-differing", "content", link_to(lambda a, b: b)),
+        ("directory", "corrupt", directory(())),
+        ("nonempty-directory", "corrupt", directory(("inside.md",))),
+        ("dangling-symlink", "corrupt", dangling),
+        ("symlink-loop", "corrupt", loop),
+        ("parent-is-a-file", "parent", parent_is_a_file),
+    ]
+    if hasattr(os, "mkfifo"):
+        shapes.append(("fifo", "corrupt", fifo))
+    if not euid_is_root:
+        shapes.append(("unreadable-regular", "unreadable", unreadable))
+    return tuple(shapes)
+
+
+class PublishedNameCrossProductTests(TempDirTestCase):
+    """AXIS ONE x AXIS TWO: every shape a name can have, crossed with the two
+    relations a request can stand in to it -- a replay of what is there, and
+    conflicting evidence about it.
+
+    A corpus built from known mutants proves only that those mutants die. This
+    one is generated from the structure being screened: the three answers
+    `_require_regular_file` can give, spelled out over the filesystem, crossed
+    with the two answers the byte comparison can give.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo, self.run_dir, _ = make_run(
+            self.tmp, three_disjoint_tasks(), worker_limit=6)
+        self.shapes = _publication_shapes(
+            hasattr(os, "geteuid") and os.geteuid() == 0)
+
+    def test_every_shape_crossed_with_every_request(self):
+        cells = 0
+        for index, (label, kind, build) in enumerate(self.shapes):
+            for offset, concerns in enumerate(("-", "changed my mind")):
+                task_id = f"c{index:02d}{offset}"
+                first = state.render_worker_result(
+                    worker_result(task_id=task_id)).encode("utf-8")
+                second = state.render_worker_result(
+                    worker_result(task_id=task_id,
+                                  concerns="changed my mind")).encode("utf-8")
+                requested = worker_result(task_id=task_id, concerns=concerns)
+                rendered = state.render_worker_result(requested).encode("utf-8")
+                path = state.worker_result_path(
+                    self.run_dir, task_id=task_id, attempt=1)
+                build(path, first, second)
+                before = name_state(path)
+                with self.subTest(shape=label, concerns=concerns):
+                    cells += 1
+                    self._assert_cell(kind, path, requested, rendered, before)
+        self.assertEqual(cells, len(self.shapes) * 2)
+
+    def _assert_cell(self, kind, path, requested, rendered, before):
+        expected = kind
+        if kind == "content":
+            #: The bytes THE NAME RESOLVES TO decide it, which is how the two
+            #: symlink shapes are covered without a rule of their own.
+            expected = ("replay" if path.read_bytes() == rendered
+                        else "conflict")
+        if expected == "absent":
+            with publication_deadline(10, "publish_worker_result"):
+                relative = state.publish_worker_result(
+                    self.run_dir, result=requested)
+            self.assertEqual((self.repo / relative).read_bytes(), rendered)
+            return
+        if expected == "replay":
+            with publication_deadline(10, "publish_worker_result"):
+                relative = state.publish_worker_result(
+                    self.run_dir, result=requested)
+            self.assertEqual((self.repo / relative).read_bytes(), rendered)
+            self.assertEqual(name_state(path), before)
+            return
+        error = {
+            "conflict": state.TrackerValidationError,
+            "corrupt": state.QuorumSchemaInvalid,
+            "unreadable": state.TrackerValidationError,
+            "parent": state.TrackerWriteError,
+        }[expected]
+        with publication_deadline(10, "publish_worker_result"):
+            with self.assertRaises(error):
+                state.publish_worker_result(self.run_dir, result=requested)
+        self.assertEqual(name_state(path), before)
+
+    def test_a_fifo_under_the_tree_does_not_hang_the_run(self):
+        """The C1 shape, on its own, with its own deadline. `is_file()` is
+        False for a FIFO, so an existence test reads it as absence; the read
+        that follows blocks for ever under the run lock."""
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("no mkfifo on this platform")
+        path = state.worker_result_path(self.run_dir, task_id="T1", attempt=1)
+        path.parent.mkdir(parents=True)
+        os.mkfifo(path)
+        with publication_deadline(10, "publish_worker_result"):
+            with self.assertRaises(state.QuorumSchemaInvalid):
+                state.publish_worker_result(self.run_dir, result=worker_result())
+
+    def test_an_invalid_utf8_neighbour_is_refused_inside_the_family(self):
+        """A `read_text` pre-check raises `UnicodeDecodeError`, which is a
+        `ValueError` and not a `TrackerError`, so a controller branching on the
+        family never sees it."""
+        path = state.worker_result_path(self.run_dir, task_id="T1", attempt=1)
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"\xff\xfe\x00not utf 8")
+        with self.assertRaises(state.TrackerValidationError):
+            state.publish_worker_result(self.run_dir, result=worker_result())
+        self.assertEqual(path.read_bytes(), b"\xff\xfe\x00not utf 8")
+
+
+class PublishedPathCitabilityTests(TempDirTestCase):
+    """What Task 10 must be able to DO with the string this returns.
+
+    `_digest_reference` is the grammar every bound reference in this module is
+    held to: `<repository-relative-path>#sha256=<64 lowercase hex>`, with the
+    path through `_safe_relative` and `#` refused inside it. So the returned
+    spelling is screened against exactly that, BEFORE anything is written --
+    a run directory that cannot be cited must not gain an immutable record
+    nothing can bind a digest to.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = make_repo(self.tmp)
+
+    def test_the_returned_path_is_a_legal_digest_reference_subject(self):
+        run_dir = make_run_in(self.repo, "docs/superpowers/runs/run-1")
+        relative = state.publish_worker_result(run_dir, result=worker_result())
+        digest = hashlib.sha256((self.repo / relative).read_bytes()).hexdigest()
+        self.assertEqual(
+            state._digest_reference(f"{relative}#sha256={digest}",
+                                    field="result"),
+            (relative, digest))
+
+    def test_a_run_directory_carrying_a_hash_is_refused_before_any_write(self):
+        """`#` is the delimiter of a bound reference. A path carrying one gives
+        `docs/a#sha256=<64 hex>.md#sha256=<64 hex>` two plausible readings, and
+        `_digest_reference` refuses it rather than picking a side."""
+        run_dir = make_run_in(self.repo, "runs/run#1")
+        with self.assertRaises(state.TrackerValidationError):
+            state.publish_worker_result(run_dir, result=worker_result())
+        self.assertFalse((run_dir / state.AGENT_OUTPUT_DIRNAME).exists())
+
+    def test_a_run_directory_carrying_a_glob_is_refused_before_any_write(self):
+        run_dir = make_run_in(self.repo, "runs/run*1", import_plan=False)
+        with self.assertRaises(state.TrackerValidationError):
+            state.publish_worker_result(run_dir, result=worker_result())
+        self.assertFalse((run_dir / state.AGENT_OUTPUT_DIRNAME).exists())
+
+    def test_a_run_outside_the_recorded_repository_root_is_refused(self):
+        """The root is the one RECORDED AT INIT and read back with
+        `repo_root(tracker)`; it is never derived from `run_dir` depth. A run
+        directory outside it has no repository-relative spelling, so there is
+        nothing a later phase could cite."""
+        outside = self.tmp / "outside" / "run-1"
+        outside.mkdir(parents=True)
+        state.initialize_run(
+            outside, run_id="run-1",
+            base_commit=git(self.repo, "rev-parse", "HEAD"),
+            target_branch="target", worker_limit=6, repo_root=str(self.repo))
+        with self.assertRaises(state.TrackerValidationError):
+            state.publish_worker_result(outside, result=worker_result())
+        self.assertFalse((outside / state.AGENT_OUTPUT_DIRNAME).exists())
+
+    def test_a_run_directory_that_cannot_be_resolved_is_refused_in_family(self):
+        """A NUL and a lone surrogate both raise out of `Path.resolve` --
+        `ValueError` and `UnicodeEncodeError`, the second a `ValueError`
+        subclass -- and `pathlib` swallows neither. An unresolvable name is
+        never reported as a name outside the repository; it is its own stop."""
+        run_dir = make_run_in(self.repo, "docs/superpowers/runs/run-1")
+        for label, spelling in (("nul", f"{run_dir}\x00x"),
+                                ("surrogate", f"{run_dir}\ud800")):
+            with self.subTest(spelling=label):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.publish_worker_result(
+                        spelling, result=worker_result())
+
+    def test_a_run_directory_with_a_space_still_publishes(self):
+        """A space is legal in a tracker cell -- `_cell_safe` refuses only
+        SURROUNDING whitespace -- so it must not be swept up by the screens
+        above. A refusal here would be a screen wider than the grammar it
+        claims to enforce."""
+        run_dir = make_run_in(self.repo, "runs/with a space/run-1")
+        relative = state.publish_worker_result(run_dir, result=worker_result())
+        self.assertEqual(
+            relative,
+            f"runs/with a space/run-1/{state.AGENT_OUTPUT_DIRNAME}"
+            "/T1/attempt-001.md")
+        self.assertTrue((self.repo / relative).is_file())
+
+
+class PublishedDigestBindingTests(TempDirTestCase):
+    """The digest is the identity, so it is compared against the BYTES ON DISK.
+
+    THE BRIEF'S STEP-3 CHECK IS VACUOUS. It compares `publish_immutable`'s
+    return value against `sha256(content)`, and `publish_immutable`'s whole
+    body is `return sha256(content)` -- the two are equal for every input, in
+    every branch, so the screen can never fire and the prose above it ('the
+    digest comparison proves the bytes on disk are the bytes that were
+    validated') describes a comparison the code does not make. The bytes on
+    disk are the other operand.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo, self.run_dir, _ = make_run(
+            self.tmp, three_disjoint_tasks(), worker_limit=6)
+
+    def test_the_bytes_on_disk_are_the_bytes_that_were_validated(self):
+        relative = state.publish_worker_result(
+            self.run_dir, result=worker_result())
+        on_disk = (self.repo / relative).read_bytes()
+        self.assertEqual(
+            on_disk,
+            state.render_worker_result(worker_result()).encode("utf-8"))
+        self.assertEqual(state.parse_worker_result(on_disk.decode("utf-8")),
+                         worker_result())
+
+    def test_a_publisher_that_wrote_other_bytes_is_caught(self):
+        """The screen's own domain. `publish_immutable` is P02's and may be
+        changed by P02; what this function promises is that the record it
+        returns a path to holds the document it validated."""
+        real = state.publish_immutable
+
+        def wrong(path, content):
+            return real(path, content + "a line nobody validated\n")
+
+        with mock.patch.object(state, "publish_immutable", wrong):
+            with self.assertRaises(state.TrackerValidationError):
+                state.publish_worker_result(
+                    self.run_dir, result=worker_result())
+
+    def test_a_publisher_that_reported_a_digest_for_other_bytes_is_caught(self):
+        """The digest is the record's identity. One that does not hash the
+        bytes on disk binds every later phase to a comparison that can only
+        fail, and it fails at the phase that CITES the record rather than at
+        the one that wrote it."""
+        real = state.publish_immutable
+
+        def lying(path, content):
+            real(path, content)
+            return "0" * 64
+
+        with mock.patch.object(state, "publish_immutable", lying):
+            with self.assertRaises(state.TrackerValidationError):
+                state.publish_worker_result(
+                    self.run_dir, result=worker_result())
+
+    def test_a_publisher_that_wrote_nothing_is_caught(self):
+        """A digest returned for a record that is not there binds a later
+        phase to a file it can never read."""
+        with mock.patch.object(
+                state, "publish_immutable",
+                lambda path, content: hashlib.sha256(
+                    content.encode("utf-8")).hexdigest()):
+            with self.assertRaises(state.TrackerValidationError):
+                state.publish_worker_result(
+                    self.run_dir, result=worker_result())
+
+    def test_the_owner_line_p06_scans_for_survives_publication(self):
+        """The cross-phase contract, end to end: what is written into
+        `agent-output/` carries the line P06's `owner_history` reads with
+        `startswith(_OWNER_LINE_PREFIX)`, and it names the owner cell."""
+        relative = state.publish_worker_result(
+            self.run_dir, result=worker_result(owner="impl-7"))
+        lines = (self.repo / relative).read_text(
+            encoding="utf-8").splitlines()
+        owners = [line[len(state._OWNER_LINE_PREFIX):] for line in lines
+                  if line.startswith(state._OWNER_LINE_PREFIX)]
+        self.assertEqual(owners, ["impl-7"])
+
+    def test_the_published_tree_is_the_one_p06_scans(self):
+        """`rglob("*.md")` from `<run_dir>/agent-output` finds every published
+        result, which is what makes the released-worker case visible at all."""
+        for attempt, owner in ((1, "impl-1"), (2, "impl-2")):
+            state.publish_worker_result(
+                self.run_dir,
+                result=worker_result(attempt=attempt, owner=owner))
+        found = sorted(
+            path.relative_to(self.run_dir / state.AGENT_OUTPUT_DIRNAME).as_posix()
+            for path in (self.run_dir / state.AGENT_OUTPUT_DIRNAME).rglob("*.md"))
+        self.assertEqual(found, ["T1/attempt-001.md", "T1/attempt-002.md"])
+
+#: THE ALPHABET THE DIVERGENCE IS MEASURED OVER, chosen so every character
+#: class either screen can disagree about is represented: ASCII alphanumerics,
+#: every character `_TOKEN` admits beyond them, the separators a cell breaks
+#: on, a NUL, a lone surrogate, a non-ASCII decimal digit (`isdigit` is true of
+#: it and `int()` accepts it), a superscript, a Latin letter with an accent,
+#: and two glob characters.
+DIVERGENCE_ALPHABET = (
+    "a", "Z", "0", ".", "_", "-", "/", "@", ":", "+",
+    " ", "\t", "\n", " ", "\x00", "\ud800",
+    "١", "³", "é", "#", "*",
+)
+
+#: `_TOKEN` and `_PATH_SEGMENT` as PATTERNS, so the hand-rolled screens can be
+#: measured against the thing the plans were written in. The module may not
+#: import `re`; this file may, and that asymmetry is the only way the
+#: translation can be checked rather than asserted.
+TOKEN_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._/@:+\-]*"
+SEGMENT_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._\-]*"
+
+
+def divergence_corpus() -> tuple:
+    """Every string of length 1..3 over the alphabet, plus the length cases.
+
+    EXHAUSTIVE OVER SHORT STRINGS rather than randomly sampled: the screens
+    are character classes with a head rule, so every disagreement either shows
+    up within three characters or is a length or trailing-character rule, and
+    those are added by name.
+    """
+    cases = []
+    for width in (1, 2, 3):
+        cases.extend("".join(combination) for combination
+                     in itertools.product(DIVERGENCE_ALPHABET, repeat=width))
+    cases.extend(("", "a" * 63, "a" * 64, "a" * 65, "a" * 200,
+                  "a" * 63 + ".", "a" * 64 + "."))
+    return tuple(cases)
+
+
+class PathSegmentGrammarDivergenceTests(unittest.TestCase):
+    """The hand-rolled screens against the patterns the plans were written in.
+
+    The module may not import `re`, so every grammar in it is a translation,
+    and a translation is a claim to MEASURE in both directions rather than a
+    transcription. Task 9 introduces no new pattern: it reuses P02's `_TOKEN`
+    and aliases P03's `_OWNER`. What it does introduce is a deliberate
+    TIGHTENING -- a task id that reaches a path is held to the narrower of the
+    two -- and the divergence between them is the thing this class writes down.
+    """
+
+    def test_p02s_token_agrees_with_the_pattern_in_both_directions(self):
+        pattern = re.compile(TOKEN_PATTERN)
+        disagreements = [
+            value for value in divergence_corpus()
+            if bool(pattern.fullmatch(value)) != bool(state._TOKEN.fullmatch(value))]
+        self.assertEqual(disagreements, [])
+
+    def test_the_segment_screen_agrees_with_its_pattern_plus_two_rules(self):
+        """`_OWNER` is a `_CharClass` with two rules bolted on, so the pattern
+        it is measured against carries them: a 64-character bound, because an
+        unbounded id passes every check here and fails inside
+        `publish_immutable` with ENAMETOOLONG; and no trailing dot, because
+        the name becomes a filename on a filesystem this module may not be
+        running on."""
+        pattern = re.compile(SEGMENT_PATTERN)
+        disagreements = [
+            value for value in divergence_corpus()
+            if (bool(pattern.fullmatch(value)) and len(value) <= 64
+                and not value.endswith("."))
+            != bool(state._PATH_SEGMENT.fullmatch(value))]
+        self.assertEqual(disagreements, [])
+
+    def test_the_tightening_is_one_directional(self):
+        """Every id that may become a directory name is an id a plan may
+        declare. The reverse is what this task refuses, and a screen that
+        admitted something `_TOKEN` does not would be a widening nobody asked
+        for."""
+        widenings = [value for value in divergence_corpus()
+                     if state._PATH_SEGMENT.fullmatch(value)
+                     and not state._TOKEN.fullmatch(value)]
+        self.assertEqual(widenings, [])
+
+    def test_every_disagreement_has_exactly_one_of_three_named_reasons(self):
+        """The divergence table, executable. A disagreement with no reason on
+        this list is a screen doing something nobody wrote down."""
+        def reason(value: str) -> str:
+            if any(character in value for character in "/@:+"):
+                return "carries a separator a path or a Windows filename cannot hold"
+            if value.endswith("."):
+                return "a trailing dot is dropped by some filesystems"
+            if len(value) > 64:
+                return "past the bound that keeps ENAMETOOLONG out of reach"
+            return "UNEXPLAINED"
+
+        reasons = {}
+        for value in divergence_corpus():
+            if bool(state._TOKEN.fullmatch(value)) != bool(
+                    state._PATH_SEGMENT.fullmatch(value)):
+                reasons.setdefault(reason(value), []).append(value)
+        self.assertNotIn("UNEXPLAINED", reasons)
+        self.assertEqual(
+            sorted(reasons),
+            ["a trailing dot is dropped by some filesystems",
+             "carries a separator a path or a Windows filename cannot hold",
+             "past the bound that keeps ENAMETOOLONG out of reach"])
+        #: The counts are the table. They are asserted so a later widening of
+        #: either grammar shows up here as a number rather than as silence.
+        self.assertEqual(
+            {name: len(values) for name, values in reasons.items()},
+            {"carries a separator a path or a Windows filename cannot hold": 204,
+             "a trailing dot is dropped by some filesystems": 23,
+             "past the bound that keeps ENAMETOOLONG out of reach": 2})
+
+    def test_the_ascii_reading_is_the_tightening_both_screens_intend(self):
+        """`\\d` and `\\w` are Unicode by default and `str.isdigit` is wider
+        still: `int('\\u0661')` is 1. Both screens are ASCII character sets, so
+        an id spelled in Arabic-Indic digits is refused by both -- which is the
+        intended reading and is measured rather than assumed."""
+        for value in ("١", "T١", "³", "Té", "é"):
+            with self.subTest(value=value):
+                self.assertFalse(state._TOKEN.fullmatch(value))
+                self.assertFalse(state._PATH_SEGMENT.fullmatch(value))
+                self.assertTrue(re.compile(r"\w+").fullmatch(value)
+                                or not value.isalnum())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -14941,3 +14941,271 @@ def reserved_baseline(row, *, attempt) -> str:
             f"{token}, which is not one 40-character object name; a symbolic "
             "end resolves somewhere else tomorrow")
     return found[0]
+
+
+# ---------------------------------------------------------------------------
+# P04 Task 9: immutable worker-result publication.
+#
+# The one helper a worker may call. Publication is ATOMIC and NO-CLOBBER:
+# republishing byte-identical content is an idempotent no-op, and any other
+# content at the same path is conflicting evidence rather than an update.
+# ---------------------------------------------------------------------------
+
+#: THE TREE, AND IT IS A CROSS-PHASE CONTRACT rather than a local naming
+#: choice. P06's ``owner_history`` scans ``<run_dir>/agent-output/**/*.md`` for
+#: owners the tracker no longer names and decides master-reviewer independence
+#: on what it finds; P07 publishes the same tree in ``SKILL.md`` as the run
+#: layout a user reads. Pointed at a directory nobody writes, that scan
+#: contributes the EMPTY SET and ``owner_history`` returns only the owners it
+#: already had from tracker rows -- a fail-open in the one direction the check
+#: exists to close, because a worker released after finishing a task can then
+#: be drawn to review its own work. The name is therefore a constant P06 and
+#: P07 CITE, exactly as ``_OWNER_LINE_PREFIX`` is the constant they cite for
+#: the owner line, and for the identical reason: a second spelling of a
+#: cross-phase contract is two answers to one question, and the one that goes
+#: stale is silent.
+AGENT_OUTPUT_DIRNAME = "agent-output"
+
+#: THE GRAMMAR FOR AN ID THAT BECOMES A NAME ON A FILESYSTEM, ALIASED rather
+#: than re-typed. ``_validate_assignment`` already states the whole argument
+#: for the owner: ``_TOKEN`` "would admit ``/``, ``:``, ``@`` and ``+`` into a
+#: name that becomes a path, and a trailing dot into one that becomes a
+#: filename." A task id that becomes a DIRECTORY name raises exactly that
+#: question, so it gets exactly that answer, and a second ``_CharClass``
+#: written beside it would be two grammars that can drift.
+_PATH_SEGMENT = _OWNER
+
+
+def worker_result_path(run_dir, *, task_id, attempt) -> Path:
+    """Where attempt ``attempt`` of ``task_id`` publishes its one result.
+
+    THE MAP FROM (task, attempt) TO A PATH IS INJECTIVE, and that is the whole
+    design constraint, because the file at the far end of it is an immutable
+    record whose identity is the sha256 of its bytes. Two task ids that share a
+    path produce one of two wrong answers: the second task to publish is
+    refused as "conflicting evidence" about a record it never wrote, or -- if
+    the two happened to render the same bytes -- accepted as an idempotent
+    replay of one. Neither is recoverable from the file, because the file no
+    longer says which task it belongs to.
+
+    SO A TASK ID THAT IS NOT ONE PATH SEGMENT IS REFUSED, NOT MANGLED. A
+    ``task_id.replace("/", "-")`` is the mangling, and it is not injective:
+    ``T/1`` and ``T-1`` are two tasks and one directory. ``_TOKEN`` -- which is
+    all the plan grammar and ``_validate_assignment`` hold a task id to --
+    ADMITS ``/``, ``:``, ``@``, ``+`` and a trailing dot, so a plan may legally
+    declare an id no directory can hold; the refusal is loud, it happens before
+    any write, and it names the characters. Refusing it earlier, at
+    ``_parse_task_metadata``, would be better still and is deliberately NOT
+    done here: that screen belongs to the plan grammar and widening it is a
+    change to what a plan may say, which is Task 2's contract and not this
+    task's.
+
+    THE ATTEMPT IS SPELLED BY ``_attempt_token`` AND BY NOTHING ELSE. An
+    ``f"attempt-{attempt}.md"`` written here is a second spelling of a
+    conversion that documents itself as the single point of one, and the two
+    disagree on every input -- ``attempt-1`` against ``attempt-001``. That is
+    fault F6 arriving through arithmetic, in the name of the very file whose
+    identity the comparison is about. ``_attempt_token`` is also the screen: it
+    refuses zero, a negative, a bool and an attempt too wide to spell.
+
+    ``_run_path`` RATHER THAN ``Path(run_dir)``: ``Path(5)`` raises
+    ``TypeError``, which is outside ``TrackerError`` and escapes every handler
+    a controller has written.
+    """
+    if not isinstance(task_id, str) or not _PATH_SEGMENT.fullmatch(task_id):
+        raise TrackerValidationError(
+            f"task id {task_id!r} cannot be one directory name: it must be an "
+            f"alphanumeric then alphanumerics, dots, underscores and hyphens, "
+            f"at most {_OWNER_MAX} characters, with no trailing dot. _TOKEN "
+            "admits '/', ':', '@' and '+' and a task id is only held to "
+            "_TOKEN, so an id carrying one reaches here -- and mangling it "
+            "into a legal name maps two task ids onto one immutable record")
+    return (_run_path(run_dir) / AGENT_OUTPUT_DIRNAME / task_id
+            / f"{_attempt_token(attempt)}.md")
+
+
+def _published_result_bytes(path: Path):
+    """The bytes already published at ``path``, or ``None`` if nothing is.
+
+    ``_require_regular_file`` RATHER THAN ``path.exists()``, and the difference
+    is a hang rather than a wrong answer. ``exists()`` and ``is_file()`` are
+    both False for a DIRECTORY, a dangling symlink, a symlink LOOP and a FIFO,
+    and false for a NUL-bearing name as well -- CPython swallows the
+    ``ValueError``. Three of those five fail an open loudly; the FIFO does not.
+    Opening one for reading BLOCKS until a writer arrives, and on a name under
+    a run directory no writer is ever coming, so an unattended controller stops
+    dead holding the run lock, with no diagnostic and no timeout. The shape is
+    therefore asked before the open rather than discovered by it, through the
+    module's one door.
+
+    ``read_bytes`` RATHER THAN ``read_text(encoding="utf-8")``. A file at this
+    name whose bytes are not valid UTF-8 raises ``UnicodeDecodeError`` out of
+    the text reader -- a ``ValueError``, not a ``TrackerError`` -- so a
+    controller branching on the family never sees it. Bytes are also the right
+    comparison: the record's identity is the sha256 of its bytes, and two byte
+    strings that decode to one string are still two records.
+
+    THE ABSENCE SPLIT IS ``_require_regular_file``'s OWN, one level down.
+    ``FileNotFoundError`` and ``NotADirectoryError`` are the two spellings of
+    "not there" -- the second is what a read reports when a PARENT component is
+    a regular file -- and the door already folds exactly those two into
+    absence. Every other ``OSError`` is a name this run cannot establish
+    anything about, and an unestablished name is never published over.
+    """
+    _require_regular_file(path, "a published worker result")
+    try:
+        return path.read_bytes()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        raise TrackerValidationError(
+            f"the worker result already at {str(path)!r} cannot be read "
+            f"({type(exc).__name__}: {exc}), so whether this publication would "
+            "be a replay or a second document under one identity is unknown -- "
+            "and an immutable record is never written over an unknown one"
+        ) from exc
+
+
+def _citable_repo_relative(resolved_run: Path, root: Path, inside: str) -> str:
+    """The repository-relative spelling of a published record, or a stop.
+
+    WHAT THIS RETURNS IS WHAT A LATER PHASE MUST BE ABLE TO CITE, so it is
+    screened against the grammar that will hold it rather than merely computed.
+    ``_digest_reference`` is that grammar -- ``<repository-relative-path>``
+    ``#sha256=<64 lowercase hex>`` -- and it puts the path through
+    ``_safe_relative`` and refuses ``#`` inside it, because
+    ``docs/a#sha256=<hex>.md#sha256=<hex>`` has two plausible readings and the
+    module counts the delimiter once rather than picking a side. A run
+    directory spelled with a ``#``, a glob character, a backslash or anything a
+    tracker cell cannot carry therefore produces a record nothing can bind a
+    digest to -- so it is refused BEFORE the record exists, rather than
+    discovered by Task 10 after an immutable file is already on disk.
+
+    IT IS THE RUN DIRECTORY THAT IS RESOLVED, AND THE RECORD'S OWN SEGMENTS
+    ARE APPENDED LEXICALLY. Resolving the record's full path would follow a
+    symlink at the record's own name and answer with what the link POINTS AT:
+    a link to a file outside the repository would be reported as a record
+    outside the repository, when the name this run publishes is plainly inside
+    it, and a symlink LOOP at that name would be reported as an unspellable
+    path rather than as the corruption it is. What a later phase cites is the
+    NAME, and the name is ``<run>/agent-output/<task>/<attempt>.md``.
+    ``inside`` is taken from the built path rather than reassembled here, so
+    the layout has one statement -- ``worker_result_path``'s.
+
+    THE ROOT IS THE ONE RECORDED AT INIT, read back through ``repo_root``. It
+    is never derived from ``run_dir`` depth, which is the rule the whole phase
+    is held to.
+    """
+    try:
+        relative = f"{resolved_run.relative_to(root).as_posix()}/{inside}"
+    except ValueError as exc:
+        raise TrackerValidationError(
+            f"the run directory {str(resolved_run)!r} is not inside the "
+            f"recorded repository root {str(root)!r}, so a worker result "
+            "published in it has no repository-relative spelling and no later "
+            "phase could cite it") from exc
+    if _DIGEST_DELIMITER[0] in relative:
+        raise TrackerValidationError(
+            f"the worker result path {relative!r} carries "
+            f"{_DIGEST_DELIMITER[0]!r}, which is the delimiter of a bound "
+            f"reference: {relative}{_DIGEST_DELIMITER}<digest> has two "
+            "readings, and a reference whose path half is ambiguous binds a "
+            "digest to whichever of the two the reader happened to take")
+    try:
+        _safe_relative(relative)
+    except PlanMetadataError as exc:
+        raise TrackerValidationError(
+            f"the worker result path {relative!r} is not a repository-relative "
+            f"path a later phase can cite or a tracker cell can hold: {exc}"
+        ) from exc
+    return relative
+
+
+def publish_worker_result(run_dir, *, result: dict) -> str:
+    """Publish one immutable attempt result; return its repository-relative path.
+
+    THE ORDER IS THE CONTRACT. Everything that can refuse runs before anything
+    is written, so a refusal leaves the run directory byte-identical: the
+    result is rendered (which validates it), the name is built, the name is
+    resolved, the run is validated, and the spelling a later phase will cite is
+    screened. Only then is a byte written. ``validate_run`` LAST of the
+    refusals and not first, because a run directory whose own name cannot be
+    resolved must be told so -- reporting it as "missing progress.md", which is
+    what ``validate_run`` says for a NUL-bearing path because ``is_file()``
+    answers False for one, sends a reader to inspect a tracker that is fine.
+
+    THE PRE-CHECK IS WHAT SEPARATES A REPLAY FROM CONFLICTING EVIDENCE.
+    ``publish_immutable`` already refuses to clobber, and it already treats
+    identical bytes as inert -- but it reports the conflict as a
+    ``TrackerWriteError``, which is the family for "the write did not happen",
+    and this one did not fail to write: it found a different answer already
+    recorded under the same identity. That is a validation fact and it is
+    raised as one. Reading first is also what keeps the FIFO out of
+    ``_link_publish``'s own ``path.read_bytes()``, which runs under the run
+    lock with nothing bounding it.
+
+    THE DIGEST IS COMPARED AGAINST THE BYTES ON DISK, which is the only
+    comparison that says anything. ``publish_immutable`` returns
+    ``sha256(content)`` and its body is that expression, so checking its return
+    value against ``sha256(content)`` compares a value with itself: a screen
+    that cannot fire, under prose claiming the bytes on disk were checked. The
+    other operand is the file. Both screens below are contract assertions
+    across a phase boundary -- P02 owns the publisher and may change it -- in
+    the same category as ``_screen_owner_line``, which the canonical re-render
+    also dominates and which Task 4 kept for the same reason: the caller of
+    this function is handed a path and a promise about what is at it.
+    """
+    content = render_worker_result(result)
+    #: ``result[...]`` is safe only because the render above is total and has
+    #: already refused a non-mapping, a missing key and a non-string id.
+    path = worker_result_path(
+        run_dir, task_id=result["task_id"], attempt=result["attempt"])
+    home = _run_path(run_dir)
+    try:
+        resolved_run = home.resolve()
+    except (ValueError, OSError, RuntimeError) as exc:
+        #: A NUL raises ``ValueError`` and a lone surrogate
+        #: ``UnicodeEncodeError`` -- a ``ValueError`` subclass -- and
+        #: ``pathlib`` swallows neither here, while ``is_file()`` swallows both
+        #: and answers "absent", which is how a NUL would otherwise reach
+        #: ``validate_run`` and be reported as a missing tracker. A symlink
+        #: loop raises ``RuntimeError``, which is not a ``TrackerError`` at all.
+        raise TrackerValidationError(
+            f"the run directory {str(home)!r} cannot be resolved "
+            f"({type(exc).__name__}: {exc}); a run this module cannot locate "
+            "is not a run known to be empty, and nothing is published into one"
+        ) from exc
+    relative = _citable_repo_relative(
+        resolved_run, _repo_dir(validate_run(run_dir)),
+        path.relative_to(home).as_posix())
+
+    data = content.encode("utf-8")
+    published = _published_result_bytes(path)
+    if published is not None:
+        if published != data:
+            raise TrackerValidationError(
+                f"a conflicting immutable result already exists at "
+                f"{str(path)!r}: {len(published)} bytes are recorded under this "
+                f"run, task and attempt and this publication renders "
+                f"{len(data)}. A second answer under one identity is "
+                "conflicting evidence to be reconciled, never an update -- "
+                "which of the two is the real one is not a question a writer "
+                "gets to settle by writing again")
+        return relative
+
+    digest = publish_immutable(path, content)
+    written = _published_result_bytes(path)
+    if written != data:
+        raise TrackerValidationError(
+            f"the bytes now at {str(path)!r} are not the bytes that were "
+            "validated; the record a later phase will read is not the document "
+            "this call screened, so the path returned would be a promise about "
+            "a file nobody checked")
+    if hashlib.sha256(written).hexdigest() != digest:
+        raise TrackerValidationError(
+            f"publish_immutable reported {digest!r} for {str(path)!r}, whose "
+            f"bytes hash to {hashlib.sha256(written).hexdigest()!r}; the digest "
+            "IS the record's identity, and one that does not hash the file "
+            "fails at the phase that cites the record rather than at the one "
+            "that wrote it")
+    return relative

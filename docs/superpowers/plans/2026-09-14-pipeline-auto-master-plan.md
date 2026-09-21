@@ -530,11 +530,44 @@ subdirectory**, so a path outside the declared scope can be reported as a
 relative path that falls inside it. The one-token fix is `--no-relative` on
 every changed-path command, alongside `--no-renames`.
 
-The general rule, since this is twice now: **a changed-path command must pin
-every git config that can alter how a path is spelled or whether it appears at
-all.** Rename detection and relative paths are two; treat the next one as
-likely rather than surprising, and prefer explicitly disabling a behaviour over
-relying on its default.
+**The rule, now at four instances and WIDENED once because the first phrasing
+missed one: a changed-path command must neutralise everything IN THE
+REPOSITORY that can alter how a path is spelled or whether it appears at
+all — not merely every git *config*.**
+
+| # | Mechanism | Needs a config edit? | Latent or live |
+| --- | --- | --- | --- |
+| 1 | rename detection (`--no-renames`) | no, it is the default | live |
+| 2 | `diff.relative` (`--no-relative`) | yes | latent |
+| 3 | `diff.ignoreSubmodules=all` (`--ignore-submodules=none`) | yes | **live** |
+| 4 | **`refs/replace/`** (`--no-replace-objects`) | **NO** | **live** |
+
+The fourth is the reason the rule had to be widened, and it is the worst.
+`core.useReplaceRefs` defaults to `true`, and `git replace -f <tip> <decoy>`
+needs no config edit at all — **a replace ref is not a config**, which is
+exactly why the rule as first written did not catch it. Measured end to end
+through the module's own emitted argv, on a real repository:
+
+```
+as emitted:              '\x0010bf86e8… 3050a01a…\n\nmine/a.py\n'
+                         *** ACCEPTED ***  attested#sha256=a6517f00…
++ --no-replace-objects:   '…\n\nmine/a.py\ntheirs/secret.py\n'
+                         REFUSED: changed paths outside its approved write scope
+ground truth:            mine/a.py   theirs/secret.py
+```
+
+It defeats more than the rename bypass did: `%H %P` still print the **real**
+commit and parent, so the chain walk, the distinctness screen, the baseline
+anchor and the head check are all satisfied by genuine history. Only the path
+list is substituted. Every structural defence passes and the scope check is
+handed a lie.
+
+(`.git/info/grafts` was also tried and is inert.)
+
+Treat the fifth as likely rather than surprising, prefer explicitly disabling a
+behaviour over relying on its default, and when a defence is stated as a rule,
+**check the rule's own wording is not narrower than the hazard** — "config"
+was.
 
 ### Third instance, found by applying the rule: `diff.ignoreSubmodules`
 

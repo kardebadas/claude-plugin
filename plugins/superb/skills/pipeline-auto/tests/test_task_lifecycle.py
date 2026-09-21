@@ -1565,15 +1565,56 @@ class TaskFieldValueTests(PlanFileTestCase):
                         + task_suite_line(value if field == "id" else "T1")
                         + "\n", name="token.md")
 
-    def test_a_task_id_may_carry_every_character_the_token_grammar_allows(self):
-        """The ACCEPT half, and a guard on ``_TOKEN`` itself: ``@``, ``:``,
-        ``+``, ``/``, ``.`` and ``-`` are all inside P02's grammar, so a P04
-        block that narrowed the token to ``[A-Za-z0-9-]`` would fail here."""
-        for task_id in ("T1", "T-1", "T.1", "T_1", "p04/t2", "a@b", "a:b",
-                        "a+b"):
-            with self.subTest(task_id=task_id):
+    def test_a_task_id_is_held_to_the_task_id_grammar_and_not_to_the_token(self):
+        """THE RULING. A task id is written into a branch name and into the
+        directory its results are published in, so it is held to ``_TASK_ID``
+        -- ``_PATH_SEGMENT`` narrowed to what ``git check-ref-format``
+        accepts -- and not to ``_TOKEN``.
+
+        This test used to assert the opposite, and the case it asserted was a
+        DEADLOCK: ``_TOKEN`` admits ``p04/t2``, ``reserve_task`` accepted it,
+        so the slot was held against the ``worker_limit - 3`` cap -- and then
+        ``publish_worker_result`` refused the id and git refuses the branch,
+        so nothing could ever release it. The refusal belongs here, at import,
+        where nothing is reserved yet.
+        """
+        for task_id in ("T1", "T-1", "T.1", "T_1", "a.b.c", "a" * 64,
+                        "T1.locker"):
+            with self.subTest(accepted=task_id):
                 metadata = self.parse(task_block(task_id), name="id.md")
                 self.assertEqual(metadata["tasks"][0]["id"], task_id)
+        for task_id in ("p04/t2", "a@b", "a:b", "a+b", "T1.", "a..b",
+                        "T1.lock", "a" * 65):
+            with self.subTest(refused=task_id):
+                exception = self._expect_rejection(
+                    task_block(task_id), name="id-bad.md")
+                self.assertIn("invalid task id", str(exception))
+
+    def test_a_batch_still_carries_every_character_the_token_grammar_allows(self):
+        """The guard on ``_TOKEN`` ITSELF, moved to the field that still asks
+        for it. ``@``, ``:``, ``+``, ``/``, ``.`` and ``-`` are all inside
+        P02's grammar, so a P04 block that narrowed the token to
+        ``[A-Za-z0-9-]`` fails here -- and narrowing ``_TOKEN`` is exactly
+        what the task-id ruling forbids, because it is shared with
+        ``target_branch``, ``phase_id``, ``axis``, ``reviewer`` and ``dep``,
+        several of which legitimately carry ``/``."""
+        for batch in ("b1", "p04/b2", "a@b", "a:b", "a+b", "b.1", "b-1",
+                      "b" * 65):
+            with self.subTest(batch=batch):
+                metadata = self.parse(
+                    task_block("T1", batch=batch), name="batch.md")
+                self.assertEqual(metadata["tasks"][0]["batch"], batch)
+
+    def test_a_dependency_is_held_to_the_task_id_grammar_too(self):
+        """A dependency NAMES a task, so it is the same kind of name. Held to
+        ``_TOKEN`` it would be a second grammar for one id, and a plan could
+        declare a dependency on an id no task in it could legally carry."""
+        exception = self._expect_rejection(
+            task_block("T1", deps="p04/t2", order=1)
+            + task_block("T2", order=2, write_scope="file:src/b.py"),
+            name="dep-segment.md")
+        self.assertIn("invalid task dependency id", str(exception))
+        self.assertNotIn("never declared", str(exception))
 
     def test_deps_keep_the_order_the_plan_wrote_them_in(self):
         """Non-alphabetical on purpose: ``T3,T2`` sorted is ``T2,T3``, so a
@@ -11613,6 +11654,14 @@ def name_state(path) -> tuple:
     with `lstat`, so a symlink is compared as a symlink rather than as the file
     it points at, and a refusal that quietly replaced the link with a regular
     file of the right bytes would be caught.
+
+    `st_ino` IS IN EVERY BRANCH, AND IT WAS IN TWO. The two regular-file
+    branches carried it and the symlink, FIFO and directory branches did not,
+    so 14 of the cross-product's 34 cells compared type, mode, target and
+    entries but NOT identity -- and a refusal that unlinked a symlink and
+    recreated it pointing at the same place, or replaced a FIFO with an
+    identical one, read as "unchanged". It costs nothing: the number is
+    already in the `lstat` that every branch has done.
     """
     try:
         info = os.lstat(path)
@@ -11624,11 +11673,11 @@ def name_state(path) -> tuple:
     kind = info.st_mode & _IFMT
     mode = info.st_mode & 0o7777
     if kind == _IFLNK:
-        return ("symlink", os.readlink(path), mode)
+        return ("symlink", os.readlink(path), mode, info.st_ino)
     if kind == _IFIFO:
-        return ("fifo", mode)
+        return ("fifo", mode, info.st_ino)
     if kind == _IFDIR:
-        return ("directory", tuple(sorted(os.listdir(path))), mode)
+        return ("directory", tuple(sorted(os.listdir(path))), mode, info.st_ino)
     try:
         return ("regular", Path(path).read_bytes(), mode, info.st_ino)
     except OSError as exc:
@@ -11689,7 +11738,45 @@ class Task9ProducesBlockTests(unittest.TestCase):
     more, so this is the fifth task to have to run the check.
     """
 
-    def test_the_two_new_names_are_the_only_two_this_task_defines(self):
+    def test_the_names_this_task_defines_are_exactly_these_five(self):
+        """The name this test used to carry claimed "only" and "two" and the
+        body asserted neither -- two `callable` checks that pass for any
+        module defining those two names, however many others it also defines.
+        The task's own section in fact defines FIVE module-level names, and a
+        sixth appearing later is a rebinding nobody declared.
+
+        Located by the section banner rather than by a diff against a parent
+        commit, so the claim survives a rebase and reads as what it is: what
+        lives under `P04 Task 9:` in the module.
+        """
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        banner = next(
+            index for index, line in enumerate(source.splitlines(), start=1)
+            if line.startswith("# P04 Task 9:"))
+        tree = ast.parse(source)
+        defined = sorted(
+            name for node in tree.body if node.lineno > banner
+            for name in module_bindings([node]))
+        self.assertEqual(defined, [
+            "AGENT_OUTPUT_DIRNAME",
+            "_citable_repo_relative",
+            "_published_result_bytes",
+            "publish_worker_result",
+            "worker_result_path",
+        ])
+        #: Three of the five are public and exactly two of those three are
+        #: CALLABLE: the third, `AGENT_OUTPUT_DIRNAME`, is the cross-phase
+        #: constant P06 and P07 cite. "The two new names" was always a claim
+        #: about the entry points and never about the module surface.
+        self.assertEqual(
+            [name for name in defined if not name.startswith("_")],
+            ["AGENT_OUTPUT_DIRNAME", "publish_worker_result",
+             "worker_result_path"])
+        self.assertEqual(
+            [name for name in defined
+             if not name.startswith("_") and callable(getattr(state, name))],
+            ["publish_worker_result", "worker_result_path"])
         self.assertTrue(callable(state.worker_result_path))
         self.assertTrue(callable(state.publish_worker_result))
 
@@ -11950,6 +12037,303 @@ class WorkerResultPathTotalityTests(unittest.TestCase):
             state.worker_result_path("/r", task_id="T1", attempt=True)
 
 
+#: AXIS ONE OF THE PUBLICATION CROSS-PRODUCT: THE SPELLINGS OF A RUN
+#: DIRECTORY, derived from the CALL TREE and not from a fixture.
+#: `publish_worker_result` puts `run_dir` through exactly two screens --
+#: `_run_path`, which admits `str` and `Path` and refuses everything else
+#: inside the family, and `home.resolve()`, which is where a NUL and a lone
+#: surrogate stop -- so the corpus is the union of what those two can be
+#: handed, which is the same union `RUN_DIR_CASES` states for
+#: `worker_result_path`.
+#:
+#: IT EXISTS BECAUSE THE `str` CELL WAS MISSING AND `str` WAS THE ONLY SHAPE
+#: THAT ESCAPED. `publish_worker_result` normalised `run_dir` into `home` and
+#: then handed the RAW value to `validate_run`, which deliberately does not
+#: coerce; `None`, an `int`, `bytes` and a `list` were all stopped earlier by
+#: `_run_path`, so the one shape that reached the uncoerced call was the one
+#: shape `RUN_DIR_CASES` pins as legal and a worker subprocess is likeliest to
+#: hold. It raised `TypeError`, outside `TrackerError`, from a function whose
+#: whole contract is that a refusal is in-family and read-only.
+#:
+#: Each entry is (label, build, refusal), where `refusal` is `None` for a
+#: spelling that must be ACCEPTED and otherwise the exception class and a
+#: fragment of the diagnosis. A family assertion alone would let any refusal
+#: stand in for any other -- Task 8's NUL is the precedent.
+def publication_run_dir_cases(run_dir) -> tuple:
+    spelling = str(run_dir)
+    not_a_path = (state.QuorumError, "not a path")
+    unresolvable = (state.TrackerValidationError, "cannot be resolved")
+    return (
+        ("str", spelling, None),
+        ("path", Path(spelling), None),
+        ("none", None, not_a_path),
+        ("int", 5, not_a_path),
+        ("bytes", spelling.encode("utf-8"), not_a_path),
+        ("list", [spelling], not_a_path),
+        ("nul", spelling + "\x00x", unresolvable),
+        ("surrogate", spelling + "\ud800", unresolvable),
+    )
+
+
+#: AXIS TWO: the three relations a publication can stand in to its own name.
+#: `publish_worker_result` branches on exactly these -- nothing published, the
+#: same bytes published, other bytes published -- so a run-directory spelling
+#: has to be answered the same way on all three, and a `str` that works only
+#: when the record happens to be absent is not fixed.
+PUBLICATION_RELATIONS = ("fresh", "replay", "conflict")
+
+
+class PublishedRunDirectorySpellingTests(TempDirTestCase):
+    """AXIS ONE x AXIS TWO, in family on every cell.
+
+    `worker_result_path` already carries this claim and
+    `publish_worker_result` did not, which is how one spelling of one
+    argument left the exception family unnoticed through a whole task.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo, self.run_dir, _ = make_run(
+            self.tmp, three_disjoint_tasks(), worker_limit=6)
+        self.cases = publication_run_dir_cases(self.run_dir)
+
+    def _prepare(self, task_id: str, relation: str):
+        """The name, as the relation requires it, and its `lstat` snapshot."""
+        requested = worker_result(task_id=task_id)
+        rendered = state.render_worker_result(requested).encode("utf-8")
+        path = state.worker_result_path(
+            self.run_dir, task_id=task_id, attempt=1)
+        if relation != "fresh":
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(
+                rendered if relation == "replay" else b"another answer\n")
+        return requested, rendered, path
+
+    def test_every_run_directory_spelling_crossed_with_every_relation(self):
+        cells = 0
+        for index, (label, run_dir, refusal) in enumerate(self.cases):
+            for offset, relation in enumerate(PUBLICATION_RELATIONS):
+                task_id = f"s{index:02d}{offset}"
+                requested, rendered, path = self._prepare(task_id, relation)
+                before = name_state(path)
+                with self.subTest(run_dir=label, relation=relation):
+                    cells += 1
+                    self._assert_cell(
+                        run_dir, refusal, relation, requested, rendered, path,
+                        before)
+        self.assertEqual(
+            tuple(label for label, _value, _refusal in self.cases),
+            ("str", "path", "none", "int", "bytes", "list", "nul",
+             "surrogate"))
+        self.assertEqual(cells, 8 * 3)
+        self.assertEqual(cells, 24)
+
+    def _assert_cell(self, run_dir, refusal, relation, requested, rendered,
+                     path, before):
+        if refusal is not None:
+            error, diagnosis = refusal
+            with publication_deadline(10, "publish_worker_result"):
+                with self.assertRaises(error) as caught:
+                    state.publish_worker_result(run_dir, result=requested)
+            #: THE DIAGNOSIS, not merely the family. `QuorumError` is also
+            #: what a malformed qid raises.
+            self.assertIn(diagnosis, str(caught.exception))
+            self.assertEqual(name_state(path), before)
+            return
+        if relation == "conflict":
+            with publication_deadline(10, "publish_worker_result"):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state.publish_worker_result(run_dir, result=requested)
+            self.assertIn("conflicting immutable result", str(caught.exception))
+            self.assertEqual(name_state(path), before)
+            return
+        with publication_deadline(10, "publish_worker_result"):
+            relative = state.publish_worker_result(run_dir, result=requested)
+        self.assertEqual((self.repo / relative).read_bytes(), rendered)
+        if relation == "replay":
+            #: Byte-identical republication is inert, inode included, however
+            #: the run directory was spelled.
+            self.assertEqual(name_state(path), before)
+
+    def test_a_str_run_directory_reaches_validate_run_as_a_path(self):
+        """THE REGRESSION, on its own and named. `validate_run`'s first
+        statement is `run_dir / "progress.md"`, so a `str` reaching it
+        uncoerced raises `TypeError` -- and `TypeError` is not a
+        `TrackerError`, so the controller handler this whole phase is built
+        around does not catch it."""
+        self.assertEqual(
+            state.publish_worker_result(
+                str(self.run_dir), result=worker_result()),
+            state.publish_worker_result(self.run_dir, result=worker_result()))
+
+    def test_a_str_run_directory_still_reports_a_foreign_tracker_in_family(self):
+        """The coercion must not swallow what `validate_run` is FOR. A `str`
+        run directory whose tracker is not ours takes the foreign-schema stop,
+        which is the diagnosis the raw-argument crash used to hide."""
+        foreign = self.repo / "docs" / "superpowers" / "runs" / "foreign"
+        foreign.mkdir(parents=True)
+        (foreign / "progress.md").write_text(
+            "<!-- pipeline-run/v2 -->\n", encoding="utf-8")
+        with self.assertRaises(state.ForeignSchemaError):
+            state.publish_worker_result(str(foreign), result=worker_result())
+        self.assertEqual(
+            sorted(entry.name for entry in foreign.iterdir()), ["progress.md"])
+
+
+#: EVERY PUBLIC ENTRY POINT THAT TAKES A RUN DIRECTORY, listed from the
+#: module's own AST rather than by hand, so a later phase adding one is
+#: measured here instead of being remembered.
+#:
+#: `validate_run` and `locked_tracker_update` are deliberately NOT on it and
+#: are named as exclusions: both are typed `Path` and both argue the
+#: no-coercion rule in their own docstrings -- "coercing here would also have
+#: hidden a caller that had lost track of what it was holding". The rule is
+#: that the ENTRY POINTS normalise and the contract functions do not, and the
+#: defect was five entry points that did not.
+RUN_DIR_ENTRY_POINTS = (
+    "initialize_run", "import_phase_plan", "reserve_task", "resume_task",
+    "publish_worker_result",
+)
+RUN_DIR_CONTRACT_FUNCTIONS = ("validate_run", "locked_tracker_update")
+
+
+class RunDirectoryCoercionSweepTests(TempDirTestCase):
+    """The pattern, not the instance.
+
+    `publish_worker_result` and `reserve_task` had the same shape, and the
+    review's own note is the reason this class exists rather than two fixes:
+    "the two are one line each and leaving one of them is how the pattern
+    survives". So the sweep is mechanical and it is a test.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo, self.run_dir, self.plan = make_run(
+            self.tmp, three_disjoint_tasks(), worker_limit=6)
+
+    def test_every_public_entry_point_taking_a_run_directory_is_listed(self):
+        """The roster is checked against the module, so a sixth entry point
+        added by a later phase fails here rather than silently escaping the
+        sweep below."""
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        found = []
+        for node in ast.parse(source).body:
+            if not isinstance(node, ast.FunctionDef) or node.name.startswith("_"):
+                continue
+            names = [arg.arg for arg in node.args.args]
+            if names[:1] == ["run_dir"]:
+                found.append(node.name)
+        self.assertEqual(
+            sorted(found),
+            sorted(RUN_DIR_ENTRY_POINTS + RUN_DIR_CONTRACT_FUNCTIONS
+                   + ("quorum_events", "quorum_budget", "current_floor",
+                      "quorum_tracker_rows", "open_quorum",
+                      "record_brain_response", "quorum_needs_redispatch",
+                      "classify_quorum", "finalize_quorum",
+                      "resolve_evidence", "worker_result_path")))
+
+    def test_every_entry_point_normalises_its_run_directory(self):
+        """The mechanical half: each of the five puts the argument through
+        `_run_path` somewhere in its body."""
+        for name in RUN_DIR_ENTRY_POINTS:
+            with self.subTest(function=name):
+                self.assertIn("_run_path(run_dir)",
+                              module_function_code(name))
+
+    def test_no_entry_point_hands_a_raw_run_directory_to_a_path_typed_callee(self):
+        """THE DEFECT, STATED STRUCTURALLY. Normalising and then passing the
+        raw name anyway is what `publish_worker_result` did -- `home =
+        _run_path(run_dir)` two lines above `validate_run(run_dir)` -- so
+        "it calls `_run_path` somewhere" is not the property that matters.
+
+        The sinks are read off the module: a function whose FIRST parameter is
+        annotated `Path` has declared that it will not coerce, and handing one
+        a `str` is a `TypeError` waiting at its first `/`. The list is
+        therefore derived, so a later phase adding another `Path`-typed
+        helper is covered without anybody remembering to add it here.
+        """
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        tree = ast.parse(source)
+        sinks = {
+            node.name for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.args.args
+            and isinstance(node.args.args[0].annotation, ast.Name)
+            and node.args.args[0].annotation.id == "Path"}
+        #: The two the defect actually reached, named so a refactor that
+        #: dropped every annotation would empty `sinks` and pass vacuously.
+        self.assertLessEqual({"validate_run", "classify_filesystem"}, sinks)
+        offenders = []
+        for node in tree.body:
+            if (not isinstance(node, ast.FunctionDef)
+                    or node.name not in RUN_DIR_ENTRY_POINTS):
+                continue
+            #: A REBINDING IS WHAT MAKES THE NAME SAFE, so the line it happens
+            #: on is the boundary: after `run_dir = _run_path(run_dir)` the
+            #: name IS the normalised value and passing it on is correct.
+            #: Before it -- or with no rebinding at all, which is
+            #: `publish_worker_result`, where the normalised value is called
+            #: `home` -- the name is still whatever the caller handed in.
+            rebound = min(
+                (inner.lineno for inner in ast.walk(node)
+                 if isinstance(inner, ast.Assign)
+                 and any(isinstance(target, ast.Name)
+                         and target.id == "run_dir"
+                         for target in inner.targets)),
+                default=None)
+            for inner in ast.walk(node):
+                if (isinstance(inner, ast.Call)
+                        and isinstance(inner.func, ast.Name)
+                        and inner.func.id in sinks
+                        and (rebound is None or inner.lineno <= rebound)
+                        and any(isinstance(argument, ast.Name)
+                                and argument.id == "run_dir"
+                                for argument in inner.args)):
+                    offenders.append(f"{node.name} -> {inner.func.id}")
+        self.assertEqual(offenders, [])
+
+    def test_the_two_contract_functions_deliberately_do_not(self):
+        """The exclusion, asserted rather than assumed. Coercing here is what
+        would hide the caller that lost track of what it was holding."""
+        for name in RUN_DIR_CONTRACT_FUNCTIONS:
+            with self.subTest(function=name):
+                self.assertNotIn("_run_path", module_function_code(name))
+
+    def test_no_entry_point_leaves_the_family_on_any_run_directory_shape(self):
+        """The behavioural half, over the same shapes `_run_path` screens.
+        Every call is made with otherwise-valid arguments, so the only thing
+        that can be wrong is the run directory."""
+        calls = {
+            "initialize_run": lambda value: state.initialize_run(
+                value, run_id="run-2", base_commit=git(self.repo, "rev-parse", "HEAD"),
+                target_branch="target", worker_limit=4, repo_root=str(self.repo)),
+            "import_phase_plan": lambda value: state.import_phase_plan(
+                value, phase_plan=str(self.plan)),
+            "reserve_task": lambda value: state.reserve_task(
+                value, task_id="T1", owner="impl-1", attempt=1),
+            "resume_task": lambda value: state.resume_task(
+                value, task_id="T1", prior_attempt=1, new_owner="impl-2",
+                new_attempt=2, decision_ref="H-1"),
+            "publish_worker_result": lambda value: state.publish_worker_result(
+                value, result=worker_result()),
+        }
+        self.assertEqual(sorted(calls), sorted(RUN_DIR_ENTRY_POINTS))
+        shapes = (None, 5, b"/runs/r", ["/runs/r"], str(self.run_dir))
+        for name in RUN_DIR_ENTRY_POINTS:
+            for shape in shapes:
+                with self.subTest(function=name, shape=type(shape).__name__):
+                    try:
+                        calls[name](shape)
+                    except state.TrackerError:
+                        pass
+                    except Exception as exc:  # noqa: BLE001 - the whole point
+                        self.fail(
+                            f"{name} left TrackerError on a "
+                            f"{type(shape).__name__} run_dir: "
+                            f"{type(exc).__name__}: {exc}")
+
+
 class PublishWorkerResultTests(TempDirTestCase):
     """The brief's six, kept verbatim in intent."""
 
@@ -12071,6 +12455,39 @@ class PublishWorkerResultTests(TempDirTestCase):
 #:
 #: Each entry is (label, class, build). `build` is handed the target path and
 #: the two candidate documents' bytes.
+#:
+#: THE ROSTER IS WRITTEN OUT, and that is the assertion. `assertEqual(cells,
+#: len(self.shapes) * 2)` was a tautology -- `cells` is incremented once per
+#: iteration of a loop that runs exactly that many times -- so the FIFO shape
+#: and then four more could be deleted from the builder below and the suite
+#: stayed green. A count that is a measurement of the corpus cannot pin the
+#: corpus; a literal list of the labels can, and it fails by NAMING whichever
+#: shape went missing.
+PUBLICATION_SHAPE_LABELS = (
+    "absent", "identical-regular", "the-other-result", "foreign-bytes",
+    "empty-regular", "truncated", "one-byte-longer", "invalid-utf8",
+    "symlink-to-identical", "symlink-to-differing", "directory",
+    "nonempty-directory", "dangling-symlink", "symlink-loop",
+    "parent-is-a-file", "fifo", "unreadable-regular",
+)
+
+
+def expected_publication_shape_labels() -> tuple:
+    """The roster, minus whichever shapes THIS platform cannot build.
+
+    The two predicates are the only things allowed to vary the corpus, and
+    naming them here is what lets the count below be a literal instead of a
+    restatement of the loop bound.
+    """
+    withheld = set()
+    if not hasattr(os, "mkfifo"):  # pragma: no cover - POSIX only
+        withheld.add("fifo")
+    if hasattr(os, "geteuid") and os.geteuid() == 0:  # pragma: no cover
+        withheld.add("unreadable-regular")
+    return tuple(label for label in PUBLICATION_SHAPE_LABELS
+                 if label not in withheld)
+
+
 def _publication_shapes(euid_is_root: bool) -> tuple:
     def regular(payload):
         def build(path, first, second):
@@ -12161,6 +12578,14 @@ class PublishedNameCrossProductTests(TempDirTestCase):
         self.shapes = _publication_shapes(
             hasattr(os, "geteuid") and os.geteuid() == 0)
 
+    def test_the_corpus_is_the_roster_and_not_its_own_length(self):
+        """The count that looked like a pin was `len(self.shapes) * 2`, which
+        is the loop bound restated. The roster is the pin."""
+        self.assertEqual(
+            tuple(label for label, _kind, _build in self.shapes),
+            expected_publication_shape_labels())
+        self.assertEqual(len(PUBLICATION_SHAPE_LABELS), 17)
+
     def test_every_shape_crossed_with_every_request(self):
         cells = 0
         for index, (label, kind, build) in enumerate(self.shapes):
@@ -12177,12 +12602,28 @@ class PublishedNameCrossProductTests(TempDirTestCase):
                     self.run_dir, task_id=task_id, attempt=1)
                 build(path, first, second)
                 before = name_state(path)
+                #: THE PARENT IS SNAPSHOTTED TOO, because for the
+                #: `parent-is-a-file` shape `name_state(path)` is `('absent',)`
+                #: on both sides -- `lstat` raises `NotADirectoryError` when a
+                #: parent component is a regular file -- so those two cells
+                #: compared nothing and would have passed had the refusal
+                #: clobbered the parent file it walked through.
+                before_parent = name_state(path.parent)
                 with self.subTest(shape=label, concerns=concerns):
                     cells += 1
-                    self._assert_cell(kind, path, requested, rendered, before)
-        self.assertEqual(cells, len(self.shapes) * 2)
+                    self._assert_cell(kind, path, requested, rendered, before,
+                                      before_parent)
+        #: THE LITERAL COUNT, guarded by the two platform predicates that are
+        #: allowed to vary it. On a POSIX machine that is not root it is 34.
+        self.assertEqual(
+            tuple(label for label, _kind, _build in self.shapes),
+            expected_publication_shape_labels())
+        self.assertEqual(cells, 2 * len(expected_publication_shape_labels()))
+        if len(self.shapes) == len(PUBLICATION_SHAPE_LABELS):
+            self.assertEqual(cells, 34)
 
-    def _assert_cell(self, kind, path, requested, rendered, before):
+    def _assert_cell(self, kind, path, requested, rendered, before,
+                     before_parent):
         expected = kind
         if kind == "content":
             #: The bytes THE NAME RESOLVES TO decide it, which is how the two
@@ -12201,6 +12642,7 @@ class PublishedNameCrossProductTests(TempDirTestCase):
                     self.run_dir, result=requested)
             self.assertEqual((self.repo / relative).read_bytes(), rendered)
             self.assertEqual(name_state(path), before)
+            self.assertEqual(name_state(path.parent), before_parent)
             return
         error = {
             "conflict": state.TrackerValidationError,
@@ -12212,6 +12654,7 @@ class PublishedNameCrossProductTests(TempDirTestCase):
             with self.assertRaises(error):
                 state.publish_worker_result(self.run_dir, result=requested)
         self.assertEqual(name_state(path), before)
+        self.assertEqual(name_state(path.parent), before_parent)
 
     def test_a_fifo_under_the_tree_does_not_hang_the_run(self):
         """The C1 shape, on its own, with its own deadline. `is_file()` is
@@ -12533,6 +12976,239 @@ class PathSegmentGrammarDivergenceTests(unittest.TestCase):
                 self.assertFalse(state._PATH_SEGMENT.fullmatch(value))
                 self.assertTrue(re.compile(r"\w+").fullmatch(value)
                                 or not value.isalnum())
+
+
+
+#: THE NAMES THE 1..3 CORPUS CANNOT REACH. `_TASK_ID`'s two extra rules are
+#: about a `..` in the MIDDLE of an id and a `.lock` at the end of one, and
+#: neither fits in three characters that also start with an alphanumeric and
+#: do not end in a dot. They are added by name, exactly as the length cases
+#: are, and each is paired with the answer real git gives.
+#: The two length cases are deliberately NOT repeated here: `divergence_corpus`
+#: already carries them, and a duplicate would inflate a count this file
+#: asserts as a literal.
+REF_RESIDUE_CASES = (
+    "T..1", "a..b", "T...1", "T..", "..T", "T.lock", "T1.lock", "T.locker",
+    "T1.LOCK", "lock", ".lock", "a.b.c", "T1",
+)
+
+
+def git_accepts_as_a_branch(value: str) -> bool:
+    """What `git check-ref-format` says about `refs/heads/<value>`.
+
+    THE REAL PROGRAM, not a transcription of its rules. The plan grammar's
+    own refusal message says a task id "is written into a tracker cell, A
+    BRANCH NAME and a checkpoint marker", so the authority on what a task id
+    may be is git, and a second-hand list of git's rules in this file would
+    be the same two-answers defect the module keeps refusing.
+    """
+    return subprocess.run(
+        ("git", "check-ref-format", "refs/heads/" + value),
+        capture_output=True).returncode == 0
+
+
+class TaskIdIsABranchNameTests(unittest.TestCase):
+    """`_TASK_ID` against `git check-ref-format`, in both directions.
+
+    THE RULING THIS PINS. A task id carrying `/`, `:`, `@`, `+`, a trailing
+    dot, a `..`, a `.lock` ending or a 65th character was accepted by the plan
+    grammar and by `_validate_assignment`, and refused at publication --
+    and `reserve_task` accepted it, so the slot was held against the
+    `worker_limit - 3` implementation cap and could never be released. The
+    grammar is tightened at plan import instead, and the authority for HOW
+    tight is the program that will be handed the branch name.
+    """
+
+    def _probed(self) -> tuple:
+        """Every string either grammar accepts, plus the named residue.
+
+        `_TOKEN`'s accepts are a superset of `_PATH_SEGMENT`'s and of
+        `_TASK_ID`'s, so probing them covers the no-widening direction
+        exhaustively over the corpus at a few hundred subprocesses rather
+        than nine thousand.
+        """
+        values = [value for value in divergence_corpus()
+                  if state._TOKEN.fullmatch(value)]
+        values.extend(value for value in REF_RESIDUE_CASES
+                      if value not in values)
+        return tuple(values)
+
+    def test_every_task_id_the_grammar_accepts_is_a_legal_branch_name(self):
+        """THE NO-WIDENING DIRECTION, exhaustive over the corpus. A task id
+        this module admits and git refuses is the deadlock again, one layer
+        further down: the plan imports, the slot is taken, and the phase that
+        creates the branch is where it dies."""
+        widenings = [value for value in self._probed()
+                     if state._TASK_ID.fullmatch(value)
+                     and not git_accepts_as_a_branch(value)]
+        self.assertEqual(widenings, [])
+
+    def test_the_two_rules_git_adds_to_the_path_grammar_are_exactly_these(self):
+        """`_PATH_SEGMENT` alone is NOT enough, and this is the measurement
+        that says so. `T..1` and `T.lock` are perfectly good filenames -- one
+        directory component each, traversing nothing -- so the path grammar
+        has no reason to refuse them, and git refuses both."""
+        residue = sorted(
+            value for value in self._probed()
+            if state._PATH_SEGMENT.fullmatch(value)
+            and not git_accepts_as_a_branch(value))
+        self.assertEqual(residue, ["T...1", "T..1", "T.lock", "T1.lock",
+                                   "a..b"])
+        for value in residue:
+            with self.subTest(value=value):
+                self.assertFalse(state._TASK_ID.fullmatch(value))
+                self.assertTrue(".." in value
+                                or value.endswith(state._REF_LOCK_SUFFIX))
+        #: The near misses, so the rules are rules and not a blocklist.
+        for value in ("T.locker", "T1.LOCK", "a.b.c", "T1"):
+            with self.subTest(accepted=value):
+                self.assertTrue(state._TASK_ID.fullmatch(value))
+                self.assertTrue(git_accepts_as_a_branch(value))
+
+    def test_the_task_id_grammar_is_a_tightening_of_both_its_parents(self):
+        """Pure grammar, over the whole corpus and with no subprocess: every
+        id `_TASK_ID` admits is one `_PATH_SEGMENT` admits, and every one of
+        those is one `_TOKEN` admits. A widening in either step would be a
+        grammar nobody asked for."""
+        corpus = divergence_corpus() + REF_RESIDUE_CASES
+        self.assertEqual(
+            [value for value in corpus if state._TASK_ID.fullmatch(value)
+             and not state._PATH_SEGMENT.fullmatch(value)], [])
+        self.assertEqual(
+            [value for value in corpus if state._PATH_SEGMENT.fullmatch(value)
+             and not state._TOKEN.fullmatch(value)], [])
+
+    def test_TOKEN_itself_is_not_narrowed_by_the_ruling(self):
+        """THE EXPLICIT NON-FIX. `_TOKEN` is shared with `target_branch`,
+        `transition_id`, `axis`, `phase_id`, `reviewer`, `batch` and `dep`,
+        and a branch name is a ref of SEVERAL components -- `feat/x` is one
+        legal branch and one illegal task id. Narrowing `_TOKEN` to fix the
+        task id would refuse every one of those."""
+        for value in ("feat/x", "a@b", "a:b", "a+b", "x" * 200, "T1."):
+            with self.subTest(value=value):
+                self.assertTrue(state._TOKEN.fullmatch(value))
+                self.assertFalse(state._TASK_ID.fullmatch(value))
+        self.assertTrue(git_accepts_as_a_branch("feat/x"))
+
+    def test_every_disagreement_with_the_token_has_a_named_reason(self):
+        """The divergence table for the grammar that now screens a task id.
+        The three `_PATH_SEGMENT` reasons plus the two git adds, with counts,
+        so a later widening of either shows up as a number rather than as
+        silence."""
+        def reason(value: str) -> str:
+            if any(character in value for character in "/@:+"):
+                return "carries a separator a path or a Windows filename cannot hold"
+            if value.endswith("."):
+                return "a trailing dot is dropped by some filesystems"
+            if len(value) > 64:
+                return "past the bound that keeps ENAMETOOLONG out of reach"
+            if ".." in value:
+                return "git refuses '..' anywhere in a ref"
+            if value.endswith(state._REF_LOCK_SUFFIX):
+                return "git reserves the '.lock' suffix for its own lock file"
+            return "UNEXPLAINED"
+
+        reasons: dict = {}
+        for value in divergence_corpus() + REF_RESIDUE_CASES:
+            if bool(state._TOKEN.fullmatch(value)) != bool(
+                    state._TASK_ID.fullmatch(value)):
+                reasons.setdefault(reason(value), []).append(value)
+        self.assertNotIn("UNEXPLAINED", reasons)
+        self.assertEqual(
+            {name: len(values) for name, values in reasons.items()},
+            {"carries a separator a path or a Windows filename cannot hold": 204,
+             #: 23 + `T..`, which the trailing-dot rule reaches before the
+             #: `..` rule does. The order of the arms is the order of the
+             #: rules, so a value is counted once and by its FIRST reason.
+             "a trailing dot is dropped by some filesystems": 24,
+             "past the bound that keeps ENAMETOOLONG out of reach": 2,
+             "git refuses '..' anywhere in a ref": 3,
+             "git reserves the '.lock' suffix for its own lock file": 2})
+
+
+class TaskIdDeadlockIsClosedTests(TempDirTestCase):
+    """END TO END: the route the review walked, now stopped at the first door.
+
+    "It is worse than 'cannot publish': the slot is consumed." A task id git
+    will not accept as a branch used to import, reserve, reach `[~]`, hold an
+    implementation slot against the `worker_limit - 3` cap and never
+    terminate. Each of those steps is asserted here to be unreachable.
+    """
+
+    #: Every shape the review named, one per rule, so a partial tightening
+    #: fails on the rule it missed rather than passing on the rules it kept.
+    WEDGING_IDS = ("T/1", "T:1", "T@1", "T+1", "T1.", "T..1", "T1.lock",
+                   "a" * 65)
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo, self.run_dir, _ = make_run(
+            self.tmp, three_disjoint_tasks(), worker_limit=6)
+
+    def test_a_phase_plan_declaring_one_is_refused_at_import(self):
+        """The loud stop, at the only place where nothing is reserved yet."""
+        for task_id in self.WEDGING_IDS:
+            with self.subTest(task_id=task_id):
+                plan = write_phase_plan(
+                    self.tmp, task_block(task_id),
+                    name=f"wedge-{len(task_id)}-{abs(hash(task_id))}.md")
+                before = (self.run_dir / "progress.md").read_bytes()
+                with self.assertRaises(state.PlanMetadataError) as caught:
+                    state.import_phase_plan(self.run_dir, phase_plan=plan)
+                self.assertIn("invalid task id", str(caught.exception))
+                self.assertEqual(
+                    (self.run_dir / "progress.md").read_bytes(), before)
+
+    def test_reserve_task_no_longer_takes_a_slot_it_cannot_release(self):
+        """The defence in depth. A tracker row can also arrive from a run
+        whose plan an older build imported, so the reservation screen is not
+        redundant with the import screen."""
+        for task_id in self.WEDGING_IDS:
+            with self.subTest(task_id=task_id):
+                before = (self.run_dir / "progress.md").read_bytes()
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state.reserve_task(self.run_dir, task_id=task_id,
+                                       owner="impl-1", attempt=1)
+                self.assertIn("invalid task id", str(caught.exception))
+                self.assertEqual(
+                    (self.run_dir / "progress.md").read_bytes(), before)
+
+    def test_resume_task_refuses_the_same_ids(self):
+        for task_id in self.WEDGING_IDS:
+            with self.subTest(task_id=task_id):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state.resume_task(
+                        self.run_dir, task_id=task_id, prior_attempt=1,
+                        new_owner="impl-2", new_attempt=2, decision_ref="H-1")
+                self.assertIn("invalid task id", str(caught.exception))
+
+    def test_publication_still_refuses_them_and_that_is_now_unreachable(self):
+        """Task 9's screen stays. After the tightening no legal plan can reach
+        it, which is the correct end state for a defence-in-depth screen and
+        not a reason to delete it -- the ruling `_require_regular_file`'s
+        absence arm already records."""
+        for task_id in self.WEDGING_IDS:
+            with self.subTest(task_id=task_id):
+                with self.assertRaises(state.TrackerValidationError):
+                    state.worker_result_path(
+                        self.run_dir, task_id=task_id, attempt=1)
+
+    def test_every_id_the_token_admits_and_the_task_grammar_does_not_is_stopped_at_import(self):
+        """The 229 divergence strings, put through the door that used to let
+        them in. Sampling would not do: the whole point of the defect is that
+        one of them reaching a reservation is a wedged run."""
+        refused = 0
+        for value in divergence_corpus() + REF_RESIDUE_CASES:
+            if not state._TOKEN.fullmatch(value) or state._TASK_ID.fullmatch(value):
+                continue
+            refused += 1
+            with self.subTest(task_id=value):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state.reserve_task(self.run_dir, task_id=value,
+                                       owner="impl-1", attempt=1)
+                self.assertIn("invalid task id", str(caught.exception))
+        self.assertEqual(refused, 204 + 24 + 2 + 3 + 2)
+        self.assertEqual(refused, 235)
 
 
 if __name__ == "__main__":

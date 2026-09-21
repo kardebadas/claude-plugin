@@ -2927,6 +2927,15 @@ def initialize_run(run_dir: Path, *, run_id: str, base_commit: str,
     keeping the three spellings identical is what makes the argument, the field
     and the accessor obviously the same fact.
     """
+    #: NORMALISED FIRST, for the reason ``worker_limit``'s type is checked
+    #: first: a ``str`` run directory reaches ``classify_filesystem`` -- typed
+    #: ``Path``, like ``validate_run`` -- and raises ``AttributeError`` there,
+    #: outside ``TrackerError``, from a function whose whole contract is that a
+    #: bad argument is a read-only stop. ``_run_path`` reads nothing, so the
+    #: stop stays read-only, and it refuses ``None``, an ``int`` and a
+    #: ``bytes`` inside the family rather than building a run directory named
+    #: by a repr.
+    run_dir = _run_path(run_dir)
     if not _RUN_ID.fullmatch(run_id):
         raise TrackerValidationError(
             f"invalid run id {run_id!r}: an alphanumeric then alphanumerics, "
@@ -11132,6 +11141,70 @@ _TASK_SUITE_COMMENT = "pipeline-auto-task-suite"
 _TASK_KEYS = ("id", "deps", "kind", "batch", "order", "write_scope", "outputs")
 _TASK_SUITE_KEYS = ("id", "commands")
 
+#: THE GRAMMAR FOR AN ID THAT BECOMES A NAME ON A FILESYSTEM, ALIASED rather
+#: than re-typed. ``_validate_assignment`` already states the whole argument
+#: for the owner: ``_TOKEN`` "would admit ``/``, ``:``, ``@`` and ``+`` into a
+#: name that becomes a path, and a trailing dot into one that becomes a
+#: filename." A task id that becomes a DIRECTORY name raises exactly that
+#: question, so it gets exactly that answer, and a second ``_CharClass``
+#: written beside it would be two grammars that can drift.
+_PATH_SEGMENT = _OWNER
+
+#: THE SUFFIX GIT RESERVES FOR ITSELF. ``git check-ref-format`` refuses any ref
+#: component ending in ``.lock``, because that is the name it gives the lock
+#: file it takes beside the ref while updating it.
+_REF_LOCK_SUFFIX = ".lock"
+
+
+class _RefComponent:
+    """A ``_PATH_SEGMENT`` that ``git check-ref-format`` also accepts.
+
+    A WRAPPER rather than two more options on ``_CharClass``, for ``_Owner``'s
+    reason: both extra rules are about THIS grammar becoming one component of
+    a git ref, and ``_TOKEN``, ``_RUN_ID`` and ``_ABS_PATH`` would each have to
+    be asked the question separately before inheriting an answer. ``_TOKEN`` in
+    particular must NOT inherit it -- it is shared with ``target_branch``,
+    ``phase_id``, ``axis``, ``batch``, ``reviewer`` and ``dep``, and a branch
+    name is a ref of several components that legitimately carries ``/``.
+
+    THE TWO RULES ARE GIT'S, MEASURED AND NOT GUESSED. ``git
+    check-ref-format`` refuses ``refs/heads/T..1`` and ``refs/heads/T.lock``
+    while accepting every other string ``_PATH_SEGMENT`` admits, so these are
+    the whole of the residue between the two grammars. Both are otherwise
+    perfectly good FILENAMES -- ``T..1`` is one directory component and
+    traverses nothing -- which is precisely why the path grammar cannot be
+    asked to catch them and why they get their own screen here.
+    """
+
+    __slots__ = ("_body",)
+
+    def __init__(self, body) -> None:
+        self._body = body
+
+    def fullmatch(self, value: str) -> bool:
+        return (self._body.fullmatch(value) and ".." not in value
+                and not value.endswith(_REF_LOCK_SUFFIX))
+
+
+#: THE ONE TASK-ID GRAMMAR, AND IT IS THE INTERSECTION OF EVERY NAME A TASK ID
+#: BECOMES. The plan grammar's own refusal already says what those are -- a
+#: task id "is written into a tracker cell, A BRANCH NAME and a checkpoint
+#: marker" -- and ``worker_result_path`` adds a fourth: a directory under
+#: ``agent-output/``. Held only to ``_TOKEN``, a plan could legally declare
+#: ``T/1``, ``T:1``, ``T@1``, ``T+1``, ``T1.``, ``T..1``, ``T1.lock`` or a
+#: 65-character id; ``reserve_task`` would ACCEPT it, so the slot is held
+#: against the ``worker_limit - 3`` implementation cap -- and then nothing can
+#: terminate it, because the one helper a worker may call to publish its result
+#: refuses the id and ``git check-ref-format`` refuses the branch. That is F2's
+#: permanent deadlock reached from a phase plan that is legal by the grammar
+#: the plan publishes, and the failure arrives AFTER the work is done.
+#:
+#: SO IT IS REFUSED AT PLAN IMPORT, where nothing is reserved yet, and again at
+#: reservation as defence in depth. Widening publication instead would only
+#: move the dead end to the phase that builds the branch, by which time work
+#: has already merged.
+_TASK_ID = _RefComponent(_PATH_SEGMENT)
+
 #: What a task PRODUCES, and the reason the plan says it rather than the worker.
 #: A ``source`` task changes the repository and is proved by running its
 #: verification suite; an ``artifact`` task writes documents and is proved by
@@ -11406,11 +11479,17 @@ def _parse_task_metadata(lines, index: int) -> dict:
      raw_outputs) = _comment_fields(lines[index], _TASK_COMMENT, _TASK_KEYS,
                                     tail=False)
 
-    if not _TOKEN.fullmatch(task_id):
+    if not _TASK_ID.fullmatch(task_id):
         raise PlanMetadataError(
-            f"invalid task id {task_id!r}: a task id is one token, because it "
-            "is written into a tracker cell, a branch name and a checkpoint "
-            "marker, none of which can carry a sentence")
+            f"invalid task id {task_id!r}: a task id is written into a tracker "
+            "cell, a branch name, a checkpoint marker and the name of the "
+            "directory its results are published in, so it is an alphanumeric "
+            "then alphanumerics, dots, underscores and hyphens, at most "
+            f"{_OWNER_MAX} characters, with no trailing dot, no '..' and no "
+            "'.lock' ending. _TOKEN -- which is all this screen used to ask "
+            "for -- admits '/', ':', '@' and '+'; git refuses those in a "
+            "branch name and a directory cannot hold them, and reserve_task "
+            "would have taken a slot for a task nothing could ever finish")
     _task_heading(lines, index, task_id)
     if not _member(kind, TASK_KINDS):
         raise PlanMetadataError(
@@ -11418,10 +11497,16 @@ def _parse_task_metadata(lines, index: int) -> dict:
             f"{list(TASK_KINDS)!r}. The kind is the PLAN's claim about what "
             "this task produces and what proves it; a worker does not get to "
             "restate it because its implementation happened to produce no diff")
+    #: ``_TOKEN`` AND DELIBERATELY NOT ``_TASK_ID``. A batch name is written
+    #: into a tracker cell and read back out of one, and it becomes no path
+    #: and no ref, so the two rules ``_TASK_ID`` adds for git would be a
+    #: narrowing with no failure behind it. This screen used to say "for the
+    #: reason a task id is", which stopped being true when the task id was
+    #: tightened.
     if not _TOKEN.fullmatch(batch):
         raise PlanMetadataError(
             f"invalid batch {batch!r} on task {task_id!r}: a batch name is one "
-            "token, for the reason a task id is")
+            "token, because it is written into a tracker cell")
 
     #: ``int(raw_order)`` ALONE IS NOT THE GRAMMAR, and the module has already
     #: written this defect down once, in ``_Numbered``: ``int(chr(0x0661))`` is 1
@@ -11459,10 +11544,16 @@ def _parse_task_metadata(lines, index: int) -> dict:
 
     deps = _declared_members(raw_deps, f"task {task_id} deps")
     for dependency in deps:
-        if not _TOKEN.fullmatch(dependency):
+        #: ``_TASK_ID`` AND NOT ``_TOKEN``: a dependency names a task, so it
+        #: is the same kind of name and gets the same grammar. Two grammars
+        #: for one id would let a plan declare a dependency on an id no task
+        #: in it could legally carry, and the diagnosis a reader then gets is
+        #: "unknown dependency" rather than "that is not a task id".
+        if not _TASK_ID.fullmatch(dependency):
             raise PlanMetadataError(
                 f"invalid task dependency id {dependency!r} in deps={raw_deps!r} "
-                f"on task {task_id!r}; a task that depends on nothing spells it "
+                f"on task {task_id!r}; a dependency names a task and is held to "
+                f"the task-id grammar. A task that depends on nothing spells it "
                 f"{_NO_DEPS!r}")
         if dependency == task_id:
             raise PlanMetadataError(
@@ -13947,6 +14038,15 @@ def import_phase_plan(run_dir, *, phase_plan) -> dict:
     import must not be told its run is corrupt, and a controller importing a
     phase it already imported must not be told nothing happened.
     """
+    #: NORMALISED FIRST, the way every P03 entry point does it. ``validate_run``
+    #: deliberately does not coerce -- its first statement is
+    #: ``run_dir / "progress.md"`` -- so a ``str`` reaching it raises
+    #: ``TypeError``, which is outside ``TrackerError`` and escapes every
+    #: handler a controller has written. A ``str`` is the likeliest spelling a
+    #: controller holds, and ``None``, an ``int`` and a ``bytes`` are what a
+    #: caller that lost the run directory holds; ``_run_path`` answers all four
+    #: inside the family.
+    run_dir = _run_path(run_dir)
     metadata = parse_plan_metadata(phase_plan)
     phase_id = metadata["phase"]["id"]
 
@@ -14108,12 +14208,29 @@ def _validate_assignment(task_id, owner, attempt) -> str:
     the trailing-dot rule are about exactly that. Re-deriving it from ``_TOKEN``
     here would admit ``/``, ``:``, ``@`` and ``+`` into a name that becomes a
     path, and a trailing dot into one that becomes a filename.
+
+    AND THAT ARGUMENT APPLIES TO BOTH ID ARGUMENTS, which is the defect this
+    function shipped with: it stated the rule and then applied it to only one
+    of them. A task id becomes a DIRECTORY under ``agent-output/`` and a
+    BRANCH NAME, so ``_TASK_ID`` is the grammar, and the cost of getting it
+    wrong is worse than a late refusal. ``reserve_task`` ACCEPTED an id that
+    ``publish_worker_result`` refuses, so the task reached ``[~]``, held a slot
+    against the ``worker_limit - 3`` implementation cap, and could never reach
+    a terminal state through the one helper a worker may call -- F2's
+    permanent deadlock, reached from a phase plan that was legal by the
+    grammar the plan publishes. ``_parse_task_metadata`` is the loud stop and
+    this is the defence in depth; both are needed, because a tracker row can
+    also arrive from a resumed run whose plan was imported by an older build.
     """
-    if not isinstance(task_id, str) or not _TOKEN.fullmatch(task_id):
+    if not isinstance(task_id, str) or not _TASK_ID.fullmatch(task_id):
         raise TrackerValidationError(
-            f"invalid task id {task_id!r}: a task id is one token, because it "
-            "is written into a tracker cell and into the replay key of the "
-            "transition that reserves it")
+            f"invalid task id {task_id!r}: a task id is written into a tracker "
+            "cell, into the replay key of the transition that reserves it, "
+            "into a branch name and into the name of the directory its result "
+            "is published in, so it is held to the task-id grammar and not to "
+            "_TOKEN. Accepting one _TOKEN admits and publication refuses would "
+            "hold an implementation slot against the worker_limit cap for a "
+            "task that can never reach a terminal state")
     if not isinstance(owner, str) or not _OWNER.fullmatch(owner):
         raise TrackerValidationError(
             f"invalid owner {owner!r}: an owner is one bounded identifier "
@@ -14135,6 +14252,15 @@ def reserve_task(run_dir, *, task_id: str, owner: str, attempt: int) -> dict:
     An ARTIFACT task records none: it produces no source range, so a baseline
     would be one end of a proof that is never drawn.
     """
+    #: NORMALISED FIRST, the way every P03 entry point does it. ``validate_run``
+    #: deliberately does not coerce -- its first statement is
+    #: ``run_dir / "progress.md"`` -- so a ``str`` reaching it raises
+    #: ``TypeError``, which is outside ``TrackerError`` and escapes every
+    #: handler a controller has written. A ``str`` is the likeliest spelling a
+    #: controller holds, and ``None``, an ``int`` and a ``bytes`` are what a
+    #: caller that lost the run directory holds; ``_run_path`` answers all four
+    #: inside the family.
+    run_dir = _run_path(run_dir)
     token = _validate_assignment(task_id, owner, attempt)
 
     def mutate(tracker: dict) -> dict:
@@ -14582,6 +14708,15 @@ def resume_task(run_dir, *, task_id: str, prior_attempt: int, new_owner: str,
     `locked_tracker_update` as `invalid transition identity`: a diagnosis about
     a transition name, handed to a caller that named a decision wrongly.
     """
+    #: NORMALISED FIRST, the way every P03 entry point does it. ``validate_run``
+    #: deliberately does not coerce -- its first statement is
+    #: ``run_dir / "progress.md"`` -- so a ``str`` reaching it raises
+    #: ``TypeError``, which is outside ``TrackerError`` and escapes every
+    #: handler a controller has written. A ``str`` is the likeliest spelling a
+    #: controller holds, and ``None``, an ``int`` and a ``bytes`` are what a
+    #: caller that lost the run directory holds; ``_run_path`` answers all four
+    #: inside the family.
+    run_dir = _run_path(run_dir)
     token = _validate_assignment(task_id, new_owner, new_attempt)
     prior_token = _attempt_token(prior_attempt)
     if not isinstance(decision_ref, str) or not _decision_id(decision_ref):
@@ -15176,14 +15311,11 @@ def reserved_baseline(row, *, attempt) -> str:
 #: stale is silent.
 AGENT_OUTPUT_DIRNAME = "agent-output"
 
-#: THE GRAMMAR FOR AN ID THAT BECOMES A NAME ON A FILESYSTEM, ALIASED rather
-#: than re-typed. ``_validate_assignment`` already states the whole argument
-#: for the owner: ``_TOKEN`` "would admit ``/``, ``:``, ``@`` and ``+`` into a
-#: name that becomes a path, and a trailing dot into one that becomes a
-#: filename." A task id that becomes a DIRECTORY name raises exactly that
-#: question, so it gets exactly that answer, and a second ``_CharClass``
-#: written beside it would be two grammars that can drift.
-_PATH_SEGMENT = _OWNER
+#: The task-id grammar this task screens against is ``_TASK_ID``, stated once
+#: beside the plan grammar that is now the first screen to apply it. It is
+#: ``_PATH_SEGMENT`` -- P03's ``_OWNER``, aliased -- narrowed to what ``git
+#: check-ref-format`` accepts, because a task id becomes both a directory here
+#: and a branch component in a later phase.
 
 
 def worker_result_path(run_dir, *, task_id, attempt) -> Path:
@@ -15200,15 +15332,19 @@ def worker_result_path(run_dir, *, task_id, attempt) -> Path:
 
     SO A TASK ID THAT IS NOT ONE PATH SEGMENT IS REFUSED, NOT MANGLED. A
     ``task_id.replace("/", "-")`` is the mangling, and it is not injective:
-    ``T/1`` and ``T-1`` are two tasks and one directory. ``_TOKEN`` -- which is
-    all the plan grammar and ``_validate_assignment`` hold a task id to --
-    ADMITS ``/``, ``:``, ``@``, ``+`` and a trailing dot, so a plan may legally
-    declare an id no directory can hold; the refusal is loud, it happens before
-    any write, and it names the characters. Refusing it earlier, at
-    ``_parse_task_metadata``, would be better still and is deliberately NOT
-    done here: that screen belongs to the plan grammar and widening it is a
-    change to what a plan may say, which is Task 2's contract and not this
-    task's.
+    ``T/1`` and ``T-1`` are two tasks and one directory. The refusal is loud,
+    it happens before any write, and it names the characters.
+
+    THE SAME SCREEN NOW RUNS AT PLAN IMPORT, and this one is defence in depth
+    rather than the only line. It was written when ``_parse_task_metadata``
+    and ``_validate_assignment`` held a task id to ``_TOKEN`` alone, which
+    ADMITS ``/``, ``:``, ``@``, ``+`` and a trailing dot -- so a plan could
+    legally declare an id no directory can hold, ``reserve_task`` would take a
+    slot for it, and nothing could ever release that slot. Both of those
+    screens now ask ``_TASK_ID``, so a legal plan cannot reach this refusal at
+    all; that is the correct end state for a screen of this kind and not a
+    reason to delete it, exactly as ``_require_regular_file``'s absence arm
+    records.
 
     THE ATTEMPT IS SPELLED BY ``_attempt_token`` AND BY NOTHING ELSE. An
     ``f"attempt-{attempt}.md"`` written here is a second spelling of a
@@ -15222,14 +15358,13 @@ def worker_result_path(run_dir, *, task_id, attempt) -> Path:
     ``TypeError``, which is outside ``TrackerError`` and escapes every handler
     a controller has written.
     """
-    if not isinstance(task_id, str) or not _PATH_SEGMENT.fullmatch(task_id):
+    if not isinstance(task_id, str) or not _TASK_ID.fullmatch(task_id):
         raise TrackerValidationError(
             f"task id {task_id!r} cannot be one directory name: it must be an "
             f"alphanumeric then alphanumerics, dots, underscores and hyphens, "
-            f"at most {_OWNER_MAX} characters, with no trailing dot. _TOKEN "
-            "admits '/', ':', '@' and '+' and a task id is only held to "
-            "_TOKEN, so an id carrying one reaches here -- and mangling it "
-            "into a legal name maps two task ids onto one immutable record")
+            f"at most {_OWNER_MAX} characters, with no trailing dot, no '..' "
+            "and no '.lock' ending. Mangling it into a legal name would map "
+            "two task ids onto one immutable record")
     return (_run_path(run_dir) / AGENT_OUTPUT_DIRNAME / task_id
             / f"{_attempt_token(attempt)}.md")
 
@@ -15385,8 +15520,18 @@ def publish_worker_result(run_dir, *, result: dict) -> str:
             f"({type(exc).__name__}: {exc}); a run this module cannot locate "
             "is not a run known to be empty, and nothing is published into one"
         ) from exc
+    #: ``home`` AND NOT ``run_dir``, and the difference is the whole of the
+    #: family guarantee. ``validate_run`` deliberately does not coerce -- its
+    #: first statement is ``run_dir / "progress.md"`` -- so handing it the raw
+    #: argument raises ``TypeError`` for the one shape ``_run_path`` exists to
+    #: normalise and ``worker_result_path`` declares legal: a ``str``. That is
+    #: outside ``TrackerError``, it escapes every handler a controller has
+    #: written, and it is the likeliest spelling a worker subprocess holds,
+    #: out of argv or JSON. Normalising two lines above and then throwing the
+    #: normalised value away is the "caller that had lost track of what it was
+    #: holding" ``validate_run``'s docstring names.
     relative = _citable_repo_relative(
-        resolved_run, _repo_dir(validate_run(run_dir)),
+        resolved_run, _repo_dir(validate_run(home)),
         path.relative_to(home).as_posix())
 
     data = content.encode("utf-8")

@@ -252,35 +252,122 @@ def command_execution_family() -> frozenset[str]:
 FORBIDDEN_OS_CALLS = command_execution_family()
 
 
+#: The routes from a module object to an arbitrary attribute of it, refused
+#: MODULE-WIDE by ``command_execution_names`` below. This is what makes that
+#: function's string arm mean something: a literal ``"popen"`` is refused, so
+#: an attacker of the guarantee writes ``"pop" + "en"`` and no literal survives
+#: for the arm to match. There is no static answer to that — the fold happens
+#: at runtime — so the ENTRY POINT is refused instead of the name it computes.
+#:
+#: Measured cost before this was added: the module reached ``getattr`` exactly
+#: once, for ``getattr(os, "O_DIRECTORY", 0)``, and it is now a module-level
+#: ``try``/``except AttributeError``. Nothing else in the module names any of
+#: these, so the ban costs one constant.
+#:
+#: ``eval``, ``exec``, ``compile`` and ``__import__`` are also in
+#: ``FORBIDDEN_BUILTINS``, and this is NOT that check restated: that one
+#: collects only ``Call.func`` names, so ``_f = eval`` then ``_f("...")``
+#: passes it. This one collects every ``ast.Name`` in every context.
+REFLECTION_NAMES = frozenset({
+    "getattr", "setattr", "delattr", "vars", "globals", "locals",
+    "eval", "exec", "compile", "__import__", "importlib", "import_module",
+    "__getattribute__", "__getattr__", "__dict__", "__builtins__",
+    "__class__", "__bases__", "__base__", "__mro__", "__subclasses__",
+    "__globals__", "__code__", "__loader__", "__spec__",
+})
+
+#: The marker ``command_execution_names`` returns for a star import. A star
+#: import is not a name, so it needs a spelling of its own to come back in a
+#: list of names.
+STAR_IMPORT = "import *"
+
+
 def command_execution_names(source: str) -> list[str]:
-    """Every forbidden ``os`` name this source reaches, by any spelling.
+    """Every command-execution or reflection name this source reaches.
 
-    FOUR SPELLINGS, because a ban on one of them is a ban on the spelling and
-    not on the capability:
+    WHAT THIS PROVES, stated as the screen actually behaves rather than as an
+    aspiration. An earlier revision of this docstring claimed the string arm
+    covered "every other reflective route"; measured against a corpus of 50
+    evasions built as ROUTE x SPELLING rather than from previously-found
+    holes, 17 of them passed — two with no obfuscation at all
+    (``from os import *; f = system; f("id")`` and
+    ``os.__getattribute__("sys" + "tem")``). The claim was the defect, and the
+    corpus is now ``test_the_command_execution_check_fails_on_a_spliced_os_popen``.
 
-    * ``os.popen(...)`` — the attribute, wherever it appears. By NAME, like
-      ``WRITE_CAPABLE``: this cannot tell ``os.system`` from some other
-      object's ``.system``, and that over-strictness points the safe way.
+    THE CLAIM NOW: no path from this module's SOURCE TEXT to a command-
+    execution attribute of ``os`` exists that does not put one of the
+    following in the source text.
+
+    * ``os.popen(...)`` — the attribute, wherever it appears, called or not.
+      By NAME, like ``WRITE_CAPABLE``: this cannot tell ``os.system`` from
+      some other object's ``.system``, and that over-strictness points the
+      safe way.
     * ``from os import popen`` — which passes the ``ALLOWED_IMPORTS`` check
-      above untouched, since the module it names IS on the allowlist.
-    * a bare ``popen(...)`` call, the thing such an import creates.
-    * the string ``"popen"``, which is ``getattr(os, "popen")`` and every other
-      reflective route. Only an EXACT match counts, so prose in a docstring
-      naming the function is unaffected — and a string constant that is
-      precisely one of these names has no other honest use in this module.
+      above untouched, since the module it names IS on the allowlist. Checked
+      for EVERY module, not only ``os``: ``from posix import system`` reaches
+      the same function object through a module the allowlist refuses
+      separately, and two screens agreeing is cheaper than one gap.
+    * ``from os import *`` — refused outright, from any module. It creates
+      bindings no reader of this source can enumerate, which is precisely what
+      the bare-name arm below needs to be able to do.
+    * a bare ``system`` — an ``ast.Name`` in ANY context, not only as the
+      callee of a call. ``f = system`` then ``f("id")`` never puts ``system``
+      in a ``Call.func`` position, and was the cheapest of the 17.
+    * the string ``"popen"``, exactly. Only an EXACT match counts, so prose in
+      a docstring naming the function is unaffected.
+    * any of ``REFLECTION_NAMES`` — the entry points that turn a computed
+      string into an attribute. The string arm alone is defeated by
+      ``"pop" + "en"``; banning ``getattr``, ``vars``, ``__dict__``,
+      ``__getattribute__``, ``eval``, ``exec``, ``compile`` and ``__import__``
+      is what closes the fold, because a fold needs somewhere to be applied.
+
+    THE THREE GAPS THAT REMAIN, measured against that same corpus and named
+    here because a screen that reads as a guarantee while missing the
+    indirection is worse than none:
+
+    1. **A name assembled at runtime.** This reads SOURCE. ``_n`` read out of
+       a tracker cell or a plan file and folded into an attribute is invisible
+       here, and no static screen can see it. What bounds that is the
+       reflection ban above — the fold needs an entry point, and every entry
+       point in the standard library's vocabulary for it is refused — not this
+       function's ability to see the name.
+    2. **Execution through an allowed import that is not ``os``.** Concretely:
+       ``fcntl`` is on ``ALLOWED_IMPORTS`` (the lock needs it) and
+       ``fcntl.ioctl(0, TIOCSTI, ...)`` pushes bytes into the controlling
+       terminal's input queue, which a shell then runs. This screen is about
+       ``os`` and does not see it. It is listed rather than fixed because the
+       fix is a second family enumerated from a second module, and the corpus
+       found exactly one member.
+    3. **An attribute getter from a module off the allowlist.**
+       ``operator.attrgetter("sys" + "tem")(os)`` passes this screen
+       completely. It is refused by the ``ALLOWED_IMPORTS`` assertion in
+       ``test_validate_run_cannot_write_or_execute`` — ``operator`` is not on
+       the list — and by nothing here. The two screens are load-bearing
+       TOGETHER; neither is the guarantee on its own.
+
+    AND TWO THINGS IT DELIBERATELY DOES NOT CLAIM:
+
+    * ``os.register_at_fork``, ``os.kill``, ``os.killpg`` and the ``wait*``
+      family are outside ``FORBIDDEN_OS_CALLS`` on purpose (see
+      ``command_execution_family``). They neither run a command nor create a
+      process, and a guard refusing them would be refusing something other
+      than what it claims.
+    * It is a screen over THIS repository's module text, run by this suite. It
+      is not a sandbox and stops nothing at runtime.
     """
+    screened = FORBIDDEN_OS_CALLS | REFLECTION_NAMES | {STAR_IMPORT}
     found = set()
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Attribute):
             found.add(node.attr)
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            found.add(node.func.id)
-        elif (isinstance(node, ast.ImportFrom)
-              and (node.module or "").split(".")[0] == "os"):
-            found.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.Name):
+            found.add(node.id)
+        elif isinstance(node, ast.ImportFrom):
+            found.update(STAR_IMPORT if alias.name == "*" else alias.name
+                         for alias in node.names)
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             found.add(node.value)
-    return sorted(found & FORBIDDEN_OS_CALLS)
+    return sorted(found & screened)
 
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
 
@@ -574,10 +661,18 @@ class RoundTripTests(unittest.TestCase):
 
         A guard asserting a set is empty is green the day it is written and
         green the day it stops working, and the two are indistinguishable
-        without this. Each spelling is spliced into the REAL module source, one
-        at a time, and must be detected — including the three that route around
-        an attribute check (the ``from os import`` form, the bare call it
-        creates, and the reflective ``getattr``).
+        without this.
+
+        THE CORPUS IS A CROSS-PRODUCT, not a list of previously-found holes.
+        Three passes over this screen each drew their cases from the previous
+        pass's defects and each found more of the same class, so the axes are
+        enumerated instead: ROUTE (how the callable is reached — attribute,
+        import, star import, bare name, ``getattr``, a dunder, generated code,
+        an alias for the module object, an attribute getter from another
+        module) x SPELLING (the name written literally, split across a ``+``,
+        joined, reversed, bound to a variable first). 50 entries; before the
+        fix that added the bare-name arm, the star-import refusal and
+        ``REFLECTION_NAMES``, 17 of them passed.
         """
         source = module_source()
         self.assertEqual(command_execution_names(source), [])
@@ -588,15 +683,49 @@ class RoundTripTests(unittest.TestCase):
         #: guard proved against anything weaker than a real call is a guard
         #: proved against a stand-in.
         for statement in (
+            #: the attribute, called and uncalled
             'os.popen("true").read()',
             'os.system("true")',
             'os.execv("/bin/true", ["true"])',
             'os.posix_spawn("/bin/true", ["true"], {})',
             'os.spawnvp(os.P_WAIT, "true", ["true"])',
+            'os.spawnl(os.P_NOWAIT, "/bin/true", "true")',
             'os._execvpe("/bin/true", ["true"])',
             'os.fork()',
+            'os.forkpty()',
+            'os.startfile("x.bat")',
             'runner = os.popen',
+            'os.path.os.system("true")',
+            #: getattr, across every spelling of the name
             'getattr(os, "popen")("true")',
+            'getattr(os, "sys" + "tem")("true")',
+            'getattr(os, "".join(["sy", "stem"]))("true")',
+            '_n = "system"\n    getattr(os, _n)("true")',
+            '_a = "sys"\n    _b = "tem"\n    getattr(os, _a + _b)("true")',
+            '_f = functools.partial(getattr, os)',
+            #: the dunders that are getattr under another name
+            'os.__getattribute__("system")("true")',
+            'os.__getattribute__("sys" + "tem")("true")',
+            'object.__getattribute__(os, "sys" + "tem")("true")',
+            'type(os).__getattribute__(os, "sys" + "tem")("true")',
+            'os.__dict__["system"]("true")',
+            'os.__dict__["sys" + "tem"]("true")',
+            'vars(os)["system"]("true")',
+            'vars(os)["sys" + "tem"]("true")',
+            '_b = os.__class__.__base__\n    _b.__subclasses__()',
+            #: generated code
+            'eval("os.sys" + "tem")("true")',
+            'exec("import os as _o; _o.sys" + "tem(\'true\')")',
+            '_c = compile("os.sys" + "tem()", "<x>", "exec")',
+            '__import__("os").system("true")',
+            #: a BARE NAME in a position that is not `Call.func`. This is the
+            #: arm the previous revision did not have, and the two cheapest
+            #: evasions in the corpus went through it.
+            'f = system\n    f("true")',
+            'popen("true")',
+            '_t = (system, popen)',
+            '[popen][0]("true")',
+            'del system',
         ):
             mutant = with_statement_in(source, "validate_run", statement)
             with self.subTest(statement=statement):
@@ -608,10 +737,82 @@ class RoundTripTests(unittest.TestCase):
         #: rather than into a function body.
         for header in ("from os import popen\n",
                        "from os import system as _run\n",
-                       "from os import popen\npopen('true')\n"):
+                       "from os import popen\npopen('true')\n",
+                       "import os.path\nfrom os import execv\n",
+                       "import os as _o\n_o.system('true')\n",
+                       #: the same function object through the module `os`
+                       #: itself is a facade over
+                       "from posix import system\n",
+                       #: and the star imports, which create bindings no
+                       #: reader of this source can enumerate -- which is
+                       #: exactly what the bare-name arm needs to be able to do
+                       "from os import *\n",
+                       "from os import *\nsystem('true')\n",
+                       "from os import *\nf = system\nf('true')\n",
+                       "from os import *\n_x = [system]\n",
+                       "from posix import *\n"):
             with self.subTest(header=header):
                 self.assertNotEqual(
                     command_execution_names(header + source), [])
+
+    def test_the_command_execution_screens_three_gaps_are_the_stated_ones(self):
+        """The corpus's residue, pinned so the docstring cannot drift off it.
+
+        The previous revision's docstring claimed the string arm covered
+        "every other reflective route" and 17 of 50 evasions passed. The claim
+        is now bounded, and a bound nobody measures is the same defect one
+        revision later -- so the three routes the screen does NOT catch are
+        asserted to still pass it, and the screen that DOES catch each one is
+        asserted beside it.
+
+        Failing this is not a regression. It means a gap closed and the
+        docstring above still names it.
+        """
+        source = module_source()
+        #: 1. A name assembled at runtime. There is no literal and no
+        #:    reflection entry point, because nothing here folds anything --
+        #:    it is the shape a fold would have if the ban did not force one.
+        runtime = with_statement_in(
+            source, "validate_run",
+            '_n = (run_dir / "n.txt").read_text()\n    _ = os.environ[_n]')
+        self.assertEqual(command_execution_names(runtime), [])
+        #: 2. Execution through an ALLOWED import that is not `os`: TIOCSTI
+        #:    pushes bytes into the controlling terminal's input queue.
+        ioctl = with_statement_in(
+            source, "validate_run", 'fcntl.ioctl(0, 0x5412, b"i")')
+        self.assertEqual(command_execution_names(ioctl), [])
+        self.assertIn("fcntl", ALLOWED_IMPORTS)
+        #: 3. An attribute getter from a module OFF the allowlist. This screen
+        #:    is blind to it; the ALLOWED_IMPORTS assertion is what refuses it,
+        #:    and the two are load-bearing together.
+        getter = ("import operator\n" + with_statement_in(
+            source, "validate_run",
+            '_g = operator.attrgetter("sys" + "tem")\n    _g(os)("true")'))
+        self.assertEqual(command_execution_names(getter), [])
+        imported = {(node.module or "").split(".")[0]
+                    for node in ast.walk(ast.parse(getter))
+                    if isinstance(node, ast.ImportFrom)}
+        imported |= {alias.name.split(".")[0]
+                     for node in ast.walk(ast.parse(getter))
+                     if isinstance(node, ast.Import) for alias in node.names}
+        self.assertEqual(imported - ALLOWED_IMPORTS, {"operator"})
+
+    def test_the_reflection_ban_costs_the_module_exactly_one_constant(self):
+        """`getattr` was reachable once, and the ban is why it is not now.
+
+        The ban is only cheap while this stays true. If the module grows a
+        second honest use of a reflection entry point, this fails and the
+        choice -- rewrite it, or narrow the ban and the docstring with it --
+        is made deliberately rather than by deleting a name from the set.
+        """
+        self.assertEqual(command_execution_names(module_source()), [])
+        for name in ("getattr", "vars", "eval", "exec", "compile",
+                     "__import__", "__getattribute__", "__dict__"):
+            with self.subTest(name=name):
+                self.assertIn(name, REFLECTION_NAMES)
+        #: And the replacement is real: the constant resolves to the flag on
+        #: a platform that has it, and to 0 on one that does not.
+        self.assertEqual(pas._O_DIRECTORY, getattr(os, "O_DIRECTORY", 0))
 
     def test_the_read_only_check_fails_on_a_write_inside_validate_run(self):
         """A test of the test: the guarantee above must be falsifiable.

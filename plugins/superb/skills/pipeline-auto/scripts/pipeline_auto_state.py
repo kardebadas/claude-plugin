@@ -2299,6 +2299,19 @@ def _sync_file(handle) -> None:
     os.fsync(handle.fileno())
 
 
+#: ``os.O_DIRECTORY`` is POSIX-only and absent on some platforms, so it is
+#: resolved ONCE here rather than at each call. Spelled as a ``try``/``except
+#: AttributeError`` rather than ``getattr(os, "O_DIRECTORY", 0)`` because
+#: ``getattr`` is a reflective route from a module object to any attribute of
+#: it, and ``command_execution_names`` refuses it module-wide: a screen that
+#: bans ``os.system`` and permits ``getattr(os, "sys" + "tem")`` bans the
+#: spelling and not the capability. This was the module's only ``getattr``.
+try:
+    _O_DIRECTORY = os.O_DIRECTORY
+except AttributeError:  # pragma: no cover - POSIX-only constant
+    _O_DIRECTORY = 0
+
+
 def _sync_directory(directory: Path) -> None:
     """Make a rename in ``directory`` durable, not merely visible.
 
@@ -2311,7 +2324,7 @@ def _sync_directory(directory: Path) -> None:
     """
     if os.name == "nt":  # native directory-sync semantics remain unverified
         return
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    flags = os.O_RDONLY | _O_DIRECTORY
     descriptor = os.open(directory, flags)
     try:
         os.fsync(descriptor)
@@ -13547,7 +13560,7 @@ def _ref_name(value) -> str:
 
 
 def _ref_text(path: Path, what: str):
-    """The contents of one ref-store file, or ``None`` if it is not there.
+    """The contents of one ref-store file, ``None`` if no ref file is there.
 
     ``is_file()`` NEVER MEANS "there is nothing here": it is false for a
     directory, a dangling symlink, a symlink loop and a FIFO, and a FIFO opened
@@ -13555,14 +13568,52 @@ def _ref_text(path: Path, what: str):
     writer coming. ``_require_regular_file`` is this module's door for that and
     is used rather than re-written; it raises inside the quorum family, so the
     wrap is what keeps a ref-store fault reading as a tracker fault.
+
+    A DIRECTORY IS THE ONE EXCEPTION, AND IT IS NOT A WEAKENING OF THAT RULE.
+    A ref namespace IS a directory: ``refs/tags/`` exists precisely because
+    ``refs/tags/v1`` does, and ``refs/remotes/origin/`` because
+    ``refs/remotes/origin/HEAD`` does. So a directory at a candidate is not
+    corruption at all -- it is the ordinary shape of a name that has children
+    and no value of its own, and git walks straight past it to the next
+    candidate. Refusing it aborted the whole search at the FIRST such name:
+    with a plain branch ``target`` and an unrelated tag ``target/rc1``, the
+    directory ``refs/tags/target/`` sits EARLIER in gitrevisions' order than
+    the ``refs/heads/target`` the run wants, and the run died on a repository
+    ``git rev-parse`` answers without complaint. It also made the
+    ``refs/remotes/<name>/HEAD`` candidate this function's own caller appends
+    unreachable by construction: that candidate can only ever be reached
+    THROUGH the directory ``refs/remotes/<name>/``.
+
+    THE OTHER FOUR STILL RAISE, and the difference is that none of them is a
+    shape the ref store legitimately has. A directory means "look further"; a
+    FIFO, a dangling link, a symlink loop and a name this process cannot read
+    mean "something is here and this run cannot establish what", which is the
+    one answer that must never be folded into absence. Git is more forgiving
+    than this -- measured, it ignores a broken loose ref with a warning and
+    carries on -- and the divergence is deliberate in the strict direction: a
+    baseline is one end of a range proof, and guessing past a ref store this
+    run cannot read is how a proof acquires an end nobody checked.
     """
+    try:
+        #: Asked BEFORE the door, because the door's answer for a directory is
+        #: "corruption" and here it is "keep looking". ``is_dir()`` raises for
+        #: exactly the errnos ``is_file()`` raises for, and those are the
+        #: door's business rather than this branch's -- so they fall through
+        #: to it and are reported there, once, in the door's own words.
+        if path.is_dir():
+            return None
+    except OSError:
+        pass
     try:
         _require_regular_file(path, what)
     except QuorumError as exc:
         raise TrackerValidationError(
             f"{what} at {str(path)!r} is a name this run cannot read ({exc}); "
-            "a directory, a dangling link, a symlink loop or a FIFO is "
-            "corruption and never an absent reference") from exc
+            "a dangling link, a symlink loop, a FIFO or a name this process "
+            "cannot examine is corruption and never an absent reference. A "
+            "DIRECTORY is not in that list and never reaches here: a ref "
+            "namespace is a directory, so it reads as absence and the search "
+            "moves to the next candidate") from exc
     try:
         return path.read_text(encoding="utf-8")
     except (FileNotFoundError, NotADirectoryError):
@@ -13662,12 +13713,46 @@ def _lookup_ref(gitdir: Path, common: Path, name: str):
     before any packed entry, and resolve the HEAD: a silent disagreement with
     ``git rev-parse`` on an ordinary repository, and the nesting this function
     exists to refuse.
+
+    AN EMPTY LOOSE FILE IS A BROKEN REF, NOT AN ABSENT ONE, and the difference
+    is which of the two lookups below it cancels. Measured against real
+    ``git rev-parse`` rather than read off the source: with an empty
+    ``refs/heads/target`` AND a packed ``refs/heads/target``, git says
+    ``warning: ignoring broken ref refs/heads/target`` and FAILS -- the loose
+    file shadows the packed entry even though it carries nothing. It does not
+    end the whole search, though: with an empty ``refs/tags/target`` and a
+    valid loose ``refs/heads/target``, git warns and answers the head. So
+    emptiness cancels THIS CANDIDATE'S packed fallback and nothing else, which
+    is what ``broken`` carries past the store loop. Treating it as plain
+    absence -- the previous behaviour -- resolved a repository ``git rev-parse``
+    refuses, which is the worse direction of the two: the run would proceed on
+    a baseline git itself will not name.
+
+    ``packed-refs`` IS READ FROM ``common``, NEVER FROM ``gitdir``. ``git
+    pack-refs`` writes ONE file, in the common directory, shared by every
+    linked worktree; a linked worktree's own ``gitdir`` has no ``packed-refs``
+    at all. Reading it from ``gitdir`` loses every packed ref in every linked
+    worktree at once -- an ordinary repository, since packing is what git does
+    on its own during ``gc``.
+
+    ONE DIVERGENCE FROM GIT IS KNOWN AND KEPT: a loose file AT a candidate that
+    is also a directory PREFIX of a later candidate in ``packed-refs`` -- an
+    empty ``refs/remotes/x`` with a packed ``refs/remotes/x/HEAD`` -- is a
+    directory/file conflict git resolves by refusing both, and this resolver
+    answers the packed entry. It is a ref store git itself calls corrupt, and
+    naming it here is cheaper than a second conflict model.
     """
     for candidate in _ref_candidates(name):
+        broken = False
         for store in (gitdir, common):
             text = _ref_text(store / candidate, f"the git ref {candidate!r}")
-            if text is not None and text.strip():
+            if text is None:
+                continue
+            if text.strip():
                 return text.strip()
+            broken = True
+        if broken:
+            continue
         packed = _packed_ref(common, candidate)
         if packed is not None:
             return packed
@@ -13909,7 +13994,16 @@ def _require_capacity(tracker: dict, owner: str) -> None:
       implementation owner yet, one in-flight quorum. Searching every
       ``(L, |impl|, quorum rows, |quorum owners|)`` shape over ``L`` 1..12
       finds the one-quorum regime is EXACTLY ``L in {1, 2, 3}`` with
-      ``|impl| == 0``, and nothing else.
+      ``|impl| == 0`` FOR A CALLER WHO IS NOT ALREADY AN IMPLEMENTATION OWNER.
+      That qualifier is not decoration and an earlier revision of this
+      sentence ended at "and nothing else", which is false: neither
+      ``reserve_task`` nor ``resume_task`` carries a one-task-per-owner guard,
+      so an owner already holding a row skips the FIRST clause entirely
+      (``owner in owners``) and arrives at the second with ``|impl| == 1``.
+      At ``L == 3`` with one quorum in flight that is ``|{owner} u 3 brains|
+      == 4 > 3`` and the second clause is what refuses it. The headline regime
+      is unaffected -- it is about which clause binds a NEW owner -- but the
+      second clause's reachable inputs are not only the ones listed above.
     * **Above the floor**, two in-flight quorums -- six brain owners against a
       cap computed from three.
 

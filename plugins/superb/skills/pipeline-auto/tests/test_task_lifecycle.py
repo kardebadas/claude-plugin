@@ -6804,6 +6804,11 @@ OTHER_DIGEST = "a7" * 32
 QUESTION_REF = f"quorum:docs/q.md#sha256={'3c' * 32}"
 
 
+def _alarm(signum, frame):
+    """SIGALRM handler for the bounded FIFO probes: blocking is a failure."""
+    raise AssertionError("the call blocked on a FIFO under the run lock")
+
+
 def git(repo, *args: str) -> str:
     return subprocess.run(
         ("git", "-C", str(repo), *args),
@@ -7317,12 +7322,26 @@ class GitRefResolutionTests(TempDirTestCase):
                 self.assertNotIn("40-character object name",
                                  str(caught.exception))
 
-    def test_a_ref_whose_file_is_a_directory_is_corruption_not_absence(self):
-        """`is_file()` never means 'there is nothing here'."""
+    def test_a_ref_whose_file_is_a_directory_reads_as_an_ABSENT_ref(self):
+        """The one shape `is_file()` is false for that IS "nothing here".
+
+        This test used to be named `..._is_corruption_not_absence` and
+        asserted only `TrackerError`. A directory at the ONLY candidate
+        resolves to nothing either way, so raising and falling through are
+        indistinguishable from here -- the assertion was true of both the
+        behaviour and the defect, which is how the defect shipped past two
+        reviews. `test_a_directory_at_an_earlier_candidate_...` below is the
+        case that separates them; this one now pins WHICH stop is reached, so
+        the two cannot drift apart again.
+
+        A ref namespace IS a directory, and git walks past it.
+        """
         repo = self.repo()
         (repo / ".git" / "refs" / "heads" / "shaped").mkdir()
-        with self.assertRaises(state.TrackerError):
+        with self.assertRaises(state.TrackerValidationError) as caught:
             state._resolved_commit(repo, "shaped")
+        self.assertIn("names no reference", str(caught.exception))
+        self.assertNotIn("cannot read", str(caught.exception))
 
     def test_a_ref_whose_file_is_a_fifo_does_not_hang_the_run(self):
         """A FIFO opened for reading BLOCKS until a writer arrives, and under
@@ -7411,6 +7430,266 @@ class GitRefResolutionTests(TempDirTestCase):
         remote.write_text(git(repo, "rev-parse", "main") + "\n", encoding="utf-8")
         self.assertNotEqual(branch, git(repo, "rev-parse", "main"))
         self.assertEqual(state._resolved_commit(repo, "target"), branch)
+
+    # ----------------------------------------------------------------------
+    # The candidate-order x candidate-shape cross-product.
+    #
+    # Three passes over `_lookup_ref` each drew their cases from the previous
+    # pass's defects and each found more of the same class. These are
+    # generated from the CROSS-PRODUCT instead -- gitrevisions' five
+    # candidates for an unqualified name, against every shape a name can have
+    # at one of them (absent, a valid file, an EMPTY file, a directory, a
+    # FIFO, a dangling symlink, a symlink loop, a name this process may not
+    # read), in the single-occupant, hostile-earlier and hostile-later
+    # arrangements. Every expectation below is read off a real `git rev-parse`
+    # on the same store, never off a reading of the module.
+    #
+    # What the product found that three hand-built passes did not: a
+    # DIRECTORY at an earlier candidate aborted the whole search, and the ref
+    # namespaces ARE directories.
+    # ----------------------------------------------------------------------
+
+    def test_a_directory_at_an_earlier_candidate_is_absence_not_corruption(self):
+        """An unrelated tag `target/rc1` broke every run against `target`.
+
+        `refs/tags/<name>` precedes `refs/heads/<name>` in gitrevisions'
+        order. `git tag target/rc1` creates the DIRECTORY
+        `refs/tags/target/`, which sits at the earlier candidate; the branch
+        the run wants is the perfectly ordinary file at the later one. The
+        resolver refused the directory as corruption and the run died on a
+        store `git rev-parse` answers without complaint.
+
+        The earlier review tested a directory at the ONLY candidate, where
+        raising and returning `None` are indistinguishable, which is why two
+        passes called this covered.
+        """
+        repo = self.repo()
+        git(repo, "tag", "target/rc1", "main")
+        directory = repo / ".git" / "refs" / "tags" / "target"
+        self.assertTrue(directory.is_dir())
+        self.assertTrue((repo / ".git" / "refs" / "heads" / "target").is_file())
+        self.assertEqual(state._resolved_commit(repo, "target"),
+                         git(repo, "rev-parse", "target"))
+
+    def test_the_remotes_head_candidate_is_reachable_through_its_directory(self):
+        """`refs/remotes/<name>/HEAD` can ONLY be reached through a directory.
+
+        The candidate is appended by `_ref_candidates` for exactly the case of
+        a remote named like the ref -- and `refs/remotes/<name>/` is a
+        directory, which the resolver refused one candidate earlier. The
+        candidate was unreachable by construction, so the mutant deleting it
+        survived: nothing could reach it either way.
+        """
+        repo = self.repo()
+        head = repo / ".git" / "refs" / "remotes" / "origin" / "HEAD"
+        head.parent.mkdir(parents=True)
+        head.write_text(git(repo, "rev-parse", "target") + "\n",
+                        encoding="utf-8")
+        self.assertTrue(head.parent.is_dir())
+        self.assertEqual(git(repo, "rev-parse", "origin"),
+                         git(repo, "rev-parse", "target"))
+        self.assertEqual(state._resolved_commit(repo, "origin"),
+                         git(repo, "rev-parse", "origin"))
+
+    def test_a_symbolic_remotes_head_is_followed_through_the_same_directory(self):
+        """The same candidate carrying git's own spelling of it: `HEAD` under
+        a remote is normally `ref: refs/remotes/origin/main`, not a sha."""
+        repo = self.repo()
+        tip = repo / ".git" / "refs" / "remotes" / "origin" / "main"
+        tip.parent.mkdir(parents=True)
+        tip.write_text(git(repo, "rev-parse", "target") + "\n",
+                       encoding="utf-8")
+        (tip.parent / "HEAD").write_text(
+            "ref: refs/remotes/origin/main\n", encoding="utf-8")
+        self.assertEqual(state._resolved_commit(repo, "origin"),
+                         git(repo, "rev-parse", "origin"))
+
+    def test_the_other_hostile_shapes_at_an_earlier_candidate_still_stop(self):
+        """The directory carve-out is not a weakening of the standing rule.
+
+        A directory means "this name has children and no value of its own",
+        which is what a ref namespace IS. A FIFO, a dangling link, a symlink
+        loop and a name this process cannot read mean "something is here and
+        this run cannot establish what", and that is never folded into
+        absence -- even though the later candidate holds a perfectly good
+        branch and even though git itself warns and carries on. A baseline is
+        one end of a range proof.
+
+        The FIFO is probed for BLOCKING as well as for raising: the whole
+        reason the shape is asked before the open is that a reader on a FIFO
+        waits under the run lock for a writer that never comes.
+        """
+        repo = self.repo()
+        good = git(repo, "rev-parse", "target")
+        self.assertEqual(state._resolved_commit(repo, "target"), good)
+        tags = repo / ".git" / "refs" / "tags"
+        tags.mkdir(parents=True, exist_ok=True)
+        hostile = tags / "target"
+
+        def clear():
+            if hostile.is_symlink() or hostile.exists():
+                hostile.chmod(0o644) if hostile.is_file() else None
+                hostile.unlink()
+
+        cases = {
+            "fifo": lambda: os.mkfifo(hostile),
+            "dangling": lambda: hostile.symlink_to(tags / "nowhere"),
+            "unreadable": lambda: (hostile.write_text(good, encoding="utf-8"),
+                                   hostile.chmod(0o000)),
+        }
+        for label, build in cases.items():
+            with self.subTest(shape=label):
+                build()
+                self.addCleanup(clear)
+                #: BOUNDED: the FIFO case must RETURN rather than block, and
+                #: an assertion that never runs is not an assertion.
+                previous = signal.signal(signal.SIGALRM, _alarm)
+                self.addCleanup(signal.signal, signal.SIGALRM, previous)
+                signal.alarm(5)
+                try:
+                    with self.assertRaises(state.TrackerValidationError):
+                        state._resolved_commit(repo, "target")
+                finally:
+                    signal.alarm(0)
+                clear()
+        #: The symlink loop needs two names, so it is built separately.
+        other = tags / "target.loop"
+        hostile.symlink_to(other)
+        other.symlink_to(hostile)
+        self.addCleanup(other.unlink)
+        self.addCleanup(clear)
+        with self.assertRaises(state.TrackerValidationError):
+            state._resolved_commit(repo, "target")
+
+    def test_an_empty_loose_ref_shadows_its_own_packed_entry_like_git(self):
+        """git calls an empty loose ref BROKEN and refuses the whole name.
+
+        Measured, not read: with an empty `refs/heads/target` AND a packed
+        `refs/heads/target`, `git rev-parse` prints `warning: ignoring broken
+        ref refs/heads/target` and exits non-zero. The loose file shadows the
+        packed entry even though it carries nothing.
+
+        The module used to treat emptiness as plain absence and fall through
+        to the packed entry, resolving a store git itself will not name -- the
+        worse of the two directions, because the run would then proceed on a
+        baseline nobody can reproduce with git.
+        """
+        repo = self.repo()
+        packed = git(repo, "rev-parse", "main")
+        (repo / ".git" / "refs" / "heads" / "target").write_text(
+            "", encoding="utf-8")
+        (repo / ".git" / "packed-refs").write_text(
+            "# pack-refs with: peeled fully-peeled sorted \n"
+            f"{packed} refs/heads/target\n", encoding="utf-8")
+        #: git's own answer, taken directly: the name does not resolve.
+        probe = subprocess.run(
+            ("git", "-C", str(repo), "rev-parse", "--verify", "-q",
+             "target^{commit}"), capture_output=True, text=True)
+        self.assertNotEqual(probe.returncode, 0, probe.stdout)
+        with self.assertRaises(state.TrackerValidationError):
+            state._resolved_commit(repo, "target")
+
+    def test_an_empty_loose_ref_cancels_its_candidate_and_not_the_search(self):
+        """...and emptiness cancels THAT CANDIDATE only.
+
+        The same measurement, one candidate earlier: an empty
+        `refs/tags/target` beside a valid loose `refs/heads/target` makes git
+        warn and answer the head. So "broken" is not "stop"; it is "this
+        candidate yields nothing, including from packed-refs".
+        """
+        repo = self.repo()
+        tags = repo / ".git" / "refs" / "tags"
+        tags.mkdir(parents=True, exist_ok=True)
+        (tags / "target").write_text("", encoding="utf-8")
+        self.assertEqual(state._resolved_commit(repo, "target"),
+                         git(repo, "rev-parse", "target"))
+
+    def test_a_whitespace_only_loose_ref_is_broken_for_the_same_reason(self):
+        """`text.strip()` is the emptiness test, so a file of spaces is the
+        same broken ref -- and git agrees, which is what makes the two one
+        case rather than two guesses."""
+        repo = self.repo()
+        packed = git(repo, "rev-parse", "main")
+        (repo / ".git" / "refs" / "heads" / "target").write_text(
+            "   \n", encoding="utf-8")
+        (repo / ".git" / "packed-refs").write_text(
+            "# pack-refs with: peeled fully-peeled sorted \n"
+            f"{packed} refs/heads/target\n", encoding="utf-8")
+        probe = subprocess.run(
+            ("git", "-C", str(repo), "rev-parse", "--verify", "-q",
+             "target^{commit}"), capture_output=True, text=True)
+        self.assertNotEqual(probe.returncode, 0, probe.stdout)
+        with self.assertRaises(state.TrackerValidationError):
+            state._resolved_commit(repo, "target")
+
+    def test_packed_refs_is_read_from_the_common_dir_not_the_worktree(self):
+        """`git pack-refs` writes ONE file, in the common directory.
+
+        A linked worktree's own gitdir has no `packed-refs` at all, so a
+        resolver reading it from `gitdir` loses EVERY packed ref in EVERY
+        linked worktree -- and packing is what git does on its own during
+        `gc`, so this is an ordinary repository, not a contrived one.
+
+        The existing packed-ref test runs in the MAIN checkout, where
+        `gitdir == common` and the two spellings are the same file; the
+        existing worktree test resolves a LOOSE ref. Neither can see the
+        difference, which is why the mutant swapping `common` for `gitdir`
+        here survived both.
+        """
+        repo = self.repo()
+        expected = git(repo, "rev-parse", "target")
+        worktree = self.tmp / "packed-wt"
+        git(repo, "worktree", "add", "-q", "--detach", str(worktree), "main")
+        self.addCleanup(git, repo, "worktree", "remove", "--force",
+                        str(worktree))
+        git(repo, "pack-refs", "--all")
+        gitdir, common = state._git_store(worktree)
+        self.assertNotEqual(gitdir, common)
+        self.assertFalse((gitdir / "packed-refs").exists())
+        self.assertTrue((common / "packed-refs").is_file())
+        self.assertFalse((common / "refs" / "heads" / "target").exists())
+        self.assertEqual(state._resolved_commit(worktree, "target"), expected)
+        self.assertEqual(state._resolved_commit(worktree, "target"),
+                         git(worktree, "rev-parse", "target"))
+
+    def test_a_candidate_the_dir_test_cannot_examine_is_not_made_absent(self):
+        """The directory carve-out must not reopen the door's own escape.
+
+        `is_dir()` raises for exactly the errnos `is_file()` raises for --
+        CPython swallows only `pathlib._IGNORED_ERRNOS` and re-raises the
+        rest -- so a carve-out spelled `except OSError: return None` would
+        fold "this run cannot establish anything about this name" into "there
+        is nothing here", at the one call site the door cannot see into. It
+        is spelled `except OSError: pass` instead, so the name falls through
+        to `_require_regular_file` and is reported ONCE, in the door's words.
+
+        The two inputs are `_door_inputs`' two, re-spelled as REFERENCES:
+        neither needs a permissions trick to be interesting and the first is
+        a pure argument `_cell_safe` accepts. A mutant swapping the `pass`
+        for a `return None` survives every other ref test in this class,
+        because every one of them asks about a name this process can stat.
+        """
+        repo = self.repo()
+        #: 1. A name past NAME_MAX. ENAMETOOLONG is not swallowed.
+        long_name = "n" * 300
+        self.assertTrue(state._cell_safe(long_name))
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._resolved_commit(repo, long_name)
+        self.assertIn("cannot examine", str(caught.exception))
+        self.assertNotIn("names no reference", str(caught.exception))
+        #: 2. A candidate under a directory this run may not search. EACCES
+        #:    is not swallowed either, and the candidate is `refs/heads/` --
+        #:    reached only after two earlier candidates answer absent, so the
+        #:    hostile shape is genuinely mid-search.
+        heads = repo / ".git" / "refs" / "heads"
+        os.chmod(heads, 0o000)
+        self.addCleanup(os.chmod, heads, 0o755)
+        if os.access(heads / "target", os.F_OK):  # pragma: no cover - root
+            self.skipTest("this user can search a mode-000 directory")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._resolved_commit(repo, "target")
+        self.assertIn("cannot examine", str(caught.exception))
+        self.assertNotIn("names no reference", str(caught.exception))
 
 
 # --------------------------------------------------------------------------

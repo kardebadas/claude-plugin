@@ -680,6 +680,47 @@ the function's own docstring: the baseline is not re-derived, and no commit is
 proved to exist — "names commits that do not exist" is defeated by Task 10's
 cross-comparison, not here.
 
+## The FIFO hazard: the predicate never blocks, the OPEN blocks
+
+Corrected after being stated imprecisely in many task briefs, including by the
+controller. Measured:
+
+```
+is_file()   -> False  in 0.0000s
+exists()    -> True   in 0.0000s
+lexists()   -> True   in 0.0000s
+is_fifo()   -> True   in 0.0000s
+read_text() -> *** STILL BLOCKED after 4s ***
+```
+
+So there are **two different hazards and they need different answers**:
+
+- **`is_file()` answers False, instantly.** Its danger is **misclassification** —
+  a FIFO, a directory, a dangling symlink, a symlink loop and a NUL-bearing path
+  all read as "there is nothing here". That is the fail-open that let a run be
+  broken by an unrelated `git tag` and let a NUL escape the error family.
+- **`exists()` / `lexists()` answer True, instantly.** Their danger is the
+  opposite: they invite the open, and **the open is what hangs forever** under
+  the run lock, with no diagnostic and no timeout.
+
+Neither predicate needs a timeout; **the read does** — or better, the type is
+established first and a non-regular file is refused before anything opens it,
+which is what `_require_regular_file` does. A brief that says "`is_file()` hangs"
+will send a fixer to bound the wrong call.
+
+## When a task changes a pinned cross-phase contract, every consumer must be told
+
+P04 Task 10 added a **required `run_command` callable** to `import_worker_result`
+and changed the `Question` cell's quorum arm to the complete
+`quorum:<qid>@<path>#sha256=<digest>`. Both are pinned contracts — master plan
+`:185` and the phase preamble's resolved question 6 — and only Task 11 was
+informed, because Task 11 happened to be the next task dispatched.
+
+P05, P06 and P07 all consume these. **The rule: a task that changes a pinned
+interface amends every document that pins it, in the same commit, and says so in
+its report — the way the `verify_source_range` signature change was propagated to
+four plan files.** Being adjacent to the next task is not propagation.
+
 ## Cross-phase clarifications
 
 Resolved after the phase plans were written, where two phases needed the same

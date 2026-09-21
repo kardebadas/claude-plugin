@@ -170,8 +170,8 @@ def parse_plan_metadata(path: str) -> dict: ...
 def import_phase_plan(run_dir: str, *, phase_plan: str) -> dict: ...
 def publish_worker_result(run_dir: str, *, result: dict) -> str: ...
 def import_worker_result(run_dir: str, *, result_path: str) -> dict: ...
-def verify_source_range(repo: str, *, baseline: str, head: str, scopes: list,
-                        transcript: str) -> dict: ...
+def verify_source_range(repo: str, *, baseline: str, head: str, head_ref: str,
+                        scopes: list, transcript: str) -> dict: ...
 def integrate_task(run_dir: str, *, task_id: str, merge_commit: str) -> dict: ...
 def reconcile_run(run_dir: str) -> dict: ...
 ```
@@ -573,6 +573,28 @@ git commit -m "feat(pipeline-auto): pin phase-plan header grammar with review_cl
 ```
 
 ---
+
+> **RULING — the task-id grammar must be tightened HERE, and it is a deadlock,
+> not an inconvenience.** Raised by P04 Task 9 (a task id carrying `/ : @ +` is
+> accepted by the plan grammar and by `_validate_assignment` but refused at
+> publication) and adjudicated by its review, which ran it end to end.
+>
+> **It is worse than "cannot publish a result".** `reserve_task` **accepts**
+> such a task, so the slot is held against the `worker_limit - 3` cap and can
+> **never terminate** — F2's permanent deadlock reached by another route. A
+> legal phase plan can therefore wedge a run, and the failure arrives after the
+> work is done.
+>
+> **Decisive evidence, and it is the plan grammar's own words.** The message
+> says a task id is "written into a tracker cell, **a branch name** and a
+> checkpoint marker" — and `git check-ref-format` already refuses `T:1` and
+> `T1.` as branch names. So widening publication instead only moves the dead
+> end later, to P05, after work has merged.
+>
+> **Fix:** tighten `_parse_task_metadata` (Task 2, `:11371`) and
+> `_validate_assignment` (Task 6, `:14059`) **in the same commit**, before P05
+> consumes any of it. **Do NOT tighten `_TOKEN`** — it is shared with
+> `target_branch`, `axis`, `phase_id` and others that legitimately want `/`.
 
 ### Task 2: Task metadata grammar and `parse_plan_metadata`
 
@@ -2773,11 +2795,27 @@ The implementation range is linear by construction — one worktree per implemen
 
 **Interfaces:**
 - Consumes: `_git`, `_git_out`, `_resolved_commit`, `_path_in_scope`, `_scope_parts`.
-- Produces: `source_range_commands(repo, *, baseline, head) -> tuple`;
+- Produces: `source_range_commands(repo, *, baseline, head, head_ref) -> tuple`;
   `_parse_range_transcript(text) -> tuple`;
-  `verify_source_range(repo, *, baseline, head, scopes, transcript) -> dict` returning
+  `verify_source_range(repo, *, baseline, head, head_ref, scopes, transcript) -> dict` returning
   `{"baseline", "head", "commits", "changed_paths", "proof_mode"}`.
   `_commit_parents` is NOT produced — parents come from the transcript, not from an object read.
+  **`head_ref` was added by the Task 8 fix round and is required.** Without it the
+  "both endpoints module-derived" clause was false in the only case that ships:
+  `_resolved_commit` short-circuited on a 40-hex ref before reading the ref store,
+  and both production ends are 40-hex, so a complete `attested` proof was obtainable
+  over a directory that is not a repository. The head is now the tip the ref store
+  holds for `head_ref`; the `head` sha is a claim checked against it. The **baseline**
+  is still not re-derived — it is the sha `reserve_task` recorded at reservation and
+  the target branch has moved on — and no commit is proved to exist, because the
+  module reads no objects.
+  **Where Task 10 gets `head_ref`:** from the controller's own knowledge of the
+  per-implementer-worktree topology, NOT from the worker's document. The
+  worker-result grammar has fourteen fields and none of them is a branch, and
+  adding one would put the anchor back on the worker's word — the point of the
+  parameter is that the module resolves a reference the controller names. If
+  Task 10 needs the name persisted, it belongs in a tracker cell or a run field
+  the controller writes, and that is a decision for Task 10 to argue.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3591,6 +3629,7 @@ def import_worker_result(run_dir, *, result_path) -> dict:
                     repo,
                     baseline=_attempt_baseline(row, result["attempt"]),
                     head=result["source_ref"],
+                    head_ref=task_branch,          # NOT from `result`
                     scopes=definition["write_scope"],
                 )
                 if tuple(result["commits"]) != proof["commits"]:

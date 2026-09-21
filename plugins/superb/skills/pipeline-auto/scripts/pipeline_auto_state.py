@@ -6199,6 +6199,15 @@ def _loads(text, what: str):
             "exception family, never outside it") from exc
 
 
+#: NUL, SPELLED ONCE FOR THE WHOLE MODULE. It is the one byte a POSIX path
+#: cannot carry, the one byte an argv element cannot carry, and -- because of
+#: exactly that -- the byte the range transcript uses as its record separator.
+#: Those are three uses of one fact, so they are one constant: a second
+#: spelling would let one of the three screens be relaxed without the other
+#: two noticing.
+_NUL = "\x00"
+
+
 def _require_regular_file(path: Path, what: str) -> None:
     """The blocking half of ``_decisions_text``'s split, spelled once.
 
@@ -6239,14 +6248,35 @@ def _require_regular_file(path: Path, what: str) -> None:
     function raw, so every one of its seven call sites inherited the escape; a
     local ``except OSError`` at the one that found it would have been a rule
     scoped to where it was learned, and the other six would have stayed open.
-    THE SEVEN ARE ENUMERATED FROM THIS MODULE'S AST RATHER THAN REMEMBERED,
+    THE CALLERS ARE ENUMERATED FROM THIS MODULE'S AST RATHER THAN REMEMBERED,
     because the count moves with the module and a stale count reads as a
     checked one: ``_question_record``, ``payload_digest``, ``_read_json``,
-    ``_response_record``, ``_plan_text``, ``resolve_evidence`` and
-    ``_ref_text``. It was five when this argument was first written and six
-    when the hole was found; ``_ref_text`` arrived afterwards and inherited the
-    wrap without knowing it existed, which is the argument for wrapping the
-    door rather than the call site, stated by the module instead of about it.
+    ``_response_record``, ``_plan_text``, ``resolve_evidence``, ``_ref_text``
+    and ``_published_result_bytes``. It was five when this argument was first
+    written, six when the hole was found, seven when ``_ref_text`` arrived and
+    eight when Task 9 added ``_published_result_bytes`` -- each of the last two
+    inherited the wrap without knowing it existed, which is the argument for
+    wrapping the door rather than the call site, stated by the module instead
+    of about it.
+
+    A NUL BYTE IS SCREENED RATHER THAN CAUGHT, and the difference is measured
+    rather than assumed. ``os.stat('\x00x')`` raises ``ValueError`` -- not an
+    ``OSError``, so the arm below would not have caught it anyway -- but
+    ``pathlib`` SWALLOWS that ``ValueError`` itself: measured on this
+    interpreter, ``Path('\x00x')`` answers ``False`` to ``is_file``,
+    ``is_dir``, ``exists``, ``is_symlink`` and ``is_fifo``, and
+    ``os.path.lexists`` -- this door's own fall-through two lines down --
+    answers ``False`` too. So an ``except ValueError`` here would be an
+    UNREACHABLE screen of exactly the kind this module reverted at
+    ``_git_store``, and the door instead asks the question it can actually
+    answer: is this a name the filesystem could even be asked about.
+
+    Without the screen the door said "nothing is here" for a name it had not
+    examined at all, and the caller's own read then raised the bare
+    ``ValueError`` OUTSIDE this module's exception family -- measured on
+    ``_read_json`` and ``payload_digest``. The standing rule names THIS
+    function as the place a NUL is refused, and it is refused here rather than
+    at the eight call sites for the reason the paragraph above gives.
 
     THE SPLIT IS THE READ ARM'S SPLIT, SPELLED ONE LEVEL EARLIER.
     ``FileNotFoundError`` and ``NotADirectoryError`` are the two spellings of
@@ -6311,6 +6341,14 @@ def _require_regular_file(path: Path, what: str) -> None:
     passes with the arm deleted. Naming a test that cannot fail for the arm's
     reason is how an equivalent mutant acquires a defence nobody ran.
     """
+    if _NUL in str(path):
+        raise QuorumSchemaInvalid(
+            f"{what} at {str(path)!r} carries a NUL byte, which is a name no "
+            "syscall will accept and which every existence predicate answers "
+            "False for WITHOUT asking the filesystem anything; reported as "
+            "absent it would fall through to the caller's own read, and that "
+            "read raises a bare ValueError outside this module's exception "
+            "family -- measured on _read_json and payload_digest")
     try:
         regular = path.is_file()
     except (FileNotFoundError, NotADirectoryError):
@@ -13778,11 +13816,26 @@ def _resolved_commit(repo, ref: str) -> str:
     somewhere else tomorrow, and every range proof this run makes has this value
     as one of its ends, so anything that does not come back as a full object
     name is refused rather than recorded.
+
+    THE STORE IS OPENED BEFORE THE OBJECT-NAME SHORT-CIRCUIT, NOT AFTER IT, and
+    that order is a fix rather than a preference. The short-circuit sat first,
+    so a ref that was ALREADY forty hex characters answered itself and this
+    function touched nothing: no ``.git``, no pointer file, no ref store. Every
+    end of the production range proof is forty hex characters -- the
+    reservation baseline is one by construction and a worker's ``source_ref``
+    is schema-bound to be one -- so BOTH ends short-circuited, and a complete
+    `attested` proof was obtainable over a directory that is not a repository
+    and commits that do not exist (measured, before this change). Reading the
+    store first does not make the module able to check that an object name
+    EXISTS -- no object is ever decompressed here, ``zlib`` is off the import
+    list -- but it does make every answer this function gives conditional on
+    ``repo`` being a repository this process can read, which is the fact the
+    ``-C <repo>`` pinning in the emitted command rests on.
     """
     name = _ref_name(ref)
+    gitdir, common = _git_store(repo)
     if _COMMIT.fullmatch(name):
         return name
-    gitdir, common = _git_store(repo)
     seen = [name]
     for _ in range(_SYMREF_LIMIT):
         value = _lookup_ref(gitdir, common, name)
@@ -14598,16 +14651,31 @@ def resume_task(run_dir, *, task_id: str, prior_attempt: int, new_owner: str,
 # "run this program" knobs that `rev-list` and `diff` honour. Shelling out
 # would hand the withheld capability to the party it was withheld from.
 #
-# WHAT IS STILL DERIVED HERE, ON NOBODY'S WORD, is both ends of the range:
-# `baseline` from the `baseline:<attempt>@<sha>` checkpoint `reserve_task`
-# persisted (`reserved_baseline` below), and `head` through `_resolved_commit`
-# reading the ref store directly. Because both ends are module-established, a
-# transcript gathered over any other range fails at the FIRST comparison --
-# which is the whole of why this is not self-certification. The chain is then
-# read out of the transcript's OWN INTERNAL STRUCTURE (first parent equals the
-# baseline, each parent equals the previous, exactly one parent each, the last
-# equals the head, no entry with an empty path list) rather than believed as an
-# assertion the transcript makes about itself.
+# WHAT IS DERIVED HERE, ON NOBODY'S WORD, AND WHAT IS NOT. The head is read
+# out of the ref store: `verify_source_range` takes a required `head_ref`, and
+# the proved head is the tip THIS repository holds for it -- a `head` sha that
+# disagrees is refused rather than believed. The baseline is the sha
+# `reserve_task` recorded by resolving the target branch AT RESERVATION
+# (`reserved_baseline` below); it is module-derived historically and is
+# re-derived nowhere, because the target branch has moved on and there is no
+# current reference to check it against. Nothing here reads a git OBJECT --
+# `zlib` and `subprocess` are both off the import list -- so "this commit
+# exists" is not a fact this module can establish about either end.
+#
+# THE FIRST VERSION OF THIS PARAGRAPH CLAIMED MORE THAN THE CODE DID, which is
+# the failure this build is built to catch. It said both ends were
+# module-derived when `_resolved_commit` short-circuited on any forty-hex ref
+# without opening the ref store -- and both production ends ARE forty hex
+# characters. A full `attested` proof was obtainable over commits that do not
+# exist in a directory that is not a repository. `_resolved_commit` now opens
+# the store before that short-circuit and the head comes from a reference, so
+# the anchor is a fact rather than a sentence.
+#
+# The chain is then read out of the transcript's OWN INTERNAL STRUCTURE (first
+# parent equals the baseline, each parent equals the previous, exactly one
+# parent each, no commit named twice, the last equals the head, no entry with
+# an empty path list) rather than believed as an assertion the transcript
+# makes about itself.
 #
 # `--no-renames` IS LOAD-BEARING AND NOT A STYLE CHOICE. Rename detection is ON
 # by default and git then reports only a rename's DESTINATION. Measured on a
@@ -14630,21 +14698,32 @@ def resume_task(run_dir, *, task_id: str, prior_attempt: int, new_owner: str,
 # defeats this -- and defeats every other option, because it owns `progress.md`
 # and `locked_tracker_update` runs in its own process. What this design defeats
 # mechanically is the worker who edits outside its scope, truncates its range,
-# names commits that do not exist, or reports a head off an unrelated history.
+# reports a head its own ref store does not carry, or reports a head off an
+# unrelated history.
+#
+# "NAMES COMMITS THAT DO NOT EXIST" IS NOT DEFEATED HERE, and the earlier
+# wording said it was. A wholly fabricated intermediate commit spliced into a
+# chain that still starts at the baseline and ends at the head is ACCEPTED by
+# this function, because checking it would mean reading a git object and this
+# module reads none. The defence against it is Task 10's cross-comparison of
+# the worker's `commits` against the controller's own transcript. Tasks 10 and
+# 11 read this block as their specification, so it says which of the two
+# functions holds that line.
 # ---------------------------------------------------------------------------
 
 #: The word the master plan pins for a proof taken over attested external
 #: execution rather than over an object read this module performed itself.
 PROOF_ATTESTED = "attested"
 
-#: NUL, as the record separator between commits in the transcript. It is the
-#: ONE byte a POSIX path cannot carry, which is what makes the split
+#: NUL, as the record separator between commits in the transcript -- THE SAME
+#: `_NUL` the filesystem door screens for, aliased here rather than respelled.
+#: It is the ONE byte a POSIX path cannot carry, which is what makes the split
 #: unambiguous: a repository really may hold a file named with forty hex
 #: characters and a space, so "does this line look like a header" is not a
 #: question with a safe answer. `%x00` is git's own spelling of it inside a
 #: `--format`, so the emitted argv carries the four characters `%x00` and no
 #: actual NUL -- an argv element with a NUL in it is one `subprocess` refuses.
-_RANGE_SEPARATOR = "\x00"
+_RANGE_SEPARATOR = _NUL
 
 #: `%H %P`: the commit and its parents, space separated, and NOTHING ELSE.
 #: Parents come from here rather than from a `_commit_parents` object read
@@ -14694,35 +14773,138 @@ def _repo_argument(repo) -> str:
     return repo
 
 
-def _range_ends(repo, baseline, head) -> tuple:
-    """`(location, baseline sha, head sha)` -- BOTH ENDS MODULE-DERIVED.
+def _range_ends(repo, baseline, head, head_ref) -> tuple:
+    """`(location, baseline sha, head sha)` -- THE HEAD TAKEN FROM A REFERENCE.
 
-    This is the anchor. `_resolved_commit` answers with a 40-character object
-    name or stops, so neither end can be a symbolic name that resolves
-    somewhere else tomorrow, and neither is taken on the worker's word.
+    THIS IS THE ANCHOR, AND SAYING SO IS NOT THE SAME AS BEING IT. The first
+    version of this function resolved both ends through `_resolved_commit` and
+    called that "both ends module-derived". It was not: `_resolved_commit`
+    returned a forty-hex ref unchanged without opening anything, and both ends
+    of the production call ARE forty hex characters -- the baseline by
+    construction from `reserved_baseline`, the head because a worker result's
+    `source_ref` is schema-bound to one. The module therefore derived nothing,
+    read no ref store and never established that `repo` was a repository at
+    all; a complete `attested` proof was obtainable over a directory that did
+    not exist. Two things changed. `_resolved_commit` now opens the store
+    BEFORE the short-circuit, so no answer it gives is free of the repository.
+    And the head is no longer accepted as a bare object name.
+
+    `head_ref` IS THE TASK'S BRANCH AND IT IS REQUIRED. The module resolves it
+    through the ref store and THAT is the head of the proved range; `head` is
+    the sha the worker CLAIMS, checked against it and refused on disagreement.
+    An object name is refused for `head_ref` specifically because an object
+    name answers itself: accepting one would restore the hole this parameter
+    exists to close, and a case that cannot be tied to the ref store must
+    refuse rather than attest.
+
+    WHAT THIS ESTABLISHES, STATED SO NOBODY HAS TO INFER IT:
+
+    * `repo` is a directory this process can read as a git repository -- a
+      `.git` directory or a gitdir pointer, and a readable commondir.
+    * `head_ref` is a reference THIS store carries, and the returned tip is
+      the value the store holds for it, not a value anybody supplied.
+    * the caller's `head`, if it names a different commit than that tip, is
+      refused.
+
+    WHAT IT DOES NOT ESTABLISH, EQUALLY PLAINLY:
+
+    * that the BASELINE is a commit in this repository. It is the sha
+      `reserve_task` recorded by resolving the target branch AT RESERVATION,
+      and the target branch has moved on since; there is no current reference
+      to check it against and this module reads no objects, so the baseline is
+      module-derived HISTORICALLY and is re-derived nowhere.
+    * that any commit named in the transcript exists. No object is ever read
+      -- `zlib` and `subprocess` are both off the import list -- so a
+      fabricated intermediate commit is defeated by Task 10's cross-comparison
+      against the controller's own transcript, never here.
     """
     location = _repo_argument(repo)
-    return (location, _resolved_commit(location, baseline),
-            _resolved_commit(location, head))
+    if not _text(head_ref):
+        raise TrackerValidationError(
+            f"the head reference {head_ref!r} is not a nonempty reference "
+            "name; the head of a proved range is read out of this "
+            "repository's ref store, never taken as an object name on the "
+            "worker's word")
+    if _COMMIT.fullmatch(head_ref):
+        raise TrackerValidationError(
+            f"the head reference {head_ref!r} is an object name, and an object "
+            "name answers itself: resolving one establishes nothing about this "
+            "repository. Name the reference whose tip it is, or the proof is "
+            "anchored on a number nobody checked")
+    tip = _resolved_commit(location, head_ref)
+    claimed = _resolved_commit(location, head)
+    if claimed != tip:
+        raise TrackerValidationError(
+            f"the claimed head {claimed} is not the tip of {head_ref!r}, which "
+            f"this repository's ref store says is {tip}; a head the store does "
+            "not agree with is the worker's word about its own range")
+    return (location, _resolved_commit(location, baseline), tip)
 
 
 def _range_argv(location: str, base: str, tip: str) -> tuple:
-    """The one command, built once, so the emitter and the diagnostic agree."""
+    """The one command, built once, so the emitter and the diagnostic agree.
+
+    EVERY GIT CONFIG THAT CAN CHANGE HOW A PATH IS SPELLED OR WHETHER IT
+    APPEARS AT ALL IS PINNED HERE. That is the master plan's general rule, and
+    it is general because the same defect has now been measured three times:
+
+    * `diff.renames` is ON by default and reports only a rename's
+      DESTINATION, so `git mv theirs/victim.py mine/victim.py` passes a scope
+      check for `tree:mine` while deleting another task's file.
+      `--no-renames` prints both sides.
+    * `diff.relative` reports paths relative to the command's directory, so
+      with `-C <repo>/mine` the out-of-scope `theirs/secret.py` VANISHES from
+      the transcript entirely and `mine/a.py` is spelled `a.py`.
+      `--no-relative` restores both. Measured.
+    * `diff.ignoreSubmodules=all` -- and the per-submodule
+      `submodule.<name>.ignore=all` -- removes a changed submodule gitlink
+      from `--name-only` OUTPUT ALTOGETHER. Measured: a commit that bumps
+      `mods/sub` prints `mods/sub` by default and prints nothing at all under
+      that config, so a commit touching one in-scope file and one out-of-scope
+      submodule passes the scope check. `--ignore-submodules=none` restores
+      it.
+    * `core.quotePath` decides whether a non-ASCII path is C-quoted or
+      printed raw, which is "how a path is spelled" exactly. It is pinned to
+      `true` -- git's own default -- rather than to `false` because that keeps
+      the transcript PURE ASCII and therefore always decodable by whatever
+      captured it, and because a C-quoted path begins with `"` and is refused
+      by the scope check. Pinning the permissive value would push a decode
+      failure into the controller, which is the harm `_repo_argument`'s NUL
+      screen exists to prevent. Fail closed, deterministically, rather than
+      fail closed by default.
+
+    Measured and NOT pinned, with the reason: `log.abbrevCommit`,
+    `log.decorate`, `log.showSignature` and `log.follow` are inert against a
+    custom `--format` and an empty pathspec; `diff.orderFile` changes the
+    order of paths inside one record and the union is sorted here anyway;
+    `diff.external` is not consulted by `--name-only`; `log.diffMerges` can
+    only ADD paths for a merge, and a merge inside the range is refused on its
+    parent count, which comes from `%P` and no config touches.
+    """
     return ((
-        "git", "-C", location, "log", "--reverse", "--no-renames",
-        "--name-only", "--no-color", _RANGE_FORMAT, f"{base}..{tip}", "--",
+        "git", "-C", location, "-c", "core.quotePath=true", "log",
+        "--reverse", "--no-renames", "--no-relative",
+        "--ignore-submodules=none", "--name-only", "--no-color",
+        _RANGE_FORMAT, f"{base}..{tip}", "--",
     ),)
 
 
-def source_range_commands(repo, *, baseline: str, head: str) -> tuple:
+def source_range_commands(repo, *, baseline: str, head: str,
+                          head_ref: str) -> tuple:
     """The exact commands whose output proves one task's implementation range.
 
     ONE command, and it is a `log` rather than a `rev-list` plus a `diff` per
     commit, because the module cannot know how many commits are in the range
     before it has been told -- and because two commands would be two
     transcripts to reconcile for a fact one of them already carries.
+
+    `head_ref` IS REQUIRED HERE TOO, and not as symmetry for its own sake: the
+    argv this function hands a controller carries the resolved ends, so an
+    emitter that would accept a head the ref store never named would print a
+    command whose range is the worker's word. The emitter and the verifier
+    anchor identically because they call `_range_ends` identically.
     """
-    return _range_argv(*_range_ends(repo, baseline, head))
+    return _range_argv(*_range_ends(repo, baseline, head, head_ref))
 
 
 def _parse_range_transcript(text) -> tuple:
@@ -14785,9 +14967,17 @@ def _parse_range_transcript(text) -> tuple:
     return tuple(entries)
 
 
-def verify_source_range(repo, *, baseline: str, head: str, scopes,
-                        transcript: str) -> dict:
+def verify_source_range(repo, *, baseline: str, head: str, head_ref: str,
+                        scopes, transcript: str) -> dict:
     """Prove one task's implementation range against its persisted baseline.
+
+    WHAT IS ANCHORED AND WHAT IS ATTESTED ARE TWO DIFFERENT SENTENCES, and
+    `_range_ends` above spells out both in full. In one line: the repository
+    is established as a repository, the head is the tip THIS ref store holds
+    for `head_ref` and the caller's `head` is refused if it disagrees, the
+    baseline is the sha the reservation recorded and is re-derived nowhere,
+    and no commit named in the transcript is proved to exist. The returned
+    `proof_mode` says `attested` for exactly that reason.
 
     THE BASELINE IS THE ONE PERSISTED AT RESERVATION, for THE ATTEMPT BEING
     PROVED. `HEAD~1` silently truncates a multi-commit task to its last commit
@@ -14811,7 +15001,7 @@ def verify_source_range(repo, *, baseline: str, head: str, scopes,
             "'no scope' must never read as 'every scope'")
     for scope in scopes:
         _scope_parts(scope)                      # rejects untyped/unsafe scopes
-    location, base, tip = _range_ends(repo, baseline, head)
+    location, base, tip = _range_ends(repo, baseline, head, head_ref)
     printable = " ".join(_range_argv(location, base, tip)[0])
     if base == tip:
         raise TrackerValidationError(
@@ -14841,6 +15031,26 @@ def verify_source_range(repo, *, baseline: str, head: str, scopes,
                 f"the implementation range must be linear; {entry['commit']} "
                 f"has {len(entry['parents'])} parents, and a merge belongs to "
                 "integration rather than to one implementer's worktree")
+    #: A COMMIT APPEARS ONCE, AND THE CHAIN WALK BELOW CANNOT SAY SO. Nothing
+    #: in git forbids a commit being its own parent, so the three records
+    #: `<C parent BASE> <TIP parent C> <TIP parent TIP>` chain from the
+    #: baseline, end at the head and were ACCEPTED -- `commits` came back
+    #: carrying the tip twice. `<A parent BASE> <B parent A> <A parent B>` is
+    #: the same fault without the self-parenting and is the reason this is a
+    #: distinctness check rather than a "never its own parent" check: the
+    #: second shape has no self-parent anywhere. Task 10 compares the worker's
+    #: `commits` list against this tuple and will read it as the range in
+    #: order, so a repeat is a disagreement waiting to happen rather than a
+    #: harmless echo.
+    names = tuple(entry["commit"] for entry in entries)
+    if len(set(names)) != len(names):
+        repeated = tuple(sorted(
+            name for name in set(names) if names.count(name) > 1))
+        raise TrackerValidationError(
+            f"the range transcript names {', '.join(repeated)} more than "
+            "once; an implementation range is a chain of distinct commits, "
+            "and a repeated record is a duplicated entry rather than a "
+            "second commit")
     previous = base
     for entry in entries:
         if entry["parents"][0] != previous:

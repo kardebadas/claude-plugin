@@ -183,8 +183,8 @@ def scopes_overlap(a: str, b: str) -> bool: ...   # file:/tree: with ancestor ru
 def parse_plan_metadata(path: str) -> dict: ...   # strict comment grammar, pinned key order; raises PlanMetadataError
 def publish_worker_result(run_dir: str, *, result: dict) -> str: ...
 def import_worker_result(run_dir: str, *, result_path: str) -> dict: ...
-def verify_source_range(repo: str, *, baseline: str, head: str, scopes: list,
-                        transcript: str) -> dict: ...
+def verify_source_range(repo: str, *, baseline: str, head: str, head_ref: str,
+                        scopes: list, transcript: str) -> dict: ...
 def reconcile_run(run_dir: str) -> dict: ...
 def render_verification_evidence(record: dict) -> str: ...        # THE only writer
 def parse_verification_evidence(text: str) -> dict: ...           # last screen is the renderer
@@ -535,6 +535,60 @@ every git config that can alter how a path is spelled or whether it appears at
 all.** Rename detection and relative paths are two; treat the next one as
 likely rather than surprising, and prefer explicitly disabling a behaviour over
 relying on its default.
+
+### Third instance, found by applying the rule: `diff.ignoreSubmodules`
+
+Applying the rule to the emitted argv rather than waiting for the next bug
+produced one immediately, and this one is **live rather than latent**:
+`diff.ignoreSubmodules=all` — and the per-submodule `submodule.<name>.ignore=all`
+— removes a changed submodule gitlink from `--name-only` output **altogether**.
+No unusual `-C` is needed, it is an ordinary repository-level config, and the
+worker owns the repository. Measured: a commit touching one in-scope file and
+bumping one out-of-scope submodule prints both paths by default and prints only
+the in-scope one under that config, so the scope check passes on a commit that
+moved another task's submodule. `--ignore-submodules=none` restores it.
+
+A fourth config is pinned for spelling rather than presence: `core.quotePath`
+decides whether a non-ASCII path is C-quoted or printed raw. It is pinned to
+`true` — git's own default — because that keeps the transcript pure ASCII and
+therefore always decodable by whatever captured it, and because a C-quoted path
+begins with `"` and is claimed by no scope. Pinning the permissive value would
+push a decode failure into the controller. **Fail closed deterministically
+rather than fail closed by default** is the shape of every pin here.
+
+Measured and deliberately **not** pinned, so the next reader does not re-measure
+them: `log.abbrevCommit`, `log.decorate`, `log.showSignature` and `log.follow`
+are inert against a custom `--format` with an empty pathspec; `diff.orderFile`
+reorders paths inside one record and the union is sorted anyway;
+`diff.external` is not consulted by `--name-only`; `log.diffMerges` can only
+*add* paths for a merge, and a merge is refused on its parent count, which comes
+from `%P`.
+
+### A proof is only anchored if the module opened something
+
+Found by the P04 Task 8 review and fixed in its fix round. `verify_source_range`
+claimed both endpoints were module-derived. `_resolved_commit` returned a 40-hex
+ref unchanged **before** it read the ref store, and both production endpoints are
+40-hex — the reservation baseline by construction, a worker's `source_ref` by
+schema — so the module opened nothing, never established that `repo` was a
+repository, and issued a full `attested#sha256=` proof over commits that do not
+exist in a directory that does not exist. A committed test asserted that
+behaviour as a feature.
+
+Two rules come out of it. **A short-circuit that skips the only I/O in a function
+skips the only thing that made its answer true** — put the establishing read
+before the fast path, not after it. And **a claim in a docstring is a claim about
+the case that ships**: "both ends module-derived" was true only for the ends
+nobody passes.
+
+The shape of the fix, for the phases that consume the name:
+`verify_source_range` and `source_range_commands` take a required `head_ref`,
+the head is the tip the ref store holds for it, a supplied `head` sha that
+disagrees is refused, and an object name is refused *as* `head_ref` because an
+object name answers itself. What is still **not** established is written into
+the function's own docstring: the baseline is not re-derived, and no commit is
+proved to exist — "names commits that do not exist" is defeated by Task 10's
+cross-comparison, not here.
 
 ## Cross-phase clarifications
 

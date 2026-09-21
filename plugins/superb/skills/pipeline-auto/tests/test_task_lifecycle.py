@@ -22,6 +22,7 @@ import ast
 import contextlib
 import errno
 import hashlib
+import inspect
 import itertools
 import json
 import os
@@ -6384,14 +6385,15 @@ class EvidenceResolutionTests(TempDirTestCase):
     def test_the_door_itself_keeps_every_caller_inside_the_family(self):
         """PINNED WHERE THE DEFECT LIVES, not where it was found.
 
-        `_require_regular_file` has SEVEN call sites -- counted from the AST,
+        `_require_regular_file` has EIGHT call sites -- counted from the AST,
         not remembered: `_question_record`, `payload_digest`, `_read_json`,
-        `_response_record`, `_plan_text`, `resolve_evidence` and `_ref_text`
-        -- and every one of them inherited this hole. It was six when this
-        test was written and `_ref_text` arrived afterwards, inheriting the
-        wrap without asking for it: the count is re-enumerated rather than
-        carried forward, because a remembered count is the reason the door
-        was nearly wrapped at one caller instead of at itself. A test that only drove `resolve_evidence`
+        `_response_record`, `_plan_text`, `resolve_evidence`, `_ref_text` and
+        `_published_result_bytes` -- and every one of them inherited this
+        hole. It was six when this test was written, seven when `_ref_text`
+        arrived and eight when Task 9 added `_published_result_bytes`, each
+        inheriting the wrap without asking for it: the count is re-enumerated
+        rather than carried forward, because a remembered count is the reason
+        the door was nearly wrapped at one caller instead of at itself. A test that only drove `resolve_evidence`
         would license a fix scoped to `resolve_evidence`, which is the shape of
         defect this build has already been bitten by. So the door is asked
         directly, and `_plan_text` is asked alongside it as the second caller
@@ -6408,6 +6410,86 @@ class EvidenceResolutionTests(TempDirTestCase):
                 with self.assertRaises(state.PlanMetadataError) as plan:
                     state._plan_text(str(path))
                 self.assertIsInstance(plan.exception, state.TrackerError)
+
+    def test_the_door_refuses_a_nul_bearing_name_instead_of_reporting_it_absent(self):
+        """THE SECOND THING `is_file()` ANSWERS FALSELY, and the standing rule
+        names this function as where it is refused.
+
+        A NUL byte is not an errno. `os.stat('\x00x')` raises `ValueError`,
+        which is not an `OSError` -- but `pathlib` swallows it, so measured on
+        this interpreter `Path('\x00x')` answers `False` to `is_file`,
+        `is_dir`, `exists`, `is_symlink` and `is_fifo`, and
+        `os.path.lexists` -- this door's own fall-through -- answers `False`
+        too. Both halves of the door therefore said ABSENT for a name that
+        had not been examined at all, and the caller's own read then raised a
+        bare `ValueError` outside the family. Measured before the screen:
+        `_read_json` and `payload_digest` both escaped that way.
+
+        An `except ValueError` here would have been an UNREACHABLE screen --
+        the same shape this module already reverted at `_git_store` -- so the
+        door asks the question instead.
+        """
+        probe = pathlib.Path("\x00x")
+        self.assertFalse(probe.is_file())
+        self.assertFalse(probe.is_dir())
+        self.assertFalse(os.path.lexists(probe))
+        with self.assertRaises(state.QuorumSchemaInvalid) as caught:
+            state._require_regular_file(probe, "a probe")
+        self.assertIn("NUL byte", str(caught.exception))
+        self.assertIsInstance(caught.exception, state.TrackerError)
+
+    def test_every_door_caller_is_enumerated_and_none_escapes_on_a_nul(self):
+        """THE CALLER SWEEP, and the count comes out of the AST.
+
+        "Widened at the single door" is only true if the door is the door, so
+        the eight callers are enumerated from the module's own syntax tree and
+        then each is DRIVEN with a NUL-bearing name. `_question_record`,
+        `_response_record`, `resolve_evidence` and `_published_result_bytes`
+        are reached through the run directory or the result they build their
+        path from -- the last is driven through its public caller
+        `publish_worker_result`, which is the only way a worker reaches it --
+        and the other four take the name more directly. Every one stays
+        inside `TrackerError`.
+        """
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        tree = ast.parse(source)
+        callers = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for inner in ast.walk(node):
+                if (isinstance(inner, ast.Call)
+                        and isinstance(inner.func, ast.Name)
+                        and inner.func.id == "_require_regular_file"):
+                    callers.add(node.name)
+        self.assertEqual(callers, {
+            "_question_record", "payload_digest", "_read_json",
+            "_response_record", "_plan_text", "resolve_evidence",
+            "_ref_text", "_published_result_bytes"})
+
+        nul = "\x00rd"
+        probe = pathlib.Path("\x00x")
+        result = {"run_id": "run-1", "task_id": "T1", "attempt": 1,
+                  "owner": "w-1", "kind": "source", "status": "complete"}
+        drives = {
+            "_question_record": lambda: state._question_record(nul, "q1"),
+            "payload_digest": lambda: state.payload_digest("q1", run_dir=nul),
+            "_read_json": lambda: state._read_json(probe, "a probe"),
+            "_response_record": lambda: state._response_record(
+                probe, "q1", "w-1", 1),
+            "_plan_text": lambda: state._plan_text("\x00plan.md"),
+            "resolve_evidence": lambda: state.resolve_evidence(
+                nul, nul, f"evidence/T1.md#sha256={'a' * 64}"),
+            "_ref_text": lambda: state._ref_text(probe, "a probe"),
+            "_published_result_bytes": lambda: state.publish_worker_result(
+                nul, result=result),
+        }
+        self.assertEqual(set(drives), callers)
+        for name, drive in sorted(drives.items()):
+            with self.subTest(caller=name):
+                with self.assertRaises(state.TrackerError):
+                    drive()
 
     def test_a_name_that_is_not_there_is_still_answered_by_falling_through(self):
         """THE HALF THE SPLIT MUST NOT BREAK. `FileNotFoundError` and
@@ -9581,9 +9663,14 @@ def run_commands(commands) -> str:
         for argv in commands)
 
 
-def range_transcript(repo, baseline: str, head: str) -> str:
-    return run_commands(
-        state.source_range_commands(repo, baseline=baseline, head=head))
+def range_transcript(repo, baseline: str, head: str,
+                     head_ref: str = "task/T1") -> str:
+    """The module's own argv, run. `head_ref` defaults to the branch every
+    fixture below commits on -- the head of a proved range is read out of the
+    ref store, so there is no spelling of this helper that does not name a
+    reference."""
+    return run_commands(state.source_range_commands(
+        repo, baseline=baseline, head=head, head_ref=head_ref))
 
 
 def transcript_records(text: str) -> list:
@@ -9604,6 +9691,17 @@ class SourceRangeProducesBlockTests(unittest.TestCase):
     Produces: `source_range_commands`, `_parse_range_transcript`,
     `verify_source_range`; `_commit_parents` is explicitly NOT produced.
     Added beyond the block: `reserved_baseline`, argued below.
+
+    THE BLOCK'S SIGNATURE GAINED ONE KEYWORD AND THE DIVERGENCE IS RECORDED
+    RATHER THAN QUIET. The plan wrote `verify_source_range(repo, *, baseline,
+    head, scopes, transcript)`, and with that signature the function could
+    not do the one thing the plan said it did -- "both endpoints stay
+    module-derived, so a transcript rooted elsewhere fails at the first
+    link". Both production endpoints are object names, `_resolved_commit`
+    answered an object name without opening anything, and a full `attested`
+    proof was obtainable over a directory that is not a repository.
+    `head_ref` is required so the head comes out of the ref store; the master
+    plan's P04 block and this phase plan were amended in the same change.
     """
 
     def test_the_two_subprocess_wrappers_the_brief_called_do_not_exist(self):
@@ -9695,6 +9793,23 @@ class SourceRangeProducesBlockTests(unittest.TestCase):
     def test_the_proof_mode_vocabulary_is_the_master_plans_own_word(self):
         self.assertEqual(state.PROOF_ATTESTED, "attested")
 
+    def test_the_head_reference_is_a_required_keyword_on_both_public_names(self):
+        """Required rather than defaulted, and keyword-only rather than
+        positional: a default would be a head nobody named, and a positional
+        would let a caller pass the sha twice by accident."""
+        for name in ("source_range_commands", "verify_source_range"):
+            with self.subTest(name=name):
+                parameters = inspect.signature(
+                    getattr(state, name)).parameters
+                head_ref = parameters["head_ref"]
+                self.assertEqual(head_ref.kind,
+                                 inspect.Parameter.KEYWORD_ONLY)
+                self.assertIs(head_ref.default, inspect.Parameter.empty)
+                self.assertEqual(
+                    [p for p in parameters
+                     if parameters[p].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD],
+                    ["repo"])
+
 
 class ReservedBaselineTests(TempDirTestCase):
     """Task 7's inheritance, and the highest-stakes read in this task.
@@ -9755,13 +9870,15 @@ class ReservedBaselineTests(TempDirTestCase):
         git(repo, "checkout", "-q", "-b", "task/T1", second)
         head = commit_only(repo, "src/a1.py", "mine = 1\n", "my only commit")
         honest = state.verify_source_range(
-            repo, baseline=second, head=head, scopes=["file:src/a1.py"],
+            repo, baseline=second, head=head, head_ref="task/T1",
+            scopes=["file:src/a1.py"],
             transcript=range_transcript(repo, second, head))
         self.assertEqual(honest["commits"], (head,))
         self.assertEqual(honest["changed_paths"], ("src/a1.py",))
         with self.assertRaises(state.TrackerValidationError) as caught:
             state.verify_source_range(
-                repo, baseline=first, head=head, scopes=["file:src/a1.py"],
+                repo, baseline=first, head=head, head_ref="task/T1",
+                scopes=["file:src/a1.py"],
                 transcript=range_transcript(repo, first, head))
         self.assertIn("src/other.py", str(caught.exception))
         #: and the innocent commit really is the one that was charged
@@ -9815,6 +9932,22 @@ class ReservedBaselineTests(TempDirTestCase):
                 with self.assertRaises(state.TrackerValidationError):
                     state.reserved_baseline(row, attempt=1)
 
+    def test_the_marker_is_anchored_at_the_start_of_the_entry(self):
+        """M-R13. `entry.startswith(marker)` weakened to `marker in entry`
+        kills nothing in the shipped vocabulary, because nothing shipped puts
+        `baseline:attempt-NNN@` anywhere but at the start of a `_csv` entry.
+        That is hardening rather than a live hole, and hardening nobody
+        exercises is hardening nobody can rely on: one entry spelled with a
+        prefix closes it."""
+        row = {"id": "T1",
+               "checkpoints": f"started:attempt-001,"
+                              f"x-baseline:attempt-001@{'a' * 40}"}
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.reserved_baseline(row, attempt=1)
+        self.assertIn("records 0 baselines", str(caught.exception))
+        row["checkpoints"] += f",baseline:attempt-001@{'b' * 40}"
+        self.assertEqual(state.reserved_baseline(row, attempt=1), "b" * 40)
+
     def test_a_row_that_is_not_a_row_is_refused_inside_the_family(self):
         for row in (None, "checkpoints", 3, [], {"id": "T1"},
                     {"checkpoints": "-"}, {"id": "T1", "checkpoints": None},
@@ -9840,11 +9973,13 @@ class SourceRangeCommandTests(TempDirTestCase):
         base = git(repo, "rev-parse", "target")
         head = git(repo, "rev-parse", "HEAD")
         self.assertEqual(
-            state.source_range_commands(repo, baseline=base, head=head),
+            state.source_range_commands(repo, baseline=base, head=head,
+                                        head_ref="main"),
             ((
-                "git", "-C", str(repo), "log", "--reverse", "--no-renames",
-                "--name-only", "--no-color", "--format=%x00%H %P",
-                f"{base}..{head}", "--",
+                "git", "-C", str(repo), "-c", "core.quotePath=true", "log",
+                "--reverse", "--no-renames", "--no-relative",
+                "--ignore-submodules=none", "--name-only", "--no-color",
+                "--format=%x00%H %P", f"{base}..{head}", "--",
             ),))
 
     def test_every_changed_path_command_carries_no_renames(self):
@@ -9854,7 +9989,7 @@ class SourceRangeCommandTests(TempDirTestCase):
         repo = make_repo(self.tmp)
         commands = state.source_range_commands(
             repo, baseline=git(repo, "rev-parse", "target"),
-            head=git(repo, "rev-parse", "HEAD"))
+            head=git(repo, "rev-parse", "HEAD"), head_ref="main")
         self.assertTrue(commands)
         for argv in commands:
             with self.subTest(argv=argv):
@@ -9867,7 +10002,7 @@ class SourceRangeCommandTests(TempDirTestCase):
         meant."""
         repo = make_repo(self.tmp)
         argv = state.source_range_commands(
-            repo, baseline="target", head="main")[0]
+            repo, baseline="target", head="main", head_ref="main")[0]
         self.assertIn(f"{git(repo, 'rev-parse', 'target')}.."
                       f"{git(repo, 'rev-parse', 'main')}", argv)
         self.assertNotIn("target..main", argv)
@@ -9876,14 +10011,42 @@ class SourceRangeCommandTests(TempDirTestCase):
         repo = make_repo(self.tmp)
         with self.assertRaises(state.TrackerValidationError):
             state.source_range_commands(repo, baseline="no-such-branch",
-                                        head="target")
+                                        head="target", head_ref="target")
 
     def test_a_repository_argument_that_cannot_be_an_argv_element_is_refused(self):
         for repo in (None, 3, "", "   ", "a\x00b", b"/tmp"):
             with self.subTest(repo=repo):
                 with self.assertRaises(state.TrackerError):
                     state.source_range_commands(repo, baseline="a" * 40,
-                                                head="b" * 40)
+                                                head="b" * 40,
+                                                head_ref="target")
+
+    def test_the_nul_screen_is_asserted_by_its_diagnosis_at_every_offset(self):
+        """M-R14, and the reason "it refused" was never a strong enough claim.
+
+        `if _RANGE_SEPARATOR in repo:` weakened to `repo[1:]` SURVIVES every
+        test that only asks whether the call refused. It refuses anyway --
+        `_git_store` walks a NUL-bearing path down to `_require_regular_file`,
+        which screens the byte at the door and raises inside the family -- so
+        the mutant's answer and the shipped answer have the same SHAPE and a
+        different SENTENCE. What is lost is the screen that fires BEFORE any
+        filesystem work and whose diagnosis is the one the caller needs: no
+        argv element may carry a NUL, so this location can never be handed to
+        a controller at all. Measured: `subprocess.run(('git', '-C',
+        '\x00repo', 'log'))` raises `ValueError: embedded null byte`, which is
+        not an `OSError` and is outside this module's exception family.
+
+        The corpus that missed this had the NUL mid-string in every case, so
+        the offset is swept here rather than assumed.
+        """
+        for repo in ("\x00", "\x00repo", "a\x00b", "repo\x00", "a\x00b\x00c"):
+            with self.subTest(repo=repo):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state.source_range_commands(
+                        repo, baseline="a" * 40, head="b" * 40,
+                        head_ref="target")
+                self.assertIn("the repository location carries a NUL byte",
+                              str(caught.exception))
 
     def test_the_command_runs_and_its_output_is_what_the_parser_reads(self):
         repo = make_repo(self.tmp)
@@ -9933,7 +10096,8 @@ class RenameHidesTheVictimTests(TempDirTestCase):
         repo, base, head = self.moved_victim()
         with self.assertRaises(state.TrackerValidationError) as caught:
             state.verify_source_range(
-                repo, baseline=base, head=head, scopes=["tree:mine"],
+                repo, baseline=base, head=head, head_ref="task/T1",
+                scopes=["tree:mine"],
                 transcript=range_transcript(repo, base, head))
         self.assertIn("theirs/victim.py", str(caught.exception))
 
@@ -9942,12 +10106,199 @@ class RenameHidesTheVictimTests(TempDirTestCase):
         removed from the argv the module emitted, the same repository produces
         a transcript every path of which is inside the declared scope."""
         repo, base, head = self.moved_victim()
-        argv = state.source_range_commands(repo, baseline=base, head=head)[0]
+        argv = state.source_range_commands(repo, baseline=base, head=head,
+                                           head_ref="task/T1")[0]
         weakened = tuple(part for part in argv if part != "--no-renames")
         proof = state.verify_source_range(
-            repo, baseline=base, head=head, scopes=["tree:mine"],
-            transcript=run_commands((weakened,)))
+            repo, baseline=base, head=head, head_ref="task/T1",
+            scopes=["tree:mine"], transcript=run_commands((weakened,)))
         self.assertEqual(proof["changed_paths"], ("mine/victim.py",))
+
+
+class PathSpellingConfigTests(TempDirTestCase):
+    """The rename bypass was not one bug, it was the first of a family.
+
+    The master plan's rule after the second instance: A CHANGED-PATH COMMAND
+    PINS EVERY GIT CONFIG THAT CAN CHANGE HOW A PATH IS SPELLED OR WHETHER IT
+    APPEARS AT ALL. This class is that rule applied to the emitted argv, one
+    config at a time, each measured against REAL git in both directions --
+    the module's own command, and the module's own command with exactly that
+    one token removed.
+
+    A third instance was found by applying the rule rather than by waiting
+    for a bug: `diff.ignoreSubmodules`. Unlike `diff.relative` it needs no
+    unusual `-C`, so it is live rather than latent.
+    """
+
+    def touch_both(self):
+        """One commit touching an in-scope file and an out-of-scope one."""
+        repo = make_repo(self.tmp)
+        git(repo, "checkout", "-q", "target")
+        for directory in ("mine", "theirs"):
+            (repo / directory).mkdir()
+            (repo / directory / "f.py").write_text("x = 1\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-qm", "two trees")
+        base = git(repo, "rev-parse", "target")
+        git(repo, "checkout", "-q", "-b", "task/T1", "target")
+        for directory in ("mine", "theirs"):
+            (repo / directory / "f.py").write_text("x = 2\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-qm", "touch both")
+        return repo, base, git(repo, "rev-parse", "HEAD")
+
+    def argv(self, repo, base, head):
+        return state.source_range_commands(
+            repo, baseline=base, head=head, head_ref="task/T1")[0]
+
+    @staticmethod
+    def without(argv, token):
+        weakened = tuple(part for part in argv if part != token)
+        assert len(weakened) == len(argv) - 1, token
+        return weakened
+
+    def test_ignore_submodules_hides_a_changed_gitlink_and_the_flag_stops_it(self):
+        """LIVE, not latent: `diff.ignoreSubmodules=all` is an ordinary
+        repository-level config and the worker owns the repository. A commit
+        that changes one in-scope file and bumps one out-of-scope submodule
+        prints the gitlink by default and prints NOTHING for it under that
+        config, so the scope check passes on a commit that moved another
+        task's submodule. The gitlink is written straight into the index
+        rather than through `git submodule add`, because the mode is what
+        `--name-only` reports on and a checked-out submodule is not needed to
+        have one."""
+        repo = make_repo(self.tmp)
+        git(repo, "checkout", "-q", "target")
+        (repo / "mine").mkdir()
+        (repo / "mine" / "f.py").write_text("x = 1\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-qm", "mine")
+        base = git(repo, "rev-parse", "target")
+        git(repo, "checkout", "-q", "-b", "task/T1", "target")
+        git(repo, "update-index", "--add", "--cacheinfo",
+            f"160000,{'1' * 40},theirs/sub")
+        (repo / "mine" / "f.py").write_text("x = 2\n", encoding="utf-8")
+        git(repo, "add", "--", "mine/f.py")
+        git(repo, "commit", "-qm", "mine, and another task's submodule")
+        head = git(repo, "rev-parse", "HEAD")
+        git(repo, "config", "diff.ignoreSubmodules", "all")
+
+        argv = self.argv(repo, base, head)
+        self.assertIn("--ignore-submodules=none", argv)
+        honest = run_commands((argv,))
+        self.assertIn("theirs/sub", honest)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.verify_source_range(
+                repo, baseline=base, head=head, head_ref="task/T1",
+                scopes=["tree:mine"], transcript=honest)
+        self.assertIn("theirs/sub", str(caught.exception))
+
+        hidden = run_commands(
+            (self.without(argv, "--ignore-submodules=none"),))
+        self.assertNotIn("theirs/sub", hidden)
+        proof = state.verify_source_range(
+            repo, baseline=base, head=head, head_ref="task/T1",
+            scopes=["tree:mine"], transcript=hidden)
+        self.assertEqual(proof["changed_paths"], ("mine/f.py",))
+
+    def test_relative_paths_respell_one_side_and_delete_the_other(self):
+        """`diff.relative` reports paths relative to the command's working
+        directory. Measured: with `-C <repo>/mine` the in-scope
+        `mine/deep/x.py` is respelled `deep/x.py` -- which a `tree:deep`
+        scope then CLAIMS -- and the out-of-scope `theirs/f.py` does not
+        appear at all.
+
+        NOT REACHABLE THROUGH THE MODULE TODAY, and the `-C` is rewritten
+        here to show the flag doing its job: `_repo_dir` yields the
+        repository root and `_git_store` requires a `.git` there. That is
+        exactly the reachability argument that was made for `--no-renames`
+        and that turned out to be wrong, so the token is on the argv and this
+        test measures it rather than the argument.
+        """
+        repo = make_repo(self.tmp)
+        git(repo, "checkout", "-q", "target")
+        (repo / "mine" / "deep").mkdir(parents=True)
+        (repo / "theirs").mkdir()
+        (repo / "mine" / "deep" / "x.py").write_text("x = 1\n", encoding="utf-8")
+        (repo / "theirs" / "f.py").write_text("x = 1\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-qm", "two trees")
+        base = git(repo, "rev-parse", "target")
+        git(repo, "checkout", "-q", "-b", "task/T1", "target")
+        (repo / "mine" / "deep" / "x.py").write_text("x = 2\n", encoding="utf-8")
+        (repo / "theirs" / "f.py").write_text("x = 2\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-qm", "touch both")
+        head = git(repo, "rev-parse", "HEAD")
+        git(repo, "config", "diff.relative", "true")
+
+        argv = self.argv(repo, base, head)
+        self.assertIn("--no-relative", argv)
+        from_subdir = tuple(str(repo / "mine") if part == str(repo) else part
+                            for part in argv)
+        self.assertIn(str(repo / "mine"), from_subdir)
+        honest = run_commands((from_subdir,))
+        self.assertIn("mine/deep/x.py", honest)
+        self.assertIn("theirs/f.py", honest)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.verify_source_range(
+                repo, baseline=base, head=head, head_ref="task/T1",
+                scopes=["tree:deep"], transcript=honest)
+        self.assertIn("theirs/f.py", str(caught.exception))
+
+        respelled = run_commands((self.without(from_subdir, "--no-relative"),))
+        self.assertNotIn("theirs/f.py", respelled)
+        self.assertNotIn("mine/deep/x.py", respelled)
+        self.assertIn("deep/x.py", respelled)
+        proof = state.verify_source_range(
+            repo, baseline=base, head=head, head_ref="task/T1",
+            scopes=["tree:deep"], transcript=respelled)
+        self.assertEqual(proof["changed_paths"], ("deep/x.py",))
+
+    def test_quote_path_is_pinned_so_the_spelling_is_not_the_default(self):
+        """`core.quotePath` decides whether a non-ASCII path is C-quoted or
+        printed raw. It is pinned to `true` -- git's own default -- so the
+        transcript is always pure ASCII and always decodable by whatever
+        captured it, and so the spelling does not depend on a config the
+        worker owns. Fail closed DETERMINISTICALLY rather than fail closed by
+        default: a C-quoted path begins with `"` and is claimed by no scope.
+        """
+        repo = make_repo(self.tmp)
+        base = git(repo, "rev-parse", "target")
+        git(repo, "checkout", "-q", "-b", "task/T1", "target")
+        head = commit_file(repo, "src/caf\u00e9.py", "x = 1\n", "accented")
+        git(repo, "config", "core.quotePath", "false")
+
+        argv = self.argv(repo, base, head)
+        self.assertIn("core.quotePath=true", argv)
+        pinned = run_commands((argv,))
+        self.assertIn('"src/caf\\303\\251.py"', pinned)
+        self.assertNotIn("src/caf\u00e9.py", pinned)
+        self.assertTrue(pinned.replace("\x00", "").isascii())
+        with self.assertRaises(state.TrackerError):
+            state.verify_source_range(
+                repo, baseline=base, head=head, head_ref="task/T1",
+                scopes=["tree:src"], transcript=pinned)
+
+        unpinned = run_commands(
+            (self.without(self.without(argv, "core.quotePath=true"), "-c"),))
+        self.assertIn("src/caf\u00e9.py", unpinned)
+        self.assertFalse(unpinned.isascii())
+
+    def test_every_pinned_token_is_on_the_one_argv_builder(self):
+        """One builder, so the emitter and the diagnostic cannot disagree,
+        and the pins are asserted as a set rather than by reading the
+        source."""
+        repo, base, head = self.touch_both()
+        argv = self.argv(repo, base, head)
+        for token in ("--no-renames", "--no-relative",
+                      "--ignore-submodules=none", "--no-color",
+                      "core.quotePath=true"):
+            with self.subTest(token=token):
+                self.assertEqual(argv.count(token), 1)
+        self.assertEqual(argv.index("-c"), 3)
+        self.assertEqual(argv[4], "core.quotePath=true")
+        self.assertEqual(argv[5], "log")
 
 
 class SourceRangeTests(TempDirTestCase):
@@ -9962,10 +10313,11 @@ class SourceRangeTests(TempDirTestCase):
             for index in range(1, 4))
         return repo, baseline, commits
 
-    def prove(self, repo, baseline, head, scopes):
+    def prove(self, repo, baseline, head, scopes, head_ref="task/T1"):
         return state.verify_source_range(
-            repo, baseline=baseline, head=head, scopes=scopes,
-            transcript=range_transcript(repo, baseline, head))
+            repo, baseline=baseline, head=head, head_ref=head_ref,
+            scopes=scopes,
+            transcript=range_transcript(repo, baseline, head, head_ref))
 
     def test_accepts_the_complete_ordered_range(self):
         repo, baseline, commits = self.three_commit_branch()
@@ -10001,7 +10353,8 @@ class SourceRangeTests(TempDirTestCase):
     def test_rejects_an_empty_range(self):
         repo, baseline, _ = self.three_commit_branch()
         with self.assertRaises(state.TrackerValidationError) as caught:
-            self.prove(repo, baseline, baseline, ["file:src/a1.py"])
+            self.prove(repo, baseline, baseline, ["file:src/a1.py"],
+                       head_ref="target")
         self.assertIn("empty", str(caught.exception))
 
     def test_rejects_a_head_that_does_not_descend_the_baseline(self):
@@ -10011,7 +10364,8 @@ class SourceRangeTests(TempDirTestCase):
         git(repo, "rm", "-rqf", ".")
         unrelated = commit_file(repo, "other.py", "x = 1\n", "unrelated history")
         with self.assertRaises(state.TrackerValidationError) as caught:
-            self.prove(repo, baseline, unrelated, ["file:other.py"])
+            self.prove(repo, baseline, unrelated, ["file:other.py"],
+                       head_ref="unrelated")
         self.assertIn("ancestor", str(caught.exception))
 
     def test_rejects_a_head_that_is_behind_the_baseline(self):
@@ -10020,8 +10374,14 @@ class SourceRangeTests(TempDirTestCase):
         it rather than fall out of the chain walk."""
         repo, baseline, commits = self.three_commit_branch()
         git(repo, "branch", "-f", "target", commits[-1])
+        #: The head of a proved range is a REFERENCE the ref store carries, so
+        #: "behind the baseline" has to be expressed as a branch rather than
+        #: as a loose object name -- which is the point of the anchor, not a
+        #: concession to it.
+        git(repo, "branch", "behind", commits[0])
         with self.assertRaises(state.TrackerValidationError) as caught:
-            self.prove(repo, commits[-1], commits[0], ["file:src/a1.py"])
+            self.prove(repo, commits[-1], commits[0], ["file:src/a1.py"],
+                       head_ref="behind")
         self.assertIn("descend", str(caught.exception))
 
     def test_rejects_a_merge_inside_the_implementation_range(self):
@@ -10056,10 +10416,12 @@ class SourceRangeTests(TempDirTestCase):
         transcript = range_transcript(repo, baseline, commits[-1])
         with self.assertRaises(state.PlanMetadataError):
             state.verify_source_range(repo, baseline=baseline, head=commits[-1],
-                                      scopes=["src/a1.py"], transcript=transcript)
+                                      head_ref="task/T1", scopes=["src/a1.py"],
+                                      transcript=transcript)
         with self.assertRaises(state.TrackerValidationError):
             state.verify_source_range(repo, baseline=baseline, head=commits[-1],
-                                      scopes=[], transcript=transcript)
+                                      head_ref="task/T1", scopes=[],
+                                      transcript=transcript)
 
     def test_the_empty_scope_refusal_is_not_an_out_of_scope_report(self):
         """M23. With the screen deleted the call still refuses -- `any()` over
@@ -10072,7 +10434,8 @@ class SourceRangeTests(TempDirTestCase):
         transcript = range_transcript(repo, baseline, commits[-1])
         with self.assertRaises(state.TrackerValidationError) as caught:
             state.verify_source_range(repo, baseline=baseline, head=commits[-1],
-                                      scopes=[], transcript=transcript)
+                                      head_ref="task/T1", scopes=[],
+                                      transcript=transcript)
         message = str(caught.exception)
         self.assertIn("at least one approved write scope", message)
         self.assertNotIn("src/a1.py", message)
@@ -10088,12 +10451,12 @@ class SourceRangeTests(TempDirTestCase):
         transcript = range_transcript(repo, baseline, head)
         self.assertEqual(
             state.verify_source_range(
-                repo, baseline=baseline, head=head, scopes=["tree:src"],
-                transcript=transcript)["changed_paths"],
+                repo, baseline=baseline, head=head, head_ref="task/T1",
+                scopes=["tree:src"], transcript=transcript)["changed_paths"],
             ("src/a1.py", "src/deep/nested.py"))
         with self.assertRaises(state.PlanMetadataError):
             state.verify_source_range(
-                repo, baseline=baseline, head=head,
+                repo, baseline=baseline, head=head, head_ref="task/T1",
                 scopes=["tree:src", "src/escaped.py"], transcript=transcript)
 
     def test_the_empty_range_screen_is_not_the_empty_transcript_screen(self):
@@ -10104,12 +10467,13 @@ class SourceRangeTests(TempDirTestCase):
         is accepted: a task that moved the branch nowhere, proved."""
         repo, baseline, _ = self.three_commit_branch()
         with self.assertRaises(state.TrackerValidationError) as caught:
-            self.prove(repo, baseline, baseline, ["file:src/a1.py"])
+            self.prove(repo, baseline, baseline, ["file:src/a1.py"],
+                       head_ref="target")
         self.assertIn("equals the recorded baseline", str(caught.exception))
         forged = f"\x00{baseline} {baseline}\n\nsrc/a1.py\n"
         with self.assertRaises(state.TrackerValidationError) as forgery:
             state.verify_source_range(
-                repo, baseline=baseline, head=baseline,
+                repo, baseline=baseline, head=baseline, head_ref="target",
                 scopes=["file:src/a1.py"], transcript=forged)
         self.assertIn("equals the recorded baseline", str(forgery.exception))
 
@@ -10138,7 +10502,49 @@ class SourceRangeTests(TempDirTestCase):
                 with self.assertRaises(state.TrackerError):
                     state.verify_source_range(
                         repo, baseline=baseline, head=commits[-1],
-                        scopes=scopes, transcript=transcript)
+                        head_ref="task/T1", scopes=scopes,
+                        transcript=transcript)
+        #: M-R16. `str` added to the `isinstance` tuple kills nothing above:
+        #: the call still refuses, because the character `'f'` fails
+        #: `_scope_parts` -- so the mutant is DIAGNOSIS-equivalent, not
+        #: behaviour-equivalent, and the diagnosis is the whole point of
+        #: writing the screen. The message must name the SEQUENCE TYPE, not a
+        #: scope, or the screen the code chose to write is unexercised.
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.verify_source_range(
+                repo, baseline=baseline, head=commits[-1], head_ref="task/T1",
+                scopes="file:src/a1.py", transcript=transcript)
+        message = str(caught.exception)
+        self.assertIn("got str", message)
+        self.assertIn("CHARACTERS", message)
+        self.assertNotIn("file:src/a1.py", message)
+
+    def test_changed_paths_is_sorted_and_the_witness_is_seed_independent(self):
+        """M-R10. `tuple(sorted(...))` weakened to `tuple({...})` is an
+        ORDER-SENSITIVE mutant: `str` hashes are randomised per process, so a
+        two-element set comes out in the asserted order about half the time
+        and a single green run calls the mutant dead or alive by a coin flip
+        -- measured by the review at 6 kills in 12 seeds. NINE paths make the
+        coincidence one in 9!, so the witness is a named test rather than a
+        lucky seed.
+
+        The order is load-bearing rather than cosmetic: `changed_paths` is
+        carried into a record whose identity is a digest, so two readings of
+        one range have to produce one tuple.
+        """
+        repo, baseline, _ = self.three_commit_branch()
+        names = ("zeta", "alpha", "mu", "beta", "omega", "kappa", "delta",
+                 "gamma")
+        for name in names:
+            (repo / "src" / f"{name}.py").write_text("x = 1\n",
+                                                     encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-qm", "eight more")
+        head = git(repo, "rev-parse", "HEAD")
+        changed = self.prove(repo, baseline, head,
+                             ["tree:src"])["changed_paths"]
+        self.assertEqual(len(changed), 9)
+        self.assertEqual(changed, tuple(sorted(changed)))
 
     def test_the_returned_dict_carries_exactly_the_five_named_keys(self):
         repo, baseline, commits = self.three_commit_branch()
@@ -10184,13 +10590,14 @@ class TranscriptChainTests(TempDirTestCase):
         with self.assertRaises(state.TrackerError) as caught:
             state.verify_source_range(
                 self.repo, baseline=self.base, head=self.head,
-                scopes=list(scopes), transcript=text)
+                head_ref="task/T1", scopes=list(scopes), transcript=text)
         return str(caught.exception)
 
     def test_the_pristine_transcript_is_accepted(self):
         proof = state.verify_source_range(
             self.repo, baseline=self.base, head=self.head,
-            scopes=["file:src/a1.py"], transcript=self.text)
+            head_ref="task/T1", scopes=["file:src/a1.py"],
+            transcript=self.text)
         self.assertEqual(proof["commits"], self.commits)
 
     def test_a_transcript_rooted_at_another_baseline_fails_at_the_first_link(self):
@@ -10211,9 +10618,55 @@ class TranscriptChainTests(TempDirTestCase):
         records[1], records[2] = records[2], records[1]
         self.assertIn("chain", self.refuse("".join(records)))
 
+    @staticmethod
+    def record(commit, parent, paths=("src/a1.py",)):
+        """One well-formed record, so a forgery is built rather than edited."""
+        return ("\x00" + commit + " " + parent + "\n\n"
+                + "".join(path + "\n" for path in paths))
+
     def test_a_duplicated_entry_is_refused(self):
+        """THE NAIVE DUPLICATE PROVES LESS THAN THIS NAME CLAIMS, which is why
+        the two tests below exist. Appending `records[-1:]` verbatim keeps the
+        duplicate's ORIGINAL parent, so what refuses it is the chain walk --
+        the duplicate names the commit before the tip as its parent when the
+        commit before it is now the tip. Nothing here is a statement about
+        duplicates at all."""
         records = transcript_records(self.text)
-        self.assertIn("chain", self.refuse("".join(records + records[-1:])))
+        message = self.refuse("".join(records + records[-1:]))
+        self.assertIn("more than once", message)
+        self.assertIn(self.head, message)
+
+    def test_a_self_parented_duplicate_is_refused(self):
+        """Re-parent the duplicate to ITSELF and the chain is intact: nothing
+        in git forbids a commit being its own parent, every link matches the
+        one before it, and the last record is the head. Before the
+        distinctness screen this was ACCEPTED, with `commits` carrying the tip
+        twice -- and Task 10 compares the worker's `commits` list against that
+        tuple as the range in order."""
+        text = "".join(transcript_records(self.text)
+                       + [self.record(self.head, self.head)])
+        message = self.refuse(text)
+        self.assertIn("more than once", message)
+        self.assertIn(self.head, message)
+
+    def test_a_repeat_with_no_self_parent_anywhere_is_refused_too(self):
+        """WHY THE SCREEN IS DISTINCTNESS AND NOT "never its own parent".
+        `A(base) B(A) C(B) B(C) C(B)` chains from the baseline, ends at the
+        head, has exactly one parent per record and no record is its own
+        parent -- and it names B and C twice each. A self-parent screen would
+        pass it."""
+        first, second, third = self.commits
+        text = (self.record(first, self.base) + self.record(second, first)
+                + self.record(third, second) + self.record(second, third)
+                + self.record(third, second))
+        entries = state._parse_range_transcript(text)
+        self.assertEqual(len(entries), 5)
+        self.assertTrue(all(entry["parents"][0] != entry["commit"]
+                            for entry in entries))
+        message = self.refuse(text)
+        self.assertIn("more than once", message)
+        for commit in (second, third):
+            self.assertIn(commit, message)
 
     def test_a_forged_parent_is_refused(self):
         records = transcript_records(self.text)
@@ -10228,15 +10681,20 @@ class TranscriptChainTests(TempDirTestCase):
         git(repo, "checkout", "-q", "-b", "task/G", "target")
         commits = [commit_file(repo, "src/a1.py", f"g = {index}\n", f"g{index}")
                    for index in range(1, 7)]
+        #: One reference per prefix length, because the head of a proved range
+        #: is read out of the ref store and a mid-branch object name is
+        #: exactly what this task stopped accepting.
+        for length in range(1, 7):
+            git(repo, "branch", f"task/G{length}", commits[length - 1])
         for length in range(1, 7):
             head = commits[length - 1]
-            text = range_transcript(repo, base, head)
+            text = range_transcript(repo, base, head, f"task/G{length}")
             records = transcript_records(text)
             self.assertEqual(len(records), length)
             self.assertEqual(
                 state.verify_source_range(
-                    repo, baseline=base, head=head, scopes=["file:src/a1.py"],
-                    transcript=text)["commits"],
+                    repo, baseline=base, head=head, head_ref=f"task/G{length}",
+                    scopes=["file:src/a1.py"], transcript=text)["commits"],
                 tuple(commits[:length]))
             for position in range(length):
                 with self.subTest(length=length, position=position):
@@ -10245,6 +10703,7 @@ class TranscriptChainTests(TempDirTestCase):
                     with self.assertRaises(state.TrackerError):
                         state.verify_source_range(
                             repo, baseline=base, head=head,
+                            head_ref=f"task/G{length}",
                             scopes=["file:src/a1.py"],
                             transcript="".join(broken))
 
@@ -10262,7 +10721,7 @@ class TranscriptChainTests(TempDirTestCase):
                     self.assertEqual(
                         state.verify_source_range(
                             self.repo, baseline=self.base, head=self.head,
-                            scopes=["file:src/a1.py"],
+                            head_ref="task/T1", scopes=["file:src/a1.py"],
                             transcript=text)["commits"], self.commits)
                     continue
                 message = self.refuse(text)
@@ -10354,12 +10813,14 @@ class SourceRangeDegradedModeTests(TempDirTestCase):
         with self.assertRaises(state.TrackerValidationError) as caught:
             state.verify_source_range(
                 self.repo, baseline=self.base, head=self.head,
-                scopes=["file:src/a1.py"], transcript=transcript)
+                head_ref="task/T1", scopes=["file:src/a1.py"],
+                transcript=transcript)
         return str(caught.exception)
 
     def test_a_missing_transcript_names_the_command_that_produces_it(self):
         printable = " ".join(state.source_range_commands(
-            self.repo, baseline=self.base, head=self.head)[0])
+            self.repo, baseline=self.base, head=self.head,
+            head_ref="task/T1")[0])
         for transcript in (None, 3, b"", ["\x00"]):
             with self.subTest(transcript=transcript):
                 message = self.refuse(transcript)
@@ -10391,7 +10852,8 @@ class ProofModeTests(TempDirTestCase):
     def prove(self, transcript):
         return state.verify_source_range(
             self.repo, baseline=self.base, head=self.head,
-            scopes=["file:src/a1.py"], transcript=transcript)
+            head_ref="task/T1", scopes=["file:src/a1.py"],
+            transcript=transcript)
 
     def test_the_proof_mode_is_attested_bound_to_the_transcript_digest(self):
         proof = self.prove(self.text)
@@ -10419,11 +10881,11 @@ class ProofModeTests(TempDirTestCase):
         self.assertNotEqual(swapped, text)
         scopes = ["tree:src"]
         first_proof = state.verify_source_range(
-            self.repo, baseline=self.base, head=head, scopes=scopes,
-            transcript=text)
+            self.repo, baseline=self.base, head=head, head_ref="task/T1",
+            scopes=scopes, transcript=text)
         second_proof = state.verify_source_range(
-            self.repo, baseline=self.base, head=head, scopes=scopes,
-            transcript=swapped)
+            self.repo, baseline=self.base, head=head, head_ref="task/T1",
+            scopes=scopes, transcript=swapped)
         self.assertEqual(first_proof["changed_paths"],
                          second_proof["changed_paths"])
         self.assertEqual(first_proof["commits"], second_proof["commits"])
@@ -10454,7 +10916,7 @@ class RangeCrossProductTests(TempDirTestCase):
         base = git(repo, "rev-parse", "target")
         git(repo, "checkout", "-q", "-b", "t", "target")
         head = commit_file(repo, "src/a1.py", "v = 1\n", "one")
-        return repo, base, head, ["file:src/a1.py"], True
+        return repo, base, head, "t", ["file:src/a1.py"], True
 
     @staticmethod
     def shape_linear_three(tmp):
@@ -10463,7 +10925,7 @@ class RangeCrossProductTests(TempDirTestCase):
         git(repo, "checkout", "-q", "-b", "t", "target")
         for index in range(3):
             head = commit_file(repo, "src/a1.py", f"v = {index}\n", f"s{index}")
-        return repo, base, head, ["file:src/a1.py"], True
+        return repo, base, head, "t", ["file:src/a1.py"], True
 
     @staticmethod
     def shape_nested_tree(tmp):
@@ -10472,7 +10934,7 @@ class RangeCrossProductTests(TempDirTestCase):
         git(repo, "checkout", "-q", "-b", "t", "target")
         commit_file(repo, "src/a1.py", "v = 1\n", "one")
         head = commit_file(repo, "src/deep/nested.py", "n = 1\n", "two")
-        return repo, base, head, ["tree:src"], True
+        return repo, base, head, "t", ["tree:src"], True
 
     @staticmethod
     def shape_rename_out_of_scope(tmp):
@@ -10488,7 +10950,8 @@ class RangeCrossProductTests(TempDirTestCase):
         git(repo, "checkout", "-q", "-b", "t", "target")
         git(repo, "mv", "theirs/victim.py", "mine/victim.py")
         git(repo, "commit", "-qm", "steal")
-        return repo, base, git(repo, "rev-parse", "HEAD"), ["tree:mine"], False
+        return (repo, base, git(repo, "rev-parse", "HEAD"), "t",
+                ["tree:mine"], False)
 
     @staticmethod
     def shape_empty_commit(tmp):
@@ -10497,7 +10960,8 @@ class RangeCrossProductTests(TempDirTestCase):
         git(repo, "checkout", "-q", "-b", "t", "target")
         commit_file(repo, "src/a1.py", "v = 1\n", "one")
         git(repo, "commit", "-q", "--allow-empty", "-m", "nothing")
-        return repo, base, git(repo, "rev-parse", "HEAD"), ["file:src/a1.py"], False
+        return (repo, base, git(repo, "rev-parse", "HEAD"), "t",
+                ["file:src/a1.py"], False)
 
     @staticmethod
     def shape_merge(tmp):
@@ -10509,7 +10973,7 @@ class RangeCrossProductTests(TempDirTestCase):
         commit_file(repo, "src/side.py", "s = 1\n", "side")
         git(repo, "checkout", "-q", "t")
         git(repo, "merge", "-q", "--no-ff", "-m", "merge", "side")
-        return (repo, base, git(repo, "rev-parse", "HEAD"),
+        return (repo, base, git(repo, "rev-parse", "HEAD"), "t",
                 ["file:src/a1.py", "file:src/side.py"], False)
 
     @staticmethod
@@ -10519,7 +10983,7 @@ class RangeCrossProductTests(TempDirTestCase):
         git(repo, "checkout", "-q", "--orphan", "unrelated")
         git(repo, "rm", "-rqf", ".")
         head = commit_file(repo, "other.py", "x = 1\n", "unrelated")
-        return repo, base, head, ["file:other.py"], False
+        return repo, base, head, "unrelated", ["file:other.py"], False
 
     @staticmethod
     def shape_behind(tmp):
@@ -10527,7 +10991,8 @@ class RangeCrossProductTests(TempDirTestCase):
         git(repo, "checkout", "-q", "-b", "t", "target")
         first = commit_file(repo, "src/a1.py", "v = 1\n", "one")
         second = commit_file(repo, "src/a1.py", "v = 2\n", "two")
-        return repo, second, first, ["file:src/a1.py"], False
+        git(repo, "branch", "behind", first)
+        return repo, second, first, "behind", ["file:src/a1.py"], False
 
     SHAPES = ("shape_single", "shape_linear_three", "shape_nested_tree",
               "shape_rename_out_of_scope", "shape_empty_commit", "shape_merge",
@@ -10609,13 +11074,14 @@ class RangeCrossProductTests(TempDirTestCase):
         for index, shape_name in enumerate(self.SHAPES):
             root = self.tmp / f"s{index}"
             root.mkdir()
-            repo, base, head, scopes, sound = getattr(self, shape_name)(root)
-            pristine = range_transcript(repo, base, head)
+            repo, base, head, head_ref, scopes, sound = getattr(
+                self, shape_name)(root)
+            pristine = range_transcript(repo, base, head, head_ref)
 
-            def call(text):
+            def call(text, head_ref=head_ref):
                 return state.verify_source_range(
-                    repo, baseline=base, head=head, scopes=list(scopes),
-                    transcript=text)
+                    repo, baseline=base, head=head, head_ref=head_ref,
+                    scopes=list(scopes), transcript=text)
 
             with self.subTest(shape=shape_name, transcript="pristine"):
                 if sound:
@@ -10667,18 +11133,26 @@ class SourceRangeTotalityTests(TempDirTestCase):
     """No input leaves this module's exception family.
 
     The case list is derived from the CALL TREE -- `verify_source_range` ->
-    `_repo_argument`, `_resolved_commit` (which forks on whether the end is
-    already an object name: a 40-hex end never touches the ref store, a
-    symbolic one walks it), `_parse_range_transcript`, `_scope_parts` ->
-    `_parse_write_scope` -> `_safe_relative`, `_path_in_scope` -> the same --
-    and not from the fixtures above. Path arguments carry a NUL and a lone
-    surrogate because both are strings Python will hand straight to a syscall.
+    `_repo_argument`, `_resolved_commit` (which now opens `_git_store` BEFORE
+    it forks on whether the end is already an object name, so every end walks
+    the ref store and a 40-hex end no longer answers itself for free),
+    `_parse_range_transcript`, `_scope_parts` -> `_parse_write_scope` ->
+    `_safe_relative`, `_path_in_scope` -> the same -- and not from the
+    fixtures above. Path arguments carry a NUL and a lone surrogate because
+    both are strings Python will hand straight to a syscall.
+
+    `head_ref` IS IN THE SWEEP because it is an argument, and the argument
+    this task added is exactly the one a totality claim written before it
+    would silently not cover.
     """
+
+    NUL_SCREENED = ("repo", "baseline", "head", "head_ref")
 
     HOSTILE = (
         None, 0, 1, -1, 3.5, True, b"bytes", [], (), {}, set(), object(),
         ["file:src/a1.py"], {"scope": "file:src/a1.py"},
-        "", " ", "\t", "\n", "-", "\x00", "a\x00b", "\udc80", "a\udc80b",
+        "", " ", "\t", "\n", "-", "\x00", "a\x00b", "\x00repo", "\udc80",
+        "a\udc80b",
         "x" * 5000, "../escape", "/abs/path", "a\\b", "src/*.py", ".",
         "..", "a/../b", "HEAD~1", "refs/heads/target", "target",
         "A" * 40, "a" * 39, "a" * 41, "a" * 40, "\x00" + "a" * 40 + "\n",
@@ -10697,6 +11171,7 @@ class SourceRangeTotalityTests(TempDirTestCase):
             "repo": self.repo,
             "baseline": "target" if symbolic else self.base,
             "head": self.head,
+            "head_ref": "task/T1",
             "scopes": ["file:src/a1.py"],
             "transcript": self.text,
         }
@@ -10704,7 +11179,8 @@ class SourceRangeTotalityTests(TempDirTestCase):
     def test_no_argument_of_any_type_escapes_the_exception_family(self):
         checked = 0
         for symbolic in (False, True):
-            for name in ("repo", "baseline", "head", "scopes", "transcript"):
+            for name in ("repo", "baseline", "head", "head_ref", "scopes",
+                         "transcript"):
                 for value in self.HOSTILE:
                     arguments = self.sound(symbolic)
                     arguments[name] = value
@@ -10721,13 +11197,57 @@ class SourceRangeTotalityTests(TempDirTestCase):
                                 f"{name}={value!r} raised "
                                 f"{type(escaped).__name__}: {escaped}")
                         self.assertIsInstance(outcome, dict)
-        self.assertEqual(checked, 2 * 5 * len(self.HOSTILE))
+        self.assertEqual(checked, 2 * 6 * len(self.HOSTILE))
+
+    def test_every_nul_bearing_argument_the_module_screens_is_refused(self):
+        """M-R14, and the reason the test above could not see it.
+
+        `if _RANGE_SEPARATOR in repo:` weakened to `repo[1:]` SURVIVES the
+        totality sweep: `"\x00"` and `"\x00repo"` are in the corpus and are
+        genuinely driven through `verify_source_range`, but the assertion
+        there is "a `TrackerError` or a dict" -- and with a LEADING NUL the
+        mutant screens nothing, git is never run, the transcript still
+        chains, and the call returns a dict. The case was in the corpus and
+        the assertion could not tell whether the screen had fired.
+
+        So the arguments whose NUL screen IS the point get the stronger
+        claim: for them a NUL is a refusal, not merely a non-escape. The
+        other two are deliberately left out rather than folded in -- a NUL in
+        `scopes` or `transcript` is refused by the scope grammar and by the
+        record grammar for reasons that have nothing to do with a NUL, and
+        asserting it here would pin an accident.
+
+        Why it matters beyond the mutant: `subprocess.run(('git', '-C',
+        '\x00repo', ...))` raises `ValueError: embedded null byte`, which is
+        not an `OSError` and is outside this module's exception family, so an
+        unscreened location kills the controller rather than refusing the
+        cell.
+        """
+        bearing = tuple(value for value in self.HOSTILE
+                        if isinstance(value, str) and "\x00" in value)
+        self.assertEqual(
+            bearing, ("\x00", "a\x00b", "\x00repo", "\x00" + "a" * 40 + "\n"))
+        self.assertTrue(any(value.startswith("\x00") for value in bearing))
+        self.assertTrue(any(not value.startswith("\x00") for value in bearing))
+        checked = 0
+        for symbolic in (False, True):
+            for name in self.NUL_SCREENED:
+                for value in bearing:
+                    arguments = self.sound(symbolic)
+                    arguments[name] = value
+                    checked += 1
+                    with self.subTest(argument=name, value=repr(value),
+                                      symbolic=symbolic):
+                        with self.assertRaises(state.TrackerError):
+                            state.verify_source_range(
+                                arguments.pop("repo"), **arguments)
+        self.assertEqual(checked, 2 * 4 * 4)
 
     def test_source_range_commands_is_total_over_the_same_corpus(self):
-        for name in ("repo", "baseline", "head"):
+        for name in ("repo", "baseline", "head", "head_ref"):
             for value in self.HOSTILE:
                 arguments = {"repo": self.repo, "baseline": self.base,
-                             "head": self.head}
+                             "head": self.head, "head_ref": "task/T1"}
                 arguments[name] = value
                 with self.subTest(argument=name, value=repr(value)[:40]):
                     try:
@@ -10802,25 +11322,122 @@ class RefStoreNullByteTests(TempDirTestCase):
                          git(repo, "rev-parse", "target"))
 
 
-class SourceRangeOpensNothingTests(TempDirTestCase):
-    """The proof reads no file when both ends are already object names, which
-    is what makes `_require_regular_file` -- this module's one door onto a
-    name that might be a FIFO -- irrelevant to this task rather than skipped.
+class SourceRangeAnchorTests(TempDirTestCase):
+    """The clause the whole design rests on, asserted rather than narrated.
+
+    THIS CLASS REPLACES ONE THAT ASSERTED THE DEFECT AS A FEATURE.
+    `test_object_name_ends_never_touch_the_filesystem` drove a directory that
+    was not a repository through `verify_source_range` and asserted a
+    complete `attested#sha256=` proof came back -- on the reasoning that
+    touching no file made `_require_regular_file` irrelevant to this task.
+    The reasoning was backwards in two ways. The FIFO hazard is a reason to
+    go THROUGH the module's door, not a reason never to open one; and both
+    ends of the PRODUCTION call are forty hex characters, so "when both ends
+    are object names" was not an edge case being documented, it was the only
+    case that ships. A test that locks in a hole is worse than no test,
+    because it is quoted as coverage.
+
+    The inverse of each of that test's assertions is below.
     """
 
-    def test_object_name_ends_never_touch_the_filesystem(self):
+    def worked_branch(self):
         repo = make_repo(self.tmp)
         base = git(repo, "rev-parse", "target")
         git(repo, "checkout", "-q", "-b", "task/T1", "target")
         head = commit_file(repo, "src/a1.py", "v = 1\n", "one")
-        text = range_transcript(repo, base, head)
+        return repo, base, head, range_transcript(repo, base, head)
+
+    def test_a_directory_that_is_not_a_repository_is_a_stop(self):
+        """The reproduction, inverted. Before: a full `attested` proof over
+        commits that do not exist, in a directory that does not exist."""
+        _repo, base, head, text = self.worked_branch()
         absent = self.tmp / "no-such-repository"
         self.assertFalse(absent.exists())
-        proof = state.verify_source_range(
-            absent, baseline=base, head=head, scopes=["file:src/a1.py"],
-            transcript=text)
-        self.assertEqual(proof["commits"], (head,))
-        self.assertEqual(proof["head"], head)
+        #: Two shapes of "not a repository": a name that is not there at
+        #: all, and a directory that IS there and holds no `.git`.
+        for location in (absent, self.tmp):
+            with self.subTest(location=str(location)):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state.verify_source_range(
+                        location, baseline=base, head=head,
+                        head_ref="task/T1", scopes=["file:src/a1.py"],
+                        transcript=text)
+                self.assertIn("not a git repository", str(caught.exception))
+
+    def test_the_fabricated_range_over_a_fabricated_repository_is_refused(self):
+        """The review's exact failing input, byte for byte."""
+        with self.assertRaises(state.TrackerError):
+            state.verify_source_range(
+                "/nonexistent/not-a-repo", baseline="a" * 40, head="b" * 40,
+                head_ref="task/T1", scopes=["file:src/a1.py"],
+                transcript="\x00" + "c" * 40 + " " + "a" * 40
+                           + "\n\nsrc/a1.py\n"
+                           + "\x00" + "b" * 40 + " " + "c" * 40
+                           + "\n\nsrc/a1.py\n")
+
+    def test_an_object_name_no_longer_answers_itself_without_a_ref_store(self):
+        """`_resolved_commit`'s short-circuit was BEFORE the store read, so a
+        forty-hex ref came back unchanged from a path that was not a
+        repository at all. The short-circuit is still there -- an object name
+        is its own answer -- but it is now conditional on the store."""
+        repo = make_repo(self.tmp)
+        self.assertEqual(state._resolved_commit(repo, "a" * 40), "a" * 40)
+        with self.assertRaises(state.TrackerValidationError):
+            state._resolved_commit(self.tmp / "no-such-repository", "a" * 40)
+
+    def test_the_head_is_the_tip_the_ref_store_holds_not_the_claim(self):
+        repo, base, head, text = self.worked_branch()
+        elsewhere = git(repo, "rev-parse", "target")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.verify_source_range(
+                repo, baseline=base, head=elsewhere, head_ref="task/T1",
+                scopes=["file:src/a1.py"], transcript=text)
+        message = str(caught.exception)
+        self.assertIn("is not the tip of 'task/T1'", message)
+        self.assertIn(head, message)
+
+    def test_a_head_reference_the_store_does_not_carry_is_a_stop(self):
+        repo, base, head, text = self.worked_branch()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.verify_source_range(
+                repo, baseline=base, head=head, head_ref="task/T404",
+                scopes=["file:src/a1.py"], transcript=text)
+        self.assertIn("names no reference", str(caught.exception))
+
+    def test_an_object_name_is_refused_as_the_head_reference(self):
+        """Accepting one would restore the hole: an object name answers
+        itself, so the store would go unread again."""
+        repo, base, head, text = self.worked_branch()
+        for head_ref in (head, "a" * 40, "", "   ", None, 3):
+            with self.subTest(head_ref=head_ref):
+                with self.assertRaises(state.TrackerError):
+                    state.verify_source_range(
+                        repo, baseline=base, head=head, head_ref=head_ref,
+                        scopes=["file:src/a1.py"], transcript=text)
+
+    def test_deleting_the_branch_after_the_work_refuses_rather_than_attests(self):
+        """The honest transcript still parses and still chains. What is gone
+        is the reference, and with it the module's only tie between the
+        claimed head and this repository."""
+        repo, base, head, text = self.worked_branch()
+        self.assertEqual(
+            state.verify_source_range(
+                repo, baseline=base, head=head, head_ref="task/T1",
+                scopes=["file:src/a1.py"], transcript=text)["head"], head)
+        git(repo, "checkout", "-q", "target")
+        git(repo, "branch", "-qD", "task/T1")
+        with self.assertRaises(state.TrackerValidationError):
+            state.verify_source_range(
+                repo, baseline=base, head=head, head_ref="task/T1",
+                scopes=["file:src/a1.py"], transcript=text)
+
+    def test_the_emitter_anchors_exactly_as_the_verifier_does(self):
+        """Two anchors would be one anchor and one hole."""
+        _repo, base, head, _text = self.worked_branch()
+        absent = self.tmp / "no-such-repository"
+        with self.assertRaises(state.TrackerValidationError):
+            state.source_range_commands(absent, baseline=base, head=head,
+                                        head_ref="task/T1")
 
     def test_no_new_door_onto_the_filesystem_was_opened(self):
         """`_require_regular_file` stays the module's single door; Task 8 adds

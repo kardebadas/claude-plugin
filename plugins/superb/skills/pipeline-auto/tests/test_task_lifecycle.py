@@ -9521,5 +9521,1412 @@ class ResumeDecisionValidationTests(TempDirTestCase):
 # exited at that line and never defined -- let alone ran -- a single Task 4
 # test. Discovery collected 386 and direct execution 252, both green, and the
 # 134 tests the difference names were the whole of the F5 work.
+
+# --------------------------------------------------------------------------
+# Task 8 -- the baseline-anchored source-range proof, faults F3 and F4.
+#
+# THE BRIEF IS STALE BY DESIGN AND ITS PRODUCES BLOCK DOES NOT SURVIVE CONTACT.
+# It called `_git_out` three times and `_git` once. Both are `subprocess.run`
+# wrappers, `subprocess` is the single capability `ALLOWED_IMPORTS` most exists
+# to withhold, and the master plan's quorum ruled the module never executes
+# git: it EMITS THE ARGV, the controller runs it, and the module VALIDATES THE
+# TRANSCRIPT. The tests below play the controller -- they shell out to git,
+# because a test is not the module -- and hand the module only what a
+# controller could hand it.
+#
+# THREE OF THE BRIEF'S CALLS WERE ALSO A SECURITY DEFECT INDEPENDENT OF THAT.
+# `git diff --name-only` does rename detection by default and then prints only
+# the DESTINATION, so a task declared to `mine/` can `git mv theirs/victim.py
+# mine/victim.py`, have every printed path inside its own scope, and pass the
+# scope check while having deleted another task's file.
+# `RenameHidesTheVictimTests` measures both halves on a real repository.
+# --------------------------------------------------------------------------
+
+
+def commit_file(repo, relative: str, text: str, message: str) -> str:
+    path = Path(repo) / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", message)
+    return git(repo, "rev-parse", "HEAD")
+
+
+def commit_only(repo, relative: str, text: str, message: str) -> str:
+    """Commit ONE path, by name.
+
+    `commit_file`'s `git add -A` sweeps the run directory -- which is
+    UNTRACKED inside the fixture repository -- into whatever branch is
+    checked out, and the next `git checkout` of a branch without it then
+    DELETES `progress.md`. Measured: three tests died with
+    `ForeignSchemaError: missing progress.md` before this existed.
+    """
+    path = Path(repo) / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    git(repo, "add", "--", relative)
+    git(repo, "commit", "-qm", message)
+    return git(repo, "rev-parse", "HEAD")
+
+
+def run_commands(commands) -> str:
+    """Play the controller: run the argv the MODULE emitted, RAW stdout.
+
+    The `git` harness above strips, which would eat both the leading record
+    separator and the trailing newline the transcript grammar is built on --
+    so a transcript is never taken through it.
+    """
+    return "".join(
+        subprocess.run(argv, capture_output=True, text=True, check=True).stdout
+        for argv in commands)
+
+
+def range_transcript(repo, baseline: str, head: str) -> str:
+    return run_commands(
+        state.source_range_commands(repo, baseline=baseline, head=head))
+
+
+def transcript_records(text: str) -> list:
+    """Split a transcript the way THIS FILE understands it, never through the
+    module's own parser: a corpus checked with the code under test measures
+    agreement with itself."""
+    return ["\x00" + chunk for chunk in text.split("\x00")[1:]]
+
+
+OTHER_SHA = "9" * 40
+
+
+class SourceRangeProducesBlockTests(unittest.TestCase):
+    """The Produces-block check, executable, name by name.
+
+    Consumes: `_resolved_commit`, `_path_in_scope`, `_scope_parts` -- and
+    `_git` / `_git_out`, which CANNOT EXIST.
+    Produces: `source_range_commands`, `_parse_range_transcript`,
+    `verify_source_range`; `_commit_parents` is explicitly NOT produced.
+    Added beyond the block: `reserved_baseline`, argued below.
+    """
+
+    def test_the_two_subprocess_wrappers_the_brief_called_do_not_exist(self):
+        """`_git_out` was called three times and `_git` once. Neither is a name
+        this module may hold: both were `subprocess.run` wrappers."""
+        self.assertFalse(hasattr(state, "_git"))
+        self.assertFalse(hasattr(state, "_git_out"))
+
+    def test_commit_parents_is_not_produced_because_parents_come_from_the_transcript(self):
+        """The brief's own Produces block already said so, and it is the whole
+        reason the chain is checked from the transcript's internal structure
+        instead of read off it as an assertion."""
+        self.assertFalse(hasattr(state, "_commit_parents"))
+
+    def test_the_module_still_imports_nothing_outside_the_twelve(self):
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        imported = set()
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imported.add((node.module or "").split(".")[0])
+        self.assertEqual(imported, {
+            "__future__", "contextlib", "copy", "errno", "fcntl", "hashlib",
+            "json", "msvcrt", "os", "pathlib", "time", "types"})
+        self.assertNotIn("subprocess", imported)
+        self.assertNotIn("re", imported)
+        self.assertNotIn("zlib", imported)
+
+    def test_no_os_command_execution_name_is_reachable_by_ast(self):
+        """`subprocess` off the allowlist is NOMINAL on its own: `os` is ON it
+        and carries `popen`, `system`, `execv`, `posix_spawn`, `spawnv` and
+        `fork`. The family is enumerated from `dir(os)` rather than from a
+        remembered list, so a spelling nobody here thought of is still caught,
+        and the PRIVATE spellings (`os._exit`-shaped names) are in the sweep.
+        """
+        family = tuple(sorted(
+            name for name in dir(os)
+            if name.lstrip("_").startswith(
+                ("popen", "system", "exec", "spawn", "fork", "posix_spawn"))))
+        self.assertIn("popen", family)
+        self.assertIn("system", family)
+        self.assertIn("execv", family)
+        self.assertIn("fork", family)
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        reached = []
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Attribute) and node.attr in family:
+                reached.append(node.attr)
+            if isinstance(node, ast.Name) and node.id in family:
+                reached.append(node.id)
+        self.assertEqual(reached, [])
+
+    def test_the_three_produced_names_are_each_bound_exactly_once(self):
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        counts = module_bindings(ast.parse(source).body)
+        for name in ("source_range_commands", "_parse_range_transcript",
+                     "verify_source_range", "reserved_baseline"):
+            with self.subTest(name=name):
+                self.assertEqual(counts.get(name), 1)
+        self.assertEqual(
+            sorted(name for name, count in counts.items() if count > 1), [])
+
+    def test_the_consumed_names_are_still_the_ones_this_module_already_had(self):
+        """A module-level redefinition rebinds the global for every caller.
+        Each consumed name is exercised on its own committed behaviour."""
+        self.assertIs(state._path_in_scope("src/a.py", "tree:src"), True)
+        self.assertIs(state._path_in_scope("srcx/a.py", "tree:src"), False)
+        self.assertEqual(state._scope_parts("file:src/a.py"),
+                         ("file", PurePosixPath("src/a.py")))
+        with self.assertRaises(state.PlanMetadataError):
+            state._scope_parts("src/a.py")
+        self.assertTrue(state._COMMIT.fullmatch("a" * 40))
+        self.assertFalse(state._COMMIT.fullmatch("A" * 40))
+        self.assertEqual(state._digest(""), hashlib.sha256(b"").hexdigest())
+
+    def test_reserved_baseline_is_the_one_name_added_beyond_the_block(self):
+        """The block names three functions and none of them can reach the
+        persisted baseline, which is the fact the whole proof is anchored on
+        and which Task 7 made AMBIGUOUS: a resumed task carries TWO
+        `baseline:` checkpoints with DIFFERENT shas. A caller left to scan the
+        cell itself would scan it five different ways in five places.
+        """
+        self.assertTrue(callable(state.reserved_baseline))
+
+    def test_the_proof_mode_vocabulary_is_the_master_plans_own_word(self):
+        self.assertEqual(state.PROOF_ATTESTED, "attested")
+
+
+class ReservedBaselineTests(TempDirTestCase):
+    """Task 7's inheritance, and the highest-stakes read in this task.
+
+    A resumed task carries two `baseline:` checkpoints with different shas.
+    Reading the wrong one charges a task that was BLOCKED with every commit
+    that landed in the target branch while it waited -- a loud failure on
+    innocent work, which erodes trust in the gate faster than a silent pass.
+    """
+
+    def blocked_and_resumed(self):
+        """A real reserve -> block -> (target moves) -> resume, so the two
+        baselines are produced by the shipped transitions and not by a fixture
+        that merely looks like them. `blocked_run` is Task 7's own harness."""
+        repo, run_dir = blocked_run(self)
+        first = state.reserved_baseline(
+            task_row(state.validate_run(run_dir), "T1"), attempt=1)
+        #: The target branch MOVES while the task is blocked. This is the whole
+        #: of the hazard: those commits belong to whoever integrated them.
+        git(repo, "checkout", "-q", "target")
+        intervening = commit_only(repo, "src/other.py", "other = 1\n",
+                                  "another task integrates")
+        git(repo, "checkout", "-q", "main")
+        state.resume_task(run_dir, task_id="T1", prior_attempt=1,
+                          new_owner="impl-2", new_attempt=2,
+                          decision_ref=QUORUM_GRANT)
+        row = task_row(state.validate_run(run_dir), "T1")
+        second = state.reserved_baseline(row, attempt=2)
+        return repo, row, first, second, intervening
+
+    def test_each_attempt_reads_its_own_baseline_and_they_differ(self):
+        _repo, row, first, second, intervening = self.blocked_and_resumed()
+        self.assertNotEqual(first, second)
+        self.assertEqual(second, intervening)
+        self.assertEqual(state.reserved_baseline(row, attempt=1), first)
+        self.assertEqual(state.reserved_baseline(row, attempt=2), second)
+
+    def test_the_row_really_carries_two_baselines_and_the_resumed_marker(self):
+        """The fixture is only evidence if the ambiguity is actually present.
+        `resumed:<prior>-><new>@<ref>` carries TWO attempt tokens in one entry
+        and must not derail the scan."""
+        _repo, row, first, second, _ = self.blocked_and_resumed()
+        entries = state._csv(row["checkpoints"])
+        self.assertIn(f"baseline:attempt-001@{first}", entries)
+        self.assertIn(f"baseline:attempt-002@{second}", entries)
+        self.assertEqual(
+            len([entry for entry in entries if entry.startswith("baseline:")]),
+            2)
+        self.assertTrue(any(entry.startswith("resumed:attempt-001->attempt-002@")
+                            for entry in entries))
+
+    def test_reading_the_wrong_attempts_baseline_charges_innocent_work(self):
+        """F3 in its Task-7 form. Attempt two's range proved against attempt
+        ONE's baseline swallows the commit another task integrated while this
+        one was blocked -- and every one of those paths is then measured
+        against THIS task's write scope."""
+        repo, _row, first, second, intervening = self.blocked_and_resumed()
+        git(repo, "checkout", "-q", "-b", "task/T1", second)
+        head = commit_only(repo, "src/a1.py", "mine = 1\n", "my only commit")
+        honest = state.verify_source_range(
+            repo, baseline=second, head=head, scopes=["file:src/a1.py"],
+            transcript=range_transcript(repo, second, head))
+        self.assertEqual(honest["commits"], (head,))
+        self.assertEqual(honest["changed_paths"], ("src/a1.py",))
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.verify_source_range(
+                repo, baseline=first, head=head, scopes=["file:src/a1.py"],
+                transcript=range_transcript(repo, first, head))
+        self.assertIn("src/other.py", str(caught.exception))
+        #: and the innocent commit really is the one that was charged
+        self.assertIn(intervening, [
+            entry["commit"] for entry in state._parse_range_transcript(
+                range_transcript(repo, first, head))])
+
+    def test_a_question_cell_spelled_resolved_does_not_derail_the_scan(self):
+        """`resolved:<ref>` is in the Question vocabulary Task 7 left behind.
+        It is not a checkpoint and this scan never reads that cell."""
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks())
+        state.reserve_task(run_dir, task_id="T1", owner="w-1", attempt=1)
+        set_task_state(run_dir, "T1", "odd-question", state="[?]",
+                       question=f"resolved:{QUORUM_GRANT}")
+        row = task_row(state.validate_run(run_dir), "T1")
+        self.assertEqual(state.reserved_baseline(row, attempt=1),
+                         git(repo, "rev-parse", "target"))
+
+    def test_an_artifact_task_records_no_baseline_and_the_refusal_says_so(self):
+        _repo, run_dir, _ = make_run(
+            self.tmp, task_block("T1", kind="artifact", outputs="docs/a.md",
+                                 write_scope="file:docs/a.md"))
+        state.reserve_task(run_dir, task_id="T1", owner="w-1", attempt=1)
+        row = task_row(state.validate_run(run_dir), "T1")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.reserved_baseline(row, attempt=1)
+        self.assertIn("attempt-001", str(caught.exception))
+        self.assertIn("0", str(caught.exception))
+
+    def test_an_attempt_with_no_checkpoint_of_its_own_is_refused(self):
+        _repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks())
+        state.reserve_task(run_dir, task_id="T1", owner="w-1", attempt=1)
+        row = task_row(state.validate_run(run_dir), "T1")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.reserved_baseline(row, attempt=2)
+        self.assertIn("attempt-002", str(caught.exception))
+
+    def test_two_baselines_for_one_attempt_are_refused_rather_than_picked_from(self):
+        row = {"id": "T1",
+               "checkpoints": f"baseline:attempt-001@{'a' * 40},"
+                              f"baseline:attempt-001@{'b' * 40}"}
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.reserved_baseline(row, attempt=1)
+        self.assertIn("2", str(caught.exception))
+
+    def test_a_baseline_payload_that_is_not_an_object_name_is_refused(self):
+        for payload in ("HEAD~1", "target", "A" * 40, "a" * 39, "a" * 41, ""):
+            with self.subTest(payload=payload):
+                row = {"id": "T1",
+                       "checkpoints": f"baseline:attempt-001@{payload}"}
+                with self.assertRaises(state.TrackerValidationError):
+                    state.reserved_baseline(row, attempt=1)
+
+    def test_a_row_that_is_not_a_row_is_refused_inside_the_family(self):
+        for row in (None, "checkpoints", 3, [], {"id": "T1"},
+                    {"checkpoints": "-"}, {"id": "T1", "checkpoints": None},
+                    {"id": "T1", "checkpoints": 7}):
+            with self.subTest(row=row):
+                with self.assertRaises(state.TrackerError):
+                    state.reserved_baseline(row, attempt=1)
+
+    def test_the_attempt_goes_through_the_single_conversion_point(self):
+        row = {"id": "T1", "checkpoints": f"baseline:attempt-001@{'a' * 40}"}
+        self.assertEqual(state.reserved_baseline(row, attempt=1), "a" * 40)
+        for attempt in ("1", "attempt-001", None, -1, 0, 1.0, True):
+            with self.subTest(attempt=attempt):
+                with self.assertRaises(state.TrackerError):
+                    state.reserved_baseline(row, attempt=attempt)
+
+
+class SourceRangeCommandTests(TempDirTestCase):
+    """The module dictates the question; the controller executes it."""
+
+    def test_the_emitted_argv_is_pinned_exactly(self):
+        repo = make_repo(self.tmp)
+        base = git(repo, "rev-parse", "target")
+        head = git(repo, "rev-parse", "HEAD")
+        self.assertEqual(
+            state.source_range_commands(repo, baseline=base, head=head),
+            ((
+                "git", "-C", str(repo), "log", "--reverse", "--no-renames",
+                "--name-only", "--no-color", "--format=%x00%H %P",
+                f"{base}..{head}", "--",
+            ),))
+
+    def test_every_changed_path_command_carries_no_renames(self):
+        """Load-bearing, not stylistic. Measured in
+        `RenameHidesTheVictimTests`: without it a `git mv` out of another
+        task's tree prints only the destination and the scope check passes."""
+        repo = make_repo(self.tmp)
+        commands = state.source_range_commands(
+            repo, baseline=git(repo, "rev-parse", "target"),
+            head=git(repo, "rev-parse", "HEAD"))
+        self.assertTrue(commands)
+        for argv in commands:
+            with self.subTest(argv=argv):
+                self.assertIn("--name-only", argv)
+                self.assertIn("--no-renames", argv)
+
+    def test_both_endpoints_are_resolved_by_the_module_not_passed_through(self):
+        """A symbolic end resolves somewhere else tomorrow. The controller is
+        handed object names, so the range it runs is the range the module
+        meant."""
+        repo = make_repo(self.tmp)
+        argv = state.source_range_commands(
+            repo, baseline="target", head="main")[0]
+        self.assertIn(f"{git(repo, 'rev-parse', 'target')}.."
+                      f"{git(repo, 'rev-parse', 'main')}", argv)
+        self.assertNotIn("target..main", argv)
+
+    def test_an_end_that_names_no_reference_is_a_stop(self):
+        repo = make_repo(self.tmp)
+        with self.assertRaises(state.TrackerValidationError):
+            state.source_range_commands(repo, baseline="no-such-branch",
+                                        head="target")
+
+    def test_a_repository_argument_that_cannot_be_an_argv_element_is_refused(self):
+        for repo in (None, 3, "", "   ", "a\x00b", b"/tmp"):
+            with self.subTest(repo=repo):
+                with self.assertRaises(state.TrackerError):
+                    state.source_range_commands(repo, baseline="a" * 40,
+                                                head="b" * 40)
+
+    def test_the_command_runs_and_its_output_is_what_the_parser_reads(self):
+        repo = make_repo(self.tmp)
+        base = git(repo, "rev-parse", "target")
+        git(repo, "checkout", "-q", "-b", "task/T1", "target")
+        head = commit_file(repo, "src/a1.py", "one = 1\n", "one")
+        entries = state._parse_range_transcript(
+            range_transcript(repo, base, head))
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["commit"], head)
+        self.assertEqual(entries[0]["parents"], (base,))
+        self.assertEqual(entries[0]["paths"], ("src/a1.py",))
+
+
+class RenameHidesTheVictimTests(TempDirTestCase):
+    """The measured scope-check bypass the brief's three `--name-only` calls
+    would have shipped."""
+
+    def moved_victim(self):
+        repo = make_repo(self.tmp)
+        git(repo, "checkout", "-q", "target")
+        (repo / "theirs").mkdir()
+        (repo / "theirs" / "victim.py").write_text("victim = 1\n" * 40,
+                                                   encoding="utf-8")
+        (repo / "mine").mkdir()
+        (repo / "mine" / "own.py").write_text("own = 1\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-qm", "two tasks' trees")
+        base = git(repo, "rev-parse", "target")
+        git(repo, "checkout", "-q", "-b", "task/T1", "target")
+        git(repo, "mv", "theirs/victim.py", "mine/victim.py")
+        git(repo, "commit", "-qm", "steal it")
+        return repo, base, git(repo, "rev-parse", "HEAD")
+
+    def test_rename_detection_prints_only_the_destination(self):
+        """The defect, measured rather than recalled. Rename detection is ON
+        by default."""
+        repo, base, head = self.moved_victim()
+        hidden = subprocess.run(
+            ("git", "-C", str(repo), "diff", "--name-only", f"{base}..{head}"),
+            capture_output=True, text=True, check=True).stdout.split()
+        self.assertEqual(hidden, ["mine/victim.py"])
+        self.assertTrue(all(state._path_in_scope(path, "tree:mine")
+                            for path in hidden))
+
+    def test_the_modules_own_command_prints_both_sides_and_the_check_refuses(self):
+        repo, base, head = self.moved_victim()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.verify_source_range(
+                repo, baseline=base, head=head, scopes=["tree:mine"],
+                transcript=range_transcript(repo, base, head))
+        self.assertIn("theirs/victim.py", str(caught.exception))
+
+    def test_deleting_the_no_renames_flag_from_the_transcript_reopens_it(self):
+        """The flag is what refuses, and nothing else is. With the flag
+        removed from the argv the module emitted, the same repository produces
+        a transcript every path of which is inside the declared scope."""
+        repo, base, head = self.moved_victim()
+        argv = state.source_range_commands(repo, baseline=base, head=head)[0]
+        weakened = tuple(part for part in argv if part != "--no-renames")
+        proof = state.verify_source_range(
+            repo, baseline=base, head=head, scopes=["tree:mine"],
+            transcript=run_commands((weakened,)))
+        self.assertEqual(proof["changed_paths"], ("mine/victim.py",))
+
+
+class SourceRangeTests(TempDirTestCase):
+    """The nine the brief named, re-aimed at the transcript."""
+
+    def three_commit_branch(self):
+        repo = make_repo(self.tmp)
+        baseline = git(repo, "rev-parse", "target")
+        git(repo, "checkout", "-q", "-b", "task/T1", "target")
+        commits = tuple(
+            commit_file(repo, "src/a1.py", f"value = {index}\n", f"step {index}")
+            for index in range(1, 4))
+        return repo, baseline, commits
+
+    def prove(self, repo, baseline, head, scopes):
+        return state.verify_source_range(
+            repo, baseline=baseline, head=head, scopes=scopes,
+            transcript=range_transcript(repo, baseline, head))
+
+    def test_accepts_the_complete_ordered_range(self):
+        repo, baseline, commits = self.three_commit_branch()
+        proof = self.prove(repo, baseline, commits[-1], ["file:src/a1.py"])
+        self.assertEqual(proof["baseline"], baseline)
+        self.assertEqual(proof["head"], commits[-1])
+        self.assertEqual(proof["commits"], commits)
+        self.assertEqual(proof["changed_paths"], ("src/a1.py",))
+
+    def test_head_tilde_one_baseline_truncates_a_multi_commit_task(self):
+        """F3: `HEAD~1` is not the review baseline. It silently drops the
+        earlier commits, which then escape every scope and range check."""
+        repo, baseline, commits = self.three_commit_branch()
+        persisted = self.prove(repo, baseline, commits[-1], ["file:src/a1.py"])
+        truncated = self.prove(repo, commits[-2], commits[-1],
+                               ["file:src/a1.py"])
+        self.assertEqual(len(persisted["commits"]), 3)
+        self.assertEqual(len(truncated["commits"]), 1)
+        self.assertNotEqual(truncated["commits"], persisted["commits"])
+        self.assertLess(set(truncated["commits"]), set(persisted["commits"]))
+
+    def test_rejects_an_empty_commit(self):
+        """F4: no diff is not an artifact completion and not a reason for an
+        empty commit."""
+        repo, baseline, _ = self.three_commit_branch()
+        git(repo, "commit", "-q", "--allow-empty", "-m", "nothing happened")
+        head = git(repo, "rev-parse", "HEAD")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            self.prove(repo, baseline, head, ["file:src/a1.py"])
+        self.assertIn("empty commit", str(caught.exception))
+        self.assertIn(head, str(caught.exception))
+
+    def test_rejects_an_empty_range(self):
+        repo, baseline, _ = self.three_commit_branch()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            self.prove(repo, baseline, baseline, ["file:src/a1.py"])
+        self.assertIn("empty", str(caught.exception))
+
+    def test_rejects_a_head_that_does_not_descend_the_baseline(self):
+        """F4: an unrelated commit proves nothing about this task."""
+        repo, baseline, _ = self.three_commit_branch()
+        git(repo, "checkout", "-q", "--orphan", "unrelated")
+        git(repo, "rm", "-rqf", ".")
+        unrelated = commit_file(repo, "other.py", "x = 1\n", "unrelated history")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            self.prove(repo, baseline, unrelated, ["file:other.py"])
+        self.assertIn("ancestor", str(caught.exception))
+
+    def test_rejects_a_head_that_is_behind_the_baseline(self):
+        """The other half of descent, and it arrives as an EMPTY transcript
+        rather than as a broken chain -- so the refusal has to be written for
+        it rather than fall out of the chain walk."""
+        repo, baseline, commits = self.three_commit_branch()
+        git(repo, "branch", "-f", "target", commits[-1])
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            self.prove(repo, commits[-1], commits[0], ["file:src/a1.py"])
+        self.assertIn("descend", str(caught.exception))
+
+    def test_rejects_a_merge_inside_the_implementation_range(self):
+        """One worktree per implementer means the implementation range is
+        linear. A merge inside it belongs to integration, not to the task."""
+        repo, baseline, _ = self.three_commit_branch()
+        git(repo, "checkout", "-q", "-b", "side", baseline)
+        commit_file(repo, "src/side.py", "side = 1\n", "side work")
+        git(repo, "checkout", "-q", "task/T1")
+        git(repo, "merge", "-q", "--no-ff", "-m", "merge side", "side")
+        head = git(repo, "rev-parse", "HEAD")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            self.prove(repo, baseline, head,
+                       ["file:src/a1.py", "file:src/side.py"])
+        self.assertIn("linear", str(caught.exception))
+
+    def test_rejects_an_out_of_scope_path(self):
+        repo, baseline, _ = self.three_commit_branch()
+        head = commit_file(repo, "src/escaped.py", "escaped = 1\n", "out of scope")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            self.prove(repo, baseline, head, ["file:src/a1.py"])
+        self.assertIn("src/escaped.py", str(caught.exception))
+
+    def test_accepts_a_tree_scope_covering_every_changed_path(self):
+        repo, baseline, _ = self.three_commit_branch()
+        head = commit_file(repo, "src/deep/nested.py", "nested = 1\n", "in a tree")
+        proof = self.prove(repo, baseline, head, ["tree:src"])
+        self.assertIn("src/deep/nested.py", proof["changed_paths"])
+
+    def test_rejects_untyped_or_absent_scopes(self):
+        repo, baseline, commits = self.three_commit_branch()
+        transcript = range_transcript(repo, baseline, commits[-1])
+        with self.assertRaises(state.PlanMetadataError):
+            state.verify_source_range(repo, baseline=baseline, head=commits[-1],
+                                      scopes=["src/a1.py"], transcript=transcript)
+        with self.assertRaises(state.TrackerValidationError):
+            state.verify_source_range(repo, baseline=baseline, head=commits[-1],
+                                      scopes=[], transcript=transcript)
+
+    def test_the_empty_scope_refusal_is_not_an_out_of_scope_report(self):
+        """M23. With the screen deleted the call still refuses -- `any()` over
+        no scopes is False, so every changed path reads as an escape -- and
+        the DIAGNOSIS is then exactly backwards: "this task wrote outside its
+        scope" for a task that was never given one. The screen buys the right
+        answer to "what is wrong here", which is the whole of what it is for.
+        """
+        repo, baseline, commits = self.three_commit_branch()
+        transcript = range_transcript(repo, baseline, commits[-1])
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.verify_source_range(repo, baseline=baseline, head=commits[-1],
+                                      scopes=[], transcript=transcript)
+        message = str(caught.exception)
+        self.assertIn("at least one approved write scope", message)
+        self.assertNotIn("src/a1.py", message)
+
+    def test_an_untyped_scope_is_refused_even_when_another_scope_covers(self):
+        """M24. The typing loop is EAGER, and that is not decoration: the
+        membership test below short-circuits on the first scope that claims a
+        path, so a declared scope that is not a scope at all is never
+        evaluated when an earlier one covers everything -- and the task is
+        accepted holding a write-scope declaration nothing validated."""
+        repo, baseline, _ = self.three_commit_branch()
+        head = commit_file(repo, "src/deep/nested.py", "n = 1\n", "nested")
+        transcript = range_transcript(repo, baseline, head)
+        self.assertEqual(
+            state.verify_source_range(
+                repo, baseline=baseline, head=head, scopes=["tree:src"],
+                transcript=transcript)["changed_paths"],
+            ("src/a1.py", "src/deep/nested.py"))
+        with self.assertRaises(state.PlanMetadataError):
+            state.verify_source_range(
+                repo, baseline=baseline, head=head,
+                scopes=["tree:src", "src/escaped.py"], transcript=transcript)
+
+    def test_the_empty_range_screen_is_not_the_empty_transcript_screen(self):
+        """M25. Both refuse on the HONEST transcript for `base..base`, which
+        is empty -- so only a FORGED one can tell them apart. A record whose
+        commit IS its own parent chains from the baseline and ends at the
+        head when the two are the same commit, and with the screen deleted it
+        is accepted: a task that moved the branch nowhere, proved."""
+        repo, baseline, _ = self.three_commit_branch()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            self.prove(repo, baseline, baseline, ["file:src/a1.py"])
+        self.assertIn("equals the recorded baseline", str(caught.exception))
+        forged = f"\x00{baseline} {baseline}\n\nsrc/a1.py\n"
+        with self.assertRaises(state.TrackerValidationError) as forgery:
+            state.verify_source_range(
+                repo, baseline=baseline, head=baseline,
+                scopes=["file:src/a1.py"], transcript=forged)
+        self.assertIn("equals the recorded baseline", str(forgery.exception))
+
+    def test_a_path_needs_ONE_scope_that_claims_it_and_not_every_scope(self):
+        """M35. With one declared scope `any` and `all` are the same function,
+        and every accepting test above declares one. Two disjoint scopes, each
+        claiming one of the two changed paths, is the smallest case that tells
+        them apart -- and `all` would refuse every honest multi-scope task."""
+        repo, baseline, _ = self.three_commit_branch()
+        (repo / "src" / "b1.py").write_text("b = 1\n", encoding="utf-8")
+        git(repo, "add", "--", "src/b1.py")
+        git(repo, "commit", "-qm", "a second declared file")
+        head = git(repo, "rev-parse", "HEAD")
+        proof = self.prove(repo, baseline, head,
+                           ["file:src/a1.py", "file:src/b1.py"])
+        self.assertEqual(proof["changed_paths"], ("src/a1.py", "src/b1.py"))
+
+    def test_a_scopes_argument_that_is_not_a_sequence_is_refused(self):
+        """A bare string is the plausible caller error and the dangerous one:
+        `tuple("file:src/a.py")` is a tuple of CHARACTERS."""
+        repo, baseline, commits = self.three_commit_branch()
+        transcript = range_transcript(repo, baseline, commits[-1])
+        for scopes in ("file:src/a1.py", None, 3, {"file:src/a1.py"},
+                       {"file:src/a1.py": 1}, iter(["file:src/a1.py"])):
+            with self.subTest(scopes=scopes):
+                with self.assertRaises(state.TrackerError):
+                    state.verify_source_range(
+                        repo, baseline=baseline, head=commits[-1],
+                        scopes=scopes, transcript=transcript)
+
+    def test_the_returned_dict_carries_exactly_the_five_named_keys(self):
+        repo, baseline, commits = self.three_commit_branch()
+        proof = self.prove(repo, baseline, commits[-1], ["file:src/a1.py"])
+        self.assertEqual(sorted(proof), ["baseline", "changed_paths",
+                                         "commits", "head", "proof_mode"])
+
+    def test_changed_paths_is_the_union_over_the_range_not_the_endpoint_diff(self):
+        """A path added and then removed inside the range never appears in
+        `baseline..head`, and it still escaped the write scope."""
+        repo, baseline, _ = self.three_commit_branch()
+        commit_file(repo, "src/transient.py", "t = 1\n", "add it")
+        (repo / "src" / "transient.py").unlink()
+        git(repo, "add", "-A")
+        git(repo, "commit", "-qm", "and remove it")
+        head = git(repo, "rev-parse", "HEAD")
+        endpoint = subprocess.run(
+            ("git", "-C", str(repo), "diff", "--no-renames", "--name-only",
+             f"{baseline}..{head}"),
+            capture_output=True, text=True, check=True).stdout.split()
+        self.assertNotIn("src/transient.py", endpoint)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            self.prove(repo, baseline, head, ["file:src/a1.py"])
+        self.assertIn("src/transient.py", str(caught.exception))
+
+
+class TranscriptChainTests(TempDirTestCase):
+    """The chain is verified from the transcript's OWN internal structure and
+    never read off it as an assertion."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = make_repo(self.tmp)
+        self.base = git(self.repo, "rev-parse", "target")
+        git(self.repo, "checkout", "-q", "-b", "task/T1", "target")
+        self.commits = tuple(
+            commit_file(self.repo, "src/a1.py", f"v = {index}\n", f"s{index}")
+            for index in range(1, 4))
+        self.head = self.commits[-1]
+        self.text = range_transcript(self.repo, self.base, self.head)
+
+    def refuse(self, text, scopes=("file:src/a1.py",)):
+        with self.assertRaises(state.TrackerError) as caught:
+            state.verify_source_range(
+                self.repo, baseline=self.base, head=self.head,
+                scopes=list(scopes), transcript=text)
+        return str(caught.exception)
+
+    def test_the_pristine_transcript_is_accepted(self):
+        proof = state.verify_source_range(
+            self.repo, baseline=self.base, head=self.head,
+            scopes=["file:src/a1.py"], transcript=self.text)
+        self.assertEqual(proof["commits"], self.commits)
+
+    def test_a_transcript_rooted_at_another_baseline_fails_at_the_first_link(self):
+        """The whole reason this is not self-certification: the module derives
+        both ends itself, so evidence gathered about a different range is
+        refused by the first comparison it meets."""
+        elsewhere = range_transcript(self.repo, self.commits[0], self.head)
+        self.assertIn("ancestor", self.refuse(elsewhere))
+
+    def test_a_transcript_that_stops_short_of_the_head_is_refused(self):
+        records = transcript_records(self.text)
+        self.assertIn("head", self.refuse("".join(records[:-1])))
+
+    def test_a_transcript_whose_entries_are_reordered_is_refused(self):
+        """Later links, so the FIRST-link diagnosis (which is the baseline's,
+        and has its own test above) cannot be what fires."""
+        records = transcript_records(self.text)
+        records[1], records[2] = records[2], records[1]
+        self.assertIn("chain", self.refuse("".join(records)))
+
+    def test_a_duplicated_entry_is_refused(self):
+        records = transcript_records(self.text)
+        self.assertIn("chain", self.refuse("".join(records + records[-1:])))
+
+    def test_a_forged_parent_is_refused(self):
+        records = transcript_records(self.text)
+        records[1] = records[1].replace(self.commits[0], OTHER_SHA, 1)
+        self.assertIn("chain", self.refuse("".join(records)))
+
+    def test_the_chain_is_searched_over_the_integer_space_not_re_derived(self):
+        """Every break position in every range length, rather than an argument
+        about where the loop's indices meet."""
+        repo = make_repo(self.tmp / "grid")
+        base = git(repo, "rev-parse", "target")
+        git(repo, "checkout", "-q", "-b", "task/G", "target")
+        commits = [commit_file(repo, "src/a1.py", f"g = {index}\n", f"g{index}")
+                   for index in range(1, 7)]
+        for length in range(1, 7):
+            head = commits[length - 1]
+            text = range_transcript(repo, base, head)
+            records = transcript_records(text)
+            self.assertEqual(len(records), length)
+            self.assertEqual(
+                state.verify_source_range(
+                    repo, baseline=base, head=head, scopes=["file:src/a1.py"],
+                    transcript=text)["commits"],
+                tuple(commits[:length]))
+            for position in range(length):
+                with self.subTest(length=length, position=position):
+                    broken = list(records)
+                    del broken[position]
+                    with self.assertRaises(state.TrackerError):
+                        state.verify_source_range(
+                            repo, baseline=base, head=head,
+                            scopes=["file:src/a1.py"],
+                            transcript="".join(broken))
+
+    def test_the_parent_count_is_searched_over_the_integer_space(self):
+        for count in range(0, 6):
+            with self.subTest(parents=count):
+                records = transcript_records(self.text)
+                header, _, rest = records[0].partition("\n")
+                commit = header[1:].split(" ")[0]
+                forged = "\x00" + " ".join(
+                    [commit] + [self.base] + [OTHER_SHA] * (count - 1)
+                ) if count else "\x00" + commit + " "
+                text = "".join([forged + "\n" + rest] + records[1:])
+                if count == 1:
+                    self.assertEqual(
+                        state.verify_source_range(
+                            self.repo, baseline=self.base, head=self.head,
+                            scopes=["file:src/a1.py"],
+                            transcript=text)["commits"], self.commits)
+                    continue
+                message = self.refuse(text)
+                self.assertIn("root commit" if count == 0 else "linear", message)
+
+
+class RangeTranscriptGrammarTests(unittest.TestCase):
+    """`_parse_range_transcript` on its own. The grammar is the module's whole
+    reading of an external process's stdout, so it is strict by construction:
+    what it cannot account for it refuses rather than skips."""
+
+    HEADER = "\x00" + "a" * 40 + " " + "b" * 40
+
+    def test_an_empty_transcript_parses_to_no_entries(self):
+        self.assertEqual(state._parse_range_transcript(""), ())
+
+    def test_one_entry_with_paths(self):
+        entries = state._parse_range_transcript(
+            self.HEADER + "\n\nsrc/a.py\nsrc/b.py\n")
+        self.assertEqual(entries, ({"commit": "a" * 40,
+                                    "parents": ("b" * 40,),
+                                    "paths": ("src/a.py", "src/b.py")},))
+
+    def test_one_entry_with_no_paths(self):
+        entries = state._parse_range_transcript(self.HEADER + "\n")
+        self.assertEqual(entries[0]["paths"], ())
+
+    def test_a_root_commit_header_parses_to_no_parents(self):
+        entries = state._parse_range_transcript("\x00" + "a" * 40 + " \n")
+        self.assertEqual(entries[0]["parents"], ())
+
+    def test_a_merge_header_parses_to_two_parents(self):
+        entries = state._parse_range_transcript(
+            "\x00" + " ".join(("a" * 40, "b" * 40, "c" * 40)) + "\n")
+        self.assertEqual(entries[0]["parents"], ("b" * 40, "c" * 40))
+
+    def test_every_malformation_of_the_grammar_is_refused(self):
+        sha = "a" * 40
+        parent = "b" * 40
+        for text in (
+            "no separator at all\n",
+            " \x00" + sha + " " + parent + "\n",
+            "\x00" + sha + " " + parent,                       # no terminator
+            "\x00" + sha + " " + parent + "\nsrc/a.py\n",      # no blank line
+            #: TWO paths and no blank line. The one-path spelling above is
+            #: refused by the `len(body) > 1` clause alone, so it could not
+            #: tell the blank-separator clause from its neighbour -- a mutant
+            #: deleting `body[0] == ""` survived the whole suite on it, and
+            #: silently DROPPED the first path of every such record.
+            "\x00" + sha + " " + parent + "\nsrc/a.py\nsrc/b.py\n",
+            #: No space at all between commit and parents. git always prints
+            #: `%H %P` with the separator, so a bare object name is not output
+            #: of the emitted command even though it reads like a root commit.
+            "\x00" + sha + "\n",
+            "\x00" + sha + " " + parent + "\n\n",              # blank, no path
+            "\x00" + sha + " " + parent + "\n\n\nsrc/a.py\n",  # two blanks
+            "\x00" + sha + " " + parent + "\n\nsrc/a.py\n\n",  # blank after
+            "\x00" + sha + "  " + parent + "\n",               # double space
+            "\x00" + sha.upper() + " " + parent + "\n",
+            "\x00" + sha[:39] + " " + parent + "\n",
+            "\x00" + sha + " " + parent[:39] + "\n",
+            "\x00" + sha + "\t" + parent + "\n",
+            "\x00\n",
+            "\x00 " + parent + "\n",
+        ):
+            with self.subTest(text=text):
+                with self.assertRaises(state.TrackerValidationError):
+                    state._parse_range_transcript(text)
+
+    def test_a_transcript_that_is_not_a_string_is_refused_inside_the_family(self):
+        for text in (None, 3, b"\x00", ["\x00"], object()):
+            with self.subTest(text=text):
+                with self.assertRaises(state.TrackerValidationError):
+                    state._parse_range_transcript(text)
+
+
+class SourceRangeDegradedModeTests(TempDirTestCase):
+    """Absent evidence is a refusal that NAMES WHAT IS MISSING, never a weaker
+    check passed silently."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = make_repo(self.tmp)
+        self.base = git(self.repo, "rev-parse", "target")
+        git(self.repo, "checkout", "-q", "-b", "task/T1", "target")
+        self.head = commit_file(self.repo, "src/a1.py", "v = 1\n", "one")
+
+    def refuse(self, transcript):
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.verify_source_range(
+                self.repo, baseline=self.base, head=self.head,
+                scopes=["file:src/a1.py"], transcript=transcript)
+        return str(caught.exception)
+
+    def test_a_missing_transcript_names_the_command_that_produces_it(self):
+        printable = " ".join(state.source_range_commands(
+            self.repo, baseline=self.base, head=self.head)[0])
+        for transcript in (None, 3, b"", ["\x00"]):
+            with self.subTest(transcript=transcript):
+                message = self.refuse(transcript)
+                self.assertIn(printable, message)
+                self.assertIn("no range transcript", message)
+
+    def test_an_empty_transcript_is_refused_and_not_read_as_a_clean_range(self):
+        message = self.refuse("")
+        self.assertIn("descend", message)
+
+    def test_nothing_about_the_refusal_depends_on_the_scope_being_wrong(self):
+        """The degraded refusal fires with a scope that would have passed."""
+        self.assertIn("no range transcript", self.refuse(None))
+
+
+class ProofModeTests(TempDirTestCase):
+    """`attested` with the transcript digest. Appearing to verify is the
+    failure mode to avoid, so the returned dict says what kind of proof this
+    is and binds the exact bytes it was given."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = make_repo(self.tmp)
+        self.base = git(self.repo, "rev-parse", "target")
+        git(self.repo, "checkout", "-q", "-b", "task/T1", "target")
+        self.head = commit_file(self.repo, "src/a1.py", "v = 1\n", "one")
+        self.text = range_transcript(self.repo, self.base, self.head)
+
+    def prove(self, transcript):
+        return state.verify_source_range(
+            self.repo, baseline=self.base, head=self.head,
+            scopes=["file:src/a1.py"], transcript=transcript)
+
+    def test_the_proof_mode_is_attested_bound_to_the_transcript_digest(self):
+        proof = self.prove(self.text)
+        self.assertEqual(
+            proof["proof_mode"],
+            f"attested{state._DIGEST_DELIMITER}{state._digest(self.text)}")
+        self.assertTrue(proof["proof_mode"].startswith(state.PROOF_ATTESTED))
+
+    def test_two_transcripts_with_one_conclusion_carry_two_digests(self):
+        """The digest binds the EVIDENCE, not the verdict. Two transcripts
+        that differ only in the order git listed one commit's paths reach the
+        SAME conclusion -- `changed_paths` is a set, ordered by this module --
+        and are still two different attestations."""
+        (self.repo / "src" / "a1.py").write_text("v = 2\n", encoding="utf-8")
+        (self.repo / "src" / "b1.py").write_text("b = 1\n", encoding="utf-8")
+        git(self.repo, "add", "--", "src/a1.py", "src/b1.py")
+        git(self.repo, "commit", "-qm", "both")
+        head = git(self.repo, "rev-parse", "HEAD")
+        text = range_transcript(self.repo, self.base, head)
+        records = transcript_records(text)
+        last = records[-1].rstrip("\n").split("\n")
+        self.assertEqual(last[2:], ["src/a1.py", "src/b1.py"])
+        swapped = "".join(records[:-1]
+                          + ["\n".join(last[:2] + last[:1:-1]) + "\n"])
+        self.assertNotEqual(swapped, text)
+        scopes = ["tree:src"]
+        first_proof = state.verify_source_range(
+            self.repo, baseline=self.base, head=head, scopes=scopes,
+            transcript=text)
+        second_proof = state.verify_source_range(
+            self.repo, baseline=self.base, head=head, scopes=scopes,
+            transcript=swapped)
+        self.assertEqual(first_proof["changed_paths"],
+                         second_proof["changed_paths"])
+        self.assertEqual(first_proof["commits"], second_proof["commits"])
+        self.assertNotEqual(first_proof["proof_mode"],
+                            second_proof["proof_mode"])
+        self.assertEqual(first_proof["commits"], (self.head, head))
+
+    def test_the_proof_mode_is_one_table_safe_cell(self):
+        proof = self.prove(self.text)
+        self.assertEqual(
+            state._table_safe(proof["proof_mode"], field="proof_mode"),
+            proof["proof_mode"])
+
+
+class RangeCrossProductTests(TempDirTestCase):
+    """The cross-product of RANGE SHAPES by TRANSCRIPT MALFORMATIONS.
+
+    A corpus built from known mutants proves only that those mutants die. The
+    cases here are generated from the structure being screened -- every shape a
+    range can have, against every way the transcript reporting it can be
+    wrong -- and the expectation is derived mechanically: a call is accepted
+    if and only if the shape is sound AND the transcript is untouched.
+    """
+
+    @staticmethod
+    def shape_single(tmp):
+        repo = make_repo(tmp)
+        base = git(repo, "rev-parse", "target")
+        git(repo, "checkout", "-q", "-b", "t", "target")
+        head = commit_file(repo, "src/a1.py", "v = 1\n", "one")
+        return repo, base, head, ["file:src/a1.py"], True
+
+    @staticmethod
+    def shape_linear_three(tmp):
+        repo = make_repo(tmp)
+        base = git(repo, "rev-parse", "target")
+        git(repo, "checkout", "-q", "-b", "t", "target")
+        for index in range(3):
+            head = commit_file(repo, "src/a1.py", f"v = {index}\n", f"s{index}")
+        return repo, base, head, ["file:src/a1.py"], True
+
+    @staticmethod
+    def shape_nested_tree(tmp):
+        repo = make_repo(tmp)
+        base = git(repo, "rev-parse", "target")
+        git(repo, "checkout", "-q", "-b", "t", "target")
+        commit_file(repo, "src/a1.py", "v = 1\n", "one")
+        head = commit_file(repo, "src/deep/nested.py", "n = 1\n", "two")
+        return repo, base, head, ["tree:src"], True
+
+    @staticmethod
+    def shape_rename_out_of_scope(tmp):
+        repo = make_repo(tmp)
+        git(repo, "checkout", "-q", "target")
+        for directory, name in (("theirs", "victim.py"), ("mine", "own.py")):
+            (repo / directory).mkdir()
+            (repo / directory / name).write_text("x = 1\n" * 40,
+                                                 encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-qm", "two trees")
+        base = git(repo, "rev-parse", "target")
+        git(repo, "checkout", "-q", "-b", "t", "target")
+        git(repo, "mv", "theirs/victim.py", "mine/victim.py")
+        git(repo, "commit", "-qm", "steal")
+        return repo, base, git(repo, "rev-parse", "HEAD"), ["tree:mine"], False
+
+    @staticmethod
+    def shape_empty_commit(tmp):
+        repo = make_repo(tmp)
+        base = git(repo, "rev-parse", "target")
+        git(repo, "checkout", "-q", "-b", "t", "target")
+        commit_file(repo, "src/a1.py", "v = 1\n", "one")
+        git(repo, "commit", "-q", "--allow-empty", "-m", "nothing")
+        return repo, base, git(repo, "rev-parse", "HEAD"), ["file:src/a1.py"], False
+
+    @staticmethod
+    def shape_merge(tmp):
+        repo = make_repo(tmp)
+        base = git(repo, "rev-parse", "target")
+        git(repo, "checkout", "-q", "-b", "t", "target")
+        commit_file(repo, "src/a1.py", "v = 1\n", "one")
+        git(repo, "checkout", "-q", "-b", "side", base)
+        commit_file(repo, "src/side.py", "s = 1\n", "side")
+        git(repo, "checkout", "-q", "t")
+        git(repo, "merge", "-q", "--no-ff", "-m", "merge", "side")
+        return (repo, base, git(repo, "rev-parse", "HEAD"),
+                ["file:src/a1.py", "file:src/side.py"], False)
+
+    @staticmethod
+    def shape_orphan(tmp):
+        repo = make_repo(tmp)
+        base = git(repo, "rev-parse", "target")
+        git(repo, "checkout", "-q", "--orphan", "unrelated")
+        git(repo, "rm", "-rqf", ".")
+        head = commit_file(repo, "other.py", "x = 1\n", "unrelated")
+        return repo, base, head, ["file:other.py"], False
+
+    @staticmethod
+    def shape_behind(tmp):
+        repo = make_repo(tmp)
+        git(repo, "checkout", "-q", "-b", "t", "target")
+        first = commit_file(repo, "src/a1.py", "v = 1\n", "one")
+        second = commit_file(repo, "src/a1.py", "v = 2\n", "two")
+        return repo, second, first, ["file:src/a1.py"], False
+
+    SHAPES = ("shape_single", "shape_linear_three", "shape_nested_tree",
+              "shape_rename_out_of_scope", "shape_empty_commit", "shape_merge",
+              "shape_orphan", "shape_behind")
+
+    @staticmethod
+    def malformations():
+        """Each returns the mutated transcript, or `None` when it cannot apply
+        to this transcript -- a skip that is counted, never a silent pass."""
+        def needs(count):
+            def decorate(function):
+                def wrapped(text):
+                    records = transcript_records(text)
+                    return None if len(records) < count else function(records)
+                return wrapped
+            return decorate
+
+        def with_paths(function):
+            def wrapped(text):
+                records = transcript_records(text)
+                index = next((position for position, record in enumerate(records)
+                              if "\n\n" in record), None)
+                return None if index is None else function(records, index)
+            return wrapped
+
+        return {
+            "empty": lambda text: "" if text else None,
+            "whitespace": lambda text: "   \n",
+            "prose": lambda text: "fatal: bad revision\n",
+            "drop_first": needs(1)(lambda r: "".join(r[1:])),
+            "drop_last": needs(1)(lambda r: "".join(r[:-1])),
+            "swap_two": needs(2)(lambda r: "".join([r[1], r[0]] + r[2:])),
+            "duplicate_last": needs(1)(lambda r: "".join(r + r[-1:])),
+            "reverse_all": needs(2)(lambda r: "".join(reversed(r))),
+            "forge_parent": needs(1)(
+                lambda r: "".join([r[0].replace(r[0].split(" ")[1].split("\n")[0],
+                                                OTHER_SHA, 1)] + r[1:])),
+            "forge_commit": needs(1)(
+                lambda r: "".join([r[0].replace(r[0][1:41], OTHER_SHA, 1)] + r[1:])),
+            "second_parent": needs(1)(
+                lambda r: "".join([r[0].split("\n")[0] + " " + OTHER_SHA + "\n"
+                                   + r[0].partition("\n")[2]] + r[1:])),
+            "no_parent": needs(1)(
+                lambda r: "".join(["\x00" + r[0][1:41] + " \n"
+                                   + r[0].partition("\n")[2]] + r[1:])),
+            "uppercase_sha": needs(1)(
+                lambda r: "".join([r[0][:1] + r[0][1:41].upper() + r[0][41:]]
+                                  + r[1:])),
+            "short_sha": needs(1)(
+                lambda r: "".join([r[0][:1] + r[0][2:]] + r[1:])),
+            "drop_separator_byte": needs(1)(lambda r: "".join(r[:-1] + [r[-1][1:]])),
+            "trailing_junk": lambda text: text + "and one more thing\n",
+            "no_terminator": lambda text: text.rstrip("\n") or None,
+            "drop_blank_line": with_paths(
+                lambda r, i: "".join(r[:i] + [r[i].replace("\n\n", "\n", 1)]
+                                     + r[i + 1:])),
+            "drop_all_paths": with_paths(
+                lambda r, i: "".join(r[:i] + [r[i].partition("\n")[0] + "\n"]
+                                     + r[i + 1:])),
+            "inject_escaped_path": with_paths(
+                lambda r, i: "".join(r[:i] + [r[i].rstrip("\n")
+                                              + '\n"a\\nb"\n'] + r[i + 1:])),
+            "inject_absolute_path": with_paths(
+                lambda r, i: "".join(r[:i] + [r[i].rstrip("\n")
+                                              + "\n/etc/passwd\n"] + r[i + 1:])),
+            "inject_traversal_path": with_paths(
+                lambda r, i: "".join(r[:i] + [r[i].rstrip("\n")
+                                              + "\n../escape.py\n"] + r[i + 1:])),
+            "inject_out_of_scope_path": with_paths(
+                lambda r, i: "".join(r[:i] + [r[i].rstrip("\n")
+                                              + "\nelsewhere/x.py\n"] + r[i + 1:])),
+        }
+
+    def test_the_cross_product_of_range_shapes_and_transcript_malformations(self):
+        malformations = self.malformations()
+        applied = 0
+        skipped = []
+        accepted = []
+        for index, shape_name in enumerate(self.SHAPES):
+            root = self.tmp / f"s{index}"
+            root.mkdir()
+            repo, base, head, scopes, sound = getattr(self, shape_name)(root)
+            pristine = range_transcript(repo, base, head)
+
+            def call(text):
+                return state.verify_source_range(
+                    repo, baseline=base, head=head, scopes=list(scopes),
+                    transcript=text)
+
+            with self.subTest(shape=shape_name, transcript="pristine"):
+                if sound:
+                    accepted.append((shape_name, "pristine"))
+                    proof = call(pristine)
+                    self.assertEqual(proof["head"], head)
+                    self.assertEqual(proof["baseline"], base)
+                else:
+                    with self.assertRaises(state.TrackerError):
+                        call(pristine)
+            for name, mutate in sorted(malformations.items()):
+                text = mutate(pristine)
+                if text is None or text == pristine:
+                    skipped.append((shape_name, name))
+                    continue
+                applied += 1
+                with self.subTest(shape=shape_name, transcript=name):
+                    with self.assertRaises(state.TrackerError):
+                        call(text)
+        #: THE CORPUS IS ONLY EVIDENCE IF IT WAS ACTUALLY GENERATED, and a
+        #: count alone cannot say that a skip was legitimate. Every skipped
+        #: cell is named, with the structural reason it cannot apply -- a
+        #: malformation that quietly became a no-op would otherwise read as a
+        #: case that passed.
+        self.assertEqual(len(self.SHAPES), 8)
+        self.assertEqual(len(malformations), 23)
+        self.assertEqual(applied + len(skipped), 8 * 23)
+        self.assertEqual(applied, 157)
+        #: `shape_behind` is the only shape whose transcript is EMPTY, so
+        #: every record-level malformation and `empty` itself are no-ops on
+        #: it; `swap_two`/`reverse_all` need two records and three shapes have
+        #: one; and `shape_orphan`'s single record is ALREADY parentless.
+        self.assertEqual(sorted(skipped), sorted(
+            [("shape_behind", name) for name in sorted(malformations)
+             if name not in ("whitespace", "prose", "trailing_junk")]
+            + [(shape, name)
+               for shape in ("shape_single", "shape_rename_out_of_scope",
+                             "shape_orphan")
+               for name in ("swap_two", "reverse_all")]
+            + [("shape_orphan", "no_parent")]))
+        self.assertEqual(len(skipped), 27)
+        self.assertEqual(
+            accepted,
+            [("shape_single", "pristine"), ("shape_linear_three", "pristine"),
+             ("shape_nested_tree", "pristine")])
+
+
+class SourceRangeTotalityTests(TempDirTestCase):
+    """No input leaves this module's exception family.
+
+    The case list is derived from the CALL TREE -- `verify_source_range` ->
+    `_repo_argument`, `_resolved_commit` (which forks on whether the end is
+    already an object name: a 40-hex end never touches the ref store, a
+    symbolic one walks it), `_parse_range_transcript`, `_scope_parts` ->
+    `_parse_write_scope` -> `_safe_relative`, `_path_in_scope` -> the same --
+    and not from the fixtures above. Path arguments carry a NUL and a lone
+    surrogate because both are strings Python will hand straight to a syscall.
+    """
+
+    HOSTILE = (
+        None, 0, 1, -1, 3.5, True, b"bytes", [], (), {}, set(), object(),
+        ["file:src/a1.py"], {"scope": "file:src/a1.py"},
+        "", " ", "\t", "\n", "-", "\x00", "a\x00b", "\udc80", "a\udc80b",
+        "x" * 5000, "../escape", "/abs/path", "a\\b", "src/*.py", ".",
+        "..", "a/../b", "HEAD~1", "refs/heads/target", "target",
+        "A" * 40, "a" * 39, "a" * 41, "a" * 40, "\x00" + "a" * 40 + "\n",
+    )
+
+    def setUp(self):
+        super().setUp()
+        self.repo = make_repo(self.tmp)
+        self.base = git(self.repo, "rev-parse", "target")
+        git(self.repo, "checkout", "-q", "-b", "task/T1", "target")
+        self.head = commit_file(self.repo, "src/a1.py", "v = 1\n", "one")
+        self.text = range_transcript(self.repo, self.base, self.head)
+
+    def sound(self, symbolic: bool) -> dict:
+        return {
+            "repo": self.repo,
+            "baseline": "target" if symbolic else self.base,
+            "head": self.head,
+            "scopes": ["file:src/a1.py"],
+            "transcript": self.text,
+        }
+
+    def test_no_argument_of_any_type_escapes_the_exception_family(self):
+        checked = 0
+        for symbolic in (False, True):
+            for name in ("repo", "baseline", "head", "scopes", "transcript"):
+                for value in self.HOSTILE:
+                    arguments = self.sound(symbolic)
+                    arguments[name] = value
+                    checked += 1
+                    with self.subTest(argument=name, value=repr(value)[:40],
+                                      symbolic=symbolic):
+                        try:
+                            outcome = state.verify_source_range(
+                                arguments.pop("repo"), **arguments)
+                        except state.TrackerError:
+                            continue
+                        except BaseException as escaped:  # noqa: BLE001
+                            self.fail(
+                                f"{name}={value!r} raised "
+                                f"{type(escaped).__name__}: {escaped}")
+                        self.assertIsInstance(outcome, dict)
+        self.assertEqual(checked, 2 * 5 * len(self.HOSTILE))
+
+    def test_source_range_commands_is_total_over_the_same_corpus(self):
+        for name in ("repo", "baseline", "head"):
+            for value in self.HOSTILE:
+                arguments = {"repo": self.repo, "baseline": self.base,
+                             "head": self.head}
+                arguments[name] = value
+                with self.subTest(argument=name, value=repr(value)[:40]):
+                    try:
+                        outcome = state.source_range_commands(
+                            arguments.pop("repo"), **arguments)
+                    except state.TrackerError:
+                        continue
+                    except BaseException as escaped:  # noqa: BLE001
+                        self.fail(f"{name}={value!r} raised "
+                                  f"{type(escaped).__name__}: {escaped}")
+                    self.assertIsInstance(outcome, tuple)
+
+    def test_reserved_baseline_is_total_over_the_same_corpus(self):
+        """`attempt=1` and `attempt=True` are the two members of the corpus
+        this function ACCEPTS -- `True == 1` in Python and `_attempt_token`
+        is where that is decided, not here -- so the claim is the same one as
+        above: every outcome is either an answer or a `TrackerError`."""
+        row = {"id": "T1", "checkpoints": f"baseline:attempt-001@{'a' * 40}"}
+        for value in self.HOSTILE:
+            with self.subTest(row=repr(value)[:40]):
+                with self.assertRaises(state.TrackerError):
+                    state.reserved_baseline(value, attempt=1)
+            with self.subTest(attempt=repr(value)[:40]):
+                try:
+                    outcome = state.reserved_baseline(row, attempt=value)
+                except state.TrackerError:
+                    continue
+                except BaseException as escaped:  # noqa: BLE001
+                    self.fail(f"attempt={value!r} raised "
+                              f"{type(escaped).__name__}: {escaped}")
+                self.assertEqual(outcome, "a" * 40)
+                self.assertEqual(int(value), 1)
+
+
+class RefStoreNullByteTests(TempDirTestCase):
+    """Two escapes from the exception family, found by the totality corpus
+    above and fixed where they live.
+
+    A NUL in a path is a `ValueError`, NOT an `OSError`, and neither
+    `_git_store`'s probe nor the `.git` pointer payload was screened for one.
+    Both are reachable with input the WORKER controls -- it owns the
+    repository this proof is taken over -- so a `ValueError` escaping
+    `except TrackerError` kills an unattended run instead of refusing a
+    repository.
+    """
+
+    def test_a_repository_path_carrying_a_null_byte_is_refused_in_family(self):
+        with self.assertRaises(state.TrackerValidationError):
+            state._resolved_commit("\x00", "target")
+
+    def test_a_git_pointer_payload_carrying_a_null_byte_is_refused_in_family(self):
+        root = self.tmp / "linked"
+        root.mkdir()
+        (root / ".git").write_bytes(b"gitdir: \x00evil")
+        with self.assertRaises(state.TrackerValidationError):
+            state._resolved_commit(root, "target")
+
+    def test_a_commondir_payload_carrying_a_null_byte_is_refused_in_family(self):
+        repo = make_repo(self.tmp)
+        gitdir = repo / ".git"
+        (gitdir / "commondir").write_bytes(b"\x00evil")
+        with self.assertRaises(state.TrackerValidationError):
+            state._resolved_commit(repo, "target")
+
+    def test_an_ordinary_linked_worktree_pointer_still_resolves(self):
+        """The screen refuses a NUL and nothing else: the pointer file is the
+        whole integration topology of this phase."""
+        repo = make_repo(self.tmp)
+        git(repo, "worktree", "add", "-q", "-b", "wt",
+            str(self.tmp / "wt"), "target")
+        self.assertEqual(state._resolved_commit(self.tmp / "wt", "target"),
+                         git(repo, "rev-parse", "target"))
+
+
+class SourceRangeOpensNothingTests(TempDirTestCase):
+    """The proof reads no file when both ends are already object names, which
+    is what makes `_require_regular_file` -- this module's one door onto a
+    name that might be a FIFO -- irrelevant to this task rather than skipped.
+    """
+
+    def test_object_name_ends_never_touch_the_filesystem(self):
+        repo = make_repo(self.tmp)
+        base = git(repo, "rev-parse", "target")
+        git(repo, "checkout", "-q", "-b", "task/T1", "target")
+        head = commit_file(repo, "src/a1.py", "v = 1\n", "one")
+        text = range_transcript(repo, base, head)
+        absent = self.tmp / "no-such-repository"
+        self.assertFalse(absent.exists())
+        proof = state.verify_source_range(
+            absent, baseline=base, head=head, scopes=["file:src/a1.py"],
+            transcript=text)
+        self.assertEqual(proof["commits"], (head,))
+        self.assertEqual(proof["head"], head)
+
+    def test_no_new_door_onto_the_filesystem_was_opened(self):
+        """`_require_regular_file` stays the module's single door; Task 8 adds
+        no `open`, `read_text` or `is_file` of its own."""
+        source = module_function_source("verify_source_range")
+        source += module_function_source("source_range_commands")
+        source += module_function_source("_parse_range_transcript")
+        source += module_function_source("reserved_baseline")
+        for forbidden in ("open(", "read_text", "read_bytes", "is_file",
+                          "is_dir", "iterdir", "stat("):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, source)
+
+
+class RangeGrammarDivergenceTests(unittest.TestCase):
+    """Every grammar this task reads a transcript with is hand-rolled, and
+    each is MEASURED against the `re` pattern it replaces IN BOTH DIRECTIONS.
+
+    `re` is not importable by the module. It is importable here, and a
+    divergence nobody measured is a divergence nobody chose.
+    """
+
+    CORPUS = (
+        "", " ", "a" * 40, "A" * 40, "a" * 39, "a" * 41, "0" * 40,
+        "abcdef0123456789" * 2 + "abcdefgh", "g" * 40,
+        "a" * 40 + "\n", "\n" + "a" * 40, "a" * 40 + " ",
+        "٠" * 40, "³" * 40, "ａ" * 40, "à" * 40,
+        "a" * 39 + "٠", "a" * 20 + "\n" + "a" * 19,
+        "\x00" + "a" * 40, "a" * 40 + "\x00", "a" * 40 + "\x00" + "b" * 40,
+        "\udc80" * 40, "a" * 39 + "\udc80",
+    )
+
+    def test_the_commit_grammar_agrees_with_its_ascii_pattern_everywhere(self):
+        """`_COMMIT` is P02's `_Hex(40)` and it is consumed, not re-declared.
+        `[0-9a-f]{40}` under `fullmatch` is its exact `re` equivalent; the
+        divergences below are against the patterns a careless hand reaches
+        for, and every one of them is a TIGHTENING."""
+        exact = re.compile(r"[0-9a-f]{40}")
+        loose_case = re.compile(r"[0-9a-fA-F]{40}")
+        word_class = re.compile(r"\w{40}")
+        digit_class = re.compile(r"[\da-f]{40}")
+        dollar_anchored = re.compile(r"^[0-9a-f]{40}$")
+        divergences = {"loose_case": [], "word_class": [], "digit_class": [],
+                       "dollar_anchored": []}
+        for value in self.CORPUS:
+            ours = state._COMMIT.fullmatch(value)
+            self.assertIs(ours, exact.fullmatch(value) is not None,
+                          f"exact pattern disagrees on {value!r}")
+            if ours is not (loose_case.fullmatch(value) is not None):
+                divergences["loose_case"].append(value)
+            if ours is not (word_class.fullmatch(value) is not None):
+                divergences["word_class"].append(value)
+            if ours is not (digit_class.fullmatch(value) is not None):
+                divergences["digit_class"].append(value)
+            if ours is not (dollar_anchored.match(value) is not None):
+                divergences["dollar_anchored"].append(value)
+        #: Measured, in both directions, and every one is the pattern being
+        #: LOOSER than the hand-rolled grammar. Written down with its reason:
+        #:  * loose_case  -- accepts an uppercase object name git never prints
+        #:  * word_class  -- `\w` is UNICODE: Arabic-Indic digits, fullwidth
+        #:                   latin and combining sequences all match
+        #:  * digit_class -- `\d` is UNICODE for the same reason
+        #:  * dollar_anchored -- `$` matches before a TRAILING NEWLINE, so a
+        #:                   sha with `\n` glued to it reads as a clean sha,
+        #:                   which is exactly the transcript-splicing case
+        self.assertEqual(divergences["loose_case"], ["A" * 40])
+        self.assertEqual(divergences["word_class"], [
+            "A" * 40,                             # uppercase hex
+            "abcdef0123456789" * 2 + "abcdefgh",  # g/h are word chars
+            "g" * 40,                             # and are not hex digits
+            "\u0660" * 40,                        # ARABIC-INDIC DIGIT ZERO
+            "\u00b3" * 40,                        # SUPERSCRIPT THREE
+            "\uff41" * 40,                        # FULLWIDTH LATIN SMALL A
+            "a" * 39 + "\u0660",                  # ONE non-ASCII digit is
+        ])                                        # enough to flip it
+        self.assertEqual(divergences["digit_class"],
+                         ["\u0660" * 40, "a" * 39 + "\u0660"])
+        self.assertEqual(divergences["dollar_anchored"], ["a" * 40 + "\n"])
+        for family, values in divergences.items():
+            for value in values:
+                with self.subTest(family=family, value=value):
+                    self.assertFalse(state._COMMIT.fullmatch(value))
+
+    def test_fullmatch_search_and_multiline_are_three_different_questions(self):
+        """The header grammar is a `fullmatch` on a line the splitter already
+        produced -- never a `search`, and never a MULTILINE `^...$`. On a
+        transcript the three answer differently, and only one of them is the
+        question being asked."""
+        spliced = "\x00" + "a" * 40 + " " + "b" * 40 + "\nsrc/" + "c" * 40 + "\n"
+        pattern = r"[0-9a-f]{40}"
+        self.assertIsNone(re.compile(pattern).fullmatch(spliced))
+        self.assertIsNotNone(re.compile(pattern).search(spliced))
+        self.assertEqual(
+            len(re.compile(r"^[0-9a-f]{40}$", re.MULTILINE).findall(spliced)), 0)
+        #: and the module asks the fullmatch question, per line, after the
+        #: record separator has already cut the transcript into records
+        entries = state._parse_range_transcript(
+            "\x00" + "a" * 40 + " " + "b" * 40 + "\n\nsrc/" + "c" * 40 + "\n")
+        self.assertEqual(entries[0]["paths"], ("src/" + "c" * 40,))
+
+    def test_the_module_still_compiles_no_pattern(self):
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        self.assertNotIn("re.compile(", source)
+        self.assertIsNone(sys.modules["pipeline_auto_state"].__dict__.get("re"))
+
+
 if __name__ == "__main__":
     unittest.main()

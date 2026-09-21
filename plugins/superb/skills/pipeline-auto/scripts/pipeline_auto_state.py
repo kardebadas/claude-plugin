@@ -13618,7 +13618,19 @@ def _ref_text(path: Path, what: str):
         return path.read_text(encoding="utf-8")
     except (FileNotFoundError, NotADirectoryError):
         return None
-    except (OSError, UnicodeError) as exc:
+    except (OSError, ValueError) as exc:
+        #: ``ValueError`` RATHER THAN ``UnicodeError``, WHICH IT CONTAINS. A
+        #: NUL byte anywhere in a path is ``ValueError: embedded null byte``
+        #: from the ``open`` wrapper and is NOT an ``OSError``, so it escaped
+        #: this module's exception family altogether -- and the two shapes
+        #: above CANNOT catch it for us: ``pathlib``'s ``is_dir``/``is_file``
+        #: both swallow ``ValueError`` and answer ``False``, so a NUL path
+        #: reads as plain absence right up to the read that raises. Measured,
+        #: and reachable twice over with input THE WORKER CONTROLS: the
+        #: repository root this proof is taken over, and the ``.git`` /
+        #: ``commondir`` pointer payloads inside it, which are files in a
+        #: repository the worker writes. An unhandled ``ValueError`` under the
+        #: run lock kills an unattended run; refusing the name does not.
         raise TrackerValidationError(
             f"unreadable {what} at {str(path)!r}: {type(exc).__name__}: "
             f"{exc}") from exc
@@ -14561,3 +14573,371 @@ def resume_task(run_dir, *, task_id: str, prior_attempt: int, new_owner: str,
         transition_id=f"resume-{task_id}-{prior_attempt}-{new_attempt}"
                       f"-{decision_ref}",
         mutate=mutate)
+
+
+# ---------------------------------------------------------------------------
+# P04 Task 8: the baseline-anchored source-range proof -- faults F3 and F4.
+#
+# THIS IS THE ONLY PLACE THE RUN CHECKS A WORKER'S STORY AGAINST THE
+# REPOSITORY, and the module does not execute git to do it.
+#
+# The brief for this task called `_git_out` three times and `_git` once. Both
+# are `subprocess.run` wrappers; `subprocess` is the single capability
+# `ALLOWED_IMPORTS` most exists to withhold, and the master plan's quorum ruled
+# the shape that replaces them: THE MODULE EMITS THE ARGV, THE CONTROLLER RUNS
+# IT, THE MODULE VALIDATES THE TRANSCRIPT. That is not a new pattern here --
+# P06's `final_suite_commands` / `record_final_verification` already gate the
+# terminal transition that way, and `resolve_evidence` already does it for test
+# results. The skill's whole verification story rests on attested external
+# execution; independence is bought by a NON-CLAIMANT re-running, never by this
+# module executing.
+#
+# Running git inside a repository the worker can write IS worker-controlled
+# code execution: `core.fsmonitor`, `core.sshCommand`, `include.path` in
+# `.git/config` and `diff.external`/`textconv` via `.gitattributes` are all
+# "run this program" knobs that `rev-list` and `diff` honour. Shelling out
+# would hand the withheld capability to the party it was withheld from.
+#
+# WHAT IS STILL DERIVED HERE, ON NOBODY'S WORD, is both ends of the range:
+# `baseline` from the `baseline:<attempt>@<sha>` checkpoint `reserve_task`
+# persisted (`reserved_baseline` below), and `head` through `_resolved_commit`
+# reading the ref store directly. Because both ends are module-established, a
+# transcript gathered over any other range fails at the FIRST comparison --
+# which is the whole of why this is not self-certification. The chain is then
+# read out of the transcript's OWN INTERNAL STRUCTURE (first parent equals the
+# baseline, each parent equals the previous, exactly one parent each, the last
+# equals the head, no entry with an empty path list) rather than believed as an
+# assertion the transcript makes about itself.
+#
+# `--no-renames` IS LOAD-BEARING AND NOT A STYLE CHOICE. Rename detection is ON
+# by default and git then reports only a rename's DESTINATION. Measured on a
+# real repository (`RenameHidesTheVictimTests`): a task whose declared scope is
+# `mine/` runs `git mv theirs/victim.py mine/victim.py`; `git diff --name-only`
+# prints `mine/victim.py` alone, every path is inside the declared scope, and
+# THE CHECK PASSES WHILE THE TASK HAS DELETED ANOTHER TASK'S FILE.
+# `--no-renames` prints both sides and the check refuses. The pathspec-limited
+# guard in the Global Constraints is NOT affected and must not be "fixed" to
+# match: limiting by path makes git report the SOURCE side of a rename, so
+# moving a file out of `skills/pipeline/` prints it either way.
+#
+# `proof_mode` RECORDS WHAT KIND OF PROOF THIS IS. Appearing to verify is the
+# failure mode to avoid, so the returned dict carries `attested` bound to the
+# digest of the exact transcript that was checked, and absent evidence is a
+# refusal that NAMES WHAT IS MISSING rather than a weaker check passed
+# silently.
+#
+# Residual risk, stated plainly: a controller that FABRICATES a transcript
+# defeats this -- and defeats every other option, because it owns `progress.md`
+# and `locked_tracker_update` runs in its own process. What this design defeats
+# mechanically is the worker who edits outside its scope, truncates its range,
+# names commits that do not exist, or reports a head off an unrelated history.
+# ---------------------------------------------------------------------------
+
+#: The word the master plan pins for a proof taken over attested external
+#: execution rather than over an object read this module performed itself.
+PROOF_ATTESTED = "attested"
+
+#: NUL, as the record separator between commits in the transcript. It is the
+#: ONE byte a POSIX path cannot carry, which is what makes the split
+#: unambiguous: a repository really may hold a file named with forty hex
+#: characters and a space, so "does this line look like a header" is not a
+#: question with a safe answer. `%x00` is git's own spelling of it inside a
+#: `--format`, so the emitted argv carries the four characters `%x00` and no
+#: actual NUL -- an argv element with a NUL in it is one `subprocess` refuses.
+_RANGE_SEPARATOR = "\x00"
+
+#: `%H %P`: the commit and its parents, space separated, and NOTHING ELSE.
+#: Parents come from here rather than from a `_commit_parents` object read
+#: precisely because the module performs no object read; linearity is then a
+#: property of the transcript's structure, which is checkable, rather than a
+#: claim it makes.
+_RANGE_FORMAT = "--format=%x00%H %P"
+
+#: The checkpoint marker `reserve_task` and `resume_task` write. Spelled ONCE
+#: and read back through the same constant: a second spelling would be a
+#: second answer to "where is this attempt's baseline", in the one cell that
+#: says so.
+_BASELINE_CHECKPOINT = "baseline:"
+
+
+def _repo_argument(repo) -> str:
+    """The repository location, as one thing that can be an argv element.
+
+    `os.PathLike` IS ACCEPTED BECAUSE EVERY CALLER HAS A `Path`, and `os.fspath`
+    is the standard-library answer for "give me the string". A PathLike that
+    answers with bytes falls through to the string screen and is refused there
+    rather than silently becoming `b'/repo'` inside an argv this module told a
+    controller to run.
+
+    THE NUL SCREEN IS NOT DECORATION. `subprocess` refuses an argv element
+    containing one with a `ValueError`, so an unscreened location would turn a
+    bad tracker cell into a crash in the CONTROLLER, outside this module's
+    exception family and far from the thing that was wrong. It is also the
+    record separator this transcript grammar is built on.
+    """
+    if isinstance(repo, os.PathLike):
+        try:
+            repo = os.fspath(repo)
+        except TypeError as exc:
+            raise TrackerValidationError(
+                f"the repository location {repo!r} cannot be spelled as a path "
+                f"({type(exc).__name__}: {exc})") from exc
+    if not _text(repo):
+        raise TrackerValidationError(
+            f"the repository location {repo!r} is not a nonempty path; the "
+            "emitted command is pinned to it with `-C`, so a proof obtained "
+            "somewhere else cannot be handed back as this one")
+    if _RANGE_SEPARATOR in repo:
+        raise TrackerValidationError(
+            "the repository location carries a NUL byte, which no argv element "
+            "may hold and which is this transcript grammar's record separator")
+    return repo
+
+
+def _range_ends(repo, baseline, head) -> tuple:
+    """`(location, baseline sha, head sha)` -- BOTH ENDS MODULE-DERIVED.
+
+    This is the anchor. `_resolved_commit` answers with a 40-character object
+    name or stops, so neither end can be a symbolic name that resolves
+    somewhere else tomorrow, and neither is taken on the worker's word.
+    """
+    location = _repo_argument(repo)
+    return (location, _resolved_commit(location, baseline),
+            _resolved_commit(location, head))
+
+
+def _range_argv(location: str, base: str, tip: str) -> tuple:
+    """The one command, built once, so the emitter and the diagnostic agree."""
+    return ((
+        "git", "-C", location, "log", "--reverse", "--no-renames",
+        "--name-only", "--no-color", _RANGE_FORMAT, f"{base}..{tip}", "--",
+    ),)
+
+
+def source_range_commands(repo, *, baseline: str, head: str) -> tuple:
+    """The exact commands whose output proves one task's implementation range.
+
+    ONE command, and it is a `log` rather than a `rev-list` plus a `diff` per
+    commit, because the module cannot know how many commits are in the range
+    before it has been told -- and because two commands would be two
+    transcripts to reconcile for a fact one of them already carries.
+    """
+    return _range_argv(*_range_ends(repo, baseline, head))
+
+
+def _parse_range_transcript(text) -> tuple:
+    """One transcript, as `({"commit", "parents", "paths"}, ...)`.
+
+    THE GRAMMAR IS STRICT BY CONSTRUCTION. This is the module's whole reading
+    of an external process's stdout, so a shape it cannot account for is
+    refused rather than skipped: a parser that shrugged at a line it did not
+    recognise would let a spliced record ride along as a path, or a path ride
+    along as a record.
+
+    The shape git actually emits, measured rather than recalled: each record is
+    the separator, then `<commit> <parents...>`, then -- ONLY WHEN THE COMMIT
+    CHANGED SOMETHING -- one empty line and then one line per path. An empty
+    commit is a header and nothing else, which is exactly the signal fault F4
+    needs and the reason the header is not followed by an unconditional blank.
+    """
+    if not isinstance(text, str):
+        raise TrackerValidationError(
+            "a range transcript is the captured stdout of the emitted command, "
+            f"which is text; got {type(text).__name__}")
+    if not text:
+        return ()
+    if not text.startswith(_RANGE_SEPARATOR):
+        raise TrackerValidationError(
+            f"a range transcript begins at a record separator; this one begins "
+            f"{text[:60]!r}, so it is not the output of the emitted command")
+    entries = []
+    for chunk in text.split(_RANGE_SEPARATOR)[1:]:
+        lines = chunk.split("\n")
+        if lines.pop() != "":
+            raise TrackerValidationError(
+                "every record in a range transcript is newline-terminated; the "
+                "last one is not, so the transcript was truncated mid-record")
+        if not lines:
+            raise TrackerValidationError(
+                "a range transcript carries an empty record, which names no "
+                "commit at all")
+        commit, space, rest = lines[0].partition(" ")
+        if not space:
+            raise TrackerValidationError(
+                f"the range transcript record {lines[0]!r} is not "
+                "'<commit> <parents>'; the separator between them is one space")
+        parents = tuple(rest.split(" ")) if rest else ()
+        for name in (commit,) + parents:
+            if not _COMMIT.fullmatch(name):
+                raise TrackerValidationError(
+                    f"the range transcript names {name!r}, which is not one "
+                    "40-character lowercase object name")
+        body = lines[1:]
+        if not body:
+            paths = ()
+        elif body[0] == "" and len(body) > 1 and all(body[1:]):
+            paths = tuple(body[1:])
+        else:
+            raise TrackerValidationError(
+                f"the record for {commit} is neither a bare header nor a header "
+                "followed by one empty line and one nonempty path per line")
+        entries.append({"commit": commit, "parents": parents, "paths": paths})
+    return tuple(entries)
+
+
+def verify_source_range(repo, *, baseline: str, head: str, scopes,
+                        transcript: str) -> dict:
+    """Prove one task's implementation range against its persisted baseline.
+
+    THE BASELINE IS THE ONE PERSISTED AT RESERVATION, for THE ATTEMPT BEING
+    PROVED. `HEAD~1` silently truncates a multi-commit task to its last commit
+    and every earlier commit escapes the scope check -- and after Task 7 there
+    is a second way to get it wrong that is louder and worse: a resumed task
+    carries TWO `baseline:` checkpoints with different shas, and proving attempt
+    two against attempt one's baseline charges the task with every commit that
+    landed in the target branch while it was BLOCKED. `reserved_baseline` is
+    what makes that a lookup by attempt rather than a scan.
+    """
+    if not isinstance(scopes, (list, tuple)):
+        raise TrackerValidationError(
+            "a source range is proved against a list of typed write scopes; "
+            f"got {type(scopes).__name__}. A bare string is the dangerous "
+            "spelling: iterating one yields CHARACTERS, not scopes")
+    scopes = tuple(scopes)
+    if not scopes:
+        raise TrackerValidationError(
+            "a source range needs at least one approved write scope; with none "
+            "declared there is nothing for a changed path to be inside, and "
+            "'no scope' must never read as 'every scope'")
+    for scope in scopes:
+        _scope_parts(scope)                      # rejects untyped/unsafe scopes
+    location, base, tip = _range_ends(repo, baseline, head)
+    printable = " ".join(_range_argv(location, base, tip)[0])
+    if base == tip:
+        raise TrackerValidationError(
+            f"source range is empty: the head {tip} equals the recorded "
+            "baseline, and a task that moved the branch nowhere has no "
+            "implementation to prove")
+    if not isinstance(transcript, str):
+        raise TrackerValidationError(
+            f"no range transcript was supplied for {base}..{tip}. This module "
+            "never executes git, so the proof is the captured stdout of: "
+            f"{printable} -- absent evidence is a refusal naming what is "
+            "missing, never a weaker check passed silently")
+    entries = _parse_range_transcript(transcript)
+    if not entries:
+        raise TrackerValidationError(
+            f"the range transcript names no commit, so the head {tip} does not "
+            f"descend the recorded baseline {base}; re-run {printable} if the "
+            "transcript was lost rather than empty")
+    for entry in entries:
+        if not entry["parents"]:
+            raise TrackerValidationError(
+                f"{entry['commit']} is a root commit, so the recorded baseline "
+                f"{base} is not an ancestor of the head {tip}; an unrelated "
+                "history proves nothing about this task")
+        if len(entry["parents"]) != 1:
+            raise TrackerValidationError(
+                f"the implementation range must be linear; {entry['commit']} "
+                f"has {len(entry['parents'])} parents, and a merge belongs to "
+                "integration rather than to one implementer's worktree")
+    previous = base
+    for entry in entries:
+        if entry["parents"][0] != previous:
+            if previous == base:
+                raise TrackerValidationError(
+                    f"the recorded baseline {base} is not an ancestor of "
+                    f"{entry['commit']}, which names parent "
+                    f"{entry['parents'][0]}; a transcript rooted anywhere else "
+                    "is evidence about a different range")
+            raise TrackerValidationError(
+                f"the range transcript is not a chain: {entry['commit']} names "
+                f"parent {entry['parents'][0]} where the commit before it is "
+                f"{previous}")
+        previous = entry["commit"]
+    if previous != tip:
+        raise TrackerValidationError(
+            f"the range transcript ends at {previous}, not at the recorded "
+            f"head {tip}; a range that stops short leaves its last commits "
+            "outside every scope and range check")
+    for entry in entries:
+        if not entry["paths"]:
+            raise TrackerValidationError(
+                f"source range contains an empty commit: {entry['commit']} "
+                "changed no repository path, and no diff is neither an "
+                "artifact completion nor a reason to commit")
+    changed = tuple(sorted(
+        {path for entry in entries for path in entry["paths"]}))
+    outside = tuple(
+        path for path in changed
+        if not any(_path_in_scope(path, scope) for scope in scopes))
+    if outside:
+        raise TrackerValidationError(
+            f"source range changed paths outside its approved write scope "
+            f"{scopes}: {', '.join(outside)}")
+    return {
+        "baseline": base,
+        "head": tip,
+        "commits": tuple(entry["commit"] for entry in entries),
+        "changed_paths": changed,
+        "proof_mode":
+            f"{PROOF_ATTESTED}{_DIGEST_DELIMITER}{_digest(transcript)}",
+    }
+
+
+def reserved_baseline(row, *, attempt) -> str:
+    """The baseline this task persisted FOR THIS ATTEMPT, or a stop.
+
+    THE PRODUCES BLOCK NAMED THREE FUNCTIONS AND NONE OF THEM COULD REACH THIS
+    FACT, which is the one the whole proof is anchored on. It is added rather
+    than left to callers because Task 7 made the cell AMBIGUOUS: after a resume
+    the history reads
+
+        started:attempt-001,baseline:attempt-001@<a>,
+        resumed:attempt-001->attempt-002@<decision>,baseline:attempt-002@<b>
+
+    with `<a>` and `<b>` DIFFERENT, because `resume_task` re-derives the target
+    tip rather than carrying the old one forward. "The first `baseline:`" and
+    "the last `baseline:`" are both wrong for one of the two attempts, and
+    reading the wrong one charges a task that was BLOCKED with every commit
+    that landed in the target branch while it waited -- a loud failure on
+    innocent work, which erodes trust in the gate faster than a silent pass
+    does. So the lookup is BY ATTEMPT and the match is on the whole marker.
+
+    NOT FOUND IS A STOP AND NEVER A FALLBACK. An artifact task records no
+    baseline at all -- it produces no source range -- and the honest answer for
+    it is "this attempt recorded none", stated with the attempt named, rather
+    than the nearest baseline belonging to somebody else.
+
+    The attempt goes through `_attempt_token`, the module's single conversion
+    point, so "which attempt" is answered by the renderer that WRITES these
+    markers and not by a second grammar beside it.
+    """
+    token = _attempt_token(attempt)
+    if not isinstance(row, dict):
+        raise TrackerValidationError(
+            f"a reservation baseline is read off a task row; got "
+            f"{type(row).__name__}")
+    for key in ("id", "checkpoints"):
+        if key not in row:
+            raise TrackerValidationError(
+                f"the task row has no {key!r} cell, so it is not a row this "
+                "run wrote")
+    if not _text(row["checkpoints"]):
+        raise TrackerValidationError(
+            f"task {row['id']!r} carries no checkpoint history, so it has "
+            f"recorded no baseline for {token}")
+    marker = f"{_BASELINE_CHECKPOINT}{token}{_CHECKPOINT_DELIMITERS[1]}"
+    found = tuple(entry[len(marker):] for entry in _csv(row["checkpoints"])
+                  if entry.startswith(marker))
+    if len(found) != 1:
+        raise TrackerValidationError(
+            f"task {row['id']!r} records {len(found)} baselines for {token} and "
+            "a range proof has exactly one; an artifact task records none, and "
+            "two would make the anchor a choice rather than a fact")
+    if not _COMMIT.fullmatch(found[0]):
+        raise TrackerValidationError(
+            f"task {row['id']!r} records {found[0]!r} as the baseline for "
+            f"{token}, which is not one 40-character object name; a symbolic "
+            "end resolves somewhere else tomorrow")
+    return found[0]

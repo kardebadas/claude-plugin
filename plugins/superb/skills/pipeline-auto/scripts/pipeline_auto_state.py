@@ -13248,9 +13248,17 @@ def parse_verification_evidence(text: str) -> dict:
     return validated
 
 
-def _evidence_directory(value, *, field: str) -> Path:
-    """One of ``resolve_evidence``'s two search roots, screened before ``Path``
-    sees it -- for its TYPE and for its SPELLING, which are two corpora.
+def _openable_path(value, *, field: str) -> Path:
+    """One path this module is about to open, screened before ``Path`` sees
+    it -- for its TYPE and for its SPELLING, which are two corpora.
+
+    THE NAME IS GENERAL BECAUSE THE SCREEN IS. It began as a screen over
+    ``resolve_evidence``'s two search roots; Task 10 takes a ``result_path``
+    off a controller and needs exactly the same two questions asked of it.
+    A second spelling of "is this a name the filesystem could even be asked
+    about" is a second answer, and the one that goes stale is silent -- so
+    the function is renamed rather than copied, and both of its original
+    call sites keep their own ``field`` labels.
 
     THE TYPE. ``Path(None)`` is a ``TypeError`` from outside this module's
     exception family, and a controller that caught ``TrackerError`` around an
@@ -13299,8 +13307,8 @@ def _evidence_directory(value, *, field: str) -> Path:
             "behind the read")
     if not spelling or not _cell_safe(spelling):
         raise TrackerValidationError(
-            f"unusable {field} {spelling!r}: an evidence search root must be a "
-            "nonempty string a tracker cell can carry back out unchanged -- no "
+            f"unusable {field} {spelling!r}: a path this module opens must be "
+            "a nonempty string a tracker cell can carry back out unchanged -- no "
             "NUL or other control character, nothing the section reader breaks "
             "a line on, nothing the UTF-8 encoder refuses, no '|', and no "
             "surrounding whitespace. A NUL here reaches the syscall as "
@@ -13393,8 +13401,8 @@ def resolve_evidence(run_dir, repo_dir, reference: str) -> dict:
     on a class rather than on a substring of a sentence.
     """
     relative, digest = _digest_reference(reference, field="evidence reference")
-    roots = (_evidence_directory(run_dir, field="run_dir"),
-             _evidence_directory(repo_dir, field="repo_dir"))
+    roots = (_openable_path(run_dir, field="run_dir"),
+             _openable_path(repo_dir, field="repo_dir"))
     for root in roots:
         candidate = root / relative
         try:
@@ -15617,13 +15625,19 @@ def _citable_repo_relative(resolved_run: Path, root: Path, inside: str) -> str:
     is held to.
     """
     try:
-        relative = f"{resolved_run.relative_to(root).as_posix()}/{inside}"
+        #: PATH DIVISION AND NOT AN f-STRING JOIN. ``Path.relative_to``
+        #: answers ``.`` when the two are the same directory, so the string
+        #: form produces ``./agent-output/...`` -- which ``_safe_relative``
+        #: then refuses for carrying a ``.`` segment, reporting a record AT
+        #: the repository root as an uncitable path. Division normalises
+        #: that one case and changes nothing else.
+        relative = (resolved_run.relative_to(root) / inside).as_posix()
     except ValueError as exc:
         raise TrackerValidationError(
-            f"the run directory {str(resolved_run)!r} is not inside the "
-            f"recorded repository root {str(root)!r}, so a worker result "
-            "published in it has no repository-relative spelling and no later "
-            "phase could cite it") from exc
+            f"the directory {str(resolved_run)!r} is not inside the recorded "
+            f"repository root {str(root)!r}, so a worker result published in "
+            "it has no repository-relative spelling and no later phase could "
+            "cite it") from exc
     if _DIGEST_DELIMITER[0] in relative:
         raise TrackerValidationError(
             f"the worker result path {relative!r} carries "
@@ -15739,3 +15753,655 @@ def publish_worker_result(run_dir, *, result: dict) -> str:
             "fails at the phase that cites the record rather than at the one "
             "that wrote it")
     return relative
+
+
+# ---------------------------------------------------------------------------
+# P04 Task 10: controller-side result import -- faults F3, F4, F5 and F6.
+#
+# A WORKER SAYING DONE IS NOT COMPLETION EVIDENCE. All five statuses and both
+# kinds undergo the same four-part identity check -- run, task, attempt, owner
+# -- against the assignment THIS controller persisted. Routing is explicit and
+# never inferred from the wording: ``NEEDS_CONTEXT`` and ``PLAN_CONFLICT`` park
+# the attempt at ``[?]`` behind a QUORUM marker carrying a resolvable,
+# digest-bound question record; ``BLOCKED`` parks it behind a HALT marker
+# carrying the stated blocker.
+#
+# THE CONTROLLER RUNS THE COMMAND AND THE MODULE VALIDATES WHAT COMES BACK.
+# ``verify_source_range``'s header defers "a worker who names commits that do
+# not exist" to this task, and that deferral only pays off if the transcript
+# the comparison rests on is the CONTROLLER'S. Three things had to exist for
+# it, and none of them did when this block was first sketched: the call omitted
+# ``transcript=`` entirely (a ``TypeError``, since the parameter has no
+# default); nothing said where a transcript came from, so the only available
+# one was the worker's -- and ``tuple(result["commits"]) != proof["commits"]``
+# over the worker's own transcript compares the worker with itself, which is
+# WORSE than no check because it reads as one; and ``task_branch`` was never
+# bound anywhere in the phase plan.
+#
+# So: ``import_worker_result`` calls ``source_range_commands`` itself, hands
+# the argv to a ``run_command`` CALLABLE THE CONTROLLER SUPPLIES, and passes
+# the captured stdout as ``transcript``. ``subprocess`` is off this module's
+# import list and stays off it; the capability arrives as an argument, which is
+# what lets the AST screen keep the import out while the proof still rests on
+# a command that really ran. The worker's document contributes ``head`` (a
+# claim ``_range_ends`` checks against the ref store's tip) and ``commits`` (a
+# claim the comparison checks). It contributes NO transcript and NO branch
+# name: the worker-result grammar has fourteen fields and none is either.
+#
+# WHAT THIS STILL DOES NOT CLOSE, stated so Task 11 does not over-read it: a
+# controller that fabricates the transcript defeats this and everything else,
+# and neither task proves the BASELINE is a commit in the repository -- it is
+# the sha ``reserve_task`` resolved at reservation and the target branch has
+# moved on. Task 8's header says so and this one does not weaken it.
+#
+# FIVE THINGS THE BRIEF'S STEP-3 CODE GOT WRONG AGAINST THE COMMITTED MODULE,
+# each corrected here and each pinned by a test:
+#
+# * ``_attempt_baseline`` is ``reserved_baseline``, already shipped by Task 8
+#   with the resume ambiguity argued into its docstring. CONSUMED, never
+#   re-spelled.
+# * ``_approved_definition(run_dir, tracker, task_id)`` is ``(tracker,
+#   task_id)``: Task 6 argued the ``run_dir`` out because no line of the body
+#   reads it.
+# * ``integration="-"`` on a completed source row is REFUSED by P02's
+#   ``_validate_tasks``: the two legal values are an integration commit and
+#   ``held``, because "deliberately deferred" and "never written down" are the
+#   two states a resuming controller has to tell apart. ``held`` is what this
+#   transition writes and Task 11 is what replaces it.
+# * ``.is_file()`` on an artifact output is the predicate this build has ruled
+#   against four times: it is False for a directory, a dangling link, a symlink
+#   loop, a FIFO and a NUL-bearing name, and the FIFO arm HANGS under the run
+#   lock. ``_require_regular_file`` is the door.
+# * one command comparison over BOTH kinds cannot hold: an artifact task
+#   declares no suite, so its approved tuple is empty, and
+#   ``_parse_command_suite`` refuses an empty array -- no evidence record can
+#   ever carry it, so every artifact import would have been impossible.
+# ---------------------------------------------------------------------------
+
+#: The PUBLIC names P05 and P06 cite for the two non-completion routes, and
+#: they are ALIASES rather than a second typing of two words already in this
+#: module. ``_ROUTE_QUORUM`` / ``_ROUTE_HALT`` are Task 4's route vocabulary
+#: and ``_QUESTION_QUORUM_ARM`` / ``_QUESTION_HALT_ARM`` are the ``Question``
+#: cell arms ``_validate_decision`` splits a resume grant on. A public constant
+#: that drifted from the arm would bind a grant to nothing, in the one cell
+#: that says what a task is blocked on.
+QUORUM_ROUTE = _ROUTE_QUORUM
+HALT_ROUTE = _ROUTE_HALT
+
+#: ``task/<id>``, and it is DERIVED FROM THE EVIDENCE SUBJECT KIND rather than
+#: typed. ``_validate_task_test_evidence`` requires a record whose ``subject``
+#: is exactly this string, and ``_evidence_subject`` requires the half before
+#: the slash to be one of ``EVIDENCE_SUBJECT_KINDS``. Spelling the prefix from
+#: that tuple makes the branch name and the evidence subject ONE derivation, so
+#: the range check and the evidence check cannot come to different conclusions
+#: about which branch a task is on -- which is the whole reason ``head_ref``
+#: exists.
+TASK_BRANCH_PREFIX = f"{EVIDENCE_SUBJECT_KINDS[0]}/"
+
+#: The checkpoint marker this transition writes for the range proof, and the
+#: reason it is a checkpoint rather than a column. ``proof_mode`` is the one
+#: fact the import learns that no existing cell holds: WHICH transcript proved
+#: the range. ``## Tasks`` is P02 schema and its committed fixture is the
+#: authority on the sixteen columns, so a seventeenth invented here would be a
+#: column no validator of P02's knows about -- Task 8 and Task 9 both declined
+#: to add one and this task declines too. ``Checkpoints`` is where per-attempt
+#: facts already live, keyed by the attempt token exactly as ``started:``,
+#: ``baseline:`` and ``resumed:`` are, and the proof is a per-attempt fact
+#: anchored on the very ``baseline:`` marker beside it. ``Verification`` is the
+#: other candidate and is the wrong one: that cell holds digest-bound PASS
+#: DOCUMENTS a later phase resolves, and a proof mode is not a document.
+_RANGE_CHECKPOINT = "range:"
+_WORKER_CHECKPOINT = "worker:"
+_COMPLETED_CHECKPOINT = "completed:"
+_BLOCKED_CHECKPOINT = "blocked:"
+
+
+def _task_branch(tracker: dict, task_id) -> str:
+    """``task/<task_id>``, read out of the tracker and screened, or a stop.
+
+    DERIVED, NEVER STORED, AND NEVER READ OUT OF THE RESULT. The worker-result
+    grammar has no branch field; adding one would put the anchor of the range
+    proof back on the worker's word, which is exactly what ``head_ref`` exists
+    to prevent. If a future topology ever needs a name that is not derivable,
+    it goes in a run field the CONTROLLER writes at reservation -- it never
+    arrives in the result.
+
+    THE ID COMES OFF THE ROW, not off the argument, so the branch is spelled
+    from the controller's own record of the reservation. The spelling is then
+    asserted against ``_TASK_ID`` -- the same grammar ``reserve_task`` used --
+    because Task 9's fix round made this derivation TOTAL by refusing at
+    reservation any id ``git check-ref-format`` rejects as a branch. That makes
+    this arm defence in depth rather than the only line, and it is kept for
+    ``worker_result_path``'s reason: a tracker row can still arrive from a
+    resumed run whose plan an older build imported.
+    """
+    row = _task_row(tracker, task_id)
+    identifier = row["id"]
+    if not isinstance(identifier, str) or not _TASK_ID.fullmatch(identifier):
+        raise TrackerValidationError(
+            f"task id {identifier!r} cannot be spelled as the branch "
+            f"{TASK_BRANCH_PREFIX}<id>: git refuses it as a reference "
+            "component, so the range proof would have no head to resolve and "
+            "the evidence record would name a subject nothing can be joined "
+            "to. Mangling it into a legal name is not injective -- 'T/1' and "
+            "'T-1' are two tasks and one branch")
+    return f"{TASK_BRANCH_PREFIX}{identifier}"
+
+
+def _range_transcript(run_command, commands) -> str:
+    """Run the argv this module emitted; return the captured stdout RAW.
+
+    THE ONE PLACE THE ARGV IS EXECUTED, so the emitted command and the executed
+    command cannot drift: everything above builds exactly one ``commands``
+    tuple, hands it here, and the string that comes back is the string
+    ``verify_source_range`` is given.
+
+    NO ``.strip()``. The leading NUL record separator and the trailing newline
+    are BOTH load-bearing in the grammar ``_parse_range_transcript`` reads -- a
+    transcript that does not begin at a separator is refused as not being the
+    emitted command's output, and a record that is not newline-terminated is
+    refused as truncated mid-record. Stripping either turns a valid transcript
+    into a grammar refusal, which reads as a defect in the worker's range.
+
+    THE CALLABLE IS THE CAPABILITY. ``subprocess`` is off this module's import
+    list and stays off it, so a controller that wants a result imported hands
+    over the ability to run one command. A failure inside that callable is NOT
+    this module's exception family -- ``subprocess.run(check=True)`` raises
+    ``CalledProcessError`` -- so it is caught and restated as what it means
+    here: no transcript, naming the command that produced none. ``Exception``
+    and not ``BaseException``: a ``KeyboardInterrupt`` is the operator, not a
+    failed proof.
+
+    AND THE ANSWER IS SCREENED FOR ITS TYPE. ``capture_output=True`` without
+    ``text=True`` answers ``bytes``; passed on, it would be refused one call
+    later with a diagnosis about a transcript rather than about the controller
+    that produced it.
+    """
+    if not callable(run_command):
+        raise TrackerValidationError(
+            f"the range transcript is captured by a callable the controller "
+            f"supplies; got {type(run_command).__name__} {run_command!r}, "
+            "which is not callable. This module never executes git -- it emits "
+            "the argv and validates the transcript -- so the ability to run "
+            "one command is an argument, and a caller that has not supplied it "
+            "cannot have a range proved")
+    captured = []
+    for argv in commands:
+        printable = " ".join(argv)
+        try:
+            answer = run_command(tuple(argv))
+        except TrackerError:
+            raise
+        except Exception as exc:
+            raise TrackerValidationError(
+                f"the controller could not run {printable} "
+                f"({type(exc).__name__}: {exc}); a command that did not run "
+                "produced no transcript, and absent evidence is a refusal "
+                "naming what is missing rather than a weaker check passed "
+                "silently") from exc
+        if not isinstance(answer, str):
+            raise TrackerValidationError(
+                f"the controller answered {printable} with "
+                f"{type(answer).__name__}; a range transcript is captured "
+                "stdout, which is text. capture_output=True without text=True "
+                "answers bytes, and a transcript this module cannot read is "
+                "not one it can have checked")
+        captured.append(answer)
+    return "".join(captured)
+
+
+def _imported_result_document(path: Path) -> tuple:
+    """``(bytes, parsed result)`` for one published record, or a stop.
+
+    ``_published_result_bytes`` IS THE DOOR, reused rather than re-spelled: it
+    already asks the shape before the open (a FIFO under this name would block
+    for ever, under the run lock), reads BYTES rather than text because the
+    record's identity is the sha256 of its bytes, and splits "not there" from
+    "there and unreadable".
+
+    WHAT IS ADDED HERE IS THE TWO ANSWERS THAT DIFFER FOR AN IMPORT. Absence is
+    a STOP -- a missing worker result is never evidence the work completed, and
+    never grounds to repeat it, which is fault F7 one task early -- where for a
+    publication it is the ordinary case. And corruption arrives from the door as
+    ``QuorumSchemaInvalid``, which is a ``QuorumError`` and NOT a
+    ``TrackerValidationError``; every test and every controller branching on
+    the validation class would miss it, so it is restated in the family this
+    transition promises.
+    """
+    try:
+        content = _published_result_bytes(path)
+    except QuorumError as exc:
+        raise TrackerValidationError(
+            f"the worker result at {str(path)!r} is a name this run cannot "
+            f"read ({exc}); a directory, a dangling link, a symlink loop or a "
+            "FIFO is corruption and never an absent result") from exc
+    if content is None:
+        raise TrackerValidationError(
+            f"no worker result is published at {str(path)!r}; a result that is "
+            "not there is not there -- it is never evidence that the work "
+            "completed, and never grounds to repeat it")
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise TrackerValidationError(
+            f"the worker result at {str(path)!r} is not UTF-8 ({exc}); a record "
+            "this module cannot read is not a record it can have checked, and "
+            "UnicodeDecodeError is a ValueError from outside this family"
+        ) from exc
+    return content, parse_worker_result(text)
+
+
+def _result_identity(result_path: Path, content: bytes, repo: Path) -> tuple:
+    """``(<relative>#sha256=<digest>, <relative>)`` for one published record.
+
+    THE IDENTITY IS WHAT THE ``Result`` CELL CARRIES AND WHAT A LATER PHASE
+    CITES, so the path half is screened against the grammar that will hold it
+    -- ``_digest_reference`` -- rather than merely computed.
+    ``_citable_repo_relative`` is that screen, shared with
+    ``publish_worker_result`` so the string this reads back is the string that
+    function returned: two derivations of one spelling would disagree about a
+    run directory with an unusual name, and the record's identity would then
+    depend on which side of the boundary you asked.
+
+    THE DIRECTORY IS RESOLVED AND THE RECORD'S OWN NAME IS APPENDED. Resolving
+    the record itself would follow a symlink AT THE RECORD'S NAME and answer
+    with what the link points at, so a link to a file outside the repository
+    would be reported as a record outside the repository when the name this run
+    published is plainly inside it -- and a symlink loop at that name would be
+    reported as an unspellable path rather than as the corruption it is. What a
+    later phase cites is the NAME.
+    """
+    if not result_path.name:
+        raise TrackerValidationError(
+            f"{str(result_path)!r} names no file, so there is no record for an "
+            "identity to be about")
+    try:
+        directory = result_path.parent.resolve()
+    except (ValueError, OSError, RuntimeError) as exc:
+        #: A NUL raises ``ValueError``, a lone surrogate ``UnicodeEncodeError``
+        #: and a symlink loop ``RuntimeError`` -- the last is not a
+        #: ``TrackerError`` at all, and ``pathlib`` swallows none of the three
+        #: here while ``is_file()`` swallows the first two and answers "absent".
+        raise TrackerValidationError(
+            f"the directory holding {str(result_path)!r} cannot be resolved "
+            f"({type(exc).__name__}: {exc}); a record this module cannot locate "
+            "is not a record known to be anywhere") from exc
+    relative = _citable_repo_relative(directory, repo, result_path.name)
+    return (f"{relative}{_DIGEST_DELIMITER}{hashlib.sha256(content).hexdigest()}",
+            relative)
+
+
+def _resolve_question_record(run_dir, repo_dir, reference: str) -> str:
+    """The complete ``Question`` cell for the quorum arm, or a stop. Fault F5.
+
+    ``quorum:<qid>@<path>#sha256=<digest>`` -- the qid for the binding, the
+    digest-bound path for the audit trail. THE WHOLE ARM IS SPELLED HERE and
+    nowhere else, because ``_validate_decision`` splits a resume grant on
+    exactly this shape: it reads the qid out of the cell and refuses any
+    decision whose id is not ``Q-<qid>``. Two spellings of the cell would be
+    two answers to "what is this task blocked on" in the one cell that says so.
+
+    THE QID IS DERIVED FROM THE RECORD'S OWN QUESTION AND AXIS, never read off
+    the path it was cited at. ``_record_qid`` is the single statement of that
+    derivation -- the same one ``open_quorum`` files a record under and
+    ``_question_record`` re-derives -- and a re-ask derives a DIFFERENT qid
+    through ``derive_reopen_qid``, which is what stops a stale answer resuming
+    a re-asked block. The cited path is then required to be where this run
+    files that qid, so a record answering under another question's identity is
+    a stop rather than a cell whose grant binding is arithmetic on the wrong
+    number.
+
+    ONE SEARCH ROOT, AND THAT IS A NARROWING OF ``resolve_evidence``'S RULE
+    RATHER THAN AN OVERSIGHT. Evidence may legitimately live under the run
+    directory or under the repository root, so that resolver searches both in a
+    pinned order. A question record may not: ``open_quorum`` writes exactly one,
+    at ``<run>/quorum/<qid>/question.md``, and the comparison below is against
+    that one name -- so a second root would be a place to put a copy that the
+    binding then has to choose between.
+
+    THE DIGEST IS CHECKED BEFORE THE RECORD IS PARSED, and a mismatch stops
+    here rather than reading as "not the file I meant". One reference names one
+    document; treating a mismatch as a miss is how whoever can write a second
+    copy gets to choose which one a reader lands on.
+    """
+    relative, digest = _digest_reference(reference, field="question_record")
+    candidate = _openable_path(repo_dir, field="repo_dir") / relative
+    try:
+        _require_regular_file(candidate, "a question record")
+    except QuorumError as exc:
+        raise TrackerValidationError(
+            f"question record {reference!r} names {relative!r}, which this run "
+            f"cannot read ({exc}); corruption is never absence") from exc
+    try:
+        content = candidate.read_bytes()
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise TrackerValidationError(
+            f"question record is missing: {reference!r} names {relative!r}, "
+            "which is not there under the recorded repository root. A quorum "
+            "raised against a record nobody wrote is a question no brain can "
+            "be asked") from exc
+    except OSError as exc:
+        raise TrackerValidationError(
+            f"question record {reference!r} names {relative!r}, which is a "
+            f"regular file this run cannot read ({exc}); an unreadable record "
+            "is corruption, never absence") from exc
+    if hashlib.sha256(content).hexdigest() != digest:
+        raise TrackerValidationError(
+            f"question record digest does not match its content: {reference!r} "
+            f"resolved to {relative!r}, whose sha256 is something else. An "
+            "unbound path names a file whose contents may have changed since, "
+            "which is the whole reason the reference carries a digest")
+    try:
+        qid = _record_qid(parse_question(content.decode("utf-8")))
+    except (UnicodeDecodeError, QuorumError) as exc:
+        raise TrackerValidationError(
+            f"the question record at {relative!r} is not one this run can read "
+            f"back ({type(exc).__name__}: {exc}); a block whose record cannot "
+            "be parsed names no question and binds no grant") from exc
+    filed = _run_path(run_dir) / _QUORUM_DIRNAME / qid / _QUESTION_FILE
+    try:
+        misfiled = filed.resolve() != candidate.resolve()
+    except (ValueError, OSError, RuntimeError) as exc:
+        raise TrackerValidationError(
+            f"the question record cited at {relative!r} cannot be compared "
+            f"with {str(filed)!r} ({type(exc).__name__}: {exc})") from exc
+    if misfiled:
+        raise TrackerValidationError(
+            f"the question record cited at {relative!r} derives qid {qid!r}, "
+            f"which this run files at {str(filed)!r}. A record answering under "
+            "another question's identity produces a block whose grant binding "
+            "-- 'Q-' followed by the qid -- is arithmetic on the wrong number, "
+            "and every response and decision keyed by it would look "
+            "well-formed")
+    return (f"{_QUESTION_QUORUM_ARM}{qid}@{relative}"
+            f"{_DIGEST_DELIMITER}{digest}")
+
+
+def _validate_task_test_evidence(run_dir, tracker: dict, result: dict,
+                                 definition: dict, code_state: str,
+                                 subject: str) -> None:
+    """Exactly one digest-bound ``task-test`` PASS record, bound to this work.
+
+    FOUR FACTS PICK THE RECORD OUT and all four are identity: the purpose, the
+    run, the subject -- which is ``_task_branch``'s single derivation, so the
+    evidence check and the range check cannot disagree about which branch this
+    is -- and the attempt token. EXACTLY ONE, because two records for one
+    attempt are two answers to "did the suite pass" and nothing here would get
+    to choose; zero is a completion with nothing to inspect.
+
+    THEN TWO FACTS BIND IT TO THIS RESULT. The ``code_state`` is the head the
+    range proof established for a source task, and the target tip for an
+    artifact task -- a record bound to an earlier commit proves the suite
+    passed against code this result is not about. And the command tuple is the
+    plan's, on BOTH sides: the record must name it, and so must the result,
+    because checking only the record would let a worker claim it ran one suite
+    while citing a record that proves another.
+
+    THE COMMAND RULE IS KIND-DEPENDENT AND THE BRIEF'S SINGLE COMPARISON COULD
+    NOT HOLD. An artifact task declares no verification suite, so its approved
+    tuple is EMPTY -- and ``_parse_command_suite`` refuses an empty array, so
+    no evidence record can ever carry it. A record-side comparison against ``()``
+    is therefore unsatisfiable and would have made every artifact import
+    impossible. What IS available for an artifact is the result side: the plan
+    approved no suite, so a result naming one has run something nobody approved.
+    """
+    records = [resolve_evidence(run_dir, _repo_dir(tracker), reference)
+               for reference in result["evidence"]]
+    matching = [record for record in records
+                if record["purpose"] == EVIDENCE_PURPOSES[0]
+                and record["run_id"] == result["run_id"]
+                and record["subject"] == subject
+                and record["attempt"] == _attempt_token(result["attempt"])]
+    if len(matching) != 1:
+        raise TrackerValidationError(
+            f"a completed task needs exactly one digest-bound "
+            f"{EVIDENCE_PURPOSES[0]} PASS record naming run "
+            f"{result['run_id']!r}, subject {subject!r} and attempt "
+            f"{_attempt_token(result['attempt'])}; this result resolves "
+            f"{len(matching)} of them out of {len(records)} evidence "
+            "references, and a claim with nothing to check can only be "
+            "believed")
+    record = matching[0]
+    if record["code_state"] != code_state:
+        raise TrackerValidationError(
+            f"task-test evidence is bound to a different code state "
+            f"({record['code_state']}) than the result it accompanies "
+            f"({code_state}); a suite that passed against other code has not "
+            "been run against this one")
+    if tuple(result["tests"]) != definition["commands"]:
+        raise TrackerValidationError(
+            f"the result names {list(result['tests'])!r} where the approved "
+            f"task suite is {list(definition['commands'])!r}; a completion must "
+            "name the exact ordered approved task suite, and an artifact task "
+            "whose plan approved none must name none")
+    if definition["commands"] and record["commands"] != definition["commands"]:
+        raise TrackerValidationError(
+            f"task-test evidence names {list(record['commands'])!r} where the "
+            f"approved task suite is {list(definition['commands'])!r}; the "
+            "record must name the exact ordered approved task suite, or it is "
+            "a PASS for something nobody approved")
+
+
+def _require_artifact_outputs(repo, outputs) -> None:
+    """Every approved output of an artifact task is a regular file on disk.
+
+    ``_require_regular_file`` AND NOT ``.is_file()``. The brief wrote ``if not
+    (repo / output).is_file()``, which answers False for a directory, a
+    dangling symlink, a symlink loop, a FIFO and a NUL-bearing name -- five
+    names that exist, reported as "the output is missing". Four of those are
+    corruption and deserve to be said so; the FIFO is worse than a wrong
+    diagnosis, because a later reader of that path BLOCKS on the open under
+    the run lock with no writer coming.
+
+    SO ABSENCE IS ASKED SEPARATELY, after the door. The door deliberately does
+    not answer absence -- every caller decides what a missing name means for
+    it -- and here it means the artifact task produced nothing, which is a
+    completion claim with no document behind it.
+
+    A FUNCTION RATHER THAN FOUR LINES INSIDE ``mutate``. The door's callers
+    are enumerated from the module's syntax tree by ENCLOSING FUNCTION NAME,
+    and ``mutate`` is the name every transition gives its closure -- a door
+    call there would enter that roster as a name eleven functions share and
+    could not be driven on its own.
+    """
+    for output in outputs:
+        target = _openable_path(repo, field="repo_dir") / output
+        try:
+            _require_regular_file(target, "an approved artifact output")
+        except QuorumError as exc:
+            raise TrackerValidationError(
+                f"the approved artifact output {output} is a name this run "
+                f"cannot read ({exc}); a directory, a dangling link, a symlink "
+                "loop or a FIFO is corruption and never a produced document"
+            ) from exc
+        if not os.path.lexists(target):
+            raise TrackerValidationError(
+                f"the approved artifact output {output} is not on disk; an "
+                "artifact task is proved by its documents existing, so a "
+                "completion naming one that does not has produced nothing")
+
+def import_worker_result(run_dir, *, result_path, run_command) -> dict:
+    """Validate one immutable result against its active assignment; import once.
+
+    ``run_command`` IS REQUIRED AND IS THE CONTROLLER'S CAPABILITY. The module
+    never executes git; it emits the argv and validates the transcript. Because
+    this transition is itself inside the module, the execution arrives as a
+    callable rather than as an import, and the AST screen keeps ``subprocess``
+    out while the proof still rests on a command that really ran. REQUIRED
+    rather than defaulted, for the rule this build pays for elsewhere: a
+    default is a capability nobody declared, and the branch that discovers it
+    missing is reached only AFTER the identity checks have passed -- so a
+    controller without it would learn so at the end of a successful-looking
+    import rather than at the call. A quorum-raising or blocked result never
+    runs it, and is still required to declare that its caller could.
+
+    THE DIGEST IS PART OF THE TRANSITION ID, and that is load-bearing rather
+    than decorative. ``locked_tracker_update`` recognises a replay by comparing
+    ``transition_id`` against ``last_transition`` and returns current state
+    WITHOUT CALLING ``mutate``. Keyed on task and attempt alone, a second
+    import of a document whose bytes had been edited since would be recognised
+    as a replay and silently accepted -- the conflicting-evidence screen inside
+    ``mutate`` would be unreachable. Keyed on the content, the same document
+    replays and a different one is examined.
+
+    THE FILE IS READ TWICE ON PURPOSE. The pre-lock read builds the replay key;
+    the read inside ``mutate`` is the one that is validated and recorded,
+    because anything read before the lock is stale by definition. If the two
+    disagree the key names content that was not applied, which is harmless:
+    what the tracker records is what was read under the lock.
+    """
+    home = _run_path(run_dir)
+    path = _openable_path(result_path, field="result_path")
+    if not callable(run_command):
+        raise TrackerValidationError(
+            f"import_worker_result needs the controller's command runner; got "
+            f"{type(run_command).__name__} {run_command!r}, which is not "
+            "callable. This module emits the argv that proves a source range "
+            "and never runs one, so the ability to run it is an argument -- "
+            "and it is asked for before the lock, because a caller that cannot "
+            "supply it has not failed a check, it has called wrongly")
+    content, published = _imported_result_document(path)
+    transition = (f"import-{published['task_id']}-"
+                  f"{_attempt_token(published['attempt'])}-"
+                  f"{hashlib.sha256(content).hexdigest()}")
+
+    def mutate(tracker: dict) -> dict:
+        repo = _repo_dir(tracker)
+        current, result = _imported_result_document(path)
+        identity, relative = _result_identity(path, current, repo)
+        token = _attempt_token(result["attempt"])
+        row = _task_row(tracker, result["task_id"])
+        accepted = _csv(row["result"])
+
+        #: AN EXACT REPLAY IS INERT, and it is the second line rather than the
+        #: first: the replay key above settles only the MOST RECENT transition,
+        #: so once anything else has landed this is what recognises the same
+        #: document arriving twice.
+        if _member(identity, accepted):
+            return tracker
+        if any(entry.split(_DIGEST_DELIMITER, 1)[0] == relative
+               for entry in accepted):
+            raise TrackerValidationError(
+                f"an accepted result path now carries conflicting content: "
+                f"{relative!r} is already recorded against task "
+                f"{result['task_id']} under a different digest. A second answer "
+                "under one identity is evidence to be reconciled, never an "
+                "update -- which of the two is the real one is not a question "
+                "a writer settles by writing again")
+        if result["run_id"] != _run_field(tracker, "run_id"):
+            raise TrackerValidationError(
+                f"result run identity {result['run_id']!r} does not match this "
+                f"tracker's {_run_field(tracker, 'run_id')!r}; a result from "
+                "another run is another run's evidence")
+        if row["state"] != _TASK_STATES[1] or row["attempt"] != token:
+            raise TrackerValidationError(
+                f"result attempt {token} is not the current active attempt of "
+                f"task {result['task_id']}, which is {row['state']} at "
+                f"{row['attempt']!r}; a result for an attempt the controller is "
+                "not waiting on is one nobody dispatched")
+        if result["owner"] != row["owner"]:
+            raise TrackerValidationError(
+                f"result owner {result['owner']!r} does not match the "
+                f"controller-assigned owner {row['owner']!r}; the assignment is "
+                "what says whose work this is, and it is the controller's")
+        definition = _approved_definition(tracker, row["id"])
+        if result["kind"] != row["kind"] or result["kind"] != definition["kind"]:
+            raise TrackerValidationError(
+                f"result kind {result['kind']!r} does not match the approved "
+                f"plan ({definition['kind']!r}) or the task row "
+                f"({row['kind']!r}); a worker cannot change what kind of task "
+                "it was given because its implementation happened to produce "
+                "no diff")
+
+        updated = dict(row)
+        updated["result"] = _append_history(row["result"], identity)
+        for checkpoint in result[_WORKER_CHECKPOINTS]:
+            updated["checkpoints"] = _append_history(
+                updated["checkpoints"],
+                f"{_WORKER_CHECKPOINT}{token}:{checkpoint['id']}:"
+                f"{checkpoint['status']}@{checkpoint['evidence']}")
+
+        if _member(result["status"], COMPLETION_STATUSES):
+            #: ``head_ref`` IS DERIVED BY THE CONTROLLER and the evidence
+            #: subject is the same string, so the two checks below cannot come
+            #: to different conclusions about which branch this task is on.
+            branch = _task_branch(tracker, row["id"])
+            if result["kind"] == TASK_KINDS[0]:
+                baseline = reserved_baseline(row, attempt=result["attempt"])
+                #: THE CONTROLLER RUNS THE COMMAND. ``transcript`` is the
+                #: stdout captured from the argv THIS MODULE emitted; handing
+                #: the worker's own transcript here would make the ``commits``
+                #: comparison below compare the worker with itself.
+                transcript = _range_transcript(
+                    run_command,
+                    source_range_commands(repo, baseline=baseline,
+                                          head=result["source_ref"],
+                                          head_ref=branch))
+                proof = verify_source_range(
+                    repo, baseline=baseline,
+                    head=result["source_ref"],   # a CLAIM, checked at the tip
+                    head_ref=branch,             # NOT from ``result``
+                    scopes=definition["write_scope"],
+                    transcript=transcript)
+                #: WORKER-CLAIM AGAINST CONTROLLER-EVIDENCE. This is the line
+                #: Task 8's header defers "names commits that do not exist" to,
+                #: and it holds only because ``proof`` came from the transcript
+                #: above rather than from the worker's document.
+                if tuple(result["commits"]) != proof["commits"]:
+                    raise TrackerValidationError(
+                        "implementation commits must equal the complete "
+                        "ordered baseline-to-source range: the result names "
+                        f"{list(result['commits'])!r} and the transcript this "
+                        f"controller captured names {list(proof['commits'])!r}")
+                _validate_task_test_evidence(
+                    home, tracker, result, definition, proof["head"], branch)
+                updated.update(source_ref=proof["head"],
+                               commits=",".join(proof["commits"]),
+                               artifacts=_ABSENT_CELL,
+                               integration=_INTEGRATION_HELD)
+                updated["checkpoints"] = _append_history(
+                    updated["checkpoints"],
+                    f"{_RANGE_CHECKPOINT}{token}"
+                    f"{_CHECKPOINT_DELIMITERS[1]}{proof['proof_mode']}")
+            else:
+                if tuple(result["artifacts"]) != definition["outputs"]:
+                    raise TrackerValidationError(
+                        f"artifact result names {list(result['artifacts'])!r} "
+                        f"and the plan approves the exact approved outputs "
+                        f"{list(definition['outputs'])!r}; an artifact task is "
+                        "proved by the documents it was approved to produce")
+                _require_artifact_outputs(repo, result["artifacts"])
+                _validate_task_test_evidence(
+                    home, tracker, result, definition,
+                    _resolved_commit(repo, _run_field(tracker, "target_branch")),
+                    branch)
+                updated.update(source_ref=_ABSENT_CELL, commits=_ABSENT_CELL,
+                               artifacts=",".join(result["artifacts"]),
+                               integration=_INTEGRATION_NA)
+            #: ``Verification`` HOLDS THE DOCUMENTS, which is what
+            #: ``_validate_tasks`` means by "its verification evidence": the
+            #: digest-bound typed PASS records a later phase resolves. The
+            #: command tuple is already inside those records, so writing it
+            #: here instead would be a copy nobody can resolve to a file.
+            updated["verification"] = _append_history(
+                row["verification"], ",".join(result["evidence"]))
+            updated["state"] = _TASK_STATES[3]
+            updated["checkpoints"] = _append_history(
+                updated["checkpoints"], f"{_COMPLETED_CHECKPOINT}{token}")
+        else:
+            #: THE MARKER IS READ BY THE CONTROLLER AND NEVER INFERRED FROM THE
+            #: WORDING. ``_validate_result_route`` has already refused a quorum
+            #: status with no question record and a halt with no reason, so the
+            #: field each arm reads is present by construction.
+            if _member(result["status"], QUORUM_STATUSES):
+                marker = _resolve_question_record(
+                    home, repo, result["question_record"])
+            else:
+                marker = f"{_QUESTION_HALT_ARM}{result['blocking_reason']}"
+            updated["state"] = _TASK_STATES[2]
+            updated["question"] = marker
+            updated["checkpoints"] = _append_history(
+                updated["checkpoints"], f"{_BLOCKED_CHECKPOINT}{token}")
+        return _replace_task(tracker, updated)
+
+    return locked_tracker_update(home, transition_id=transition, mutate=mutate)

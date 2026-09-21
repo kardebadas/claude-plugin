@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import copy
 import errno
 import hashlib
 import inspect
@@ -6579,7 +6580,8 @@ class EvidenceResolutionTests(TempDirTestCase):
         self.assertEqual(callers, {
             "_question_record", "payload_digest", "_read_json",
             "_response_record", "_plan_text", "resolve_evidence",
-            "_ref_text", "_published_result_bytes"})
+            "_ref_text", "_published_result_bytes",
+            "_resolve_question_record", "_require_artifact_outputs"})
 
         nul = "\x00rd"
         probe = pathlib.Path("\x00x")
@@ -6597,6 +6599,14 @@ class EvidenceResolutionTests(TempDirTestCase):
             "_ref_text": lambda: state._ref_text(probe, "a probe"),
             "_published_result_bytes": lambda: state.publish_worker_result(
                 nul, result=result),
+            #: Task 10's two. Each takes the root its path is built from, so
+            #: the NUL arrives the same way it does for `resolve_evidence`:
+            #: through the directory, not through the reference, which
+            #: `_digest_reference` has already screened.
+            "_resolve_question_record": lambda: state._resolve_question_record(
+                nul, nul, f"quorum/q1/question.md#sha256={'a' * 64}"),
+            "_require_artifact_outputs": lambda: state._require_artifact_outputs(
+                nul, ("docs/out.md",)),
         }
         self.assertEqual(set(drives), callers)
         for name, drive in sorted(drives.items()):
@@ -12137,12 +12147,21 @@ class Task9ProducesBlockTests(unittest.TestCase):
         """
         source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
             encoding="utf-8")
-        banner = next(
+        banners = [
             index for index, line in enumerate(source.splitlines(), start=1)
-            if line.startswith("# P04 Task 9:"))
+            if line.startswith("# P04 Task 9:")
+            or line.startswith("# P04 Task 10:")]
+        #: BOUNDED AT BOTH ENDS. With only the opening banner the claim was
+        #: "everything the module defines from here to the bottom of the
+        #: file", which is Task 9's section only while Task 9 is the last
+        #: section -- so the first thing Task 10 appended failed a test about
+        #: Task 9's surface. The section is between its own banner and the
+        #: next one.
+        self.assertEqual(len(banners), 2)
+        banner, end = banners
         tree = ast.parse(source)
         defined = sorted(
-            name for node in tree.body if node.lineno > banner
+            name for node in tree.body if banner < node.lineno < end
             for name in module_bindings([node]))
         self.assertEqual(defined, [
             "AGENT_OUTPUT_DIRNAME",
@@ -12578,7 +12597,7 @@ class PublishedRunDirectorySpellingTests(TempDirTestCase):
 #: defect was five entry points that did not.
 RUN_DIR_ENTRY_POINTS = (
     "initialize_run", "import_phase_plan", "reserve_task", "resume_task",
-    "publish_worker_result",
+    "publish_worker_result", "import_worker_result",
 )
 RUN_DIR_CONTRACT_FUNCTIONS = ("validate_run", "locked_tracker_update")
 
@@ -12703,6 +12722,9 @@ class RunDirectoryCoercionSweepTests(TempDirTestCase):
                 new_attempt=2, decision_ref="H-1"),
             "publish_worker_result": lambda value: state.publish_worker_result(
                 value, result=worker_result()),
+            "import_worker_result": lambda value: state.import_worker_result(
+                value, result_path=self.run_dir / "absent.md",
+                run_command=controller_git),
         }
         self.assertEqual(sorted(calls), sorted(RUN_DIR_ENTRY_POINTS))
         shapes = (None, 5, b"/runs/r", ["/runs/r"], str(self.run_dir))
@@ -13595,6 +13617,1343 @@ class TaskIdDeadlockIsClosedTests(TempDirTestCase):
                 self.assertIn("invalid task id", str(caught.exception))
         self.assertEqual(refused, 204 + 24 + 2 + 3 + 2)
         self.assertEqual(refused, 235)
+
+
+# --------------------------------------------------------------------------
+# Task 10 -- controller-side result import: identity, routing, completion.
+# Faults F3, F4, F5, F6.
+#
+# THE BRIEF'S STEP-3 CODE PREDATES THREE RULINGS AND DOES NOT COMPILE AGAINST
+# THIS MODULE. Every divergence is asserted below rather than merely written
+# down, because a divergence nobody tests is a note.
+#
+# * `_approved_definition(run_dir, tracker, task_id)` -- Task 6 shipped it as
+#   `(tracker, task_id)` and argued the `run_dir` out: nothing in its body
+#   reads it, and an argument no body reads is one a caller gets wrong free.
+# * `_attempt_baseline(row, attempt)` -- Task 8 shipped exactly that function
+#   as `reserved_baseline(row, *, attempt)`, with the resume ambiguity argued
+#   in its docstring. A second spelling is a second answer to "where is this
+#   attempt's baseline" in the one cell that says so.
+# * `integration="-"` on a completed source task -- P02's `_validate_tasks`
+#   REFUSES it: a completed source row records an integration commit or
+#   `held`, because "deliberately deferred" and "never written down" are the
+#   two states a resuming controller has to tell apart. The brief's own test
+#   asserts the value the schema rejects, so the import it describes could
+#   never have been written at all.
+# * `.is_file()` on an artifact output -- false for a directory, a dangling
+#   link, a loop, a FIFO and a NUL-bearing name, and the FIFO arm is a HANG
+#   under the run lock. `_require_regular_file` is this module's door.
+# * `tests:<commands>` into the `Verification` cell -- that column holds the
+#   digest-bound typed PASS records, which is what `_validate_tasks` means by
+#   "its verification evidence"; the command tuple is already in the record.
+# * `record["commands"] != definition["commands"]` applied to BOTH kinds -- an
+#   artifact task's approved suite is EMPTY and `_parse_command_suite` refuses
+#   an empty array, so no evidence record can ever satisfy that comparison and
+#   no artifact task could ever be imported.
+# --------------------------------------------------------------------------
+
+
+def controller_git(argv) -> str:
+    """Play the controller: run ONE argv the module emitted, RAW stdout.
+
+    No `.strip()`. The leading NUL record separator and the trailing newline
+    are both load-bearing in the grammar `_parse_range_transcript` reads, and
+    stripping either turns a valid transcript into a grammar refusal.
+    """
+    return subprocess.run(argv, capture_output=True, text=True,
+                          check=True).stdout
+
+
+class RecordingController:
+    """A controller that answers honestly AND remembers what it was asked.
+
+    The recording half is the whole point: the defence Task 8 defers to this
+    task only holds if the transcript came from a command the MODULE emitted,
+    and the only way to assert that from outside is to capture the argv the
+    module actually handed over and compare it with `source_range_commands`.
+    """
+
+    def __init__(self, answer=controller_git):
+        self.calls = []
+        self._answer = answer
+
+    def __call__(self, argv):
+        self.calls.append(tuple(argv))
+        return self._answer(argv)
+
+
+def source_result_commits(repo, count: int = 2, branch: str = "task/T1",
+                          path: str = "src/a1.py", base: str = "target"):
+    """`count` in-scope commits on `branch`, as a tuple in range order.
+
+    `commit_only` RATHER THAN `commit_file`, and this is not style. `git add
+    -A` sweeps the run directory -- untracked inside the fixture repository --
+    into the task branch, which does two things at once: the next checkout of
+    a branch without it DELETES `progress.md`, and every commit then touches
+    `docs/superpowers/runs/run-1/...`, which is outside the task's declared
+    `file:src/a1.py` scope, so the range proof fails for a reason the test was
+    not written about.
+    """
+    git(repo, "checkout", "-q", "-b", branch, base)
+    return tuple(
+        commit_only(repo, path, f"value = {index}\n", f"step {index}")
+        for index in range(1, count + 1)
+    )
+
+
+def evidence_reference(run_dir, digest: str, name: str = "T1.md") -> str:
+    return f"evidence/{name}#sha256={digest}"
+
+
+def import_result(run_dir, path, controller=None):
+    """The call under test, with the controller capability supplied."""
+    return state.import_worker_result(
+        run_dir, result_path=path,
+        run_command=controller_git if controller is None else controller)
+
+
+class ImportResultProducesBlockTests(unittest.TestCase):
+    """The Produces-block check, executable, name by name.
+
+    Produces: `QUORUM_ROUTE`, `HALT_ROUTE`, `_attempt_baseline`,
+    `_result_identity`, `_validate_task_test_evidence`, `import_worker_result`,
+    `_task_branch`, `_range_transcript`.
+    Consumes: `parse_worker_result`, `source_range_commands`,
+    `verify_source_range`, `resolve_evidence`, `_approved_definition`,
+    `_repo_dir`, `_attempt_baseline`, `locked_tracker_update`,
+    `derive_next_action`.
+
+    Two of the eight produced names do not survive the check, and one consumed
+    name is not the signature the block assumed.
+    """
+
+    def test_attempt_baseline_is_not_produced_because_task_8_already_shipped_it(self):
+        """`reserved_baseline(row, *, attempt)` IS `_attempt_baseline`. It is
+        the same lookup, by attempt, over the same marker, and Task 8 argued
+        the resume ambiguity into its docstring: a resumed task carries TWO
+        `baseline:` checkpoints with DIFFERENT shas, so "the first" and "the
+        last" are each wrong for one of the two attempts. A second module-level
+        spelling would be a second answer in the one cell that says so."""
+        self.assertFalse(hasattr(state, "_attempt_baseline"))
+        self.assertTrue(callable(state.reserved_baseline))
+        parameters = inspect.signature(state.reserved_baseline).parameters
+        self.assertEqual(parameters["attempt"].kind,
+                         inspect.Parameter.KEYWORD_ONLY)
+
+    def test_the_two_route_constants_alias_the_spellings_already_committed(self):
+        """`_ROUTE_QUORUM` and `_ROUTE_HALT` are Task 4's, and
+        `_QUESTION_QUORUM_ARM` / `_QUESTION_HALT_ARM` are Task 7's cell arms.
+        The plan pins `QUORUM_ROUTE` / `HALT_ROUTE` as the PUBLIC names P05 and
+        P06 cite, so they are ALIASES of the committed values, never a second
+        typing of the two words: a public constant that drifted from the arm
+        `_validate_decision` splits on would bind a grant to nothing."""
+        self.assertIs(state.QUORUM_ROUTE, state._ROUTE_QUORUM)
+        self.assertIs(state.HALT_ROUTE, state._ROUTE_HALT)
+        self.assertEqual(state._QUESTION_QUORUM_ARM, f"{state.QUORUM_ROUTE}:")
+        self.assertEqual(state._QUESTION_HALT_ARM, f"{state.HALT_ROUTE}:")
+
+    def test_approved_definition_is_still_task_6s_two_argument_signature(self):
+        """The brief calls `_approved_definition(run_dir, tracker, row["id"])`.
+        Task 6 shipped `(tracker, task_id)` and argued the third argument out.
+        Calling it the brief's way is a `TypeError` from outside the family."""
+        self.assertEqual(
+            [name for name in inspect.signature(
+                state._approved_definition).parameters],
+            ["tracker", "task_id"])
+
+    def test_resolve_evidence_is_still_the_three_argument_resolver(self):
+        self.assertEqual(
+            [name for name in inspect.signature(
+                state.resolve_evidence).parameters],
+            ["run_dir", "repo_dir", "reference"])
+
+    def test_run_command_is_a_required_keyword_only_capability(self):
+        """THE MODULE NEVER EXECUTES GIT, and `import_worker_result` lives
+        inside the module, so the execution arrives as a CALLABLE the
+        controller supplies. Required rather than defaulted: a default is a
+        capability nobody declared, and the branch that discovers it missing
+        is discovered after the identity checks have already passed."""
+        parameters = inspect.signature(state.import_worker_result).parameters
+        self.assertEqual(list(parameters), ["run_dir", "result_path",
+                                            "run_command"])
+        for name in ("result_path", "run_command"):
+            with self.subTest(name=name):
+                self.assertEqual(parameters[name].kind,
+                                 inspect.Parameter.KEYWORD_ONLY)
+                self.assertIs(parameters[name].default,
+                              inspect.Parameter.empty)
+
+    def test_each_produced_name_is_bound_exactly_once_at_module_level(self):
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        counts = module_bindings(ast.parse(source).body)
+        for name in ("QUORUM_ROUTE", "HALT_ROUTE", "_result_identity",
+                     "_validate_task_test_evidence", "import_worker_result",
+                     "_task_branch", "_range_transcript",
+                     "_resolve_question_record",
+                     "_require_artifact_outputs",
+                     "_imported_result_document"):
+            with self.subTest(name=name):
+                self.assertEqual(counts.get(name), 1)
+        self.assertEqual(
+            sorted(name for name, count in counts.items() if count > 1), [])
+
+    def test_the_module_still_imports_nothing_outside_the_twelve(self):
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        imported = set()
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imported.add((node.module or "").split(".")[0])
+        self.assertEqual(imported, {
+            "__future__", "contextlib", "copy", "errno", "fcntl", "hashlib",
+            "json", "msvcrt", "os", "pathlib", "time", "types"})
+
+    def test_no_os_command_execution_name_became_reachable(self):
+        """The capability the callable replaces must not have arrived by
+        another door. Enumerated from `dir(os)`, private spellings included."""
+        family = tuple(sorted(
+            name for name in dir(os)
+            if name.lstrip("_").startswith(
+                ("popen", "system", "exec", "spawn", "fork", "posix_spawn"))))
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        reached = [
+            node.attr if isinstance(node, ast.Attribute) else node.id
+            for node in ast.walk(ast.parse(source))
+            if (isinstance(node, ast.Attribute) and node.attr in family)
+            or (isinstance(node, ast.Name) and node.id in family)
+        ]
+        self.assertEqual(reached, [])
+
+    def test_this_task_hand_rolls_no_new_grammar_and_so_has_no_divergence(self):
+        """`re` IS NOT IMPORTABLE, so every pattern in this module is a
+        hand-rolled screen object -- and every one of them is a second answer
+        to a question some earlier screen already answers, which is why each
+        past task that added one owed a measured divergence table against the
+        `re` form it replaced.
+
+        THIS TASK ADDS NONE, and that is the assertion rather than a claim in
+        prose: the commit shape is `_COMMIT`, the task id is `_TASK_ID`, the
+        attempt is `_attempt_token`, a bound reference is `_digest_reference`,
+        a citable path is `_safe_relative` and a cell spelling is
+        `_cell_safe`. A new grammar object appearing in this section fails
+        here, which is the point at which a divergence table would be owed.
+        """
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        banner = next(
+            index for index, line in enumerate(source.splitlines(), start=1)
+            if line.startswith("# P04 Task 10:"))
+        constructors = {"_CharClass", "_Numbered", "_Hex", "_RefComponent",
+                        "_Owner", "_AttemptToken", "_QuorumOutcome"}
+        #: Derived, so a constructor added by a later task is still swept.
+        tree = ast.parse(source)
+        constructors |= {
+            node.name for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name.startswith("_")
+            and any(isinstance(inner, ast.FunctionDef)
+                    and inner.name == "fullmatch" for inner in node.body)}
+        self.assertIn("_CharClass", constructors)
+        minted = [
+            node.targets[0].id for node in tree.body
+            if node.lineno > banner and isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id in constructors]
+        self.assertEqual(minted, [])
+
+    def test_the_worker_result_grammar_names_no_branch_and_no_transcript(self):
+        """`head_ref` is DERIVED and the transcript is CAPTURED. Fourteen
+        fields, and a fifteenth named either of those would put the anchor
+        back on the worker's word, which is the whole reason `head_ref`
+        exists."""
+        fields = set(state.WORKER_RESULT_FIELDS) | {state._WORKER_CHECKPOINTS}
+        for forbidden in ("branch", "head_ref", "task_branch", "transcript",
+                          "range", "proof", "baseline"):
+            with self.subTest(field=forbidden):
+                self.assertNotIn(forbidden, fields)
+
+
+class TaskBranchTests(TempDirTestCase):
+    """`_task_branch` -- ONE derivation, used by the range check and the
+    evidence check alike, so the two cannot disagree about which branch the
+    task is on."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo, self.run_dir, _ = make_run(
+            self.tmp, three_disjoint_tasks(), worker_limit=6)
+        self.tracker = state.validate_run(self.run_dir)
+
+    def test_the_branch_is_the_phases_pinned_task_slash_id_spelling(self):
+        self.assertEqual(state._task_branch(self.tracker, "T1"), "task/T1")
+
+    def test_the_id_is_read_out_of_the_tracker_row_not_off_the_argument(self):
+        """The row is the controller's own record of the reservation. A caller
+        that hands a spelling no row carries gets a stop, not a branch."""
+        with self.assertRaises(state.TrackerValidationError):
+            state._task_branch(self.tracker, "T9")
+
+    def test_an_id_no_branch_can_spell_is_refused_rather_than_mangled(self):
+        """Task 9's fix round made the derivation TOTAL by refusing such an id
+        at reservation, so this arm is defence in depth -- and a tracker row
+        can still arrive from a run whose plan an older build imported."""
+        tracker = copy.deepcopy(self.tracker)
+        for spelling in ("T:1", "T1.", "a/b", "x.lock", "-lead", ""):
+            with self.subTest(task_id=spelling):
+                tracker["tasks"][0]["id"] = spelling
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state._task_branch(tracker, spelling)
+                self.assertIn("branch", str(caught.exception))
+
+    def test_the_spelling_comes_off_the_row_and_not_off_the_argument(self):
+        """THE MUTANT THAT SURVIVED EVERYTHING ELSE, and it is not equivalent.
+
+        `identifier = task_id` looks identical to `identifier = row["id"]`,
+        because `_task_row` returns the row whose id COMPARES EQUAL to the
+        argument -- and for every `str` argument the two really are the same
+        value, which is why fifty seeded runs could not tell them apart.
+
+        They differ for an argument that is not a `str` and compares equal to
+        one. Handed a proxy, the committed form spells the branch from the
+        TRACKER CELL, which is a `str` and is the id this run recorded; the
+        mutant spells it from the caller's object and is then refused by its
+        own `isinstance` screen. The row is the controller's record of the
+        reservation, and reading the argument instead would make the branch a
+        function of whatever the caller happened to be holding.
+        """
+        class ComparesEqualToT1:
+            def __eq__(self, other):
+                return other == "T1"
+
+            def __hash__(self):
+                return hash("T1")
+
+        self.assertEqual(state._task_branch(self.tracker, ComparesEqualToT1()),
+                         "task/T1")
+
+    def test_the_branch_is_what_the_evidence_subject_must_be(self):
+        """`_validate_task_test_evidence` requires a record whose `subject` is
+        this same string. One derivation or two answers."""
+        self.assertEqual(
+            state._evidence_subject(state._task_branch(self.tracker, "T1")),
+            ("task", "T1"))
+
+
+class RangeTranscriptTests(unittest.TestCase):
+    """`_range_transcript` -- the ONE place the emitted argv is executed."""
+
+    ARGV = (("git", "--version"),)
+
+    def test_it_returns_the_captured_stdout_unchanged(self):
+        self.assertEqual(
+            state._range_transcript(lambda argv: "\x00abc\n", self.ARGV),
+            "\x00abc\n")
+
+    def test_it_never_strips_the_separator_or_the_trailing_newline(self):
+        """Both are load-bearing in the grammar Task 8 parses: the leading NUL
+        is the record separator a transcript begins at, and a record that is
+        not newline-terminated is refused as truncated mid-record."""
+        raw = "\x00" + "a" * 40 + " " + "b" * 40 + "\n\nsrc/a.py\n"
+        self.assertEqual(state._range_transcript(lambda argv: raw, self.ARGV),
+                         raw)
+        self.assertEqual(
+            state._parse_range_transcript(
+                state._range_transcript(lambda argv: raw, self.ARGV)
+            )[0]["paths"], ("src/a.py",))
+
+    def test_every_argv_the_emitter_produced_is_run_in_order(self):
+        seen = []
+
+        def controller(argv):
+            seen.append(tuple(argv))
+            return f"<{argv[-1]}>"
+
+        self.assertEqual(
+            state._range_transcript(controller, (("a", "1"), ("b", "2"))),
+            "<1><2>")
+        self.assertEqual(seen, [("a", "1"), ("b", "2")])
+
+    def test_a_controller_that_raises_is_a_stop_inside_the_family(self):
+        """`subprocess.run(check=True)` raises `CalledProcessError`, which is
+        not a `TrackerError`; a controller whose git failed has produced NO
+        transcript, and that is a validation stop naming the command, never an
+        exception a controller's own handler cannot catch."""
+        def angry(argv):
+            raise RuntimeError("git: fatal")
+
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._range_transcript(angry, self.ARGV)
+        self.assertIn("git --version", str(caught.exception))
+
+    def test_a_controller_answering_with_anything_but_text_is_a_stop(self):
+        """`capture_output=True` without `text=True` answers `bytes`, and
+        `_parse_range_transcript` would refuse it one call later with a
+        diagnosis about a transcript rather than about the controller."""
+        for answer in (b"\x00", None, 5, ["\x00"]):
+            with self.subTest(answer=answer):
+                with self.assertRaises(state.TrackerValidationError):
+                    state._range_transcript(lambda argv: answer, self.ARGV)
+
+    def test_a_non_callable_capability_is_refused_before_anything_is_run(self):
+        for value in (None, "git", 5):
+            with self.subTest(value=value):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state._range_transcript(value, self.ARGV)
+                self.assertIn("callable", str(caught.exception))
+                #: SCREENED, NOT DISCOVERED BY CALLING IT. Without the screen
+                #: the call itself raises `TypeError: 'NoneType' object is not
+                #: callable` -- whose text also contains the word "callable",
+                #: so the substring alone discriminates nothing. The screen
+                #: raises on its own; the wrap raises `from exc`.
+                self.assertIsNone(caught.exception.__cause__)
+
+
+class ResultIdentityTests(TempDirTestCase):
+    """`_result_identity` -- the immutable record's identity, as a string a
+    later phase can cite and `_digest_reference` can read back."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = make_repo(self.tmp)
+
+    def test_the_identity_is_the_published_path_bound_to_its_own_bytes(self):
+        run_dir = make_run_in(self.repo, "docs/superpowers/runs/run-1")
+        relative = state.publish_worker_result(run_dir, result=worker_result())
+        path = self.repo / relative
+        content = path.read_bytes()
+        identity, subject = state._result_identity(path, content, self.repo)
+        self.assertEqual(subject, relative)
+        self.assertEqual(
+            identity,
+            f"{relative}#sha256={hashlib.sha256(content).hexdigest()}")
+        self.assertEqual(state._digest_reference(identity, field="result"),
+                         (relative, hashlib.sha256(content).hexdigest()))
+
+    def test_a_path_naming_no_file_is_its_own_diagnosis(self):
+        """Without the screen the refusal still happens -- a root directory is
+        not inside the repository either -- so the DIAGNOSIS is the assertion.
+        A reader sent to check the repository root for a call that named no
+        file at all looks in the wrong place."""
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._result_identity(Path("/"), b"", self.repo)
+        self.assertIn("names no file", str(caught.exception))
+
+    def test_a_record_outside_the_recorded_repository_root_has_no_identity(self):
+        outside = self.tmp / "elsewhere" / "r.md"
+        outside.parent.mkdir(parents=True)
+        outside.write_text("x\n", encoding="utf-8")
+        with self.assertRaises(state.TrackerValidationError):
+            state._result_identity(outside, b"x\n", self.repo)
+
+    def test_a_hash_in_the_path_is_refused_because_the_reference_splits_on_it(self):
+        """`docs/a#sha256=<hex>.md#sha256=<hex>` has two readings, and the
+        module counts the delimiter once rather than picking a side."""
+        odd = self.repo / "r#1.md"
+        odd.write_text("x\n", encoding="utf-8")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._result_identity(odd, b"x\n", self.repo)
+        self.assertIn("#", str(caught.exception))
+
+    def test_the_record_name_itself_is_never_resolved_through(self):
+        """Resolving the record's own name would answer with what a symlink at
+        it POINTS AT: a link to a file outside the repository would be reported
+        as a record outside the repository, when the NAME this run publishes is
+        plainly inside it. The directory is resolved; the name is appended."""
+        outside = self.tmp / "outside.md"
+        outside.write_text("x\n", encoding="utf-8")
+        link = self.repo / "linked.md"
+        link.symlink_to(outside)
+        identity, subject = state._result_identity(link, b"x\n", self.repo)
+        self.assertEqual(subject, "linked.md")
+        self.assertTrue(identity.startswith("linked.md#sha256="))
+
+
+class ImportWorkerResultTests(TempDirTestCase):
+    """The brief's thirteen, corrected where the brief asserted the schema's
+    own rejection as a feature."""
+
+    def scratch(self) -> Path:
+        """A fresh root per case. `make_repo` writes `<root>/repo`, so a
+        subTest loop that built two runs under one root died on the SECOND
+        iteration -- which reports as an error about `mkdir`, not about the
+        case, and hides whatever the case was measuring."""
+        self._case = getattr(self, "_case", 0) + 1
+        root = self.tmp / f"case-{self._case}"
+        root.mkdir()
+        return root
+
+    def reserved_run(self, *, worker_limit: int = 6, tasks=None):
+        repo, run_dir, _ = make_run(
+            self.scratch(), three_disjoint_tasks() if tasks is None else tasks,
+            worker_limit=worker_limit)
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        return repo, run_dir
+
+    def implement(self, repo, count: int = 2):
+        return source_result_commits(repo, count)
+
+    def done_result(self, run_dir, commits, **overrides) -> dict:
+        digest = write_evidence(
+            Path(run_dir) / "evidence", code_state=commits[-1],
+            commands=json.dumps([EVIDENCE_COMMAND]))
+        return worker_result(**{
+            "source_ref": commits[-1], "commits": commits,
+            "tests": (EVIDENCE_COMMAND,),
+            "evidence": (f"evidence/T1.md#sha256={digest}",),
+            **overrides,
+        })
+
+    def publish(self, repo, run_dir, result) -> Path:
+        return Path(repo) / state.publish_worker_result(run_dir, result=result)
+
+    def complete(self, **overrides):
+        """A reserved, implemented, published DONE source attempt."""
+        repo, run_dir = self.reserved_run()
+        commits = self.implement(repo)
+        result = self.done_result(run_dir, commits, **overrides)
+        return repo, run_dir, commits, self.publish(repo, run_dir, result)
+
+    # -- the completion route ---------------------------------------------
+
+    def test_imports_a_complete_source_result(self):
+        repo, run_dir, commits, path = self.complete()
+        tracker = import_result(run_dir, path)
+        row = task_row(tracker, "T1")
+        self.assertEqual(row["state"], "[x]")
+        self.assertEqual(row["source_ref"], commits[-1])
+        self.assertEqual(row["commits"], ",".join(commits))
+        self.assertEqual(row["artifacts"], "-")
+        self.assertIn("completed:attempt-001", row["checkpoints"])
+        self.assertTrue(state.derive_next_action(tracker))
+
+    def test_a_completed_source_task_records_held_and_never_the_empty_marker(self):
+        """THE BRIEF ASSERTS THE SCHEMA'S OWN REJECTION AS A FEATURE. P02's
+        `_validate_tasks` refuses a completed source row whose `Integration`
+        is neither a commit nor `held`, because "deliberately deferred" and
+        "never written down" are the two states a resuming controller has to
+        tell apart. `-` is the second, so the brief's `integration="-"` makes
+        every import of a source completion raise inside the render canary."""
+        repo, run_dir, commits, path = self.complete()
+        row = task_row(import_result(run_dir, path), "T1")
+        self.assertEqual(row["integration"], state._INTEGRATION_HELD)
+        self.assertNotEqual(row["integration"], "-")
+
+    def test_the_verification_cell_carries_the_evidence_references(self):
+        """That column is what `_validate_tasks` means by "its verification
+        evidence": the digest-bound typed PASS record. The brief wrote the
+        COMMAND TUPLE into it, which is a copy of a field the record already
+        carries and which no later phase can resolve to a document."""
+        repo, run_dir = self.reserved_run()
+        commits = self.implement(repo)
+        result = self.done_result(run_dir, commits)
+        row = task_row(import_result(run_dir, self.publish(repo, run_dir, result)), "T1")
+        self.assertEqual(row["verification"], ",".join(result["evidence"]))
+        self.assertEqual(
+            state.resolve_evidence(run_dir, repo, row["verification"])["purpose"],
+            "task-test")
+
+    def test_the_result_cell_is_the_records_own_bound_identity(self):
+        repo, run_dir, commits, path = self.complete()
+        row = task_row(import_result(run_dir, path), "T1")
+        relative, digest = state._digest_reference(row["result"], field="result")
+        self.assertEqual(digest, hashlib.sha256(path.read_bytes()).hexdigest())
+        self.assertEqual((repo / relative).resolve(), path.resolve())
+
+    def test_the_attested_proof_mode_is_persisted_against_its_attempt(self):
+        """NO COLUMN IS ADDED. `## Tasks` is P02 schema and its fixture is the
+        authority, so the one fact this transition learns that no cell already
+        holds -- WHICH transcript proved the range -- goes into `Checkpoints`,
+        beside `started:`, `baseline:` and `resumed:`, keyed by the same
+        attempt token. Without it the row records the commits and nothing at
+        all about what proved them."""
+        repo, run_dir, commits, path = self.complete()
+        row = task_row(import_result(run_dir, path), "T1")
+        transcript = run_commands(state.source_range_commands(
+            repo, baseline=state.reserved_baseline(row, attempt=1),
+            head=commits[-1], head_ref="task/T1"))
+        self.assertIn(
+            f"range:attempt-001@{state.PROOF_ATTESTED}"
+            f"#sha256={hashlib.sha256(transcript.encode('utf-8')).hexdigest()}",
+            state._csv(row["checkpoints"]))
+
+    # -- F6: the four-part identity ---------------------------------------
+
+    def test_rejects_every_four_part_identity_mismatch(self):
+        """F6: run_id + task_id + attempt + owner must match the controller's
+        persisted assignment exactly, and a refusal leaves the tracker
+        byte-identical."""
+        #: EACH CASE ASSERTS ITS OWN DIAGNOSIS. "Something in the family" is
+        #: what let three of these pass against a screen that had been
+        #: deleted: an attempt the row does not carry is refused a second
+        #: time by `reserved_baseline`, and a kind the plan does not declare
+        #: by the outputs comparison, so `assertRaises` alone cannot tell the
+        #: identity check from whatever refuses next.
+        cases = (
+            ({"run_id": "run-other"}, "does not match this tracker's"),
+            ({"task_id": "T2"}, "not the current active attempt"),
+            ({"attempt": 2}, "not the current active attempt"),
+            ({"owner": "impl-9"}, "controller-assigned owner"),
+        )
+        for override, diagnosis in cases:
+            with self.subTest(override=override):
+                repo, run_dir = self.reserved_run()
+                commits = self.implement(repo)
+                path = self.publish(
+                    repo, run_dir, self.done_result(run_dir, commits, **override))
+                before = (run_dir / "progress.md").read_bytes()
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    import_result(run_dir, path)
+                self.assertIn(diagnosis, str(caught.exception))
+                self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_rejects_a_result_for_a_task_that_is_not_active(self):
+        repo, run_dir, _ = make_run(self.scratch(), three_disjoint_tasks(),
+                                    worker_limit=6)
+        result = worker_result(status="BLOCKED", source_ref="-", commits=(),
+                               evidence=(), tests=(),
+                               blocking_reason="never started")
+        path = self.publish(repo, run_dir, result)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(run_dir, path)
+        self.assertIn("active attempt", str(caught.exception))
+
+    def test_rejects_a_result_for_a_task_already_blocked_at_this_attempt(self):
+        """`[?]` is not `[~]`: the attempt is parked awaiting an answer, and a
+        second result for it arrives after the controller stopped listening."""
+        repo, run_dir = self.reserved_run()
+        publish_question_record(run_dir)
+        set_task_state(run_dir, "T1", "test-block", state="[?]",
+                       question=QUESTION_REF)
+        result = worker_result(status="BLOCKED", source_ref="-", commits=(),
+                               evidence=(), tests=(), blocking_reason="late")
+        path = self.publish(repo, run_dir, result)
+        with self.assertRaises(state.TrackerValidationError):
+            import_result(run_dir, path)
+
+    # -- F3 and F4: the range ---------------------------------------------
+
+    def test_rejects_a_head_tilde_one_truncated_commit_list(self):
+        """F3: the persisted baseline, not `HEAD~1`. A truncated list drops the
+        earlier commits from every scope and range check."""
+        repo, run_dir = self.reserved_run()
+        commits = self.implement(repo, count=3)
+        result = self.done_result(run_dir, commits)
+        result["commits"] = commits[-1:]
+        path = self.publish(repo, run_dir, result)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(run_dir, path)
+        self.assertIn("complete ordered", str(caught.exception))
+
+    def test_rejects_an_extra_pre_baseline_commit(self):
+        """F4: a pre-baseline commit is not part of this task's range."""
+        repo, run_dir = self.reserved_run()
+        baseline = git(repo, "rev-parse", "target")
+        commits = self.implement(repo)
+        result = self.done_result(run_dir, commits)
+        result["commits"] = (baseline,) + commits
+        path = self.publish(repo, run_dir, result)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(run_dir, path)
+        self.assertIn("complete ordered", str(caught.exception))
+
+    def test_rejects_a_reordered_commit_list(self):
+        """The range is ORDERED. A set comparison would accept the reverse,
+        and the order is what makes clause 1 of the ancestry predicate
+        checkable in Task 11."""
+        repo, run_dir = self.reserved_run()
+        commits = self.implement(repo)
+        result = self.done_result(run_dir, commits)
+        result["commits"] = tuple(reversed(commits))
+        path = self.publish(repo, run_dir, result)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(run_dir, path)
+        self.assertIn("complete ordered", str(caught.exception))
+
+    def test_rejects_a_commit_outside_the_declared_write_scope(self):
+        """F1's other end: the range proof is against the APPROVED scope, and
+        the scope comes from the plan and never from the result."""
+        repo, run_dir = self.reserved_run()
+        git(repo, "checkout", "-q", "-b", "task/T1", "target")
+        commits = (commit_only(repo, "src/a1.py", "a = 1\n", "in scope"),
+                   commit_only(repo, "src/a2.py", "b = 1\n", "out of scope"))
+        path = self.publish(repo, run_dir, self.done_result(run_dir, commits))
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(run_dir, path)
+        self.assertIn("outside its approved write scope", str(caught.exception))
+
+    # -- the evidence ------------------------------------------------------
+
+    def test_rejects_evidence_bound_to_a_different_code_state(self):
+        repo, run_dir = self.reserved_run()
+        commits = self.implement(repo)
+        digest = write_evidence(run_dir / "evidence", code_state=commits[0],
+                                commands=json.dumps([EVIDENCE_COMMAND]))
+        result = worker_result(
+            source_ref=commits[-1], commits=commits, tests=(EVIDENCE_COMMAND,),
+            evidence=(f"evidence/T1.md#sha256={digest}",))
+        path = self.publish(repo, run_dir, result)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(run_dir, path)
+        self.assertIn("different code state", str(caught.exception))
+
+    def test_rejects_evidence_naming_a_different_command_tuple(self):
+        repo, run_dir = self.reserved_run()
+        commits = self.implement(repo)
+        digest = write_evidence(
+            run_dir / "evidence", code_state=commits[-1],
+            commands=json.dumps(["python3 -m unittest -k something-else"]))
+        result = worker_result(
+            source_ref=commits[-1], commits=commits, tests=(EVIDENCE_COMMAND,),
+            evidence=(f"evidence/T1.md#sha256={digest}",))
+        path = self.publish(repo, run_dir, result)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(run_dir, path)
+        self.assertIn("approved task suite", str(caught.exception))
+
+    def test_rejects_a_result_naming_tests_the_plan_never_approved(self):
+        """The RESULT's own `tests` is checked against the plan too. Checking
+        only the record would let a worker claim it ran a suite while the
+        record it cites proves a different one."""
+        repo, run_dir = self.reserved_run()
+        commits = self.implement(repo)
+        result = self.done_result(run_dir, commits)
+        result["tests"] = (EVIDENCE_COMMAND, "make lint")
+        path = self.publish(repo, run_dir, result)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(run_dir, path)
+        self.assertIn("approved task suite", str(caught.exception))
+
+    def test_rejects_evidence_naming_another_task_or_attempt_or_run(self):
+        for label, override in (("subject", {"subject": "task/T2"}),
+                                ("attempt", {"attempt": "attempt-002"}),
+                                ("run_id", {"run_id": "run-other"}),
+                                ("purpose", {"purpose": "task-integration"})):
+            with self.subTest(field=label):
+                repo, run_dir = self.reserved_run()
+                commits = self.implement(repo)
+                digest = write_evidence(
+                    run_dir / "evidence", code_state=commits[-1],
+                    commands=json.dumps([EVIDENCE_COMMAND]), **override)
+                result = worker_result(
+                    source_ref=commits[-1], commits=commits,
+                    tests=(EVIDENCE_COMMAND,),
+                    evidence=(f"evidence/T1.md#sha256={digest}",))
+                path = self.publish(repo, run_dir, result)
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    import_result(run_dir, path)
+                self.assertIn("exactly one", str(caught.exception))
+
+    def test_rejects_two_task_test_records_for_one_attempt(self):
+        """EXACTLY ONE. Two records for one attempt is two answers to "did the
+        suite pass", and nothing here would get to choose between them."""
+        repo, run_dir = self.reserved_run()
+        commits = self.implement(repo)
+        first = write_evidence(run_dir / "evidence", code_state=commits[-1],
+                               commands=json.dumps([EVIDENCE_COMMAND]))
+        second = write_evidence(run_dir / "evidence", name="T1b.md",
+                                code_state=commits[-1],
+                                commands=json.dumps([EVIDENCE_COMMAND]),
+                                environment="python3.11-macos")
+        result = worker_result(
+            source_ref=commits[-1], commits=commits, tests=(EVIDENCE_COMMAND,),
+            evidence=(f"evidence/T1.md#sha256={first}",
+                      f"evidence/T1b.md#sha256={second}"))
+        path = self.publish(repo, run_dir, result)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(run_dir, path)
+        self.assertIn("exactly one", str(caught.exception))
+
+    def test_rejects_evidence_that_does_not_resolve(self):
+        repo, run_dir = self.reserved_run()
+        commits = self.implement(repo)
+        result = worker_result(
+            source_ref=commits[-1], commits=commits, tests=(EVIDENCE_COMMAND,),
+            evidence=(f"evidence/absent.md#sha256={DIGEST}",))
+        path = self.publish(repo, run_dir, result)
+        with self.assertRaises(state.EvidenceMissing):
+            import_result(run_dir, path)
+
+    # -- F5: the quorum and halt routes ------------------------------------
+
+    def test_quorum_statuses_park_the_attempt_with_a_quorum_marker(self):
+        """F5: the question record must resolve, match its digest, and derive
+        the qid the cell binds the later grant to."""
+        for status in state.QUORUM_STATUSES:
+            with self.subTest(status=status):
+                repo, run_dir = self.reserved_run()
+                publish_question_record(run_dir)
+                result = quorum_result(
+                    status,
+                    question_record=QUESTION_REF[len(state._QUESTION_QUORUM_ARM):]
+                    .split("@", 1)[1],
+                    tests=())
+                path = self.publish(repo, run_dir, result)
+                tracker = import_result(run_dir, path)
+                row = task_row(tracker, "T1")
+                self.assertEqual(row["state"], "[?]")
+                self.assertEqual(row["question"], QUESTION_REF)
+                self.assertTrue(row["question"].startswith(
+                    f"{state.QUORUM_ROUTE}:"))
+
+    def test_the_parked_question_cell_is_what_resume_task_can_act_on(self):
+        """END TO END, because the cell is a CONTRACT between this transition
+        and Task 7's: `_validate_decision` splits it on the same two arms and
+        binds the grant to the qid this import derived."""
+        repo, run_dir = self.reserved_run()
+        publish_question_record(run_dir)
+        reference = QUESTION_REF.split("@", 1)[1]
+        result = quorum_result("NEEDS_CONTEXT", question_record=reference,
+                               tests=())
+        path = self.publish(repo, run_dir, result)
+        import_result(run_dir, path)
+        write_decisions(run_dir, RESUME_DECISION)
+        tracker = state.resume_task(
+            run_dir, task_id="T1", prior_attempt=1, new_owner="impl-2",
+            new_attempt=2, decision_ref=QUORUM_GRANT)
+        self.assertEqual(task_row(tracker, "T1")["state"], "[~]")
+
+    def test_quorum_status_with_an_unresolvable_question_record_is_rejected(self):
+        repo, run_dir = self.reserved_run()
+        result = quorum_result(
+            "NEEDS_CONTEXT", tests=(),
+            question_record=f"questions/absent.md#sha256={DIGEST}")
+        path = self.publish(repo, run_dir, result)
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.TrackerValidationError):
+            import_result(run_dir, path)
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_quorum_status_whose_question_record_digest_disagrees_is_rejected(self):
+        repo, run_dir = self.reserved_run()
+        publish_question_record(run_dir)
+        reference = QUESTION_REF.split("@", 1)[1]
+        wrong = reference.split("#sha256=")[0] + f"#sha256={DIGEST}"
+        result = quorum_result("PLAN_CONFLICT", question_record=wrong, tests=())
+        path = self.publish(repo, run_dir, result)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(run_dir, path)
+        self.assertIn("digest", str(caught.exception))
+
+    def test_a_question_record_filed_under_another_qid_is_rejected(self):
+        """The qid is DERIVED from the record's own question and axis, and the
+        path it is cited at must be where this run files that qid. A record
+        answering under another question's identity produces a cell whose
+        grant binding is arithmetic on the wrong number."""
+        repo, run_dir = self.reserved_run()
+        other = "0" * 12
+        publish_question_record(run_dir, qid=other)
+        digest = hashlib.sha256(QUESTION_RECORD_TEXT.encode("utf-8")).hexdigest()
+        reference = (f"docs/superpowers/runs/run-1/quorum/{other}/question.md"
+                     f"#sha256={digest}")
+        result = quorum_result("NEEDS_CONTEXT", question_record=reference,
+                               tests=())
+        path = self.publish(repo, run_dir, result)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(run_dir, path)
+        self.assertIn(BLOCK_QID, str(caught.exception))
+
+    def test_blocked_parks_the_attempt_with_a_halt_marker(self):
+        repo, run_dir = self.reserved_run()
+        result = worker_result(
+            status="BLOCKED", source_ref="-", commits=(), evidence=(),
+            tests=(), blocking_reason=HALT_BLOCKER)
+        path = self.publish(repo, run_dir, result)
+        tracker = import_result(run_dir, path)
+        row = task_row(tracker, "T1")
+        self.assertEqual(row["state"], "[?]")
+        self.assertEqual(row["question"], HALT_REF)
+        self.assertEqual(row["question"], f"{state.HALT_ROUTE}:{HALT_BLOCKER}")
+
+    def test_a_parked_attempt_claims_no_completion_cell(self):
+        """`_validate_tasks` refuses a `[?]` row carrying any of the four
+        completion cells, so a route that wrote one would be refused by the
+        render canary rather than by anything here -- with a diagnosis about
+        the schema instead of about the route."""
+        repo, run_dir = self.reserved_run()
+        path = self.publish(repo, run_dir, worker_result(
+            status="BLOCKED", source_ref="-", commits=(), evidence=(),
+            tests=(), blocking_reason=HALT_BLOCKER))
+        row = task_row(import_result(run_dir, path), "T1")
+        for cell in ("source_ref", "commits", "artifacts", "integration"):
+            with self.subTest(cell=cell):
+                self.assertEqual(row[cell], "-")
+
+    # -- replay and conflicting evidence -----------------------------------
+
+    def test_import_replay_is_an_idempotent_no_op(self):
+        repo, run_dir, commits, path = self.complete()
+        import_result(run_dir, path)
+        snapshot = (run_dir / "progress.md").read_bytes()
+        tracker = import_result(run_dir, path)
+        self.assertEqual((run_dir / "progress.md").read_bytes(), snapshot)
+        self.assertEqual(task_row(tracker, "T1")["state"], "[x]")
+
+    def test_a_replay_after_an_intervening_transition_changes_no_task_state(self):
+        """The replay key settles only the MOST RECENT transition. The second
+        line of defence is the accepted identity already in the `Result` cell,
+        and it is the one that holds once anything else has landed."""
+        repo, run_dir, commits, path = self.complete()
+        first = import_result(run_dir, path)
+        bump(run_dir, "test-intervening")
+        tracker = import_result(run_dir, path)
+        self.assertEqual(task_row(tracker, "T1"), task_row(first, "T1"))
+
+    def test_changed_content_under_an_accepted_identity_is_conflicting(self):
+        repo, run_dir, commits, path = self.complete()
+        import_result(run_dir, path)
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "| concerns | - |", "| concerns | quietly edited |"),
+            encoding="utf-8")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(run_dir, path)
+        self.assertIn("conflicting", str(caught.exception))
+
+    def test_a_replay_key_that_ignored_the_content_would_swallow_the_tamper(self):
+        """WHY THE DIGEST IS IN THE TRANSITION ID. Keyed on task and attempt
+        alone, the tampered import above is recognised as a REPLAY by
+        `locked_tracker_update` before `mutate` is ever called, and the
+        conflicting-evidence screen is unreachable."""
+        repo, run_dir, commits, path = self.complete()
+        tracker = import_result(run_dir, path)
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        self.assertIn(digest, tracker["run"]["last_transition"])
+
+    # -- artifact tasks ----------------------------------------------------
+
+    def artifact_run(self, *, outputs="docs/out.md", scope="tree:docs"):
+        body = task_block("T1", kind="artifact", write_scope=scope,
+                          outputs=outputs)
+        repo, run_dir, _ = make_run(self.scratch(), body, worker_limit=6)
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        return repo, run_dir
+
+    def artifact_evidence(self, repo, run_dir) -> str:
+        digest = write_evidence(
+            run_dir / "evidence", code_state=git(repo, "rev-parse", "target"),
+            commands=json.dumps(["make docs"]))
+        return f"evidence/T1.md#sha256={digest}"
+
+    def test_imports_an_artifact_result_against_the_target_tip(self):
+        """Resolved question 8: an artifact task is proved by its exact
+        outputs existing, with `code_state` bound to the target tip. It has no
+        source range, so its integration is `N/A` and never `held`."""
+        repo, run_dir = self.artifact_run()
+        (repo / "docs").mkdir(exist_ok=True)
+        (repo / "docs" / "out.md").write_text("output\n", encoding="utf-8")
+        path = self.publish(repo, run_dir, worker_result(
+            kind="artifact", source_ref="-", commits=(), tests=(),
+            artifacts=("docs/out.md",),
+            evidence=(self.artifact_evidence(repo, run_dir),)))
+        row = task_row(import_result(run_dir, path), "T1")
+        self.assertEqual(row["state"], "[x]")
+        self.assertEqual(row["artifacts"], "docs/out.md")
+        self.assertEqual(row["integration"], state._INTEGRATION_NA)
+        self.assertEqual(row["source_ref"], "-")
+        self.assertEqual(row["commits"], "-")
+
+    def test_artifact_result_must_name_the_exact_approved_outputs(self):
+        repo, run_dir = self.artifact_run()
+        (repo / "docs").mkdir(exist_ok=True)
+        (repo / "docs" / "other.md").write_text("output\n", encoding="utf-8")
+        path = self.publish(repo, run_dir, worker_result(
+            kind="artifact", source_ref="-", commits=(), tests=(),
+            artifacts=("docs/other.md",),
+            evidence=(self.artifact_evidence(repo, run_dir),)))
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(run_dir, path)
+        self.assertIn("exact approved outputs", str(caught.exception))
+
+    def test_an_approved_output_that_is_not_on_disk_is_refused(self):
+        repo, run_dir = self.artifact_run()
+        path = self.publish(repo, run_dir, worker_result(
+            kind="artifact", source_ref="-", commits=(), tests=(),
+            artifacts=("docs/out.md",),
+            evidence=(self.artifact_evidence(repo, run_dir),)))
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(run_dir, path)
+        self.assertIn("docs/out.md", str(caught.exception))
+
+    def test_an_artifact_task_may_not_claim_a_suite_the_plan_approved_none_of(self):
+        """An artifact task declares NO suite, so its approved command tuple
+        is empty -- and `_parse_command_suite` refuses an empty array, so no
+        evidence record can ever carry it. The rule that IS available is that
+        the result claims no suite either; the brief's single comparison over
+        both kinds would have made every artifact import impossible."""
+        repo, run_dir = self.artifact_run()
+        (repo / "docs").mkdir(exist_ok=True)
+        (repo / "docs" / "out.md").write_text("output\n", encoding="utf-8")
+        path = self.publish(repo, run_dir, worker_result(
+            kind="artifact", source_ref="-", commits=(),
+            tests=("make docs",), artifacts=("docs/out.md",),
+            evidence=(self.artifact_evidence(repo, run_dir),)))
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(run_dir, path)
+        self.assertIn("approved task suite", str(caught.exception))
+
+    def test_an_artifact_output_that_is_not_a_regular_file_is_corruption(self):
+        """`.is_file()` -- the brief's predicate -- answers False for all four
+        of these and would report every one as "the output is missing". They
+        are names that EXIST, and the FIFO is the one that does not merely
+        mis-diagnose: a later open of it blocks under the run lock with no
+        writer coming, so the shape is asked before any open."""
+        for label in ("directory", "dangling", "loop", "fifo"):
+            with self.subTest(shape=label):
+                repo, run_dir = self.artifact_run()
+                (repo / "docs").mkdir(exist_ok=True)
+                target = repo / "docs" / "out.md"
+                if label == "directory":
+                    target.mkdir()
+                elif label == "dangling":
+                    target.symlink_to(repo / "docs" / "nothing-here")
+                elif label == "loop":
+                    target.symlink_to(target)
+                else:
+                    os.mkfifo(target)
+                path = self.publish(repo, run_dir, worker_result(
+                    kind="artifact", source_ref="-", commits=(), tests=(),
+                    artifacts=("docs/out.md",),
+                    evidence=(self.artifact_evidence(repo, run_dir),)))
+                previous = signal.signal(signal.SIGALRM, _alarm)
+                signal.alarm(5)
+                try:
+                    with self.assertRaises(
+                            state.TrackerValidationError) as caught:
+                        import_result(run_dir, path)
+                finally:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, previous)
+                self.assertIn("cannot read", str(caught.exception))
+
+    def test_a_kind_the_plan_does_not_declare_is_refused(self):
+        repo, run_dir = self.reserved_run()
+        commits = self.implement(repo)
+        result = self.done_result(run_dir, commits)
+        result.update(kind="artifact", source_ref="-", commits=(), tests=(),
+                      artifacts=("docs/out.md",))
+        path = self.publish(repo, run_dir, result)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(run_dir, path)
+        self.assertIn("approved plan", str(caught.exception))
+
+
+class WorkerClaimAgainstControllerEvidenceTests(TempDirTestCase):
+    """THE DEFENCE TASK 8 DEFERRED HERE, and the proof that it is not a
+    self-comparison.
+
+    `verify_source_range`'s header names this task as the answer to "a worker
+    who names commits that do not exist": Task 8 reads no git object, so a
+    fabricated intermediate commit spliced into a chain that still starts at
+    the baseline and ends at the head is accepted THERE. The comparison that
+    catches it is `tuple(result["commits"]) != proof["commits"]` -- and it is
+    worth nothing unless the two sides come from different places.
+
+    Three facts have to hold, and each is asserted below rather than argued:
+
+    1. the transcript is the stdout of an argv the MODULE emitted, captured by
+       the controller -- never a field of the worker's document;
+    2. `head_ref` is derived as `task/<id>` from the tracker row, never read
+       out of the result, which has no field for it;
+    3. the left-hand side of the comparison is the worker's document and the
+       right-hand side is the controller's transcript.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo, self.run_dir, _ = make_run(
+            self.tmp, three_disjoint_tasks(), worker_limit=6)
+        state.reserve_task(self.run_dir, task_id="T1", owner="impl-1",
+                           attempt=1)
+        self.commits = source_result_commits(self.repo)
+        self.digest = write_evidence(
+            self.run_dir / "evidence", code_state=self.commits[-1],
+            commands=json.dumps([EVIDENCE_COMMAND]))
+
+    def result(self, **overrides) -> dict:
+        return worker_result(**{
+            "source_ref": self.commits[-1], "commits": self.commits,
+            "tests": (EVIDENCE_COMMAND,),
+            "evidence": (f"evidence/T1.md#sha256={self.digest}",),
+            **overrides,
+        })
+
+    def published(self, **overrides) -> Path:
+        return self.repo / state.publish_worker_result(
+            self.run_dir, result=self.result(**overrides))
+
+    def test_a_fabricated_intermediate_commit_is_caught_here(self):
+        """The commit the worker invented is not in the controller's `git log`
+        output, so the two tuples differ. This is the whole deferral."""
+        spliced = (self.commits[0], "c" * 40, self.commits[-1])
+        path = self.published(commits=spliced)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(self.run_dir, path)
+        self.assertIn("complete ordered", str(caught.exception))
+
+    def test_the_transcript_is_the_stdout_of_the_argv_the_module_emitted(self):
+        controller = RecordingController()
+        path = self.published()
+        import_result(self.run_dir, path, controller)
+        baseline = state.reserved_baseline(
+            task_row(state.validate_run(self.run_dir), "T1"), attempt=1)
+        self.assertEqual(
+            controller.calls,
+            [tuple(argv) for argv in state.source_range_commands(
+                self.repo, baseline=baseline, head=self.commits[-1],
+                head_ref="task/T1")])
+
+    def test_the_executed_argv_carries_the_four_path_hiding_pins(self):
+        """The emitted command and the executed command CANNOT DRIFT, because
+        `_range_transcript` is the one place the argv is run. Asserted on what
+        the controller was actually handed, not on what the emitter returns."""
+        controller = RecordingController()
+        import_result(self.run_dir, self.published(), controller)
+        argv = controller.calls[0]
+        for token in ("--no-renames", "--no-relative",
+                      "--ignore-submodules=none", "--no-replace-objects",
+                      "core.useReplaceRefs=false", "core.quotePath=true"):
+            with self.subTest(token=token):
+                self.assertIn(token, argv)
+
+    def test_the_head_reference_is_derived_and_is_never_the_workers_word(self):
+        """MEASURED BY MOVING THE BRANCH. The result document has no branch
+        field, so if `head_ref` were anything but `task/<id>` derived from the
+        tracker row, renaming the branch would change nothing. It does: the
+        commits still exist, the claimed head still resolves as an object
+        name, and the import stops because the REFERENCE the module derived
+        names nothing in this store."""
+        path = self.published()
+        git(self.repo, "branch", "-m", "task/T1", "other/T1")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(self.run_dir, path)
+        self.assertIn("task/T1", str(caught.exception))
+        self.assertNotIn("branch", set(state.WORKER_RESULT_FIELDS))
+        git(self.repo, "branch", "-m", "other/T1", "task/T1")
+        self.assertEqual(
+            task_row(import_result(self.run_dir, path), "T1")["state"], "[x]")
+
+    def test_the_transcript_reaches_verify_source_range_unaltered(self):
+        """Captured RAW. A controller that stripped would hand over a string
+        the grammar refuses, and the refusal is the proof the bytes were not
+        massaged on the way in."""
+        path = self.published()
+        cases = (
+            ("strip", lambda argv: controller_git(argv).strip(),
+             "truncated mid-record"),
+            ("separator", lambda argv: controller_git(argv).lstrip("\x00"),
+             "record separator"),
+        )
+        for label, controller, diagnosis in cases:
+            with self.subTest(mangling=label):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    import_result(self.run_dir, path, controller)
+                self.assertIn(diagnosis, str(caught.exception))
+
+    def test_the_proof_the_row_records_is_the_controllers_transcript(self):
+        captured = {}
+
+        def controller(argv):
+            captured["out"] = controller_git(argv)
+            return captured["out"]
+
+        row = task_row(
+            import_result(self.run_dir, self.published(), controller), "T1")
+        self.assertIn(
+            f"range:attempt-001@{state.PROOF_ATTESTED}#sha256="
+            f"{hashlib.sha256(captured['out'].encode('utf-8')).hexdigest()}",
+            state._csv(row["checkpoints"]))
+
+    def test_the_comparison_is_structurally_not_self_referential(self):
+        """THE DEFECT THAT WAS CAUGHT, asserted on the code rather than on its
+        behaviour: if `transcript=` were fed from the worker's document, every
+        behavioural test above would still pass on a fixture whose worker told
+        the truth. The AST says where each side comes from.
+        """
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        function = next(
+            node for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "import_worker_result")
+        verify = next(
+            node for node in ast.walk(function)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "verify_source_range")
+
+
+        def bound(expression):
+            """One level of local binding resolved: a keyword argument that is
+            a bare Name is followed to its single assignment inside this
+            function. A structural claim that only held for an INLINE call
+            would be defeated by a local variable, which is not a property
+            worth pinning."""
+            if not isinstance(expression, ast.Name):
+                return expression
+            assignments = [
+                node.value for node in ast.walk(function)
+                if isinstance(node, ast.Assign)
+                and [expression.id] == [name for target in node.targets
+                                        for name in target_names(target)]]
+            self.assertEqual(len(assignments), 1, expression.id)
+            return assignments[0]
+
+
+
+        def worker_fields(expression) -> set:
+            return {node.slice.value for node in ast.walk(expression)
+                    if isinstance(node, ast.Subscript)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "result"
+                    and isinstance(node.slice, ast.Constant)}
+
+        transcript = bound(next(word.value for word in verify.keywords
+                                if word.arg == "transcript"))
+        self.assertIsInstance(transcript, ast.Call)
+        self.assertEqual(transcript.func.id, "_range_transcript")
+        #: THE ONE FIELD OF THE WORKER'S DOCUMENT THE TRANSCRIPT MAY DEPEND ON
+        #: is `source_ref`, and it is a CLAIM `_range_ends` refuses unless it
+        #: equals the tip the ref store holds for the derived branch. If
+        #: `commits` -- the very list the comparison is about -- reached the
+        #: command, the proof would be built from the answer.
+        self.assertEqual(worker_fields(transcript), {"source_ref"})
+        branch = bound(next(word.value for word in verify.keywords
+                            if word.arg == "head_ref"))
+        self.assertIsInstance(branch, ast.Call)
+        self.assertEqual(branch.func.id, "_task_branch")
+        self.assertEqual(worker_fields(branch), set())
+
+        comparison = next(
+            node for node in ast.walk(function)
+            if isinstance(node, ast.Compare)
+            and worker_fields(node.left) == {"commits"})
+        self.assertEqual(len(comparison.comparators), 1)
+        right = comparison.comparators[0]
+        self.assertEqual(worker_fields(right), set())
+        self.assertIsInstance(right, ast.Subscript)
+        self.assertEqual(right.slice.value, "commits")
+        self.assertEqual(bound(right.value).func.id, "verify_source_range")
+
+    def test_the_baseline_is_still_not_proved_and_the_module_says_so(self):
+        """STATED SO TASK 11 DOES NOT OVER-READ THIS. Neither task proves the
+        BASELINE is a commit in the repository: it is the sha `reserve_task`
+        resolved at reservation and the target branch has moved on. Task 8's
+        header says so and this task does not weaken it."""
+        self.assertIn("is re-derived nowhere",
+                      state.verify_source_range.__doc__)
+        self.assertIn("fabricated intermediate commit",
+                      module_function_source("_range_ends"))
+
+
+class ImportWorkerResultTotalityTests(TempDirTestCase):
+    """Every path argument this transition takes, over a corpus derived from
+    the CALL TREE rather than from a fixture -- and every case asserts its own
+    DIAGNOSIS, because "something in the family" is what let a NUL ride along
+    unseen once already."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo, self.run_dir, _ = make_run(
+            self.tmp, three_disjoint_tasks(), worker_limit=6)
+        state.reserve_task(self.run_dir, task_id="T1", owner="impl-1",
+                           attempt=1)
+
+    def unspellable_cases(self, base: str) -> tuple:
+        """NUL at the LEADING offset AND in the middle, plus a lone surrogate.
+
+        Two rounds of this build were bitten by a leading-offset blind spot,
+        and `pathlib` swallows the `ValueError` for both spellings -- so
+        `is_file()`, `exists()` and `os.path.lexists` all answer False and no
+        door upstream sees them.
+        """
+        return (
+            ("nul-leading", "\x00" + base),
+            ("nul-middle", base[:4] + "\x00" + base[4:]),
+            ("nul-trailing", base + "\x00"),
+            ("surrogate", base + "\ud800"),
+        )
+
+    def test_an_unspellable_result_path_stops_inside_the_family(self):
+        for label, spelling in self.unspellable_cases(str(self.run_dir)):
+            with self.subTest(spelling=label):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    import_result(self.run_dir, spelling)
+                self.assertIn("result_path", str(caught.exception))
+
+    def test_a_result_path_of_the_wrong_type_stops_inside_the_family(self):
+        for value in (None, 5, b"/tmp/x", object()):
+            with self.subTest(value=type(value).__name__):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    import_result(self.run_dir, value)
+                self.assertIn("result_path", str(caught.exception))
+
+    def test_every_non_regular_shape_at_the_result_path_is_corruption(self):
+        """`is_file()` NEVER MEANS "there is nothing here". A directory, a
+        dangling link, a symlink loop and a FIFO are all names that exist, and
+        the FIFO is the one that HANGS: this read runs under the run lock, so
+        an unattended controller would stop dead with no diagnostic."""
+        shapes = {}
+        (self.tmp / "adir").mkdir()
+        shapes["directory"] = self.tmp / "adir"
+        dangling = self.tmp / "dangling"
+        dangling.symlink_to(self.tmp / "nothing-here")
+        shapes["dangling"] = dangling
+        loop = self.tmp / "loop"
+        loop.symlink_to(loop)
+        shapes["loop"] = loop
+        fifo = self.tmp / "fifo"
+        os.mkfifo(fifo)
+        shapes["fifo"] = fifo
+        for label, path in shapes.items():
+            with self.subTest(shape=label):
+                previous = signal.signal(signal.SIGALRM, _alarm)
+                signal.alarm(5)
+                try:
+                    with self.assertRaises(state.TrackerValidationError):
+                        import_result(self.run_dir, path)
+                finally:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, previous)
+
+    def test_an_absent_result_is_an_absent_result_and_not_a_completion(self):
+        """F7's neighbour: a missing worker result is never evidence of
+        anything. It stops, naming the path."""
+        absent = self.run_dir / state.AGENT_OUTPUT_DIRNAME / "T1" / "attempt-001.md"
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(self.run_dir, absent)
+        self.assertIn("attempt-001.md", str(caught.exception))
+
+    def test_a_result_whose_bytes_are_not_utf8_is_a_stop_not_a_crash(self):
+        path = self.run_dir / state.AGENT_OUTPUT_DIRNAME / "T1" / "attempt-001.md"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"\xff\xfe not utf-8")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(self.run_dir, path)
+        self.assertIn("UTF-8", str(caught.exception))
+
+    def test_a_run_dir_of_the_wrong_type_stops_inside_the_family(self):
+        for value in (None, 5, b"/tmp/x"):
+            with self.subTest(value=type(value).__name__):
+                with self.assertRaises(state.TrackerError):
+                    state.import_worker_result(
+                        value, result_path=self.run_dir / "x.md",
+                        run_command=controller_git)
+
+    def test_a_non_callable_run_command_is_refused_before_the_lock(self):
+        """Before the lock and before the read: a capability that is not one
+        is a caller error, and discovering it inside `mutate` would leave the
+        diagnosis behind a transition that had already taken the lock."""
+        repo, run_dir = self.repo, self.run_dir
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.import_worker_result(
+                run_dir, result_path=run_dir / "x.md", run_command=None)
+        self.assertIn("callable", str(caught.exception))
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
 
 
 if __name__ == "__main__":

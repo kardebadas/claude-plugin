@@ -2368,6 +2368,77 @@ git commit -m "feat(pipeline-auto): hold three worker slots for a quorum when re
 
 ---
 
+> **QUORUM DECISION — the resume grant binds to the BLOCK, via the qid.**
+> Three brains, decorrelated (ledger grammar / threat model / build cost), all
+> `code-evidenced`, all converging. Recorded here because Tasks 7 and 10 must
+> change together.
+>
+> **The hole.** `_validate_decision` is four screens wide and never reads the
+> task row. A decision answering a *different* question, scoped to T1 with
+> action `task.resume`, resumes T1. Worse than "wrong task": a controller can
+> hand-author a `task.resume` record and clear a block **without a quorum, an
+> escalation, or a unit of drift budget** — the budget that caps machine
+> decision authority is bypassed entirely.
+>
+> **The binding already exists and is free.** `settle_quorum` mints
+> `decision_id = "Q-" + qid`, and `_final_event` already refuses an adoption
+> naming any other id, with the comment "without this an adoption may name
+> ANOTHER quorum's decision -- or a HUMAN's". So a quorum decision id
+> *contains the identity of the question it answers*. The only missing link is
+> that the `Question` cell holds a worker-chosen path instead of that qid.
+>
+> **What to build:**
+> 1. **Task 10** (unbuilt, so this is a plan edit not a rewrite) derives the qid
+>    itself with the committed `derive_qid` from the published question record —
+>    never trusting the worker for identity — and writes
+>    `quorum:<qid>@<path>#sha256=<digest>`: the qid for the binding, the bound
+>    path for the audit trail.
+> 2. **Task 10** also appends `blocked:<attempt>@<question>` to `Checkpoints`,
+>    which is append-only. The committed fixture already shows this shape
+>    (`valid-progress.md:71`) and the predecessor both writes and *validates* it
+>    (`pipeline_state.py:528-531`). `_validate_tasks` requires it on a `[?]` row.
+>    **This costs zero lines in `resume_task`** and makes the audit pointer
+>    survive every resume.
+> 3. **Task 7**: `_validate_decision` takes `row` (it is already in hand three
+>    lines earlier, inside `mutate`) and adds a fifth screen — on the quorum
+>    route, `decision_ref == "Q-" + qid` split from the cell. ~10 lines, no file
+>    read, no new column, no fixture change. This also closes re-opens:
+>    `derive_reopen_qid` mints a different qid, so a stale answer cannot resume
+>    a re-asked block.
+> 4. **Bind the grant to the attempt.** A single adopted `task.resume` currently
+>    authorises *unlimited* resumes of its task, for ever — `_require_fresh_attempt`
+>    bounds attempts, not grants. `phase-07-skill-prose.md:3285` already says the
+>    grant is "for the named prior attempt"; the attempt appears nowhere in it.
+>    Require it and compare.
+> 5. **The `halt:` route has no machine binding and the template must say so.**
+>    No qid exists and there is no question record. Use an asserted `Blocker`
+>    field compared against the cell, require `Provenance: human`, and state
+>    plainly that this arm is an assertion by the writer, not a derivation.
+>    Require one arm or the other, never neither.
+>
+> **Rejected.** *Two-phase stamp-back* is structurally impossible, not merely
+> impolite: P03 has no task id — `_QUORUM_HEADER` carries `Phase`, never a task —
+> so it would have to scan `## Tasks` for the row naming the qid, which is the
+> reverse index it was supposed to create. *Weakening the template* legitimises
+> the hole silently. *The `Decisions` column* is P06's provisional-taint edge;
+> putting the grant there would silently make a resumed task taint-eligible.
+>
+> **Two honest weaknesses, to carry into the work.** The harness constant
+> `QUESTION_REF = "quorum:docs/q.md#sha256=3c…"` points at a file that does not
+> exist, so no fixture contains a real qid and **the current suite could not
+> catch a subtly wrong qid comparison** — `blocked_run` must publish a real
+> record first. And nothing in this module can catch a controller that copies
+> the wrong blocker string on the halt arm; the template must not claim
+> otherwise. `decisions.md` is unsigned and hand-editable, so this is
+> tamper-evident by cross-reference, never tamper-proof.
+>
+> **Also settled:** the template clause this replaces was the drift, not the
+> code. It was authored in the shipped template, appears in neither the spec nor
+> the P02 plan, and describes the state `resume_task` *produces* read as a
+> precondition — satisfiable only after the transition it was meant to gate. The
+> predecessor implements it literally at `pipeline_state.py:1907` and it is dead
+> code there too, reachable only from a hand-doctored tracker.
+
 ### Task 7: `resume_task`
 
 An answered blocked attempt moves `[?] -> [~]`. The prior attempt must match, the new attempt must be distinct and unused, and `decision_ref` must resolve to an explicit adopted answer whose `Decision action` is `task.resume` and whose scope names the task. Context compaction or a restarted controller is not a blocked-task retry and creates no new attempt.

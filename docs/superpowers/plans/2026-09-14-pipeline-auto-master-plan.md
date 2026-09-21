@@ -562,12 +562,69 @@ anchor and the head check are all satisfied by genuine history. Only the path
 list is substituted. Every structural defence passes and the scope check is
 handed a lie.
 
-(`.git/info/grafts` was also tried and is inert.)
+**The pin for the fourth is TWO tokens, and the flag is not the load-bearing
+one.** Measured on git 2.39.5, and it is the reverse of what the option name
+suggests: `--no-replace-objects` is applied before config parsing, so
+`core.useReplaceRefs = true` in the repository's own `.git/config` — which the
+worker owns — overwrites it and the bypass comes back.
 
-Treat the fifth as likely rather than surprising, prefer explicitly disabling a
-behaviour over relying on its default, and when a defence is stated as a rule,
+```
+--no-replace-objects, no config          -> mine/a.py theirs/secret.py
+--no-replace-objects, repo config true   -> mine/a.py            <- DEFEATED
+-c core.useReplaceRefs=false, cfg true   -> mine/a.py theirs/secret.py
+both, repo config true                   -> mine/a.py theirs/secret.py
+```
+
+A command-line `-c` is the highest-precedence config source and no file reaches
+past it, so `-c core.useReplaceRefs=false` is what actually holds; the flag
+ships beside it because it is git's documented spelling of the intent and a pin
+whose strength depends on one version's parse order should not be a single
+token. **Generalise this, not just the mechanism: a pin is only a pin if it
+cannot be undone from inside the repository.** The other three were re-measured
+against a hostile `.git/config` (and against a `[include] path =` pointing at
+one) and all three hold — a `log` option is parsed after config and wins. Only
+the replace pin had the inversion, and only because half of it is a *global*
+`git` option rather than a subcommand option.
+
+**A FIFTH was looked for under the widened wording and not found.** Recorded so
+the next person does not re-measure them: `.git/info/grafts` (both a reparent
+to the baseline's parent and a reparent to the decoy — it rewrites parents and
+hides no path), `.gitattributes` and `.git/info/attributes` (`-diff`, `binary`),
+`.gitignore` and `.git/info/exclude` (they speak about untracked files, not a
+committed diff), `core.sparseCheckout` with `.git/info/sparse-checkout`, a
+written `commit-graph`, `[include] path =` in `.git/config`,
+`extensions.worktreeConfig` with a `.git/config.worktree`, `core.attributesFile`,
+`core.excludesFile`, `.git/objects/info/alternates`, `diff.noprefix` and
+`diff.srcPrefix`, `core.ignoreCase`, `core.precomposeUnicode`, and
+`log.diffMerges=off` — all measured **inert** against the emitted argv on a
+repository whose range touches one in-scope and one out-of-scope path.
+`.git/shallow` is the one that is not inert, and it fails in the **safe**
+direction: it makes the tip look parentless, so
+`--name-only` prints its whole tree and the scope check sees more paths, never
+fewer. `git replace` on the tip's **tree** rather than its commit hides a path
+the same way and the same pin restores it — a variant of the fourth, not a
+fifth.
+
+Treat the sixth as likely rather than surprising, prefer explicitly disabling a
+behaviour over relying on its default, **check that a pin cannot be undone from
+inside the thing it is pinning**, and when a defence is stated as a rule,
 **check the rule's own wording is not narrower than the hazard** — "config"
 was.
+
+### The pin that is also a product constraint: `core.quotePath=true`
+
+Pinning it is right — the spelling of a path must not depend on a config the
+worker owns — but the value has a consequence nothing recorded, so it is
+recorded here: **no task may ever add a path outside ASCII.** `core.quotePath=true`
+C-quotes a non-ASCII path, a C-quoted path begins with `"`, and no scope claims
+such a path, so a task that commits a non-ASCII filename *inside its own
+declared scope* can never prove its range. Measured end to end. `true` is git's
+own default, so this is not new behaviour; the pin makes it **guaranteed**
+rather than dependent on how the repository happens to be configured, which is
+the point. The alternative — pinning `false` — buys non-ASCII paths at the
+price of a transcript whose decoding depends on the controller's locale, and
+that is the harm the NUL screen on the repository argument exists to prevent.
+Fail closed deterministically rather than fail closed by accident.
 
 ### Third instance, found by applying the rule: `diff.ignoreSubmodules`
 

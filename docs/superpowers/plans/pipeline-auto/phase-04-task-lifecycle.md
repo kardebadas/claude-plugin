@@ -2813,9 +2813,30 @@ The implementation range is linear by construction — one worktree per implemen
   per-implementer-worktree topology, NOT from the worker's document. The
   worker-result grammar has fourteen fields and none of them is a branch, and
   adding one would put the anchor back on the worker's word — the point of the
-  parameter is that the module resolves a reference the controller names. If
-  Task 10 needs the name persisted, it belongs in a tracker cell or a run field
-  the controller writes, and that is a decision for Task 10 to argue.
+  parameter is that the module resolves a reference the controller names.
+  **SETTLED in Task 10** (it was left there as "a decision for Task 10 to
+  argue", and a sketch that used an unbound `task_branch` was not that
+  argument): `_task_branch(tracker, task_id)` derives `task/<task_id>`, which
+  is already this phase's pinned spelling for the same task, and Task 9's fix
+  round made the derivation total by refusing an unspellable task id at
+  reservation.
+
+  **`head` is a CLAIM and must be spelled as one.** It is refused unless it is
+  forty hex characters — the exact mirror of `head_ref`, which is refused *if*
+  it is. Both ends went through `_resolved_commit`, so `head="HEAD"`,
+  `head="main"` or `head=head_ref` made the store resolve both sides and the
+  `claimed != tip` check compared the store with itself. Measured: a no-op in
+  every one of those spellings. The only thing behind accepting them was "a
+  worker result's `source_ref` is forty hex by schema" — the reasoning that
+  produced the hole above — so it is not trusted for `head` either.
+
+  **What "`repo` is a git repository" means, exactly.** It is now git's own
+  test: a `.git` directory or gitdir pointer, a readable commondir, a readable
+  `HEAD`, and `objects/` and `refs/` directories. The earlier test was
+  `(<repo>/.git).is_dir()` alone, and the weakest artifact that satisfied it
+  and produced a full `attested` proof was a directory holding ONE FILE —
+  `.git/refs/heads/<ref>` with forty hex in it — that real `git -C` refuses
+  and that the module's own emitted argv cannot be run against.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3263,8 +3284,94 @@ Routing is where pipeline-auto departs from `superb:pipeline`: `NEEDS_CONTEXT` a
 - Test: `plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py`
 
 **Interfaces:**
-- Consumes: `parse_worker_result`, `verify_source_range`, `resolve_evidence`, `_approved_definition`, `_repo_dir`, `_attempt_baseline`, P02's `locked_tracker_update`, `derive_next_action`.
-- Produces: `QUORUM_ROUTE = "quorum"`, `HALT_ROUTE = "halt"`; `_attempt_baseline(row, attempt) -> str`; `_result_identity(path, content, repo) -> tuple[str, str]`; `_validate_task_test_evidence(...)`; `import_worker_result(run_dir, *, result_path) -> dict`.
+- Consumes: `parse_worker_result`, **`source_range_commands`** (the controller runs the argv itself — see below), `verify_source_range`, `resolve_evidence`, `_approved_definition`, `_repo_dir`, `_attempt_baseline`, P02's `locked_tracker_update`, `derive_next_action`.
+- Produces: `QUORUM_ROUTE = "quorum"`, `HALT_ROUTE = "halt"`; `_attempt_baseline(row, attempt) -> str`; `_result_identity(path, content, repo) -> tuple[str, str]`; `_validate_task_test_evidence(...)`; `import_worker_result(run_dir, *, result_path) -> dict`; **`_task_branch(tracker, task_id) -> str`** and **`_range_transcript(repo, argv) -> str`** (both new, both argued below).
+
+#### The defence Task 8 defers here, and the three things that have to exist for it to work
+
+`verify_source_range`'s module header names **this task** as the defence
+against a worker that "names commits that do not exist" — Task 8 reads no git
+object, so a fabricated intermediate commit spliced into a chain that still
+starts at the baseline and ends at the head is accepted there. That deferral
+was honest but it pointed at something that, as this section was first
+sketched, **could not have been built**. All three were measured against the
+sketch below:
+
+1. **The call omitted `transcript=`.** `verify_source_range(repo, *, baseline,
+   head, head_ref, scopes, transcript)` has no default on `transcript`, so the
+   sketched call raised `TypeError: missing 1 required keyword-only argument`.
+2. **Nothing said where the transcript came from, and the only comparison
+   present was circular.** `proof["commits"]` is parsed out of whatever
+   transcript is passed. If that transcript is the worker's, then
+   `tuple(result["commits"]) != proof["commits"]` compares the worker's list
+   against the worker's own document and defeats nothing. The header's phrase
+   is "the **controller's own** transcript", and that is a requirement on this
+   task, not a description of one.
+3. **`task_branch` was never bound.** The name appeared once in the whole
+   phase plan — in the sketch — and was never derived or persisted.
+
+So the rule for this task, and it is not optional:
+
+**THE CONTROLLER RUNS THE COMMAND ITSELF.** `import_worker_result` calls
+`source_range_commands(repo, baseline=…, head=…, head_ref=…)`, executes the
+argv it returns, and passes the captured **stdout** as `transcript`. The
+worker's document contributes `head` (a *claim*, which `_range_ends` checks
+against the ref store's tip) and `commits` (a *claim*, which the comparison
+below checks). It contributes **no transcript and no branch name**. A
+transcript taken from the worker's document would make the cross-comparison
+compare the worker with itself, which is worse than no check because it reads
+as one.
+
+- `_range_transcript(repo, argv)` is the one place the argv is executed, so the
+  emitted command and the executed command cannot drift. It captures stdout
+  **raw** — no `.strip()`: the leading NUL record separator and the trailing
+  newline are both load-bearing in the grammar Task 8 parses, and stripping
+  either turns a valid transcript into a grammar refusal.
+- `subprocess` is off `pipeline_auto_state.py`'s import list and stays off it.
+  The execution lives in the **controller**, which is why Task 8 emits an argv
+  instead of running one; if `import_worker_result` is itself inside the
+  module, then the module gains a `run_command` **callable parameter** the
+  controller supplies and the AST screen keeps `subprocess` out. Decide which
+  before writing the test, and write the decision here.
+
+**`head_ref` comes from `_task_branch(tracker, task_id)`, never from the
+worker.** The worker-result grammar has fourteen fields and none is a branch;
+adding one would put the anchor back on the worker's word, which is the whole
+reason `head_ref` exists. The name is **derived, not stored**: `task/<task_id>`
+is already this phase's pinned spelling — `_validate_task_test_evidence` below
+requires an evidence record whose `subject` is `f"task/{result['task_id']}"`,
+and Task 11's fixtures merge `task/T2` — and Task 9's fix round made the
+derivation total by refusing **at reservation** any task id that
+`git check-ref-format` rejects, so there is no id in a tracker that cannot be
+spelled as this branch. `_task_branch(tracker, task_id)` therefore reads the
+id out of the tracker row the controller already holds, spells the branch, and
+asserts the spelling against the same grammar `reserve_task` used — one
+derivation, used by the evidence check and the range check alike, so the two
+cannot come to different conclusions about which branch the task is on. If a
+future topology needs a name that is not derivable, it goes in a run field the
+**controller** writes at reservation; it never arrives in the result.
+
+**The comparison is then worker-claim against controller-evidence:**
+
+```python
+if tuple(result["commits"]) != proof["commits"]:
+    raise TrackerValidationError(
+        "implementation commits must equal the complete ordered "
+        "baseline-to-source range"
+    )
+```
+
+with `result["commits"]` read out of the worker's document and
+`proof["commits"]` read out of a transcript **the controller captured** from a
+command **the module emitted**. That is a genuine cross-comparison, and it is
+what closes the fabricated-commit gap: a commit the worker invented is not in
+the controller's `git log` output, so the two tuples differ.
+
+**What it still does not close, stated so Task 11 does not over-read it:** a
+controller that fabricates the transcript defeats this and everything else, and
+neither task proves the **baseline** is a commit in the repository — it is the
+sha `reserve_task` resolved at reservation and the target branch has moved on.
+Task 8's header says so; do not weaken that sentence here.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3625,13 +3732,33 @@ def import_worker_result(run_dir, *, result_path) -> dict:
 
         if result["status"] in COMPLETION_STATUSES:
             if result["kind"] == "source":
+                #: `head_ref` is DERIVED by the controller, never read out of
+                #: `result`: the worker-result grammar has no branch field and
+                #: adding one would put the anchor back on the worker's word.
+                branch = _task_branch(tracker, row["id"])
+                baseline = _attempt_baseline(row, result["attempt"])
+                #: THE CONTROLLER RUNS THE COMMAND. `transcript` is the stdout
+                #: the controller captured from the argv the module emitted --
+                #: passing the worker's own transcript here would make the
+                #: `commits` comparison below compare the worker with itself.
+                argv = source_range_commands(
+                    repo,
+                    baseline=baseline,
+                    head=result["source_ref"],
+                    head_ref=branch,
+                )
                 proof = verify_source_range(
                     repo,
-                    baseline=_attempt_baseline(row, result["attempt"]),
-                    head=result["source_ref"],
-                    head_ref=task_branch,          # NOT from `result`
+                    baseline=baseline,
+                    head=result["source_ref"],   # a CLAIM, checked against the tip
+                    head_ref=branch,             # NOT from `result`
                     scopes=definition["write_scope"],
+                    transcript=_range_transcript(repo, argv),
                 )
+                #: worker-claim vs controller-evidence. This is the line the
+                #: Task 8 header defers "names commits that do not exist" to,
+                #: and it only holds because `proof` came from the transcript
+                #: ABOVE rather than from the worker's document.
                 if tuple(result["commits"]) != proof["commits"]:
                     raise TrackerValidationError(
                         "implementation commits must equal the complete ordered "

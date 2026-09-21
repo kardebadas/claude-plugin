@@ -72,6 +72,33 @@ try:  # Windows
 except ImportError:  # pragma: no cover - only reachable on POSIX
     msvcrt = None
 
+#: NUL AS A SCREEN AND AS A RECORD SEPARATOR, SPELLED ONCE, AND DEFINED AT THE
+#: TOP OF THE MODULE BECAUSE ITS EARLIEST USE IS NEAR THE TOP. It is the one
+#: byte a POSIX path cannot carry and the one byte an argv element cannot
+#: carry, which is what makes it safe to use as the range transcript's record
+#: separator and what makes "does this value carry one" the right question to
+#: ask of a path, an argv element and a qid field. Those are uses of ONE fact,
+#: so they are one constant.
+#:
+#: THE EARLIER CLAIM WAS "THE MODULE'S SINGLE SPELLING OF THE BYTE" AND IT WAS
+#: FALSE -- the constant sat two thousand lines BELOW `derive_qid`, whose
+#: field-separator screen therefore carried its own `"\x00"` literal and could
+#: have been relaxed without this one noticing. Hoisting it is the fix; the
+#: sentence is narrowed at the same time, because four NUL constants remain
+#: and they are deliberately NOT this one:
+#:
+#: * three `b"\x00"` and one `"\x00"` FIELD SEPARATORS inside `hashlib` digest
+#:   inputs. They separate fields of a hash input rather than screening
+#:   anything, and a digest's wire format must not move because a validation
+#:   rule did, nor the reverse -- changing either would silently re-key every
+#:   record already written under the old one.
+#: * the lock file's `b"\x00"` PROBE BYTE, which is a write to test a
+#:   descriptor and has nothing to do with the byte's meaning here.
+#:
+#: `test_the_nul_constants_are_exactly_the_screen_and_the_separators` asserts
+#: that set from the AST, so neither half of this can rot unnoticed.
+_NUL = "\x00"
+
 SCHEMA = "pipeline-auto/v1"
 MARKER = f"<!-- {SCHEMA} -->"
 TITLE = "# Pipeline Auto — Progress Tracker"
@@ -3245,7 +3272,7 @@ def derive_qid(question: str, axis: str) -> str:
         raise QuorumSchemaInvalid(
             f"axis is {type(axis).__name__}, not str; an axis is a table cell "
             "before it is a hash input")
-    if "\x00" in question:
+    if _NUL in question:
         raise QuorumSchemaInvalid(
             "a question may not contain the field separator: it would let one "
             "question on one axis collide with another on another")
@@ -6206,15 +6233,6 @@ def _loads(text, what: str):
             f"{what} is not readable JSON ({type(exc).__name__}: {exc}); a "
             "malformed record is input and stops the run inside this module's "
             "exception family, never outside it") from exc
-
-
-#: NUL, SPELLED ONCE FOR THE WHOLE MODULE. It is the one byte a POSIX path
-#: cannot carry, the one byte an argv element cannot carry, and -- because of
-#: exactly that -- the byte the range transcript uses as its record separator.
-#: Those are three uses of one fact, so they are one constant: a second
-#: spelling would let one of the three screens be relaxed without the other
-#: two noticing.
-_NUL = "\x00"
 
 
 def _require_regular_file(path: Path, what: str) -> None:
@@ -13617,6 +13635,14 @@ _GIT_DIRNAME = ".git"
 #: every repository this run actually creates.
 _GITDIR_PREFIX = "gitdir: "
 _COMMONDIR_FILE = "commondir"
+
+#: What `git`'s own `is_git_directory()` requires before it will call a
+#: directory a repository: a readable `HEAD`, an `objects` directory and a
+#: `refs` directory. Spelled here because this module answers the same
+#: question and must not answer it more weakly -- see `_git_store`.
+_HEAD_FILE = "HEAD"
+_OBJECTS_DIRNAME = "objects"
+_REFS_DIRNAME = "refs"
 _PACKED_REFS_FILE = "packed-refs"
 _SYMREF_PREFIX = "ref: "
 _PEEL_PREFIX = "^"
@@ -13772,6 +13798,29 @@ def _git_store(repo) -> tuple:
     ``gitdir`` and the shared refs live in ``commondir``, so a resolver that
     knew only one of the two would read either the wrong ``HEAD`` or no
     branches at all.
+
+    "IS A GIT REPOSITORY" IS ASKED THE WAY GIT ASKS IT, and it used to be
+    asked far more weakly. The only question here was ``(<repo>/.git).is_dir()``
+    -- so the WEAKEST artifact that yielded a complete ``attested`` proof was a
+    directory containing exactly ONE FILE, ``.git/refs/heads/<ref>`` holding
+    forty hex characters. No objects, no ``HEAD``, no ``config``. Measured:
+    ``git -C`` on that directory says ``fatal: not a git repository``, and so
+    does the argv this module emits for it, while the module produced a full
+    proof. A docstring that Tasks 10 and 11 read as a specification promised
+    "a directory this process can read as a git repository" and delivered "a
+    directory with a ref file in it".
+
+    So the three things ``git``'s own ``is_git_directory()`` requires are
+    required here: a readable ``HEAD``, an ``objects`` directory and a
+    ``refs`` directory. ``HEAD`` is per-worktree and is asked of ``gitdir``;
+    ``objects`` and ``refs`` are shared and are asked of the COMMONDIR, which
+    is why they are checked after it is resolved rather than before -- in a
+    linked worktree ``gitdir`` carries neither. ``HEAD`` goes through
+    ``_ref_text`` and therefore through ``_require_regular_file``: a FIFO at
+    ``HEAD`` would otherwise block forever under the run lock. Its CONTENT is
+    deliberately not parsed -- an unborn branch, a detached HEAD and a symref
+    are all ordinary, and this function's job is "is this a repository", not
+    "what is checked out".
     """
     root = Path(repo)
     pointer = root / _GIT_DIRNAME
@@ -13791,7 +13840,28 @@ def _git_store(repo) -> tuple:
                 "directory and no gitdir pointer, so no reference in it resolves")
         gitdir = _relative_to(root, text[len(_GITDIR_PREFIX):].strip())
     common = _ref_text(gitdir / _COMMONDIR_FILE, "the git commondir pointer")
-    return gitdir, gitdir if common is None else _relative_to(gitdir, common.strip())
+    common = gitdir if common is None else _relative_to(gitdir, common.strip())
+    if _ref_text(gitdir / _HEAD_FILE, "the git HEAD file") is None:
+        raise TrackerValidationError(
+            f"{str(root)!r} is not a git repository: {str(gitdir)!r} carries no "
+            f"readable {_HEAD_FILE}, and a ref file on its own is not a "
+            "repository -- `git -C` refuses such a directory and so does the "
+            "command this module emits for it")
+    for required in (_OBJECTS_DIRNAME, _REFS_DIRNAME):
+        candidate = common / required
+        try:
+            present = candidate.is_dir()
+        except OSError as exc:
+            raise TrackerValidationError(
+                f"the repository at {str(root)!r} cannot be examined "
+                f"({type(exc).__name__}: {exc})") from exc
+        if not present:
+            raise TrackerValidationError(
+                f"{str(root)!r} is not a git repository: {str(common)!r} "
+                f"carries no {required}/ directory, which is one of the three "
+                "things git's own `is_git_directory` requires before it will "
+                "read a reference out of a directory")
+    return gitdir, common
 
 
 def _relative_to(base: Path, value: str) -> Path:
@@ -14843,7 +14913,26 @@ def resume_task(run_dir, *, task_id: str, prior_attempt: int, new_owner: str,
 # module reads none. The defence against it is Task 10's cross-comparison of
 # the worker's `commits` against the controller's own transcript. Tasks 10 and
 # 11 read this block as their specification, so it says which of the two
-# functions holds that line.
+# functions holds that line -- AND WHAT TASK 10 HAS TO DO FOR THE LINE TO
+# EXIST, because "deferred to Task 10" was checked against the phase plan and
+# Task 10 as sketched could not have carried it: the call omitted the required
+# `transcript=`, nothing said where a transcript came from, and the only
+# comparison present would have been the worker's list against the worker's
+# own document. The phase plan now says the three things, and they are
+# repeated here because this block is what gets read:
+#
+#   1. THE CONTROLLER RUNS THE COMMAND. It calls `source_range_commands`,
+#      executes the argv, and passes the captured stdout as `transcript`.
+#      A transcript taken from the worker's document makes the comparison
+#      compare the worker with itself, which is worse than no check because
+#      it reads as one.
+#   2. `head_ref` IS DERIVED BY THE CONTROLLER -- `task/<task_id>`, the
+#      spelling this phase already pins for the same task -- and never read
+#      out of the worker's result.
+#   3. THE COMPARISON IS `result["commits"]` (the worker's claim) against
+#      `proof["commits"]` (the controller's evidence). A commit the worker
+#      invented is not in the controller's `git log` output, so the tuples
+#      differ. That, and nothing here, is what closes the gap.
 # ---------------------------------------------------------------------------
 
 #: The word the master plan pins for a proof taken over attested external
@@ -14932,10 +15021,25 @@ def _range_ends(repo, baseline, head, head_ref) -> tuple:
     exists to close, and a case that cannot be tied to the ref store must
     refuse rather than attest.
 
+    `head` IS HELD TO THE MIRROR OF THAT RULE, and the first version of this
+    function was not consistent about it. `head_ref` must NOT be an object
+    name; `head` must BE one. Both ends went through `_resolved_commit`, so
+    `head="HEAD"`, `head="main"` or `head=head_ref` resolved through the same
+    store and the `claimed != tip` comparison compared the store with itself
+    -- a no-op, measured. The only thing standing behind it was "a worker
+    result's `source_ref` is forty hex by schema", which is EXACTLY the
+    reasoning that produced the hole this function was rewritten to close, so
+    it is not trusted for `head` either. A claim that is not spelled as a
+    claim is refused before the store is asked.
+
     WHAT THIS ESTABLISHES, STATED SO NOBODY HAS TO INFER IT:
 
-    * `repo` is a directory this process can read as a git repository -- a
-      `.git` directory or a gitdir pointer, and a readable commondir.
+    * `repo` is a directory this process can read as a git repository, in
+      git's OWN sense of the phrase: a `.git` directory or a gitdir pointer,
+      a readable commondir, a readable `HEAD`, and `objects/` and `refs/`
+      directories. The weaker earlier test -- `.git` is a directory -- was
+      satisfied by a directory holding one ref file that `git -C` itself
+      refuses, so the sentence promised more than the code asked.
     * `head_ref` is a reference THIS store carries, and the returned tip is
       the value the store holds for it, not a value anybody supplied.
     * the caller's `head`, if it names a different commit than that tip, is
@@ -14967,6 +15071,13 @@ def _range_ends(repo, baseline, head, head_ref) -> tuple:
             "repository. Name the reference whose tip it is, or the proof is "
             "anchored on a number nobody checked")
     tip = _resolved_commit(location, head_ref)
+    if not isinstance(head, str) or not _COMMIT.fullmatch(head):
+        raise TrackerValidationError(
+            f"the claimed head {head!r} is not an object name; the head is a "
+            "CLAIM checked against the tip this ref store holds, and a claim "
+            "spelled as a reference makes the store answer itself -- "
+            f"{head!r} and {head_ref!r} would both resolve here and the "
+            "comparison would compare nothing")
     claimed = _resolved_commit(location, head)
     if claimed != tip:
         raise TrackerValidationError(
@@ -14979,9 +15090,12 @@ def _range_ends(repo, baseline, head, head_ref) -> tuple:
 def _range_argv(location: str, base: str, tip: str) -> tuple:
     """The one command, built once, so the emitter and the diagnostic agree.
 
-    EVERY GIT CONFIG THAT CAN CHANGE HOW A PATH IS SPELLED OR WHETHER IT
-    APPEARS AT ALL IS PINNED HERE. That is the master plan's general rule, and
-    it is general because the same defect has now been measured three times:
+    EVERYTHING IN THE REPOSITORY THAT CAN CHANGE HOW A PATH IS SPELLED OR
+    WHETHER IT APPEARS AT ALL IS NEUTRALISED HERE. That is the master plan's
+    general rule, and the wording is "everything in the repository" rather
+    than "every git config" because the first phrasing was NARROWER THAN THE
+    HAZARD and missed the fourth instance outright -- a replace ref is not a
+    config. The same defect has now been measured four times:
 
     * `diff.renames` is ON by default and reports only a rename's
       DESTINATION, so `git mv theirs/victim.py mine/victim.py` passes a scope
@@ -15007,6 +15121,47 @@ def _range_argv(location: str, base: str, tip: str) -> tuple:
       failure into the controller, which is the harm `_repo_argument`'s NUL
       screen exists to prevent. Fail closed, deterministically, rather than
       fail closed by default.
+    * `refs/replace/` REWRITES THE OBJECT GRAPH ITSELF, and it is the worst
+      of the four because it needs NO CONFIG EDIT: `core.useReplaceRefs`
+      defaults to `true` and `git replace -f <tip> <decoy>` is ordinary
+      porcelain writing an ordinary ref in a repository the worker owns.
+      Measured: a tip that changes `mine/a.py` AND `theirs/secret.py`,
+      replaced by a same-parent decoy touching only `mine/a.py`, prints one
+      path through the unpinned argv and both through the pinned one. It
+      defeats more than the rename bypass did -- `%H` and `%P` print the REAL
+      commit and the REAL parent, so the chain walk, the distinctness screen,
+      the baseline anchor and the head claim are all satisfied by genuine
+      history and only the path list is substituted. `git replace` on the
+      tip's TREE hides a path the same way, and the same pin restores it.
+
+    THE REPLACE PIN IS TWO TOKENS AND THE SECOND ONE IS THE LOAD-BEARING ONE.
+    Measured on git 2.39.5, and it is the reverse of what the option name
+    suggests: `--no-replace-objects` ALONE IS DEFEATED by `core.useReplaceRefs
+    = true` in the repository's own `.git/config`, which the worker owns.
+
+        --no-replace-objects, no config          -> mine/a.py theirs/secret.py
+        --no-replace-objects, repo config true   -> mine/a.py        <- DEFEATED
+        -c core.useReplaceRefs=false, cfg true   -> mine/a.py theirs/secret.py
+        both, repo config true                   -> mine/a.py theirs/secret.py
+
+    The flag is applied before config parsing and the config then overwrites
+    it; a `-c` is the highest-precedence source and no file can reach past it.
+    So `-c core.useReplaceRefs=false` is what actually holds, and
+    `--no-replace-objects` is kept beside it because it is git's documented
+    spelling of the intent and because a pin whose strength depends on one
+    version's parse order should not be a single token. NEITHER IS REDUNDANT
+    -- do not delete the `-c` as a duplicate of the flag.
+
+    A NON-ASCII PATH CAN NEVER BE PROVED, AND THAT IS A PRODUCT CONSTRAINT,
+    not an accident. `core.quotePath=true` C-quotes it, a C-quoted path begins
+    with `"`, and no scope claims such a path -- so a task that commits a
+    non-ASCII filename INSIDE ITS OWN DECLARED SCOPE cannot prove its range.
+    Pinning the value makes that permanent rather than dependent on a config,
+    so it is recorded here as a rule this build accepts: NO TASK MAY ADD A
+    PATH OUTSIDE ASCII. The alternative -- pinning `false` -- buys non-ASCII
+    paths at the price of a transcript whose decoding depends on the
+    controller's locale, which is the harm `_repo_argument`'s NUL screen
+    exists to prevent.
 
     Measured and NOT pinned, with the reason: `log.abbrevCommit`,
     `log.decorate`, `log.showSignature` and `log.follow` are inert against a
@@ -15015,9 +15170,29 @@ def _range_argv(location: str, base: str, tip: str) -> tuple:
     `diff.external` is not consulted by `--name-only`; `log.diffMerges` can
     only ADD paths for a merge, and a merge inside the range is refused on its
     parent count, which comes from `%P` and no config touches.
+
+    Swept for a FIFTH under the widened wording and none found, each measured
+    inert against this argv on a real repository whose range touches one
+    in-scope and one out-of-scope path: `.git/info/grafts` (both a reparent to
+    the baseline's parent and a reparent to the decoy -- it rewrites parents
+    and hides no path), `.git/info/attributes` and `.gitattributes`
+    (`theirs/* -diff binary`), `.gitignore` and `.git/info/exclude` (they
+    speak about untracked files, not about a committed diff),
+    `core.sparseCheckout` with `.git/info/sparse-checkout`, a written
+    `commit-graph`, a `[include] path =` in `.git/config` pointing at a file
+    that sets all three of the configs above, `extensions.worktreeConfig`
+    with a `.git/config.worktree` doing the same, `core.attributesFile`,
+    `core.excludesFile`, `.git/objects/info/alternates`, `diff.noprefix` and
+    `diff.srcPrefix`, `core.ignoreCase`, `core.precomposeUnicode`, and
+    `log.diffMerges=off` -- a command-line `-c` and a `log` option both
+    outrank every config FILE, which is the general reason most of these are
+    inert. `.git/shallow` is the one that is not inert, and it fails in the
+    SAFE direction: it makes the tip look parentless, so `--name-only` prints
+    its WHOLE tree and the scope check sees MORE paths, never fewer.
     """
     return ((
-        "git", "-C", location, "-c", "core.quotePath=true", "log",
+        "git", "--no-replace-objects", "-C", location,
+        "-c", "core.quotePath=true", "-c", "core.useReplaceRefs=false", "log",
         "--reverse", "--no-renames", "--no-relative",
         "--ignore-submodules=none", "--name-only", "--no-color",
         _RANGE_FORMAT, f"{base}..{tip}", "--",

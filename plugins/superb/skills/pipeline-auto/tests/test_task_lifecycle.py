@@ -28,6 +28,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -6479,6 +6480,77 @@ class EvidenceResolutionTests(TempDirTestCase):
         self.assertIn("NUL byte", str(caught.exception))
         self.assertIsInstance(caught.exception, state.TrackerError)
 
+    def test_the_nul_constants_are_exactly_the_screen_and_the_separators(self):
+        """`_NUL` claimed to be "the module's single spelling of the byte"
+        and it was not -- SEVEN NUL-bearing constants lived in executable
+        code, and one of them, `derive_qid`'s field-separator screen, was a
+        SECOND SCREEN carrying its own literal two thousand lines above the
+        constant. A screen with its own spelling can be relaxed without the
+        constant noticing, which is the whole harm the constant exists to
+        prevent.
+
+        The fix was to hoist `_NUL` above that screen and use it there, and
+        to narrow the sentence rather than overstate it: `_NUL` is the single
+        spelling of the byte AS A SCREEN AND AS A RECORD SEPARATOR. What
+        remains is a digest field separator (which must not move because a
+        validation rule did, nor the reverse) and the lock file's probe byte.
+
+        This test enumerates every NUL-bearing constant from the AST,
+        DOCSTRINGS EXCLUDED, and asserts the exact partition -- so neither
+        the claim nor the exception list can rot unnoticed. Asserting the
+        SET rather than a count is deliberate: a count passes when one
+        member is swapped for another.
+        """
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        tree = ast.parse(source)
+        docstrings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.FunctionDef,
+                                 ast.AsyncFunctionDef, ast.ClassDef)):
+                first = node.body[0] if node.body else None
+                if (isinstance(first, ast.Expr)
+                        and isinstance(first.value, ast.Constant)
+                        and isinstance(first.value.value, str)):
+                    docstrings.add(id(first.value))
+        owner = {}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for child in ast.walk(node):
+                    if isinstance(child, ast.Constant):
+                        owner.setdefault(id(child), node.name)
+        found = {}
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Constant) and id(node) not in docstrings
+                    and isinstance(node.value, (str, bytes))):
+                needle = "\x00" if isinstance(node.value, str) else b"\x00"
+                if needle in node.value:
+                    found.setdefault(
+                        owner.get(id(node), "<module>"), []).append(node.lineno)
+        #: THE PARTITION, asserted by OWNER rather than by count or by line.
+        #: `derive_qid` and `derive_reopen_qid` separate fields of a qid's
+        #: hash input; `payload_digest` separates the shared payload from the
+        #: text; `_exclusive_lock` writes one byte to test a descriptor. None
+        #: of the four screens anything, and each would re-key or break a
+        #: record already written if it moved because a screen moved.
+        self.assertEqual(
+            set(found),
+            {"<module>", "derive_qid", "derive_reopen_qid", "payload_digest",
+             "_exclusive_lock"},
+            found)
+        self.assertEqual(found["<module>"], [found["<module>"][0]], found)
+        definition = found["<module>"][0]
+        self.assertRegex(source.splitlines()[definition - 1],
+                         r'^_NUL = "\\x00"$')
+        #: and the screen that used to carry its own literal now does not.
+        self.assertIn("if _NUL in question:", source)
+        self.assertNotIn(r'if "\x00" in question:', source)
+        #: `_NUL` is defined before every use, which is what makes the claim
+        #: mechanical rather than a convention.
+        self.assertLess(definition, min(
+            index + 1 for index, line in enumerate(source.splitlines())
+            if "_NUL" in line and not line.startswith("_NUL = ")))
+
     def test_every_door_caller_is_enumerated_and_none_escapes_on_a_nul(self):
         """THE CALLER SWEEP, and the count comes out of the AST.
 
@@ -10017,7 +10089,9 @@ class SourceRangeCommandTests(TempDirTestCase):
             state.source_range_commands(repo, baseline=base, head=head,
                                         head_ref="main"),
             ((
-                "git", "-C", str(repo), "-c", "core.quotePath=true", "log",
+                "git", "--no-replace-objects", "-C", str(repo),
+                "-c", "core.quotePath=true",
+                "-c", "core.useReplaceRefs=false", "log",
                 "--reverse", "--no-renames", "--no-relative",
                 "--ignore-submodules=none", "--name-only", "--no-color",
                 "--format=%x00%H %P", f"{base}..{head}", "--",
@@ -10040,19 +10114,76 @@ class SourceRangeCommandTests(TempDirTestCase):
     def test_both_endpoints_are_resolved_by_the_module_not_passed_through(self):
         """A symbolic end resolves somewhere else tomorrow. The controller is
         handed object names, so the range it runs is the range the module
-        meant."""
+        meant.
+
+        THE TWO ENDS ARE NOT SYMMETRIC AND THIS TEST USED TO PRETEND THEY
+        WERE. It passed `head="main"` -- a reference name -- and measured
+        only that the argv carried the resolved sha. That is the WARNING the
+        verification round raised: with a reference name in `head`, the store
+        resolves both `head` and `head_ref` and `claimed != tip` compares the
+        store with itself. `baseline` is still resolved symbolically, because
+        it is not a claim about anything; `head` is a CLAIM and must arrive
+        spelled as one.
+        """
         repo = make_repo(self.tmp)
+        head = git(repo, "rev-parse", "main")
         argv = state.source_range_commands(
-            repo, baseline="target", head="main", head_ref="main")[0]
-        self.assertIn(f"{git(repo, 'rev-parse', 'target')}.."
-                      f"{git(repo, 'rev-parse', 'main')}", argv)
+            repo, baseline="target", head=head, head_ref="main")[0]
+        self.assertIn(f"{git(repo, 'rev-parse', 'target')}..{head}", argv)
         self.assertNotIn("target..main", argv)
+
+    def test_a_head_spelled_as_a_reference_makes_the_store_answer_itself(self):
+        """The mirror of `test_an_object_name_is_refused_as_the_head_reference`.
+
+        `head_ref` must NOT be an object name; `head` must BE one. Measured
+        before the screen: `HEAD`, `main`, `other` and the head reference
+        itself were all ACCEPTED and the head-claim check was a no-op in
+        every one of them. The only thing standing behind accepting them was
+        "a worker result's `source_ref` is forty hex by schema" -- the exact
+        reasoning that produced the fabricated-repository hole, declined for
+        `head_ref` and then relied upon for `head`.
+        """
+        repo = make_repo(self.tmp)
+        git(repo, "branch", "-f", "other", "main")
+        sha = git(repo, "rev-parse", "main")
+        #: `sha + "x"` and `sha + "/y"` are the reason the screen is
+        #: `fullmatch` and not `match`: a prefix match accepts them, they are
+        #: not object names, and the refusal that follows would come from the
+        #: ref lookup with a DIFFERENT diagnosis -- the same shape, a
+        #: different sentence, which is exactly how a weakened screen hides.
+        #: `Path("a" * 40)` and an object whose `__str__` IS forty hex are the
+        #: reason the screen asks `isinstance(head, str)` rather than coercing
+        #: with `str(head)`. A coercing screen accepts both -- measured -- and
+        #: then hands `_resolved_commit` a value the tracker cell it came from
+        #: could never have carried. "It is spelled like a claim" has to mean
+        #: the value IS the claim, not that something about it prints like one.
+        class LooksLikeASha:
+            def __str__(self):
+                return "b" * 40
+
+        for head in ("main", "HEAD", "other", "refs/heads/main", "target",
+                     sha[:12], sha + "x", sha + "/y", sha.upper(),
+                     "", "   ", None, 3, b"a" * 40,
+                     pathlib.Path("a" * 40), LooksLikeASha()):
+            with self.subTest(head=head):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state.source_range_commands(
+                        repo, baseline="target", head=head, head_ref="main")
+                self.assertIn("is not an object name", str(caught.exception))
+        #: and the honest spelling still works, so the screen is not simply
+        #: refusing everything.
+        self.assertIsInstance(
+            state.source_range_commands(
+                repo, baseline="target", head=git(repo, "rev-parse", "main"),
+                head_ref="main"),
+            tuple)
 
     def test_an_end_that_names_no_reference_is_a_stop(self):
         repo = make_repo(self.tmp)
         with self.assertRaises(state.TrackerValidationError):
-            state.source_range_commands(repo, baseline="no-such-branch",
-                                        head="target", head_ref="target")
+            state.source_range_commands(
+                repo, baseline="no-such-branch",
+                head=git(repo, "rev-parse", "target"), head_ref="target")
 
     def test_a_repository_argument_that_cannot_be_an_argv_element_is_refused(self):
         for repo in (None, 3, "", "   ", "a\x00b", b"/tmp"):
@@ -10159,16 +10290,27 @@ class RenameHidesTheVictimTests(TempDirTestCase):
 class PathSpellingConfigTests(TempDirTestCase):
     """The rename bypass was not one bug, it was the first of a family.
 
-    The master plan's rule after the second instance: A CHANGED-PATH COMMAND
-    PINS EVERY GIT CONFIG THAT CAN CHANGE HOW A PATH IS SPELLED OR WHETHER IT
-    APPEARS AT ALL. This class is that rule applied to the emitted argv, one
-    config at a time, each measured against REAL git in both directions --
-    the module's own command, and the module's own command with exactly that
-    one token removed.
+    The master plan's rule, WIDENED after the fourth instance because the
+    first wording was narrower than the hazard: A CHANGED-PATH COMMAND
+    NEUTRALISES EVERYTHING IN THE REPOSITORY THAT CAN CHANGE HOW A PATH IS
+    SPELLED OR WHETHER IT APPEARS AT ALL -- not merely every git CONFIG.
+    This class is that rule applied to the emitted argv, one mechanism at a
+    time, each measured against REAL git in both directions -- the module's
+    own command, and the module's own command with exactly that one token
+    removed.
 
     A third instance was found by applying the rule rather than by waiting
     for a bug: `diff.ignoreSubmodules`. Unlike `diff.relative` it needs no
     unusual `-C`, so it is live rather than latent.
+
+    A FOURTH was found by applying the WIDENED rule, and it is the worst:
+    `refs/replace/`. It is not a config at all, which is exactly why the
+    first wording missed it, and it needs no edit to anything -- one
+    `git replace -f` in a repository the worker owns. It also carries the
+    only pin on this argv that could be undone from inside the repository,
+    which `test_the_replace_pin_needs_the_config_because_the_flag_alone_loses`
+    measures and `test_no_pin_on_this_argv_can_be_undone_from_inside_the_repository`
+    then asks of every pin at once.
     """
 
     def touch_both(self):
@@ -10197,6 +10339,18 @@ class PathSpellingConfigTests(TempDirTestCase):
         weakened = tuple(part for part in argv if part != token)
         assert len(weakened) == len(argv) - 1, token
         return weakened
+
+    @staticmethod
+    def without_config(argv, setting):
+        """Drop one `-c <setting>` PAIR.
+
+        `without` cannot do this any more and the reason is the point: the
+        argv now carries TWO `-c` tokens, so removing "-c" by value would
+        remove both pins at once and measure nothing about either.
+        """
+        index = argv.index(setting)
+        assert argv[index - 1] == "-c", setting
+        return argv[:index - 1] + argv[index + 1:]
 
     def test_ignore_submodules_hides_a_changed_gitlink_and_the_flag_stops_it(self):
         """LIVE, not latent: `diff.ignoreSubmodules=all` is an ordinary
@@ -10241,6 +10395,134 @@ class PathSpellingConfigTests(TempDirTestCase):
             repo, baseline=base, head=head, head_ref="task/T1",
             scopes=["tree:mine"], transcript=hidden)
         self.assertEqual(proof["changed_paths"], ("mine/f.py",))
+
+    def replaced_tip(self):
+        """A real tip changing an in-scope AND an out-of-scope file, with a
+        `refs/replace/` ref pointing it at a same-parent decoy that changes
+        only the in-scope one. Returns `(repo, base, tip)`."""
+        repo = make_repo(self.tmp)
+        git(repo, "checkout", "-q", "target")
+        for directory in ("mine", "theirs"):
+            (repo / directory).mkdir()
+            (repo / directory / "f.py").write_text("x = 1\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-qm", "two trees")
+        base = git(repo, "rev-parse", "target")
+        git(repo, "checkout", "-q", "-b", "task/T1", "target")
+        (repo / "mine" / "a.py").write_text("x = 1\n", encoding="utf-8")
+        (repo / "theirs" / "secret.py").write_text("x = 1\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-qm", "mine, and another task's file")
+        tip = git(repo, "rev-parse", "HEAD")
+        #: the decoy shares the tip's parent, so `%P` is unchanged by the
+        #: substitution and every structural screen still sees real history.
+        git(repo, "checkout", "-q", "--detach", base)
+        (repo / "mine" / "a.py").write_text("x = 1\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-qm", "decoy: only mine")
+        decoy = git(repo, "rev-parse", "HEAD")
+        git(repo, "checkout", "-q", "task/T1")
+        git(repo, "replace", "-f", tip, decoy)
+        return repo, base, tip
+
+    def test_a_replace_ref_substitutes_the_path_list_and_the_pin_stops_it(self):
+        """FOURTH instance of the family, and the first that needs NO config.
+
+        `core.useReplaceRefs` defaults to `true` and `git replace` is
+        ordinary porcelain writing an ordinary ref in a repository the worker
+        owns, so this is live with a single command and no edit to anything.
+
+        It is also worse than the rename bypass, and the assertions below say
+        why: `%H` and `%P` print the REAL commit and the REAL parent, so the
+        proof that comes back over the substituted transcript has a chain
+        that starts at the baseline, ends at the head, is distinct and is
+        linear. Every structural defence in `verify_source_range` passes.
+        Only the path list is a lie, which is exactly the thing no structural
+        defence can see.
+        """
+        repo, base, tip = self.replaced_tip()
+        argv = self.argv(repo, base, tip)
+        self.assertIn("--no-replace-objects", argv)
+        self.assertIn("core.useReplaceRefs=false", argv)
+
+        honest = run_commands((argv,))
+        self.assertIn("theirs/secret.py", honest)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.verify_source_range(
+                repo, baseline=base, head=tip, head_ref="task/T1",
+                scopes=["tree:mine"], transcript=honest)
+        self.assertIn("theirs/secret.py", str(caught.exception))
+
+        unpinned = self.without_config(
+            self.without(argv, "--no-replace-objects"),
+            "core.useReplaceRefs=false")
+        hidden = run_commands((unpinned,))
+        self.assertNotIn("theirs/secret.py", hidden)
+        #: the real commit and the real parent, in the LYING transcript.
+        self.assertIn(tip, hidden)
+        self.assertIn(f"{tip} {base}", hidden)
+        proof = state.verify_source_range(
+            repo, baseline=base, head=tip, head_ref="task/T1",
+            scopes=["tree:mine"], transcript=hidden)
+        self.assertEqual(proof["changed_paths"], ("mine/a.py",))
+        self.assertEqual(proof["commits"], (tip,))
+        self.assertTrue(proof["proof_mode"].startswith("attested#sha256="))
+
+    def test_the_replace_pin_needs_the_config_because_the_flag_alone_loses(self):
+        """THE FLAG IS NOT THE PIN, and the name says the opposite.
+
+        Measured on git 2.39.5: `--no-replace-objects` is applied before
+        config parsing, and `core.useReplaceRefs = true` in the repository's
+        own `.git/config` -- which the worker owns -- then overwrites it. A
+        `-c` is the highest-precedence source and no file reaches past it, so
+        `-c core.useReplaceRefs=false` is what actually holds. Both tokens
+        ship: the flag is git's documented spelling of the intent and a pin
+        whose strength depends on one version's parse order should not be a
+        single token. THIS TEST IS WHY NEITHER MAY BE DELETED AS A DUPLICATE
+        OF THE OTHER.
+        """
+        repo, base, tip = self.replaced_tip()
+        #: the hostile value, in the file the WORKER owns.
+        git(repo, "config", "core.useReplaceRefs", "true")
+        argv = self.argv(repo, base, tip)
+        #: BEHAVIOUR FIRST, and deliberately so: this line is what fails when
+        #: the `-c` is dropped and only the flag is left. A test that reached
+        #: for the half-pins first would fail on a helper raising instead, and
+        #: "it raised" is not the claim being made here.
+        self.assertIn("theirs/secret.py", run_commands((argv,)))
+
+        #: the flag WITHOUT the config pin -- the shape the fix was first
+        #: proposed in -- loses to the repository's own config.
+        flag_only = self.without_config(argv, "core.useReplaceRefs=false")
+        self.assertIn("--no-replace-objects", flag_only)
+        self.assertNotIn("theirs/secret.py", run_commands((flag_only,)))
+
+        #: the config pin WITHOUT the flag holds, which is what says which of
+        #: the two tokens is load-bearing.
+        config_only = self.without(argv, "--no-replace-objects")
+        self.assertIn("theirs/secret.py", run_commands((config_only,)))
+
+    def test_no_pin_on_this_argv_can_be_undone_from_inside_the_repository(self):
+        """The generalisation of the finding above, asked of every pin.
+
+        A worker owns `.git/config`. For each pinned behaviour, set the
+        hostile value THERE and measure that the emitted argv still reports
+        the out-of-scope path. `--no-replace-objects` is the one that failed
+        this and the reason the `-c` is beside it.
+        """
+        repo, base, tip = self.replaced_tip()
+        git(repo, "mv", "theirs/f.py", "mine/moved.py")
+        git(repo, "commit", "-qm", "rename out of another task's tree")
+        tip = git(repo, "rev-parse", "HEAD")
+        for name, value in (("diff.renames", "true"),
+                            ("diff.relative", "true"),
+                            ("diff.ignoreSubmodules", "all"),
+                            ("core.quotePath", "false"),
+                            ("core.useReplaceRefs", "true")):
+            git(repo, "config", name, value)
+        transcript = run_commands((self.argv(repo, base, tip),))
+        self.assertIn("theirs/f.py", transcript)
+        self.assertIn("theirs/secret.py", transcript)
 
     def test_relative_paths_respell_one_side_and_delete_the_other(self):
         """`diff.relative` reports paths relative to the command's working
@@ -10322,7 +10604,7 @@ class PathSpellingConfigTests(TempDirTestCase):
                 scopes=["tree:src"], transcript=pinned)
 
         unpinned = run_commands(
-            (self.without(self.without(argv, "core.quotePath=true"), "-c"),))
+            (self.without_config(argv, "core.quotePath=true"),))
         self.assertIn("src/caf\u00e9.py", unpinned)
         self.assertFalse(unpinned.isascii())
 
@@ -10334,12 +10616,23 @@ class PathSpellingConfigTests(TempDirTestCase):
         argv = self.argv(repo, base, head)
         for token in ("--no-renames", "--no-relative",
                       "--ignore-submodules=none", "--no-color",
-                      "core.quotePath=true"):
+                      "--no-replace-objects", "core.quotePath=true",
+                      "core.useReplaceRefs=false"):
             with self.subTest(token=token):
                 self.assertEqual(argv.count(token), 1)
-        self.assertEqual(argv.index("-c"), 3)
-        self.assertEqual(argv[4], "core.quotePath=true")
-        self.assertEqual(argv[5], "log")
+        #: ORDER IS PART OF THE PIN, not decoration. `--no-replace-objects` is
+        #: a `git` option and not a `log` option -- measured: as a `log`
+        #: option git exits with `fatal: unrecognized argument`, so an argv
+        #: that merely CONTAINS the token but places it after `log` does not
+        #: run at all. Every `-c` must likewise precede the subcommand.
+        self.assertEqual(argv[1], "--no-replace-objects")
+        self.assertEqual(argv[2], "-C")
+        self.assertEqual(argv[4], "-c")
+        self.assertEqual(argv[5], "core.quotePath=true")
+        self.assertEqual(argv[6], "-c")
+        self.assertEqual(argv[7], "core.useReplaceRefs=false")
+        self.assertEqual(argv[8], "log")
+        self.assertEqual(argv.index("log"), 8)
 
 
 class SourceRangeTests(TempDirTestCase):
@@ -11479,6 +11772,99 @@ class SourceRangeAnchorTests(TempDirTestCase):
         with self.assertRaises(state.TrackerValidationError):
             state.source_range_commands(absent, baseline=base, head=head,
                                         head_ref="task/T1")
+
+    def test_one_ref_file_is_not_a_repository(self):
+        """The weakest artifact the earlier anchor accepted, refused.
+
+        `_git_store` asked ONE question -- `(<repo>/.git).is_dir()` -- and
+        then read ref files. So a directory holding exactly one file,
+        `.git/refs/heads/task/T1` with forty hex characters in it, yielded a
+        complete `attested#sha256=` proof: no objects, no `HEAD`, no
+        `config`. Measured alongside: real `git -C` on that same directory
+        says `fatal: not a git repository`, and so does the argv this module
+        emits for it. The docstring Tasks 10 and 11 read as a specification
+        promised "a directory this process can read as a git repository" and
+        delivered "a directory with a ref file in it".
+        """
+        _repo, base, head, text = self.worked_branch()
+        fake = self.tmp / "one-file"
+        ref = fake / ".git" / "refs" / "heads" / "task" / "T1"
+        ref.parent.mkdir(parents=True)
+        ref.write_text(head + "\n", encoding="utf-8")
+        self.assertEqual([str(found.relative_to(fake))
+                          for found in sorted(fake.rglob("*"))
+                          if found.is_file()],
+                         [str(pathlib.Path(".git/refs/heads/task/T1"))])
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.verify_source_range(
+                fake, baseline=base, head=head, head_ref="task/T1",
+                scopes=["file:src/a1.py"], transcript=text)
+        self.assertIn("is not a git repository", str(caught.exception))
+        #: and REAL git agrees, which is the whole point of the check: the
+        #: module must not call a repository something the command it emits
+        #: cannot be run against.
+        self.assertNotEqual(
+            subprocess.run(("git", "-C", str(fake), "rev-parse", "--git-dir"),
+                           capture_output=True, text=True).returncode, 0)
+
+    def test_what_git_requires_is_what_this_module_requires(self):
+        """Each of git's three, removed one at a time from a REAL repository.
+
+        `is_git_directory()` wants a readable `HEAD`, an `objects` directory
+        and a `refs` directory. Asserting the three by deletion rather than
+        by reading the source means a screen that stops firing is a failure
+        here, and means the corpus is derived from git's own rule rather
+        than from the mutants somebody thought of.
+        """
+        for removed in ("HEAD", "objects", "refs"):
+            with self.subTest(removed=removed):
+                repo = make_repo(self.tmp / removed)
+                base = git(repo, "rev-parse", "target")
+                git(repo, "checkout", "-q", "-b", "task/T1", "target")
+                head = commit_file(repo, "src/a1.py", "v = 1\n", "one")
+                text = range_transcript(repo, base, head)
+                #: green first, so the deletion is what changes the answer.
+                self.assertEqual(
+                    state.verify_source_range(
+                        repo, baseline=base, head=head, head_ref="task/T1",
+                        scopes=["file:src/a1.py"],
+                        transcript=text)["head"], head)
+                target = repo / ".git" / removed
+                if target.is_dir():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+                self.assertNotEqual(
+                    subprocess.run(
+                        ("git", "-C", str(repo), "rev-parse", "--git-dir"),
+                        capture_output=True, text=True).returncode, 0)
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state.verify_source_range(
+                        repo, baseline=base, head=head, head_ref="task/T1",
+                        scopes=["file:src/a1.py"], transcript=text)
+                self.assertIn("is not a git repository", str(caught.exception))
+
+    def test_a_linked_worktree_is_still_a_repository(self):
+        """The strengthening must not refuse the shape it was written for.
+
+        A linked worktree's gitdir carries `HEAD` and NEITHER `objects` nor
+        `refs` -- those live in the commondir. A check that asked all three
+        of the gitdir would refuse every linked worktree, which is the one
+        shape `_git_store` returns two paths for in the first place.
+        """
+        repo = make_repo(self.tmp)
+        base = git(repo, "rev-parse", "target")
+        git(repo, "checkout", "-q", "-b", "task/T1", "target")
+        head = commit_file(repo, "src/a1.py", "v = 1\n", "one")
+        text = range_transcript(repo, base, head)
+        linked = self.tmp / "linked"
+        git(repo, "worktree", "add", "-q", "--detach", str(linked), head)
+        self.assertTrue((linked / ".git").is_file())
+        self.assertFalse((linked / ".git" / "objects").exists())
+        proof = state.verify_source_range(
+            linked, baseline=base, head=head, head_ref="task/T1",
+            scopes=["file:src/a1.py"], transcript=text)
+        self.assertEqual(proof["head"], head)
 
     def test_no_new_door_onto_the_filesystem_was_opened(self):
         """`_require_regular_file` stays the module's single door; Task 8 adds

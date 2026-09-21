@@ -6590,6 +6590,15 @@ class DeriveQidTests(unittest.TestCase):
             pas.derive_qid(forged, "c")
         with self.assertRaises(pas.QuorumSchemaInvalid):
             pas.derive_qid("a", "b\x00c")
+        #: EVERY OFFSET, not just the middle one. A screen weakened to
+        #: `question[1:]` refuses `"a\x00b"` exactly as the shipped one does
+        #: and lets a LEADING NUL through -- the same "it refused, so the test
+        #: passed" trap the repository-location screen was caught in. The
+        #: offsets are enumerated so the weakening has somewhere to die.
+        for offset in ("\x00ab", "a\x00b", "ab\x00", "\x00a\x00b\x00", "\x00"):
+            with self.subTest(question=repr(offset)):
+                with self.assertRaises(pas.QuorumSchemaInvalid):
+                    pas.derive_qid(offset, "c")
 
     def test_an_axis_outside_the_question_id_namespace_is_refused(self):
         """The axis is a table cell before it is a hash input.

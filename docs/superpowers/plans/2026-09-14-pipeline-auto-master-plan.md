@@ -498,6 +498,44 @@ explicitly, not just the question.
 forward to get an invocable skill sooner was offered and declined: interfaces
 settle before the prose that documents them.
 
+## A single-run mutation verdict is a coin flip for order-sensitive mutants
+
+Found by the P04 Task 8 review, and it retro-qualifies every "N/N killed" this
+build has recorded.
+
+`unittest` discovery order and `PYTHONHASHSEED` jointly decide which test
+reaches a mutant first. For a mutant whose detection depends on the *order* in
+which cases run — anything touching iteration order, a shared fixture's
+accumulated state, or a first-match/short-circuit path — one run is one sample.
+Measured: the R10 mutant was **killed in 6 of 12 seeds**. A single green run
+would have called it a survivor half the time and a kill the other half.
+
+**So a mutation claim must say which kind it is.** For a mutant whose catching
+test is order-independent (the usual case: one test, one input, one screen),
+one run is enough and the catching test can be named. For anything
+order-sensitive, run it across several seeds and report the ratio, or pin
+`PYTHONHASHSEED` and say so — **"46/46 killed" without either is not
+supportable for that class.** This does not invalidate the kills already
+recorded; it means the confidence attached to them was overstated where the
+mutant was order-sensitive, and nobody separated the two.
+
+The cheap discipline: when a mutant dies, name the test that killed it. If you
+cannot name one specific test, the verdict is order-dependent and needs seeds.
+
+## `--no-renames` is not the only rename-shaped bypass: `diff.relative`
+
+Second instance of the family the scope-check bypass came from. `diff.relative`
+is a repository-level config that makes git report paths **relative to a
+subdirectory**, so a path outside the declared scope can be reported as a
+relative path that falls inside it. The one-token fix is `--no-relative` on
+every changed-path command, alongside `--no-renames`.
+
+The general rule, since this is twice now: **a changed-path command must pin
+every git config that can alter how a path is spelled or whether it appears at
+all.** Rename detection and relative paths are two; treat the next one as
+likely rather than surprising, and prefer explicitly disabling a behaviour over
+relying on its default.
+
 ## Cross-phase clarifications
 
 Resolved after the phase plans were written, where two phases needed the same

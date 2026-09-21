@@ -30,10 +30,39 @@ Use `none` unless the answer authorises that exact controller action. A generic
 choice and must never be recorded as one — this holds for a quorum answer of
 "proceed" exactly as it holds for a human's.
 
-`task.resume` names the exact blocked task in `Scope`; that task's `Question`
-cell must hold this decision's id and this decision's `Status` must be
-`Adopted`. The action never replaces the identity fields; it is granted on top
-of them.
+`task.resume` names the exact blocked task in `Scope`, names the attempt it
+releases in `Attempt`, and its `Status` must be `Adopted`. The action never
+replaces the identity fields; it is granted on top of them.
+
+A grant is spent on ONE ATTEMPT of one task. `Attempt` holds the attempt token
+the task is blocked at (`attempt-001`); a grant that named only the task would
+authorise every resume of that task for ever, which is not a grant but a
+standing permission.
+
+A grant must also name THE BLOCK, and how it does that depends on which arm the
+task's `Question` cell takes:
+
+- `quorum:<qid>@<path>#sha256=<digest>` — the DERIVED arm. A quorum decision's
+  id is `Q-` followed by the qid of the question it settles, so the grant binds
+  to the block by construction: the id must be `Q-` followed by the very qid in
+  that cell. A re-open derives a different qid, so a stale answer cannot resume
+  a re-asked block.
+- `halt:<reason>` — the ASSERTED arm. Nothing opened a quorum, so no qid exists
+  and there is no question record to derive one from. The grant repeats the
+  reason verbatim in a `Blocker` field and must carry `Provenance: human`.
+  **This arm is an assertion by whoever writes the record, not a derivation.**
+  Nothing here can tell a correctly copied blocker string from a carelessly
+  copied one; the field makes a mismatch visible to a reader, and that is the
+  whole of what it buys.
+
+One arm or the other, never neither. A `Question` cell in neither form binds a
+grant to nothing at all.
+
+`decisions.md` is unsigned and hand-editable, so every binding above is
+TAMPER-EVIDENT BY CROSS-REFERENCE and none of it is tamper-proof: a writer with
+this file open can author a record that satisfies all of it. What the bindings
+remove is the grant that clears a block by ACCIDENT — a stale answer, another
+question's answer, or a second resume spending a grant that was already spent.
 
 `quorum.extend-budget` and `dispatch.extend-budget` are separate actions
 because they are separate authorities: the drift budget caps decision authority

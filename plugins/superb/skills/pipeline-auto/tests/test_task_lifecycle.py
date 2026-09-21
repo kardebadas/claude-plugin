@@ -6799,9 +6799,82 @@ class EvidenceModuleBoundaryTests(unittest.TestCase):
 #: the fixture agree with the code by construction.
 FAKE_DIGEST = "5e" * 32
 OTHER_DIGEST = "a7" * 32
-#: A question-record reference a blocked task can name. `_validate_tasks` asks
-#: only that a `[?]` row's Question cell is not the absence marker.
-QUESTION_REF = f"quorum:docs/q.md#sha256={'3c' * 32}"
+# --- the block a `[?]` row names, and it is REAL ---------------------------
+#
+# The constant this replaces was `quorum:docs/q.md#sha256=3c...`: a path no
+# fixture ever wrote and a digest of nothing. `_validate_tasks` asks only that
+# the cell is not `-`, so it passed -- and the consequence was that NO FIXTURE
+# IN THE SUITE HELD A REAL QID, so a qid comparison that was subtly wrong could
+# not have been caught by anything here. Everything below is derived: the qid
+# by the committed `derive_qid`, the digest over the bytes actually written,
+# and the path is where `_question_record` looks.
+
+#: The question a blocked task is blocked on, and the axis it opens.
+BLOCK_QUESTION = "Which serialiser does T1 use for its checkpoint payload?"
+BLOCK_AXIS = "checkpoint-serialiser"
+#: DERIVED, never typed. `settle_quorum` mints a quorum decision id as
+#: `"Q-" + qid`, so this one string is what binds a grant to this block.
+BLOCK_QID = state.derive_qid(BLOCK_QUESTION, BLOCK_AXIS)
+QUORUM_GRANT = f"Q-{BLOCK_QID}"
+
+
+def question_record_text(qid: str, question: str, axis: str,
+                         *, blocks: str = "T1") -> str:
+    """One publishable question record, in the grammar `parse_question` reads.
+
+    Modelled on `tests/fixtures/quorum/question-record.md` rather than reading
+    it: that fixture is pinned byte-for-byte by P03's suite as the record ITS
+    cases reason about, and a second reader of it here would couple two
+    unrelated sets of cases through one file.
+    """
+    return "\n".join((
+        "<!-- pipeline-auto/v1 -->",
+        "",
+        f"## Q-{qid} — the checkpoint serialiser",
+        "",
+        f"- **Question:** {question}",
+        f"- **Axis:** {axis}",
+        "- **Phase:** P04",
+        f"- **Blocks:** {blocks}",
+        "- **Raiser:** impl-1",
+        "- **Options supplied:** yes",
+        "- **Options:** json, msgpack",
+        "- **Candidate answers:** json, because it is already imported",
+        "- **Recommendation:** json",
+        "- **Reading roots:** spec=docs/superpowers/specs/design.md, "
+        "intent-brief=docs/superpowers/runs/run-1/intent-brief.md, repo=., "
+        "tests=tests, phase-plan=docs/superpowers/plans/phase-04.md",
+        "- **Owners:** brain-1, brain-2, brain-3",
+    )) + "\n"
+
+
+QUESTION_RECORD_TEXT = question_record_text(BLOCK_QID, BLOCK_QUESTION, BLOCK_AXIS)
+#: Every run this harness builds lives at `docs/superpowers/runs/run-1`, so the
+#: repo-root-relative path of the published record is a constant and the digest
+#: over its bytes is one too.
+QUESTION_RECORD_PATH = (
+    f"docs/superpowers/runs/run-1/quorum/{BLOCK_QID}/question.md")
+#: Task 10's ruled form, which this harness is now the specification of:
+#: `quorum:<qid>@<path>#sha256=<digest>` -- the qid for the binding, the
+#: digest-bound path for the audit trail.
+QUESTION_REF = (
+    f"quorum:{BLOCK_QID}@{QUESTION_RECORD_PATH}"
+    f"#sha256={hashlib.sha256(QUESTION_RECORD_TEXT.encode('utf-8')).hexdigest()}")
+
+#: The OTHER arm. A halt opened no quorum, so there is no question record and
+#: no qid; the grant asserts this string back and must be a human's.
+HALT_BLOCKER = "the release host is unreachable and no machine can settle it"
+HALT_REF = f"halt:{HALT_BLOCKER}"
+HALT_GRANT = "H-001"
+
+
+def publish_question_record(run_dir, *, text: str = QUESTION_RECORD_TEXT,
+                            qid: str = BLOCK_QID) -> str:
+    """Write the record where `_question_record` reads it; return its cell."""
+    path = Path(run_dir) / "quorum" / qid / "question.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return QUESTION_REF
 
 
 def _alarm(signum, frame):
@@ -8405,20 +8478,41 @@ DECISION_FILE_HEADER = "# Pipeline Auto — Decisions\n"
 #: refuses both in `Question` and `Answer`, and a fixture that tripped that
 #: screen would make every case below pass for the wrong reason.
 RESUME_DECISION_FIELDS = {
-    "Question": "Which serialiser does T1 use for its checkpoint payload?",
-    "Axis": "checkpoint-serialiser",
+    "Question": BLOCK_QUESTION,
+    "Axis": BLOCK_AXIS,
     "Answer": "the standard-library json module — nothing new is imported.",
-    "Provenance": "human",
+    "Provenance": "quorum",
     "Decision action": "task.resume",
-    "Depth": "0",
+    "Depth": "1",
     "Scope": "T1",
+    #: THE ATTEMPT THE GRANT RELEASES. Without it one adopted record authorises
+    #: unlimited resumes of its task for ever: `_require_fresh_attempt` bounds
+    #: the attempts a task may mint, not the grants one record may be read as.
+    "Attempt": "attempt-001",
     "Status": "Adopted",
 }
 
+#: The halt arm's grant. A `halt:` block opened no quorum, so no qid exists to
+#: derive an id from: the record ASSERTS the blocker string back and must be a
+#: human's. Its axis differs from the quorum grant's on purpose -- an axis
+#: holds at most one Adopted decision, so a file holding both would be refused
+#: by `parse_decisions` before any screen under test was reached.
+HALT_DECISION_FIELDS = dict(
+    RESUME_DECISION_FIELDS,
+    **{
+        "Question": "Does T1 wait for the release host or change targets?",
+        "Axis": "release-host",
+        "Answer": "wait for the host — the target is not negotiable here.",
+        "Provenance": "human",
+        "Depth": "0",
+        "Blocker": HALT_BLOCKER,
+    })
 
-def decision_record(did: str = "H-001", overrides=None, *, drop=()) -> str:
+
+def decision_record(did: str = QUORUM_GRANT, overrides=None, *, drop=(),
+                    fields=None) -> str:
     """One `decisions.md` record in the shipped emphasised bullet grammar."""
-    fields = dict(RESUME_DECISION_FIELDS)
+    fields = dict(RESUME_DECISION_FIELDS if fields is None else fields)
     fields.update(overrides or {})
     lines = [f"\n## {did} — the answer that unblocks a blocked task\n"]
     lines += [f"- **{name}:** {value}" for name, value in fields.items()
@@ -8433,8 +8527,14 @@ def decisions_file(*records: str) -> str:
 RESUME_DECISION = decisions_file()
 
 
+def halt_decision_record(did: str = HALT_GRANT, overrides=None, *,
+                         drop=()) -> str:
+    return decision_record(did, overrides, drop=drop,
+                           fields=HALT_DECISION_FIELDS)
+
+
 def retired_resume_decision() -> str:
-    """`H-001` retired, beside the record that retires it.
+    """The grant retired, beside the record that retires it.
 
     Both halves, because `parse_decisions` refuses a lone `Superseded` record
     as an orphan -- and a fixture built out of one would be refused before the
@@ -8442,8 +8542,9 @@ def retired_resume_decision() -> str:
     defect wearing a passing test as a disguise.
     """
     return decisions_file(
-        decision_record("H-001", {"Status": "Superseded"}),
-        decision_record("H-002", {"Supersedes": "H-001"}),
+        decision_record(QUORUM_GRANT, {"Status": "Superseded"}),
+        decision_record("H-002", {"Supersedes": QUORUM_GRANT,
+                                  "Provenance": "human", "Depth": "0"}),
     )
 
 
@@ -8478,9 +8579,15 @@ TABLE_SPELLED_DECISION = """# Pipeline Auto — Decisions
 
 
 def blocked_run(case, *, worker_limit: int = 6, tasks=None, decisions=None,
-                task_id: str = "T1"):
+                task_id: str = "T1", question=None):
     """One task reserved, then blocked on a question, with an adopted
     `task.resume` decision sitting in the run's audit trail.
+
+    THE QUESTION RECORD IS PUBLISHED FOR REAL and the `Question` cell is the
+    ruled `quorum:<qid>@<path>#sha256=<digest>` form over it, with the qid
+    derived by the committed `derive_qid`. The harness constant this replaced
+    named a file no fixture ever wrote, so no fixture in the suite held a real
+    qid and nothing here could have caught a wrong qid comparison.
 
     Module level rather than a method, because two test classes need the same
     starting state and a helper inherited from one of them would tie the
@@ -8489,9 +8596,10 @@ def blocked_run(case, *, worker_limit: int = 6, tasks=None, decisions=None,
     repo, run_dir, _ = make_run(
         case.tmp, tasks if tasks is not None else three_disjoint_tasks(),
         worker_limit=worker_limit)
+    publish_question_record(run_dir)
     state.reserve_task(run_dir, task_id=task_id, owner="impl-1", attempt=1)
     set_task_state(run_dir, task_id, f"test-block-{task_id}", state="[?]",
-                   question=QUESTION_REF)
+                   question=QUESTION_REF if question is None else question)
     write_decisions(run_dir, RESUME_DECISION if decisions is None else decisions)
     return repo, run_dir
 
@@ -8509,19 +8617,46 @@ class ResumeProducesBlockTests(unittest.TestCase):
         """`_decision_sections` exists at module level already: it is P03's,
         it takes the whole TEXT of `decisions.md` and it returns an ORDERED
         LIST of `(heading, fields)` pairs. The brief's version took the same
-        name for a `dict` keyed by heading -- which would silently let a
-        second `## H-001` overwrite the first in an append-only file, and
-        would be a `TypeError` inside `parse_decisions`, which iterates pairs.
+        name for a `dict` keyed by heading.
+
+        TWO REASONS ONCE GIVEN HERE FOR REFUSING IT WERE FALSE ABOUT THE BRIEF
+        and are corrected rather than dropped: the brief's dict version DOES
+        raise on a repeated heading (`if current in sections: raise ...` is in
+        its quoted body), and iterating a dict under `for did, fields in ...`
+        unpacks each heading character-wise, so the failure is a `ValueError`
+        and not a `TypeError`. Both halves are measured below. The reasons that
+        hold are structural: the return type breaks every existing caller, and
+        a module-level redefinition rebinds the global for all of them.
         """
         sections = state._decision_sections(RESUME_DECISION)
         self.assertIsInstance(sections, list)
-        self.assertEqual([heading for heading, _ in sections], ["H-001"])
+        self.assertEqual([heading for heading, _ in sections], [QUORUM_GRANT])
         headings, fields = sections[0]
-        self.assertEqual(headings, "H-001")
+        self.assertEqual(headings, QUORUM_GRANT)
         self.assertEqual(fields["decision_action"], "task.resume")
         #: And the caller that would break still works over the same bytes.
         self.assertEqual(
-            sorted(state.parse_decisions(RESUME_DECISION)["decisions"]), ["H-001"])
+            sorted(state.parse_decisions(RESUME_DECISION)["decisions"]),
+            [QUORUM_GRANT])
+
+    def test_the_duplicate_heading_guard_is_the_modules_and_raises_value_error(self):
+        """The measured half of the correction above.
+
+        The module's own duplicate guard fires -- so the security-relevant
+        property holds here whatever the brief did -- and the brief's dict
+        shape fails inside `parse_decisions` with a `ValueError`, which is what
+        `for did, fields in <dict>` does to a heading that is not exactly two
+        characters long. A two-character heading would unpack SILENTLY, which
+        is why naming the exception correctly is not pedantry.
+        """
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.parse_decisions(decisions_file(decision_record(),
+                                                 decision_record()))
+        self.assertIn("two ##", str(caught.exception))
+        with self.assertRaises(ValueError) as unpack:
+            for _did, _fields in {"H-001": {}}:
+                pass
+        self.assertNotIsInstance(unpack.exception, TypeError)
 
     def test_no_second_decision_field_reader_was_added(self):
         """`_decision_fields(lines)` was named as a Task 7 product. The module
@@ -8601,13 +8736,13 @@ class FreshAttemptReachabilityTests(TempDirTestCase):
         repo, run_dir = self.blocked()
         state.resume_task(run_dir, task_id="T1", prior_attempt=1,
                           new_owner="impl-2", new_attempt=2,
-                          decision_ref="H-001")
+                          decision_ref=QUORUM_GRANT)
         set_task_state(run_dir, "T1", "test-block-T1-again", state="[?]",
                        question=QUESTION_REF)
         with self.assertRaises(state.TrackerValidationError) as caught:
             state.resume_task(run_dir, task_id="T1", prior_attempt=2,
                               new_owner="impl-3", new_attempt=1,
-                              decision_ref="H-001")
+                              decision_ref=QUORUM_GRANT)
         message = str(caught.exception)
         self.assertIn("already been used", message)
         self.assertIn("attempt-001", message)
@@ -8623,7 +8758,7 @@ class FreshAttemptReachabilityTests(TempDirTestCase):
         repo, run_dir = self.blocked()
         tracker = state.resume_task(run_dir, task_id="T1", prior_attempt=1,
                                     new_owner="impl-2", new_attempt=2,
-                                    decision_ref="H-001")
+                                    decision_ref=QUORUM_GRANT)
         row = task_row(tracker, "T1")
         self.assertEqual(row["attempt"], "attempt-002")
         self.assertIn("attempt-001", row["checkpoints"])
@@ -8640,7 +8775,7 @@ class FreshAttemptReachabilityTests(TempDirTestCase):
         with self.assertRaises(state.TrackerValidationError) as caught:
             state.resume_task(run_dir, task_id="T1", prior_attempt=1,
                               new_owner="impl-2", new_attempt=1,
-                              decision_ref="H-001")
+                              decision_ref=QUORUM_GRANT)
         self.assertIn("already been used", str(caught.exception))
 
     def test_a_fresh_attempt_need_not_be_the_next_integer(self):
@@ -8650,13 +8785,21 @@ class FreshAttemptReachabilityTests(TempDirTestCase):
         repo, run_dir = self.blocked()
         tracker = state.resume_task(run_dir, task_id="T1", prior_attempt=1,
                                     new_owner="impl-2", new_attempt=7,
-                                    decision_ref="H-001")
+                                    decision_ref=QUORUM_GRANT)
         self.assertEqual(task_row(tracker, "T1")["attempt"], "attempt-007")
 
     def test_the_recorded_set_reads_every_side_of_a_resume_marker(self):
         """`resumed:attempt-001->attempt-002@H-001` names two attempts inside
         one checkpoint entry, and a scan that split on `:` and `@` alone would
-        see the pair as one unrecognisable token and spend neither."""
+        see the pair as one unrecognisable token and spend neither.
+
+        THE `->` HALF IS THE ONLY HALF THIS FIXTURE PROVES, and the name once
+        claimed both. Every token here is reachable by a SECOND route --
+        `attempt-001` through `started:`, `attempt-002` left of the second
+        `->`, `attempt-004` from the `Attempt` cell -- so dropping `"@"` from
+        `_CHECKPOINT_DELIMITERS` leaves this assertion green. The case below
+        is the missing half.
+        """
         row = {
             "attempt": "attempt-004",
             "checkpoints": ("started:attempt-001,baseline:attempt-001@" + "a" * 40
@@ -8666,6 +8809,28 @@ class FreshAttemptReachabilityTests(TempDirTestCase):
         self.assertEqual(
             state._recorded_attempts(row),
             {"attempt-001", "attempt-002", "attempt-004"})
+
+    def test_an_attempt_reachable_only_left_of_an_at_sign_is_still_spent(self):
+        """`"@"`'s own half, and it is the M17 argument mirrored.
+
+        `_recorded_attempts`'s domain is every row `_validate_tasks` admits,
+        not only the rows this module writes -- which is exactly why the
+        `Attempt` cell is seeded into the candidate list. `_validate_tasks`
+        nowhere requires `Checkpoints` to mention the `Attempt` cell, so a row
+        whose only record of a spent attempt is a `baseline:<token>@<sha>`
+        entry is admissible; here `attempt-003` is reachable through nothing
+        but the left side of that `@`. Dropping `"@"` from
+        `_CHECKPOINT_DELIMITERS` hands `attempt-003` out a second time, which
+        is fault F6 -- two pieces of work under one identity.
+        """
+        row = {"attempt": "attempt-009",
+               "checkpoints": "baseline:attempt-003@" + "a" * 40}
+        self.assertEqual(state._recorded_attempts(row),
+                         {"attempt-003", "attempt-009"})
+        #: And the refusal the set exists to produce, on the same row.
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._require_fresh_attempt(dict(row, id="T1"), "attempt-003")
+        self.assertIn("already been used", str(caught.exception))
 
     def test_the_attempt_cell_counts_even_when_the_history_omits_it(self):
         """The two cells are not guaranteed to agree. P02's `_validate_tasks`
@@ -8696,13 +8861,20 @@ class ResumeTaskTests(TempDirTestCase):
         repo, run_dir = self.blocked()
         tracker = state.resume_task(
             run_dir, task_id="T1", prior_attempt=1, new_owner="impl-2",
-            new_attempt=2, decision_ref="H-001")
+            new_attempt=2, decision_ref=QUORUM_GRANT)
         row = task_row(tracker, "T1")
         self.assertEqual(row["state"], "[~]")
         self.assertEqual(row["owner"], "impl-2")
         self.assertEqual(row["attempt"], "attempt-002")
-        self.assertIn("resumed:attempt-001->attempt-002@H-001", row["checkpoints"])
-        self.assertEqual(row["question"], "resolved:H-001")
+        self.assertIn(f"resumed:attempt-001->attempt-002@{QUORUM_GRANT}",
+                      row["checkpoints"])
+        #: AND THE QUESTION CELL SURVIVES UNTOUCHED. It was once overwritten
+        #: with `resolved:<ref>`, which destroyed the tracker's only pointer
+        #: to what was asked in the same write that acted on the answer -- so
+        #: a grant bound to the wrong block could not be audited afterwards.
+        #: The resume is recorded where a record belongs: the append-only
+        #: `Checkpoints` cell, asserted one line above.
+        self.assertEqual(row["question"], QUESTION_REF)
 
     def test_the_prior_attempts_history_survives_the_resume(self):
         """`_append_history`, not a rewrite: the reservation's own baseline is
@@ -8713,7 +8885,7 @@ class ResumeTaskTests(TempDirTestCase):
         first = git(repo, "rev-parse", "target")
         tracker = state.resume_task(
             run_dir, task_id="T1", prior_attempt=1, new_owner="impl-2",
-            new_attempt=2, decision_ref="H-001")
+            new_attempt=2, decision_ref=QUORUM_GRANT)
         checkpoints = task_row(tracker, "T1")["checkpoints"]
         self.assertIn("started:attempt-001", checkpoints)
         self.assertIn(f"baseline:attempt-001@{first}", checkpoints)
@@ -8733,7 +8905,7 @@ class ResumeTaskTests(TempDirTestCase):
         self.assertNotEqual(before, moved)
         tracker = state.resume_task(
             run_dir, task_id="T1", prior_attempt=1, new_owner="impl-2",
-            new_attempt=2, decision_ref="H-001")
+            new_attempt=2, decision_ref=QUORUM_GRANT)
         checkpoints = task_row(tracker, "T1")["checkpoints"]
         self.assertIn(f"baseline:attempt-002@{moved}", checkpoints)
         self.assertNotIn(f"baseline:attempt-002@{before}", checkpoints)
@@ -8747,9 +8919,9 @@ class ResumeTaskTests(TempDirTestCase):
             "T1", kind="artifact", write_scope="tree:docs", outputs="docs/out.md"))
         tracker = state.resume_task(
             run_dir, task_id="T1", prior_attempt=1, new_owner="impl-2",
-            new_attempt=2, decision_ref="H-001")
+            new_attempt=2, decision_ref=QUORUM_GRANT)
         checkpoints = task_row(tracker, "T1")["checkpoints"]
-        self.assertIn("resumed:attempt-001->attempt-002@H-001", checkpoints)
+        self.assertIn(f"resumed:attempt-001->attempt-002@{QUORUM_GRANT}", checkpoints)
         self.assertNotIn("baseline:", checkpoints)
 
     def test_requires_the_matching_blocked_attempt(self):
@@ -8757,7 +8929,7 @@ class ResumeTaskTests(TempDirTestCase):
         with self.assertRaises(state.TrackerValidationError) as caught:
             state.resume_task(
                 run_dir, task_id="T1", prior_attempt=9, new_owner="impl-2",
-                new_attempt=2, decision_ref="H-001")
+                new_attempt=2, decision_ref=QUORUM_GRANT)
         self.assertIn("blocked attempt", str(caught.exception))
         self.assertIn("attempt-009", str(caught.exception))
 
@@ -8772,7 +8944,7 @@ class ResumeTaskTests(TempDirTestCase):
         with self.assertRaises(state.TrackerValidationError) as caught:
             state.resume_task(
                 run_dir, task_id="T1", prior_attempt=1, new_owner="impl-2",
-                new_attempt=2, decision_ref="H-001")
+                new_attempt=2, decision_ref=QUORUM_GRANT)
         self.assertIn("blocked attempt", str(caught.exception))
         self.assertIn("[~]", str(caught.exception))
 
@@ -8781,7 +8953,7 @@ class ResumeTaskTests(TempDirTestCase):
         with self.assertRaises(state.TrackerValidationError) as caught:
             state.resume_task(
                 run_dir, task_id="T2", prior_attempt=1, new_owner="impl-2",
-                new_attempt=2, decision_ref="H-001")
+                new_attempt=2, decision_ref=QUORUM_GRANT)
         self.assertIn("blocked attempt", str(caught.exception))
 
     def test_refuses_a_completed_task(self):
@@ -8795,7 +8967,7 @@ class ResumeTaskTests(TempDirTestCase):
         with self.assertRaises(state.TrackerValidationError) as caught:
             state.resume_task(
                 run_dir, task_id="T1", prior_attempt=1, new_owner="impl-2",
-                new_attempt=2, decision_ref="H-001")
+                new_attempt=2, decision_ref=QUORUM_GRANT)
         self.assertIn("blocked attempt", str(caught.exception))
 
     def test_an_unknown_task_is_a_stop(self):
@@ -8803,7 +8975,7 @@ class ResumeTaskTests(TempDirTestCase):
         with self.assertRaises(state.TrackerValidationError) as caught:
             state.resume_task(
                 run_dir, task_id="T9", prior_attempt=1, new_owner="impl-2",
-                new_attempt=2, decision_ref="H-001")
+                new_attempt=2, decision_ref=QUORUM_GRANT)
         self.assertIn("unknown task", str(caught.exception))
 
     def test_the_decision_ref_must_be_a_decision_id(self):
@@ -8823,19 +8995,54 @@ class ResumeTaskTests(TempDirTestCase):
                 self.assertIn("decision", message)
                 self.assertNotIn("invalid transition identity", message)
 
-    def test_a_quorum_decision_id_is_equally_a_decision_ref(self):
-        """The accepting half of the grammar above: `Q-<qid>` is the other
-        namespace, and a screen that admitted only `H-<n>` would make every
-        quorum-answered block unresumable."""
-        repo, run_dir = self.blocked(decisions=decisions_file(decision_record(
-            "Q-abc123def456",
-            {"Provenance": "quorum", "Depth": "1",
-             "Decision action": "task.resume"})))
+    def test_a_human_grant_answers_a_halt_arm_block(self):
+        """The OTHER arm, and the other namespace with it.
+
+        A `halt:` block opened no quorum, so no qid exists and the `Q-<qid>`
+        binding has nothing to compare; the grant asserts the blocker string
+        back and must be a human's. The quorum arm is the default fixture
+        everywhere else in this class, so this is where `H-<n>` is shown to
+        still resume something -- a screen that admitted only one of the two
+        namespaces would make half the blocks in a run unresumable.
+        """
+        repo, run_dir = self.blocked(
+            question=HALT_REF,
+            decisions=decisions_file(halt_decision_record()))
         tracker = state.resume_task(
             run_dir, task_id="T1", prior_attempt=1, new_owner="impl-2",
-            new_attempt=2, decision_ref="Q-abc123def456")
-        self.assertEqual(task_row(tracker, "T1")["question"],
-                         "resolved:Q-abc123def456")
+            new_attempt=2, decision_ref=HALT_GRANT)
+        row = task_row(tracker, "T1")
+        self.assertEqual(row["state"], "[~]")
+        self.assertIn(f"resumed:attempt-001->attempt-002@{HALT_GRANT}",
+                      row["checkpoints"])
+        self.assertEqual(row["question"], HALT_REF)
+
+    def test_the_replay_key_carries_the_decision_ref(self):
+        """A re-issue citing a DIFFERENT decision is a different transition.
+
+        `resume_task`'s docstring argues that `decision_ref` is interpolated
+        into the replay key, and nothing asserted it: with the ref dropped
+        from the key, the call below collides with the one above it, is
+        recognised as a replay, and returns SUCCESS -- having never resolved
+        `H-002`, never checked it was Adopted, never checked its action, its
+        scope, its attempt or its binding. An inert replay that validates
+        nothing and reports success is the worst of the two failure modes.
+
+        The existing replay case re-issues the SAME ref and passes identically
+        either way, which is why it could not catch this.
+        """
+        repo, run_dir = self.blocked(decisions=decisions_file(
+            decision_record(),
+            decision_record("H-002", {"Provenance": "human", "Depth": "0",
+                                      "Axis": "second-axis"})))
+        state.resume_task(run_dir, task_id="T1", prior_attempt=1,
+                          new_owner="impl-2", new_attempt=2,
+                          decision_ref=QUORUM_GRANT)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.resume_task(run_dir, task_id="T1", prior_attempt=1,
+                              new_owner="impl-9", new_attempt=2,
+                              decision_ref="H-002")
+        self.assertIn("blocked attempt", str(caught.exception))
 
     def test_a_refused_resume_leaves_the_tracker_byte_identical(self):
         repo, run_dir = self.blocked()
@@ -8852,10 +9059,10 @@ class ResumeTaskTests(TempDirTestCase):
         repo, run_dir = self.blocked()
         first = state.resume_task(
             run_dir, task_id="T1", prior_attempt=1, new_owner="impl-2",
-            new_attempt=2, decision_ref="H-001")
+            new_attempt=2, decision_ref=QUORUM_GRANT)
         again = state.resume_task(
             run_dir, task_id="T1", prior_attempt=1, new_owner="impl-2",
-            new_attempt=2, decision_ref="H-001")
+            new_attempt=2, decision_ref=QUORUM_GRANT)
         self.assertEqual(again["run"]["revision"], first["run"]["revision"])
         self.assertEqual(task_row(again, "T1")["checkpoints"],
                          task_row(first, "T1")["checkpoints"])
@@ -8870,7 +9077,7 @@ class ResumeTaskTests(TempDirTestCase):
         with self.assertRaises(state.TrackerValidationError) as caught:
             state.resume_task(
                 run_dir, task_id="T1", prior_attempt=1, new_owner="impl-4",
-                new_attempt=2, decision_ref="H-001")
+                new_attempt=2, decision_ref=QUORUM_GRANT)
         message = str(caught.exception)
         self.assertIn("quorum", message)
         self.assertNotIn("write scope", message)
@@ -8884,7 +9091,7 @@ class ResumeTaskTests(TempDirTestCase):
         state.reserve_task(run_dir, task_id="T3", owner="impl-3", attempt=1)
         tracker = state.resume_task(
             run_dir, task_id="T1", prior_attempt=1, new_owner="impl-1",
-            new_attempt=2, decision_ref="H-001")
+            new_attempt=2, decision_ref=QUORUM_GRANT)
         self.assertEqual(task_row(tracker, "T1")["owner"], "impl-1")
         self.assertEqual(len(state._implementation_owners(tracker)), 3)
 
@@ -8907,7 +9114,7 @@ class ResumeTaskTests(TempDirTestCase):
         with self.assertRaises(state.TrackerValidationError) as caught:
             state.resume_task(
                 run_dir, task_id="T1", prior_attempt=1, new_owner="impl-3",
-                new_attempt=2, decision_ref="H-001")
+                new_attempt=2, decision_ref=QUORUM_GRANT)
         message = str(caught.exception)
         self.assertIn("write scope", message)
         self.assertIn("T2", message)
@@ -8930,16 +9137,17 @@ class ResumeTaskTests(TempDirTestCase):
             verification=f"docs/v.md#sha256={'2b' * 32}",
             source_ref="b" * 40, commits="b" * 40, integration="held")
         state.reserve_task(run_dir, task_id="T2", owner="impl-2", attempt=1)
+        publish_question_record(run_dir)
         set_task_state(run_dir, "T2", "test-block-T2", state="[?]",
                        question=QUESTION_REF)
         write_decisions(run_dir, decisions_file(
-            decision_record("H-001", {"Scope": "T2"})))
+            decision_record(QUORUM_GRANT, {"Scope": "T2"})))
         set_task_state(run_dir, "T1", "test-unstart-T1", state="[ ]",
                        **{key: "-" for key in state._TASK_LIFECYCLE})
         with self.assertRaises(state.TrackerValidationError) as caught:
             state.resume_task(
                 run_dir, task_id="T2", prior_attempt=1, new_owner="impl-3",
-                new_attempt=2, decision_ref="H-001")
+                new_attempt=2, decision_ref=QUORUM_GRANT)
         message = str(caught.exception)
         self.assertIn("dependency", message)
         self.assertIn("T1", message)
@@ -8963,15 +9171,19 @@ class ResumeDecisionValidationTests(TempDirTestCase):
     #: tests the sentences rather than the screens.
     OTHER_DIAGNOSES = ("does not resolve", "and not Adopted",
                        "rather than 'task.resume'", "not scoped to task",
-                       "where its answer belongs")
+                       "where its answer belongs", "grants the resume of",
+                       "does not answer what task", "states Blocker",
+                       "halted rather than in quorum", "which is neither",
+                       "which states no blocker", "which names no qid")
 
-    def resume(self, decisions=None, *, decision_ref: str = "H-001",
-               write: bool = True):
+    def resume(self, decisions=None, *, decision_ref: str = QUORUM_GRANT,
+               write: bool = True, question: str = QUESTION_REF):
         repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(),
                                     worker_limit=6)
+        publish_question_record(run_dir)
         state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
         set_task_state(run_dir, "T1", "test-block-T1", state="[?]",
-                       question=QUESTION_REF)
+                       question=question)
         if write:
             write_decisions(run_dir,
                             RESUME_DECISION if decisions is None else decisions)
@@ -9009,40 +9221,37 @@ class ResumeDecisionValidationTests(TempDirTestCase):
         self.refuse("does not resolve", write=False)
 
     def test_rejects_a_superseded_decision(self):
-        """`H-001` is retired beside the record that retires it, so the file
+        """The grant is retired beside the record that retires it, so the file
         parses and the Status screen is the only thing left to refuse it."""
         self.refuse("and not Adopted", decisions=retired_resume_decision())
 
     def test_rejects_a_decision_without_the_task_resume_action(self):
         self.refuse("rather than 'task.resume'",
                     decisions=decisions_file(
-                        decision_record("H-001", {"Decision action": "none"})))
+                        decision_record(QUORUM_GRANT, {"Decision action": "none"})))
 
     def test_rejects_a_quorum_adopt_action_as_a_resume_grant(self):
         """`quorum.adopt` is an adopted decision with a real answer in it, and
         it still authorises no task transition. The action is the authority."""
         self.refuse("rather than 'task.resume'",
                     decisions=decisions_file(decision_record(
-                        "Q-abc123def456",
-                        {"Provenance": "quorum", "Depth": "1",
-                         "Decision action": "quorum.adopt"})),
-                    decision_ref="Q-abc123def456")
+                        QUORUM_GRANT, {"Decision action": "quorum.adopt"})))
 
     def test_rejects_a_decision_scoped_to_another_task(self):
         self.refuse("not scoped to task",
                     decisions=decisions_file(
-                        decision_record("H-001", {"Scope": "T3"})))
+                        decision_record(QUORUM_GRANT, {"Scope": "T3"})))
 
     def test_rejects_a_decision_with_no_scope_at_all(self):
         self.refuse("not scoped to task",
                     decisions=decisions_file(
-                        decision_record("H-001", drop=("Scope",))))
+                        decision_record(QUORUM_GRANT, drop=("Scope",))))
 
     def test_a_scope_naming_several_tasks_includes_this_one(self):
         """The accepting half of the scope rule: `Scope` is a multi-valued
         cell, so an answer that unblocks two tasks unblocks each of them."""
         run_dir, call = self.resume(decisions=decisions_file(
-            decision_record("H-001", {"Scope": "T3,T1"})))
+            decision_record(QUORUM_GRANT, {"Scope": "T3,T1"})))
         self.assertEqual(task_row(call(), "T1")["state"], "[~]")
 
     def test_a_scope_that_merely_contains_the_task_id_is_not_a_scope(self):
@@ -9050,14 +9259,14 @@ class ResumeDecisionValidationTests(TempDirTestCase):
         containment test would let it resume this one."""
         self.refuse("not scoped to task",
                     decisions=decisions_file(
-                        decision_record("H-001", {"Scope": "T10"})))
+                        decision_record(QUORUM_GRANT, {"Scope": "T10"})))
 
     def test_rejects_the_absence_marker_as_an_answer(self):
         """`-` is this schema's empty cell. An adopted record carrying it has
         recorded that a question was asked and nothing that answers it."""
         self.refuse("where its answer belongs",
                     decisions=decisions_file(
-                        decision_record("H-001", {"Answer": "-"})))
+                        decision_record(QUORUM_GRANT, {"Answer": "-"})))
 
     def test_a_generic_approval_is_refused_upstream_by_parse_decisions(self):
         """Not a screen of this task's: `parse_decisions` already refuses a
@@ -9066,10 +9275,233 @@ class ResumeDecisionValidationTests(TempDirTestCase):
         duplicate out of `_validate_decision`, where it would be a second
         check nothing could delete visibly."""
         run_dir, call = self.resume(decisions=decisions_file(
-            decision_record("H-001", {"Answer": "approved"})))
+            decision_record(QUORUM_GRANT, {"Answer": "approved"})))
         with self.assertRaises(state.TrackerValidationError) as caught:
             call()
         self.assertIn("generic approval", str(caught.exception))
+
+
+    # --- the grant is bound to the BLOCK and to the ATTEMPT ---------------
+    #
+    # Everything above binds the grant to the TASK. A decision answering an
+    # entirely different question, scoped to T1 with action `task.resume`,
+    # satisfied every one of those screens and resumed T1 -- with no quorum,
+    # no escalation and no unit of the drift budget that exists to cap machine
+    # decision authority. No code in this module ever writes a `task.resume`
+    # record, so every such grant is hand-authored into an unsigned,
+    # hand-editable file.
+
+    def test_the_grant_must_name_the_attempt_it_releases(self):
+        """A grant is SPENT, not standing. `_require_fresh_attempt` bounds the
+        attempts a task may mint, not the number of times one adopted record
+        may be read as authority -- so without this screen a single grant
+        resumes its task for ever."""
+        message = self.refuse("grants the resume of", decisions=decisions_file(
+            decision_record(QUORUM_GRANT, {"Attempt": "attempt-007"})))
+        self.assertIn("attempt-007", message)
+        self.assertIn("attempt-001", message)
+
+    # --- THREE INPUTS, NOT ONE. A field can be absent, present and empty,
+    # or present and wrong, and only the third is what a naive screen tests.
+    # The first two are where a `.get` DEFAULT decides the answer: read as
+    # `record.get("attempt", row["attempt"])` the absent field compares equal
+    # to itself and the screen passes, which is the whole hole wearing the
+    # screen that closes it as a disguise. Each input gets its own case.
+
+    def test_a_grant_that_names_no_attempt_at_all_is_refused(self):
+        """Input one: the field is ABSENT. This is the case a default of
+        `row["attempt"]` would silently accept -- and the comparison below it
+        would still read as correct, so no mutant aimed at the `if` finds
+        it."""
+        message = self.refuse("grants the resume of", decisions=decisions_file(
+            decision_record(QUORUM_GRANT, drop=("Attempt",))))
+        self.assertIn(repr(state._ABSENT_CELL), message)
+
+    def test_a_grant_whose_attempt_is_the_absence_marker_is_refused(self):
+        """Input two: the field is PRESENT and holds `-`, this schema's empty
+        cell. A record that wrote the field down and left it empty has
+        recorded that a grant names an attempt and named none."""
+        self.refuse("grants the resume of", decisions=decisions_file(
+            decision_record(QUORUM_GRANT, {"Attempt": state._ABSENT_CELL})))
+
+    def test_a_grant_answering_another_question_is_refused(self):
+        """THE CRITICAL CASE. The record resolves, is Adopted, carries
+        `task.resume`, is scoped to T1 and names the blocked attempt -- and it
+        settles a DIFFERENT question. `settle_quorum` mints a quorum decision
+        id as `"Q-" + qid`, so the id carries the identity of the question it
+        answers and the comparison is arithmetic rather than trust."""
+        other = state.derive_qid("Does T1 retry on a transport timeout?",
+                                 "transport-retry")
+        self.assertNotEqual(other, BLOCK_QID)
+        message = self.refuse("does not answer what task", decisions=decisions_file(
+            decision_record(f"Q-{other}", {"Axis": "transport-retry"})),
+            decision_ref=f"Q-{other}")
+        self.assertIn(BLOCK_QID, message)
+
+    def test_a_qid_differing_in_one_character_is_another_question(self):
+        """THE WHOLE COMPARISON, NOT MOST OF IT.
+
+        A qid is twelve hex characters and `derive_qid` is a truncated
+        sha256, so two questions' qids differ in whatever characters they
+        differ in -- there is no prefix that identifies a question. A
+        comparison that dropped ONE character from each side (`[:-1]`)
+        survived the whole suite, because every other case here names a qid
+        that differs from the block's in many places at once. This one
+        differs in exactly the last character, which is the near-miss a hand
+        edit of an unsigned `decisions.md` actually produces.
+        """
+        near = BLOCK_QID[:-1] + ("0" if BLOCK_QID[-1] != "0" else "1")
+        self.assertNotEqual(near, BLOCK_QID)
+        self.assertEqual(near[:-1], BLOCK_QID[:-1])
+        self.assertTrue(state._decision_id(f"Q-{near}"))
+        message = self.refuse("does not answer what task",
+                              decisions=decisions_file(decision_record(
+                                  f"Q-{near}", {"Axis": "near-miss-axis"})),
+                              decision_ref=f"Q-{near}")
+        self.assertIn(BLOCK_QID, message)
+
+    def test_a_reopen_of_the_same_question_is_a_different_block(self):
+        """Re-opens close for free. `derive_reopen_qid` mints a DIFFERENT qid
+        for a re-ask of the very same question on the very same axis, so the
+        answer adopted the first time round cannot resume the re-asked block
+        -- which is the whole of what separates "this was settled" from "a run
+        asking again until it likes the answer"."""
+        reopened = state.derive_reopen_qid(BLOCK_QUESTION, BLOCK_AXIS,
+                                           QUORUM_GRANT)
+        self.assertNotEqual(reopened, BLOCK_QID)
+        message = self.refuse(
+            "does not answer what task",
+            question=f"quorum:{reopened}@{QUESTION_RECORD_PATH}#sha256={'0a' * 32}")
+        self.assertIn(reopened, message)
+
+    def test_a_human_grant_cannot_resume_a_quorum_arm_block(self):
+        """The sharp end stated from the other side: a hand-authored `H-<n>`
+        record can never name a qid, so it can never clear a block that a
+        quorum was opened for. That is the escalation route being preserved
+        rather than a spelling rule."""
+        self.refuse("does not answer what task", decisions=decisions_file(
+            decision_record("H-001", {"Provenance": "human", "Depth": "0"})),
+            decision_ref="H-001")
+
+    def test_a_halt_arm_grant_must_repeat_the_blocker_verbatim(self):
+        """The asserted arm. No quorum was opened, so no qid exists and there
+        is nothing to derive from: the record states the blocker back and the
+        two strings agreeing is the whole of the binding. The docstring and
+        `templates/decisions.md` both say so in those words -- nothing here
+        can tell a correctly copied blocker from a carelessly copied one."""
+        self.refuse("states Blocker", question=HALT_REF,
+                    decisions=decisions_file(halt_decision_record(
+                        overrides={"Blocker": "the release host is fine"})),
+                    decision_ref=HALT_GRANT)
+
+    def test_a_halt_arm_grant_with_no_blocker_field_is_refused(self):
+        """Input one for the asserted arm: the field is ABSENT."""
+        self.refuse("states Blocker", question=HALT_REF,
+                    decisions=decisions_file(
+                        halt_decision_record(drop=("Blocker",))),
+                    decision_ref=HALT_GRANT)
+
+    def test_a_halt_arm_grant_whose_blocker_is_the_absence_marker_is_refused(self):
+        """Input two for the asserted arm: PRESENT and empty."""
+        self.refuse("states Blocker", question=HALT_REF,
+                    decisions=decisions_file(halt_decision_record(
+                        overrides={"Blocker": state._ABSENT_CELL})),
+                    decision_ref=HALT_GRANT)
+
+    def test_a_halt_on_nothing_is_not_a_blocker_a_grant_can_repeat(self):
+        """THE FAIL-OPEN THE TWO ABOVE WOULD OTHERWISE HIDE, and the reason
+        `_ABSENT_CELL` is refused explicitly rather than left to lose the
+        comparison.
+
+        `_validate_tasks` requires a `[?]` row's `Question` cell to not BE
+        `-`; it says nothing about `halt:-`, which is legal and states a halt
+        on nothing. The reason split out of that cell is then `-` -- exactly
+        the value `record.get("blocker", _ABSENT_CELL)` returns for a record
+        with NO `Blocker` field. So the two sides matched, and a grant
+        asserting nothing cleared a halt asserting nothing, through a screen
+        whose comparison was perfectly correct.
+        """
+        message = self.refuse(
+            "which states no blocker",
+            question=f"{state._QUESTION_HALT_ARM}{state._ABSENT_CELL}",
+            decisions=decisions_file(halt_decision_record(drop=("Blocker",))),
+            decision_ref=HALT_GRANT)
+        self.assertIn("nothing here to repeat", message)
+
+    def test_a_halt_naming_no_reason_at_all_is_refused(self):
+        """The same hole reached with an empty reason rather than the marker."""
+        self.refuse("which states no blocker",
+                    question=state._QUESTION_HALT_ARM,
+                    decisions=decisions_file(halt_decision_record()),
+                    decision_ref=HALT_GRANT)
+
+    def test_a_quorum_arm_cell_naming_no_qid_is_refused(self):
+        """The third default of the same shape. An empty qid made the screen
+        compare `decision_ref` against the literal `'Q-'`, which only
+        `_decision_id` two functions away refuses -- an unreachability this
+        screen should not rest on, and a diagnosis naming `qid ''`."""
+        self.refuse("which names no qid",
+                    question=state._QUESTION_QUORUM_ARM)
+
+    def test_a_machine_answer_cannot_settle_a_halt(self):
+        """`Provenance: human` on the asserted arm. A halt opened no question,
+        so there is no qid a quorum answer could be bound to it by -- and a
+        machine answer accepted here would clear a halt with the one thing a
+        halt exists to require absent."""
+        self.refuse("halted rather than in quorum", question=HALT_REF,
+                    decisions=decisions_file(
+                        decision_record(QUORUM_GRANT,
+                                        {"Blocker": HALT_BLOCKER})))
+
+    def test_a_question_cell_in_neither_arm_binds_nothing(self):
+        """One arm or the other, never neither. The cell below is exactly what
+        this transition USED to overwrite the question with -- which is the
+        second reason that overwrite was wrong: it turned a bound block into
+        an unbindable one while destroying the pointer to what was asked."""
+        message = self.refuse("which is neither",
+                              question=f"resolved:{QUORUM_GRANT}")
+        self.assertIn("resolved:", message)
+
+    def test_the_published_question_record_is_a_real_one(self):
+        """What makes every case above capable of failing.
+
+        The harness constant these fixtures replaced pointed at `docs/q.md`,
+        a file nothing ever wrote, so no fixture held a real qid at all. Here
+        the record is on disk where `_question_record` reads it, the module
+        re-derives the qid from the record's own question and axis and agrees
+        with the cell, and the digest in the cell is over the bytes written.
+        """
+        run_dir, _call = self.resume()
+        record = state._question_record(run_dir, BLOCK_QID)
+        self.assertEqual(record["question"], BLOCK_QUESTION)
+        self.assertEqual(record["axis"], BLOCK_AXIS)
+        self.assertEqual(state.derive_qid(record["question"], record["axis"]),
+                         BLOCK_QID)
+        written = (Path(run_dir) / "quorum" / BLOCK_QID / "question.md"
+                   ).read_bytes()
+        self.assertTrue(QUESTION_REF.endswith(
+            hashlib.sha256(written).hexdigest()))
+        self.assertIn(f"quorum:{BLOCK_QID}@", QUESTION_REF)
+
+    def test_the_grant_is_read_from_the_file_the_run_says_is_its_trail(self):
+        """M2. `_decisions_text` reads `<run_dir>/decisions.md` and the `##
+        Run` table separately records a `decisions` pointer; nothing checked
+        they agree. They always do today, because `initialize_run` writes the
+        constant -- but this transition is the first to rest a GRANT on that
+        file, and a pointer written elsewhere would have authority read out of
+        a document the run does not treat as its audit trail."""
+        run_dir, call = self.resume()
+
+        def repoint(tracker: dict) -> dict:
+            tracker["run"]["decisions"] = "docs/superpowers/runs/run-1/other.md"
+            return tracker
+
+        state.locked_tracker_update(run_dir, transition_id="test-repoint",
+                                    mutate=repoint)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            call()
+        self.assertIn("audit trail", str(caught.exception))
+        self.assertIn("other.md", str(caught.exception))
 
     def test_the_audit_trail_is_read_through_its_one_door(self):
         """`_decisions_text` is the one reader of `decisions.md`, and it

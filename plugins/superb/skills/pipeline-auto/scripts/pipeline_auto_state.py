@@ -14105,10 +14105,29 @@ def reserve_task(run_dir, *, task_id: str, owner: str, attempt: int) -> dict:
 # P04 Task 7: resuming an answered block.
 #
 # TRANSITION AUTHORITY COMES FROM AN EXPLICIT ADOPTED DECISION, never from the
-# wording of an answer. `templates/decisions.md`: "`task.resume` names the exact
-# blocked task in `Scope`; that task's `Question` cell must hold this decision's
-# id and this decision's `Status` must be `Adopted`. The action never replaces
-# the identity fields; it is granted on top of them."
+# wording of an answer, and the grant is bound to THE BLOCK AND THE ATTEMPT and
+# not merely to the task. `templates/decisions.md`: "`task.resume` names the
+# exact blocked task in `Scope`, names the attempt it releases in `Attempt`, and
+# its `Status` must be `Adopted` ... A grant must also name THE BLOCK, and how
+# it does that depends on which arm the task's `Question` cell takes."
+#
+# WHAT THE TASK ROW ALREADY SAYS IS THE BINDING, and it was free. `settle_quorum`
+# mints a quorum decision id as `"Q-" + qid` and `_final_event` already refuses
+# an adoption naming any other id, so a quorum decision id CONTAINS the identity
+# of the question it answers. Task 10 writes `quorum:<qid>@<path>#sha256=<digest>`
+# into the `Question` cell -- the qid for the binding, the digest-bound path for
+# the audit trail -- and this transition compares. Without that comparison a
+# decision answering an ENTIRELY DIFFERENT question, scoped to T1 with action
+# `task.resume`, resumes T1: no quorum, no escalation, and not one unit of the
+# drift budget that exists to cap machine decision authority.
+#
+# THE `halt:` ARM HAS NO DERIVATION AVAILABLE and the code must not pretend
+# otherwise. Nothing opened a quorum, so no qid exists and there is no question
+# record to hash; the grant asserts the blocker string and carries
+# `Provenance: human`, and that arm is an ASSERTION BY THE WRITER. Nothing here
+# can tell a correctly copied blocker from a carelessly copied one.
+# `decisions.md` is unsigned and hand-editable, so all of this is
+# TAMPER-EVIDENT BY CROSS-REFERENCE and none of it is tamper-proof.
 #
 # Context compaction and a restarted controller are NOT a blocked-task retry.
 # Neither answers a question, so neither mints an attempt: this transition runs
@@ -14120,8 +14139,20 @@ def reserve_task(run_dir, *, task_id: str, owner: str, attempt: int) -> dict:
 # * `_decision_sections` ALREADY EXISTS -- it is P03's, it takes the whole text
 #   of `decisions.md` and returns an ORDERED LIST of `(heading, fields)` pairs,
 #   and `parse_decisions` iterates that list. The brief's version was a `dict`
-#   keyed by heading, which would be a `TypeError` inside `parse_decisions` and
-#   would let a second `## H-001` overwrite the first in an append-only file.
+#   keyed by heading. TWO REASONS ONCE WRITTEN HERE FOR REFUSING IT WERE FALSE
+#   ABOUT THE BRIEF AND ARE CORRECTED RATHER THAN DROPPED, because in this
+#   build a justification that does not hold is itself the defect: the brief's
+#   dict version DOES raise on a repeated heading -- its quoted body carries
+#   `if current in sections: raise TrackerValidationError(...)` -- so it would
+#   NOT have let a second `## H-001` overwrite the first; and iterating a dict
+#   under `for did, fields in ...` unpacks each heading CHARACTER-WISE, so the
+#   failure is a `ValueError`, not a `TypeError` (and a two-character heading
+#   would unpack silently, which is why the diagnosis matters). The reasons
+#   that DO hold: it returns a `dict` where every existing caller iterates
+#   pairs, a module-level redefinition rebinds the global for `parse_decisions`
+#   and every other caller, its heading grammar `(?:H|Q|D)-[0-9A-Za-z]+` admits
+#   a third namespace `_decision_id` refuses and a `Q-` body no qid can be, and
+#   it needs `re`, which `ALLOWED_IMPORTS` does not hold.
 #   CONSUMED HERE, never re-declared.
 # * `_decision_fields(lines)` IS NOT BUILT. The brief wrote a decision record as
 #   a `| Field | Value |` table and needed a reader for it. That is not this
@@ -14158,6 +14189,21 @@ RESUME_ACTION = "task.resume"
 #: because it is also a character INSIDE `attempt-001`: splitting on it would
 #: destroy every token this scan exists to find.
 _CHECKPOINT_DELIMITERS = (":", "@", "->")
+
+#: The two arms a blocked task's `Question` cell may take, and the whole of
+#: them. Task 10 renders `quorum:<qid>@<path>#sha256=<digest>` and
+#: `halt:<reason>`; `_validate_decision` splits on the same two prefixes. They
+#: are constants and not literals because a grant is bound to a block through
+#: this vocabulary, and two spellings of it would be two answers to "what is
+#: this task blocked on" in the one cell that says so.
+#:
+#: `-` IS NEITHER ARM and is not listed as a third: P02's `_validate_tasks`
+#: already refuses a `[?]` row whose `Question` cell is the absence marker, so
+#: a row reaching here carries something. What it does NOT guarantee is that
+#: the something is one of these two, which is why the else-branch below is a
+#: stop rather than a pass.
+_QUESTION_QUORUM_ARM = "quorum:"
+_QUESTION_HALT_ARM = "halt:"
 
 
 def _recorded_attempts(row: dict) -> set:
@@ -14216,31 +14262,108 @@ def _require_fresh_attempt(row: dict, token: str) -> None:
             "one identity")
 
 
-def _validate_decision(run_dir, decision_ref: str, task_id: str) -> dict:
-    """The adopted `task.resume` grant for this task, or a stop.
+def _validate_decision(run_dir, row: dict, decision_ref: str) -> dict:
+    """The adopted `task.resume` grant for THIS BLOCK, or a stop.
 
-    THE BRIEF'S `tracker` ARGUMENT IS NOT TAKEN, on `_approved_definition`'s
-    precedent one task back: nothing here would read it. `_decisions_text` is
-    the ONE door onto `decisions.md` -- the budget, the projection and
-    `open_quorum` all read the trail through it -- and a second resolver here
-    would be a fourth reader free to spell "this run has decided nothing"
-    differently from the other three. In particular it is what separates a
-    missing file from a name that exists and cannot be read: folding a
-    directory, a dangling link or a FIFO back into "no decisions yet" would make
-    an unreadable audit trail read as an unrestricted grant.
+    THE ROW IS TAKEN, NOT THE TASK ID, and that REOPENS THIS TASK'S OWN RULING
+    that the brief's `tracker` argument should be dropped because nothing here
+    would read it. That ruling was right while the screens were four facts
+    about a record; it stops being right the moment a screen has to read the
+    row's `Attempt` and `Question` cells. The row is already in hand three
+    lines earlier inside `mutate`, so taking it costs nothing, and re-reading
+    the tracker here would add a second reader of a table the caller holds.
 
-    FOUR SCREENS, AND NOT ONE OF THEM IS A DUPLICATE OF `parse_decisions`. That
-    parser already refuses an unknown action, a generic approval, a provenance
-    that disagrees with the id, an Open record carrying an authority, and a
-    `Superseded` record nothing supersedes. What is specific to this grant is
-    only: it resolves, it is the live record, it carries the resume action, and
-    it names this task.
+    The `tracker` argument itself is still NOT taken, and for the reason the
+    brief's version failed rather than the reason once written down: the brief
+    resolved the file itself and reported an unresolvable one as "decisions
+    file is missing". `_decisions_text` is the ONE door onto `decisions.md` --
+    the budget, the projection and `open_quorum` all read the trail through it
+    -- and it is what separates a missing file from a name that exists and
+    cannot be read. Folding a directory, a dangling link or a FIFO back into
+    "no decisions yet" would make an unreadable audit trail read as an
+    unrestricted grant.
 
-    The fifth is the absence marker, which `parse_decisions` does NOT refuse:
-    `-` is a non-empty string and is not a rubber stamp, so it passes every
-    upstream screen while recording that a question was asked and nothing that
-    settles it.
+    SEVEN SCREENS, AND NOT ONE OF THEM IS A DUPLICATE OF `parse_decisions`.
+    That parser already refuses an unknown action, a generic approval, a
+    provenance that disagrees with the id, an Open record carrying an
+    authority, and a `Superseded` record nothing supersedes. What is specific
+    to this grant is: it resolves, it is the live record, it carries the resume
+    action, it names this task, it is not the absence marker, IT NAMES THE
+    ATTEMPT IT RELEASES, and IT NAMES THE BLOCK.
+
+    The absence marker is one `parse_decisions` does NOT refuse: `-` is a
+    non-empty string and is not a rubber stamp, so it passes every upstream
+    screen while recording that a question was asked and nothing that settles
+    it.
+
+    THE ATTEMPT, BECAUSE A GRANT IS SPENT AND NOT STANDING. Without it a single
+    adopted `task.resume` authorises unlimited resumes of its task for ever:
+    `_require_fresh_attempt` bounds the ATTEMPTS a task may mint, not the
+    GRANTS one record may be read as. The row's `Attempt` cell is compared
+    rather than the caller's `prior_attempt`, and the two are the same string
+    by construction -- `mutate` refuses the row three lines earlier unless
+    `row["attempt"] == prior_token` -- so this reads the fact from the tracker
+    instead of from the caller, and there is no second value to keep in step.
+
+    THE BLOCK, THROUGH THE QUESTION CELL, AND THE TWO ARMS ARE NOT THE SAME
+    KIND OF THING.
+
+    * `quorum:<qid>@...` is DERIVED. `settle_quorum` mints a quorum decision id
+      as `"Q-" + qid` and `_final_event` already refuses an adoption naming any
+      other id, for exactly this reason -- so a quorum decision id contains the
+      identity of the question it answers and the comparison is arithmetic, not
+      trust. Re-opens close for free: `derive_reopen_qid` mints a DIFFERENT
+      qid, so a stale answer cannot resume a re-asked block.
+    * `halt:<reason>` is ASSERTED. No quorum was opened, so no qid exists and
+      there is no question record to hash. The grant repeats the reason in a
+      `Blocker` field and must carry `Provenance: human`. NOTHING HERE CAN TELL
+      A CORRECTLY COPIED BLOCKER FROM A CARELESSLY COPIED ONE, and the template
+      says so in the same words rather than claiming an enforcement that does
+      not exist.
+
+    ONE ARM OR THE OTHER, NEVER NEITHER. `_validate_tasks` requires a `[?]`
+    row's `Question` cell to be something, and nothing anywhere requires it to
+    be one of these two -- so a cell in neither form reaches here, binds the
+    grant to nothing, and is a stop.
+
+    NO DEFAULT HERE MAY MAKE ITS OWN COMPARISON VACUOUS, and that is a rule
+    about the `.get` and NOT about the `if` below it. A field read as
+    `record.get(name, <the very thing it is about to be compared with>)` turns
+    an ABSENT field into a PASS: the screen still reads as a guarantee, the
+    comparison is still correct, and no mutant aimed at that comparison finds
+    anything. So every optional field defaults to `_ABSENT_CELL`, which is a
+    value no legal counterpart can equal. BOTH DEFAULTS ARE PINNED -- a mutant
+    re-pointing either at its comparand dies.
+
+    WHAT IS REFUSED EXPLICITLY IS THE CELL, NOT THE RECORD, and that split was
+    measured rather than argued. An explicit `granted_attempt == _ABSENT_CELL`
+    and an explicit `asserted == _ABSENT_CELL` were both written first and
+    both SURVIVED as mutants: with the defaults above they are unreachable
+    second refusals of an input the comparison already refuses, and a screen
+    that can be deleted with nothing going red is one this build deletes. The
+    two CELL-side screens are the opposite -- each kills its mutant:
+
+    * `halt:-` IS A LEGAL CELL. `_validate_tasks` refuses a `[?]` row whose
+      `Question` is `-` and says nothing about a halt ON `-`, so the reason
+      split out of that cell is the absence marker itself -- which is exactly
+      what a record with no `Blocker` field reads back as. The two sides
+      matched, and a grant asserting nothing cleared a halt asserting nothing
+      through a comparison that was perfectly correct. The cell must state a
+      blocker for there to be anything to repeat.
+    * `quorum:` WITH NOTHING AFTER IT yields an empty qid, and the comparison
+      then asks whether `decision_ref` is the literal `Q-`. `_decision_id`
+      refuses that before the lock, so it was unreachable -- but only by a
+      screen two functions away, which is not a property this one should rest
+      on, and the diagnosis it produced named `qid ''`.
+
+    AND NONE OF THIS IS TAMPER-PROOF. `decisions.md` is unsigned and
+    hand-editable and no code in this module ever writes a `task.resume`
+    record, so every grant is hand-authored. What the screens buy is that a
+    grant clearing a block BY ACCIDENT -- a stale answer, another question's
+    answer, a spent grant read a second time -- is caught; a writer who means
+    to author a record that satisfies all seven can.
     """
+    task_id = row["id"]
     records = parse_decisions(_decisions_text(Path(run_dir)))["decisions"]
     record = records.get(decision_ref)
     if record is None:
@@ -14271,7 +14394,89 @@ def _validate_decision(run_dir, decision_ref: str, task_id: str) -> dict:
             "belongs; that is this schema's empty cell, so an adopted record "
             "carrying it has written down that a question was asked and "
             "nothing at all that settles it")
+    granted_attempt = record.get("attempt", _ABSENT_CELL).strip()
+    if granted_attempt != row["attempt"]:
+        raise TrackerValidationError(
+            f"decision {decision_ref} grants the resume of attempt "
+            f"{granted_attempt!r} and task {task_id} is blocked at "
+            f"{row['attempt']!r}; a grant is spent on the attempt it names, and "
+            "one naming only the task would authorise every resume of that "
+            "task for ever")
+    cell = row["question"]
+    if cell.startswith(_QUESTION_QUORUM_ARM):
+        qid = cell[len(_QUESTION_QUORUM_ARM):].split("@", 1)[0].strip()
+        if not qid or qid == _ABSENT_CELL:
+            raise TrackerValidationError(
+                f"task {task_id} is blocked on {cell!r}, which names no qid; "
+                "the derived arm binds a grant to the identity of the question "
+                "it answers, and a cell naming no question identifies nothing "
+                "for a grant to be bound to")
+        if decision_ref != f"Q-{qid}":
+            raise TrackerValidationError(
+                f"decision {decision_ref} does not answer what task {task_id} "
+                f"is blocked on: that block names qid {qid!r}, whose answer is "
+                f"'Q-{qid}'. A quorum decision id is 'Q-' followed by the qid "
+                "it settles, so a grant naming any other id settled another "
+                "question -- and a re-open derives a new qid, so a stale "
+                "answer cannot resume a re-asked block")
+    elif cell.startswith(_QUESTION_HALT_ARM):
+        blocker = cell[len(_QUESTION_HALT_ARM):].strip()
+        if not blocker or blocker == _ABSENT_CELL:
+            raise TrackerValidationError(
+                f"task {task_id} is halted on {cell!r}, which states no "
+                "blocker; the asserted arm binds a grant by having the record "
+                "repeat the reason back, and there is nothing here to repeat")
+        if record["provenance"] != "human":
+            raise TrackerValidationError(
+                f"decision {decision_ref} is a {record['provenance']} answer "
+                f"and task {task_id} is halted rather than in quorum; a halt "
+                "opened no question, so there is no qid to bind a machine "
+                "answer to it and the arm is a human assertion or nothing")
+        asserted = record.get("blocker", _ABSENT_CELL).strip()
+        if asserted != blocker:
+            raise TrackerValidationError(
+                f"decision {decision_ref} states Blocker {asserted!r} and task "
+                f"{task_id} is halted on {blocker!r}; this arm is an ASSERTION "
+                "by whoever wrote the record and not a derivation -- no qid "
+                "exists to derive from -- so the two strings agreeing is the "
+                "whole of the binding there is")
+    else:
+        raise TrackerValidationError(
+            f"task {task_id} is blocked on {cell!r}, which is neither "
+            f"{_QUESTION_QUORUM_ARM!r} nor {_QUESTION_HALT_ARM!r}; a grant can "
+            "be bound to a question record or to an asserted halt, and a cell "
+            "in neither form binds it to nothing")
     return record
+
+
+def _require_decisions_pointer(tracker: dict, run_dir) -> None:
+    """The run's own `decisions` pointer names the file the grant is read from.
+
+    `_decisions_text` reads `<run_dir>/decisions.md` and `initialize_run`
+    separately records `decisions` as a repo-root-relative path. Nothing
+    validated that the two agree, and today they always do because
+    `initialize_run` writes the constant -- so this is LATENT rather than live.
+    It is asked HERE, at the first caller for which it matters, because
+    `resume_task` is the first transition to rest a GRANT on that file: if the
+    pointer is ever written differently, the authority to restart a task would
+    be read out of a file the run does not consider its audit trail, and
+    nothing would object.
+
+    ASKED, NOT RESOLVED THROUGH. Pointing `_decisions_text` at the field
+    instead would make the one door's answer depend on a tracker cell for the
+    budget and the projection too, and those two read the trail on runs this
+    transition never touches. Agreement is the property that matters; which of
+    the two spellings wins is not this task's to decide.
+    """
+    stated = _run_field(tracker, "decisions")
+    if (_repo_dir(tracker) / stated).resolve() != (
+            Path(run_dir) / _DECISIONS_FILE).resolve():
+        raise TrackerValidationError(
+            f"this run records its audit trail at {stated!r} and a resume "
+            f"grant is read from {_DECISIONS_FILE!r} inside the run directory; "
+            "the two must name one file, because a grant read from anywhere "
+            "else is authority taken from a document the run does not treat as "
+            "its audit trail")
 
 
 def resume_task(run_dir, *, task_id: str, prior_attempt: int, new_owner: str,
@@ -14293,11 +14498,24 @@ def resume_task(run_dir, *, task_id: str, prior_attempt: int, new_owner: str,
     "that task was wrong, redo it", so the reservation's old verdict is not
     evidence about the state the resume runs in.
 
+    THE `Question` CELL IS LEFT EXACTLY AS IT WAS, and that is a correction
+    rather than an omission. This transition once overwrote it with
+    `resolved:<ref>`, which destroyed the tracker's only pointer to WHAT WAS
+    ASKED in the same write that acted on the answer -- so a grant bound to the
+    wrong block could not even be audited afterwards. Nothing consumes that
+    cell on a `[~]` row: `_validate_tasks` constrains it only for `[ ]` (which
+    must carry no lifecycle state at all) and for `[?]` (which must carry
+    something), and the resume is already recorded where a record belongs --
+    `resumed:<prior>-><new>@<decision>` in the APPEND-ONLY `Checkpoints` cell.
+    Overwriting bought a second, lossy copy of a fact the history already held.
+
     `decision_ref` IS SCREENED BEFORE THE LOCK IS EVER TAKEN, and by the same
     `_decision_id` grammar `_validate_tasks` holds a task's `Decisions` cell to.
-    It is interpolated into the replay key, so an unscreened one would come back
-    from `locked_tracker_update` as `invalid transition identity` -- a diagnosis
-    about a transition name, handed to a caller that named a decision wrongly.
+    It is interpolated into the replay key -- which is what makes a re-issue
+    citing a DIFFERENT decision a new transition rather than an inert replay of
+    the first -- so an unscreened one would come back from
+    `locked_tracker_update` as `invalid transition identity`: a diagnosis about
+    a transition name, handed to a caller that named a decision wrongly.
     """
     token = _validate_assignment(task_id, new_owner, new_attempt)
     prior_token = _attempt_token(prior_attempt)
@@ -14318,7 +14536,8 @@ def resume_task(run_dir, *, task_id: str, prior_attempt: int, new_owner: str,
                 f"{prior_token!r}. A compaction or a restarted controller is "
                 "not a blocked-task retry and mints no attempt")
         _require_fresh_attempt(row, token)
-        _validate_decision(run_dir, decision_ref, task_id)
+        _require_decisions_pointer(tracker, run_dir)
+        _validate_decision(run_dir, row, decision_ref)
         definition = _approved_definition(tracker, task_id)
         _require_dependencies_complete(tracker, definition)
         _require_no_scope_conflict(tracker, definition)
@@ -14334,7 +14553,6 @@ def resume_task(run_dir, *, task_id: str, prior_attempt: int, new_owner: str,
             _key("Owner"): new_owner,
             _key("Attempt"): token,
             _key("Checkpoints"): _append_history(row["checkpoints"], checkpoint),
-            _key("Question"): f"resolved:{decision_ref}",
         })
         return _replace_task(tracker, updated)
 

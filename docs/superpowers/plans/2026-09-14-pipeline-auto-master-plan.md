@@ -465,6 +465,39 @@ forbids any of them.** A worker could satisfy any of the above with
 exists to state. The screen must refuse the whole family **by name**, enumerated
 from `dir(os)` rather than from a remembered list.
 
+## Execution policy from 2026-09-21 — risk-graded review
+
+Set by the user after ~35 of 92 tasks. The full bar was earning its keep on
+enforcement code and over-serving everything else, at roughly twice the
+remaining budget. It is now graded.
+
+**FULL bar** — implementer, independent review, fix rounds to zero findings,
+independent verification of the fix, and mutation on every screen. Applies to
+any task touching **authority, write scope, evidence integrity, digests, the
+ref store, or git**. Concretely in what remains: P04 Tasks 8-11, P05's gate and
+ratchet tasks, P06's master gate and independence checks.
+
+**LIGHT bar** — implementer plus one independent review; no separate
+verification round; mutation only where the reviewer or the controller flags a
+screen. Applies to accessors, renderers, templates, prose and walkthroughs:
+most of P07, P08 and P09, and the reporting halves of P05/P06.
+
+**Mutation is not the thing to cut.** It is the only technique that has
+reliably caught this build's dominant defect — a test that passes without
+exercising what it names, 28+ instances, nearly none found by a test anyone
+wrote. Cutting review rounds is cheaper and safer than cutting mutation.
+
+**Design questions: three brains only where the answer affects authority,
+scope, or evidence integrity.** Everything else goes to one well-briefed agent
+that reports options with evidence, and the controller rules. The three-brain
+rounds run so far converged every time; their value came from *decorrelated
+reading assignments*, so a single agent must be given the reading plan
+explicitly, not just the question.
+
+**Phase order is unchanged** (P04 → P05 → P06 → P07 → P08 → P09). Pulling P07
+forward to get an invocable skill sooner was offered and declined: interfaces
+settle before the prose that documents them.
+
 ## Cross-phase clarifications
 
 Resolved after the phase plans were written, where two phases needed the same

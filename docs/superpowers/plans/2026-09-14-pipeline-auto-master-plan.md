@@ -757,7 +757,23 @@ is then trusted by everyone downstream. The seventeen configs recorded as
 "measured inert" in this plan are each only as good as the repository they were
 measured against.
 
-**So: when recording a mechanism as inert, state what the fixture contained that
+**The rule in prose was not enough — it was violated by the agent that wrote
+it, one screen away, within the same commit.** Task 11 diagnosed Task 8's
+vacuous `log.showSignature` measurement, then shipped a hostile-config test that
+sets `log.showSignature=true` over a fixture with **no signed commit**. Its
+review caught it as a surviving mutant: removing `--no-show-signature` from the
+argv killed nothing.
+
+**So the check is mechanical, not a matter of remembering: a pin must have a
+mutant, and that mutant must die.** Remove the flag, run the suite. If nothing
+fails, the pin is unproved and the measurement behind it was vacuous —
+regardless of how the test is named or what the docstring claims. A
+"hostile config" test that passes with the pin removed has measured nothing.
+
+This is why the mutation pass is not optional on argv pins specifically: it is
+the only thing that distinguishes a measured pin from a remembered one.
+
+**And when recording a mechanism as inert, state what the fixture contained that
 would have let it fire.** A signed commit for `log.showSignature`, a submodule
 for `diff.ignoreSubmodules`, a rename for `--no-renames`, a replace ref for
 `core.useReplaceRefs`. If you cannot name it, you have not measured the

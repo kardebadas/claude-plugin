@@ -15002,6 +15002,30 @@ def _repo_argument(repo) -> str:
         raise TrackerValidationError(
             "the repository location carries a NUL byte, which no argv element "
             "may hold and which is this transcript grammar's record separator")
+    #: THE SAME HARM AS THE NUL, THROUGH THE OTHER DOOR, and it was found by
+    #: Task 11's totality corpus rather than by this function's own. A lone
+    #: surrogate that is NOT one of `surrogateescape`'s -- `"\ud800"`, which
+    #: no filesystem produced -- makes `os.fsencode` raise `UnicodeEncodeError`
+    #: inside `subprocess`, in the CONTROLLER's process, outside this module's
+    #: exception family and far from the tracker cell that was wrong. That is
+    #: the identical sentence the NUL screen above is justified by, so it is
+    #: the identical screen.
+    #:
+    #: `os.fsencode` RATHER THAN `.encode("utf-8")`, and the difference is a
+    #: live repository rather than a nicety: a POSIX path holding bytes that
+    #: are not UTF-8 arrives in Python as `surrogateescape` code points in
+    #: `\udc80`-`\udcff`, `subprocess` encodes those back to the original
+    #: bytes without complaint, and `str.encode` would refuse the legitimate
+    #: repository this module is being pointed at. The screen must be the one
+    #: the consumer actually performs.
+    try:
+        os.fsencode(repo)
+    except (UnicodeEncodeError, ValueError) as exc:
+        raise TrackerValidationError(
+            f"the repository location {repo!r} cannot be spelled as an argv "
+            f"element ({type(exc).__name__}: {exc}); an unencodable name would "
+            "raise inside the controller's process rather than here, which is "
+            "the harm the NUL screen above exists to prevent") from exc
     return repo
 
 
@@ -15171,9 +15195,30 @@ def _range_argv(location: str, base: str, tip: str) -> tuple:
     controller's locale, which is the harm `_repo_argument`'s NUL screen
     exists to prevent.
 
+    A SIXTH WAS FOUND BY TASK 11 AND THE ENTRY BELOW USED TO CLAIM IT WAS
+    INERT. `log.showSignature` was measured against this argv, found inert,
+    and written down as inert -- and the measurement was taken over a history
+    with no signed commit in it, which measures nothing. Re-measured on git
+    2.39.5 over a commit carrying a `gpgsig` header: with `log.showSignature
+    = true` in the repository's own config, gpg's verification text is written
+    to STDOUT and lands INSIDE the transcript -- thirteen `gpg:` lines in the
+    first record's BODY, where `_parse_range_transcript` reads them as paths,
+    and before the first separator when the signed commit is the only record,
+    where the transcript is refused as not beginning at one. Both ends are
+    wrong in the SAFE direction -- the injected lines are claimed by no scope,
+    so the range is refused -- but the refusal blames the worker's range for
+    the repository's config, which is a false accusation against an honest
+    worker and, in a real run, an unfindable one. `--no-show-signature` is a
+    `log` option, so it outranks every config source inside the repository:
+    measured holding against `.git/config`, a command-line `-c`, an
+    `[include] path =` file, a `.git/config.worktree` under
+    `extensions.worktreeConfig`, and `gpg.format` -- unlike
+    `--no-replace-objects`, no file reaches past it and no second token is
+    needed.
+
     Measured and NOT pinned, with the reason: `log.abbrevCommit`,
-    `log.decorate`, `log.showSignature` and `log.follow` are inert against a
-    custom `--format` and an empty pathspec; `diff.orderFile` changes the
+    `log.decorate` and `log.follow` are inert against a custom `--format` and
+    an empty pathspec; `diff.orderFile` changes the
     order of paths inside one record and the union is sorted here anyway;
     `diff.external` is not consulted by `--name-only`; `log.diffMerges` can
     only ADD paths for a merge, and a merge inside the range is refused on its
@@ -15202,8 +15247,8 @@ def _range_argv(location: str, base: str, tip: str) -> tuple:
         "git", "--no-replace-objects", "-C", location,
         "-c", "core.quotePath=true", "-c", "core.useReplaceRefs=false", "log",
         "--reverse", "--no-renames", "--no-relative",
-        "--ignore-submodules=none", "--name-only", "--no-color",
-        _RANGE_FORMAT, f"{base}..{tip}", "--",
+        "--ignore-submodules=none", "--name-only", "--no-show-signature",
+        "--no-color", _RANGE_FORMAT, f"{base}..{tip}", "--",
     ),)
 
 
@@ -16405,3 +16450,625 @@ def import_worker_result(run_dir, *, result_path, run_command) -> dict:
         return _replace_task(tracker, updated)
 
     return locked_tracker_update(home, transition_id=transition, mutate=mutate)
+
+
+# ---------------------------------------------------------------------------
+# P04 Task 11: integration -- faults F9 and F10.
+#
+# One worktree per concurrently dispatched implementer, merged ``--no-ff`` in
+# task order. ``--no-ff`` is LOAD-BEARING: a fast-forward collapses the merge
+# commit and with it the boundary clause 2 of the ancestry predicate checks. A
+# conflict is a HARD STOP, because under typed write-scope validation a
+# conflict should be impossible and is therefore evidence that a scope
+# declaration was wrong.
+#
+# THE BRIEF FOR THIS TASK NAMED SIX CALLS THAT CANNOT RUN -- ``_git`` three
+# times and ``_git_out`` three times, both ``subprocess.run`` wrappers -- and
+# consumed a seventh name, ``_commit_parents``, that would have to read a
+# commit object. ``subprocess`` is refused by name, the ``os`` command family
+# is refused by an AST screen that enumerates it from ``dir(os)``, and ``zlib``
+# is off the import list, so no object is ever decompressed. The shape is
+# therefore the one Tasks 8 and 10 built and the master plan's quorum ruled:
+# THE MODULE EMITS THE EXACT ARGV, THE CONTROLLER EXECUTES IT, AND THE MODULE
+# VALIDATES THE TRANSCRIPT.
+#
+# THREE OF THE BRIEF'S GIT CALLS NEEDED NO GIT AT ALL, and moving them off it
+# makes each answer strictly stronger rather than merely cheaper:
+#
+#   * ``MERGE_HEAD`` is already in ``_PSEUDO_REFS`` and the ref-store reader
+#     answers it today, so "is this tree mid-merge" is a file this module
+#     reads itself -- no controller, no transcript, nothing to fabricate.
+#   * THE COLLIDING TASK IS THE ONE WHOSE DECLARED SCOPE CLAIMS THE CONFLICTED
+#     PATH. The brief reached for ``git show --name-only`` over each recorded
+#     commit, which answers "who touched it"; the message's whole claim is that
+#     a SCOPE DECLARATION was wrong, and ``_path_in_scope`` answers exactly
+#     that question against the approved plan.
+#   * "the merge commit is an ancestor of the target branch" becomes
+#     ``merge == _resolved_commit(repo, target_branch)`` read off the ref
+#     store. That is DERIVED rather than attested, and it is strictly stronger
+#     than the ancestry it replaces -- every commit equal to the tip is an
+#     ancestor of it and not conversely. The walk is kept only as the fallback
+#     for the case the equality cannot cover: the tip has moved on because a
+#     later task integrated first.
+#
+# AND ``merge --abort`` MUST NOT RETURN. The module never writes to the user's
+# repository; it raises the hard stop and NAMES the abort as the controller's
+# next action. Running it here would be this module taking a write it has no
+# authority for, in the one situation where the evidence most needs preserving.
+# ---------------------------------------------------------------------------
+
+#: ``MERGE_HEAD``, ALIASED out of the pseudo-ref tuple the ref-store reader
+#: already searches rather than re-typed. A second spelling would be a second
+#: answer to "which name says a merge is in progress", and the one that goes
+#: stale is silent.
+_MERGE_HEAD = _PSEUDO_REFS[3]
+
+#: A ``--no-ff`` merge has EXACTLY two parents. One is a fast-forward, which is
+#: fault F10; three or more is an octopus, which merges several tasks into one
+#: commit and destroys the per-task boundary just as thoroughly.
+_MERGE_PARENTS = 2
+
+#: ``<gitdir>/info/grafts``. Read by this module rather than pinned on the
+#: command line, and the reason is measured rather than assumed -- see
+#: ``_graft_screen``.
+_GRAFT_DIRNAME = "info"
+_GRAFT_FILENAME = "grafts"
+
+#: The checkpoint this transition writes, keyed by the attempt token exactly as
+#: ``started:``, ``baseline:``, ``range:`` and ``completed:`` are. It is NOT
+#: written to ``Verification``: that cell holds digest-bound typed PASS
+#: DOCUMENTS a later phase resolves with ``resolve_evidence``, and an
+#: ``integrated:`` marker is not a document -- writing it there would put an
+#: entry nothing can resolve to a file in the one cell whose whole contract is
+#: that every entry resolves. The ``Integration`` column already carries the
+#: commit; the checkpoint carries WHICH ATTEMPT integrated it, which no column
+#: holds.
+_INTEGRATED_CHECKPOINT = "integrated:"
+
+#: The two words the hard stop is recognised by. Spelled as constants because
+#: the controller branches on the first and performs the second, and a message
+#: is the only channel this module has to either.
+_HARD_STOP = "HARD STOP"
+_ABORT_ACTION = "git merge --abort"
+
+
+def _integration_pins(location: str) -> tuple:
+    """The pinned ``git`` prefix every command in this block is built on.
+
+    A PIN IS ONLY A PIN IF IT CANNOT BE UNDONE FROM INSIDE THE REPOSITORY, and
+    each of these was measured on this machine's git (2.39.5) against a real
+    repository rather than read off documentation.
+
+    ``-c core.useReplaceRefs=false`` IS THE LOAD-BEARING ONE HERE, and the
+    hazard it closes is fault F10 itself rather than a path-hiding bypass.
+    Measured: take an ordinary fast-forward commit with ONE parent, build a
+    decoy with ``git commit-tree`` carrying the same tree, the same first
+    parent and the TASK BRANCH TIP as a second parent, and ``git replace -f``
+    the real commit with it. ``%P`` then prints two parents whose second is
+    exactly the tip clause 2 looks for -- a fast-forward presented as a
+    ``--no-ff`` merge, with no config edit and no object forgery, using
+    ordinary porcelain in a repository the worker owns. The reverse also
+    measured: replacing a real merge with a single-parent decoy hides the
+    second parent. ``--no-replace-objects`` ALONE IS DEFEATED by
+    ``core.useReplaceRefs = true`` in the repository's own config, and the
+    ``-c`` is the highest-precedence source that no file can reach past --
+    exactly as Task 8 measured for the path list. NEITHER TOKEN IS REDUNDANT.
+
+    ``-c core.commitGraph=false`` is added HERE and is not in Task 8's argv.
+    The commit-graph is a cache of the parent and reachability data these two
+    commands are entirely about, it is an unsigned file in
+    ``.git/objects/info/`` that the worker can write, and git does not verify
+    it before trusting it. No witness is recorded for a forged one: the cheap
+    construction -- write grafts, ``git commit-graph write``, delete the grafts
+    -- is refused by git itself, which declines to write a graph while grafts
+    or replace refs are in effect (measured). The pin costs nothing and closes
+    the channel by precedence; it is recorded as applied-without-witness rather
+    than claimed as proved.
+
+    ``--no-show-signature`` is added HERE for a hazard that IS witnessed.
+    Measured: with a commit carrying a ``gpgsig`` header and
+    ``log.showSignature = true`` in the repository's own config, gpg's
+    verification text is written to STDOUT, ahead of the record separator, and
+    lands inside the transcript this module parses. It is a config file, so a
+    command-line flag outranks it. (Task 8's ``_range_argv`` had the same
+    exposure and failed CLOSED there -- the injected lines arrive where a path
+    list is read, so they are refused as out-of-scope paths -- but the
+    diagnosis blamed the worker's range for the repository's config. It now
+    carries the same token; ``PathSpellingConfigTests`` measures it.)
+
+    ``-c core.quotePath=true`` pins git's OWN default so a non-ASCII path is
+    C-quoted rather than raw. It keeps the transcript pure ASCII and therefore
+    decodable by whatever captured it, and a C-quoted path begins with ``"``,
+    which no write scope claims -- so it fails closed in the direction this
+    build already accepted for Task 8. ``--no-color`` pins the same property
+    against ``color.ui``.
+
+    WHAT NO ARGV CAN PIN, MEASURED AND REPORTED RATHER THAN ASSUMED:
+    ``.git/info/grafts``. It rewrites ``%P`` outright -- the same forged second
+    parent as above, with no object written at all -- and on git 2.39.5
+    ``core.graftFile`` is INERT from a config file AND from a ``-c``; only the
+    ``GIT_GRAFT_FILE`` environment variable turns it off, and this module emits
+    argv, never an environment. So the graft file is screened as a FILE, by
+    ``_graft_screen`` below, which is a read this module already performs for
+    ``packed-refs`` and is beyond the reach of anything written inside the
+    repository.
+    """
+    return (
+        "git", "--no-replace-objects", "-C", location,
+        "-c", "core.quotePath=true",
+        "-c", "core.useReplaceRefs=false",
+        "-c", "core.commitGraph=false",
+    )
+
+
+def _integration_end(value, *, field: str) -> str:
+    """One end of an integration command, as a 40-character object name.
+
+    EVERY END OF EVERY COMMAND IN THIS BLOCK IS AN OBJECT NAME BEFORE IT IS AN
+    ARGV ELEMENT. A symbolic end resolves somewhere else tomorrow, and the
+    caller has already resolved each of these through ``_resolved_commit``; the
+    screen is what makes that a property of the emitted command rather than a
+    convention its callers happen to follow.
+    """
+    if not isinstance(value, str) or not _COMMIT.fullmatch(value):
+        raise TrackerValidationError(
+            f"the integration {field} {value!r} is not one 40-character "
+            "lowercase object name; the emitted command names immutable ends "
+            "only, because a name that resolves elsewhere tomorrow proves "
+            "nothing about the merge that happened today")
+    return value
+
+
+def merge_parents_commands(repo, *, merge_commit: str) -> tuple:
+    """The exact command whose output names one merge commit's parents.
+
+    ``--no-walk`` rather than ``-1``: one commit, named, with no history walk
+    behind it, so nothing about the surrounding graph can change which record
+    comes back. The format is ``_RANGE_FORMAT`` -- the SAME ``%x00%H %P`` Task
+    8 emits -- so the one transcript grammar in this module reads both, and a
+    record with no paths is already the shape ``_parse_range_transcript``
+    accepts for a commit that changed nothing.
+    """
+    location = _repo_argument(repo)
+    return ((
+        *_integration_pins(location), "log", "--no-walk",
+        "--no-show-signature", "--no-color", _RANGE_FORMAT,
+        _integration_end(merge_commit, field="merge commit"), "--",
+    ),)
+
+
+def integration_range_commands(repo, *, first_parent: str,
+                               second_parent: str) -> tuple:
+    """The exact command whose output is one merge's second-parent commit set.
+
+    ``<first parent>..<second parent>``, SPELLED WITH THE RESOLVED PARENTS
+    RATHER THAN WITH ``<merge>^1..<merge>^2``. The caret spelling is what the
+    master plan wrote and it is one round trip shorter, but it is not TOTAL: a
+    merge commit with no first parent -- a root commit handed in as one --
+    makes ``<merge>^1`` a fatal error in the CONTROLLER's process rather than a
+    refusal in this module's exception family, which is the harm
+    ``_repo_argument``'s NUL screen exists to prevent. Naming the parents that
+    the first command already established costs one command and makes every
+    end of this one a 40-character object name.
+
+    The same argv answers clause 2's fallback, with the target tip as the left
+    end: ``<target tip>..<merge>`` is EMPTY exactly when the merge is an
+    ancestor of the target branch.
+    """
+    location = _repo_argument(repo)
+    base = _integration_end(first_parent, field="first parent")
+    tip = _integration_end(second_parent, field="second parent")
+    return ((
+        *_integration_pins(location), "log", "--reverse",
+        "--no-show-signature", "--no-color", _RANGE_FORMAT, f"{base}..{tip}",
+        "--",
+    ),)
+
+
+def conflicted_paths_commands(repo) -> tuple:
+    """The exact command whose output names the unmerged paths of a merge.
+
+    THE FOUR PATH-HIDING MECHANISMS ARE PINNED HERE TOO, for Task 8's reasons
+    and not as decoration: ``--no-renames`` because rename detection reports
+    only a rename's destination, ``--no-relative`` because ``diff.relative``
+    drops every path outside the command's directory, ``--ignore-submodules=
+    none`` because ``diff.ignoreSubmodules=all`` removes a changed gitlink from
+    the output altogether, and ``core.quotePath=true`` because it decides how a
+    path is spelled. A conflicted path this command fails to print is a
+    collision the hard stop cannot name, which is the whole content of the
+    message fault F9 demands.
+
+    ``--diff-filter=U`` IS WHAT MAKES IT THE UNMERGED SET rather than the
+    working tree's ordinary diff. It is read for a DIAGNOSIS, never for a
+    decision: the hard stop is raised on ``MERGE_HEAD`` alone, which this
+    module reads itself, so a controller that answered this command with
+    nothing at all would still be stopped -- it would only be stopped less
+    informatively.
+    """
+    location = _repo_argument(repo)
+    return ((
+        *_integration_pins(location), "diff", "--no-renames", "--no-relative",
+        "--ignore-submodules=none", "--no-color", "--name-only",
+        "--diff-filter=U", "--",
+    ),)
+
+
+def _graft_screen(repo) -> None:
+    """Refuse a repository whose graft file rewrites the parent relation.
+
+    THE ONE HAZARD IN THIS BLOCK THAT NO EMITTED FLAG CAN REACH, measured on
+    git 2.39.5: a line ``<commit> <parent> <parent>`` in
+    ``<gitdir>/info/grafts`` makes ``%P`` print a second parent that the commit
+    object does not carry -- fault F10 forged with one ordinary file write and
+    no object at all -- and ``core.graftFile`` is inert both from a config file
+    and from a command-line ``-c``. Only ``GIT_GRAFT_FILE`` turns it off, and
+    this module emits argv rather than an environment.
+
+    So the file is screened rather than the flag, which is what the pin rule
+    actually asks for: the module reads it itself, the same way it already
+    reads ``packed-refs``, ``HEAD`` and the gitdir pointer, and nothing written
+    inside the repository can reach past that. ``_ref_text`` is the reader
+    rather than ``open``, because it goes through ``_require_regular_file``: a
+    FIFO at this name would otherwise block for ever under the run lock.
+
+    BOTH STORES ARE ASKED. Git reads the graft file out of the COMMON
+    directory, which is a different directory from ``gitdir`` in exactly the
+    topology this phase creates -- one linked worktree per concurrently
+    dispatched implementer -- so asking only one of the two would leave the
+    channel open in the ordinary case.
+
+    AN EMPTY OR WHITESPACE FILE IS NOT A GRAFT. ``git init`` templates and
+    tooling leave empty files behind, and refusing one would stop a run over a
+    file that changes no parent of anything.
+    """
+    gitdir, common = _git_store(repo)
+    for store in (gitdir, common):
+        path = store / _GRAFT_DIRNAME / _GRAFT_FILENAME
+        text = _ref_text(path, "the git graft file")
+        if text is not None and text.strip():
+            raise TrackerValidationError(
+                f"the repository at {str(path)!r} carries a graft file, which "
+                "rewrites the parent relation this integration predicate is "
+                "entirely about: a grafted commit reports a second parent it "
+                "does not have, which is a fast-forward wearing a merge's "
+                "shape. No command-line option turns it off on this git, so a "
+                "repository carrying one cannot have its integration proved. "
+                "Remove it, or convert it with `git replace "
+                "--convert-graft-file` and the replace pin will neutralise it")
+
+
+def _merge_in_progress(repo):
+    """The ``MERGE_HEAD`` this tree is mid-merge on, or ``None``.
+
+    NO CONTROLLER AND NO TRANSCRIPT. ``MERGE_HEAD`` is one of the five names
+    git looks for directly under ``$GIT_DIR`` and is already in
+    ``_PSEUDO_REFS``, so the ref-store reader this module has answered it
+    before this task existed. The brief spent a ``git rev-parse --verify`` on
+    the question and then a second command on the unmerged paths; only the
+    second needs a controller, and only for the DIAGNOSIS.
+
+    That separation is the point. The hard stop is raised on a fact this module
+    established itself, so a controller that answers the path command with
+    nothing -- or with a lie -- cannot make a conflicted tree look clean. It
+    can only make the message less specific.
+
+    A VALUE THAT IS NOT AN OBJECT NAME IS A STOP, NOT AN ABSENCE. ``MERGE_HEAD``
+    is written by ``git merge`` as one object name per line; anything else at
+    that name is a repository state this run cannot classify, and folding it
+    into "no merge in progress" would let the one screen that fault F9 rests on
+    be switched off by writing a junk file.
+    """
+    gitdir, common = _git_store(repo)
+    value = _lookup_ref(gitdir, common, _MERGE_HEAD)
+    if value is None:
+        return None
+    if not _COMMIT.fullmatch(value):
+        raise TrackerValidationError(
+            f"{_MERGE_HEAD} names {value!r}, which is not one 40-character "
+            "object name; a tree whose merge state this run cannot read is "
+            "never a tree it may record an integration over")
+    return value
+
+
+def _claimed_by(path: str, scopes) -> bool:
+    """Does any of these typed write scopes claim this repository path?
+
+    ``_path_in_scope`` RAISES for a path no scope could ever claim -- absolute,
+    a traversal, glob-bearing, or the C-quoted spelling ``core.quotePath=true``
+    prints for a non-ASCII name -- because it screens the path through
+    ``_safe_relative`` exactly as it screens the scope. Here that is an ANSWER
+    and not a fault: a path no declaration can even spell is claimed by no
+    declaration, and the hard stop still has to be raised. Letting the
+    exception out would turn the diagnosis into the failure.
+    """
+    for scope in scopes:
+        try:
+            if _path_in_scope(path, scope):
+                return True
+        except PlanMetadataError:
+            return False
+    return False
+
+
+def _declared_scopes(tracker: dict, task_id) -> tuple:
+    """One task's APPROVED write scope, or ``()`` if the plan cannot say.
+
+    The plan is the authority and ``_approved_definition`` is the only reader
+    of it, but this is called while BUILDING A DIAGNOSIS: a phase plan that has
+    moved, or a row whose kind has drifted, must not replace the hard stop with
+    a different exception. The empty tuple reads as "this run could not recover
+    the declaration", which is itself worth printing beside a collision.
+    """
+    try:
+        return tuple(_approved_definition(tracker, task_id)["write_scope"])
+    except TrackerError:
+        return ()
+
+
+def _colliding_task(tracker: dict, task_id, paths) -> tuple:
+    """Who else this conflict implicates: ``((id, scopes, claimed), ...)``.
+
+    THE COLLIDING TASK IS THE ONE WHOSE DECLARED SCOPE CLAIMS A CONFLICTED
+    PATH, and that is a stronger answer than the brief's ``git show
+    --name-only`` over each recorded commit rather than a cheaper one. The
+    message's entire claim is that A SCOPE DECLARATION WAS WRONG; "who touched
+    this path" is evidence about commits, while ``_path_in_scope`` against the
+    approved plan is evidence about declarations, which is the thing being
+    accused. It also needs no repository, no controller and no transcript.
+
+    THE EMPTY-HANDED CASE IS NOT A FAILURE, IT IS THE LOUDER FINDING. When no
+    declaration claims the conflicted path -- which is what the fixture for
+    fault F9 constructs, and what a real scope bug looks like -- the fact is
+    that the path is outside EVERY approved scope, so every task that has
+    reached the repository is a candidate and each is named with what it
+    actually declared. A single confidently-wrong name would be worse than a
+    list: the run is stopping so a human can read the declarations.
+
+    Ordering puts proven claimants first and is otherwise by id, so the message
+    is stable across runs rather than dependent on row order.
+    """
+    _task_row(tracker, task_id)              # an unknown subject is a stop
+    found = []
+    for row in tracker.get("tasks", ()) or ():
+        other = row["id"]
+        if other == task_id:
+            continue
+        scopes = _declared_scopes(tracker, other)
+        claimed = tuple(path for path in paths if _claimed_by(path, scopes))
+        if claimed or row["state"] == _TASK_STATES[3]:
+            found.append((other, scopes, claimed))
+    return tuple(sorted(found, key=lambda entry: (not entry[2], entry[0])))
+
+
+def _conflicted_paths(repo, run_command) -> tuple:
+    """The unmerged paths, deduplicated, in the order the command printed them.
+
+    ONE PATH PER LINE IS SAFE ONLY BECAUSE ``core.quotePath=true`` IS PINNED: a
+    path carrying a newline is C-quoted by that setting, so the newline arrives
+    as the two characters ``\\n`` inside one quoted token rather than as a
+    record separator. Unpinned, the same path would split into two lines and
+    the message would name two paths that do not exist.
+    """
+    text = _range_transcript(run_command, conflicted_paths_commands(repo))
+    return tuple(dict.fromkeys(line for line in text.split("\n") if line))
+
+
+def _integration_ancestry(repo, *, commits, branch_tip: str,
+                          merge_commit: str, target_branch: str,
+                          run_command) -> tuple:
+    """The three-clause ancestry predicate for the per-worktree topology.
+
+    Clause 1 is unchanged from ``superb:pipeline``: a task's recorded commits
+    are ancestors of its own branch tip. Clause 2 becomes: the task branch tip
+    is the merge commit's SECOND parent, and the merge commit is the target
+    branch. Clause 3's code state is the MERGE COMMIT, which P05 and P06 bind
+    their ``task-integration`` evidence to.
+
+    ``--no-ff`` IS LOAD-BEARING, NOT STYLISTIC, and the parent count is where
+    that is enforced. A fast-forward leaves no merge commit at all, so the
+    boundary between "what this task wrote" and "what the target branch already
+    had" -- the boundary clause 2 is about -- simply does not exist to check.
+    An octopus is refused by the same clause and for the same reason from the
+    other side: several tasks share one commit and no per-task boundary
+    survives either.
+
+    CLAUSE 2's SECOND HALF IS A REF-STORE EQUALITY BEFORE IT IS A WALK, and
+    that ordering is the strengthening the brief did not have. ``merge ==
+    _resolved_commit(repo, target_branch)`` is DERIVED by this module from the
+    ref store it reads itself; ``merge-base --is-ancestor`` would be attested
+    by the controller. Equality is also strictly stronger: every commit equal
+    to the tip is an ancestor of it and not conversely. The walk is kept only
+    for the case equality cannot cover -- a later task integrated first and the
+    tip has moved past this merge -- where ``<target tip>..<merge>`` is empty
+    exactly when the merge is an ancestor of the branch.
+
+    CLAUSE 1 IS THE SET EQUALITY AND NOT A SEPARATE ANCESTRY QUESTION. Because
+    the merge commit exists, ``<first parent>..<second parent>`` yields the
+    exact task commit set directly, with no baseline bookkeeping; requiring it
+    to EQUAL the recorded ordered commits proves every recorded commit is
+    reachable from the branch tip and that no commit rode along unrecorded.
+    The chain is then checked from the transcript's own structure -- one parent
+    each, each parent the record before it, the first parent the merge's first
+    parent, the last record the branch tip -- rather than read off it as an
+    assertion, which is Task 8's rule applied to Task 8's grammar.
+    """
+    location = _repo_argument(repo)
+    _graft_screen(location)
+    commits = tuple(commits)
+    if not commits:
+        raise TrackerValidationError(
+            "integration needs at least one recorded commit: a task that moved "
+            "its branch nowhere has no boundary to prove and nothing to "
+            "integrate")
+    for name in commits:
+        _integration_end(name, field="recorded commit")
+    tip = _resolved_commit(location, _integration_end(branch_tip,
+                                                      field="branch tip"))
+    merge = _resolved_commit(location, _integration_end(merge_commit,
+                                                        field="merge commit"))
+    target = _resolved_commit(location, target_branch)
+    if merge != target:
+        #: The tip has moved on, so equality cannot answer. `<tip>..<merge>` is
+        #: empty exactly when the merge is reachable from the branch.
+        beyond = _parse_range_transcript(_range_transcript(
+            run_command, integration_range_commands(
+                location, first_parent=target, second_parent=merge)))
+        if beyond:
+            raise TrackerValidationError(
+                f"the merge commit {merge} is not on the target branch "
+                f"{target_branch!r}, whose tip this ref store says is "
+                f"{target}; an integration the target branch does not carry is "
+                "work this run has not integrated")
+    header = _parse_range_transcript(_range_transcript(
+        run_command, merge_parents_commands(location, merge_commit=merge)))
+    if len(header) != 1 or header[0]["commit"] != merge:
+        raise TrackerValidationError(
+            f"the controller's transcript for {merge} names "
+            f"{[entry['commit'] for entry in header]!r} rather than that one "
+            "commit; a header that is not about the merge commit is not "
+            "evidence about this integration")
+    parents = header[0]["parents"]
+    if len(parents) != _MERGE_PARENTS:
+        raise TrackerValidationError(
+            f"integration must be a --no-ff merge with exactly "
+            f"{_MERGE_PARENTS} parents; {merge} has {len(parents)}. A "
+            "fast-forward collapses the merge commit the predicate depends on, "
+            "and an octopus dissolves the per-task boundary from the other "
+            "side -- either way there is nothing left that says where this "
+            "task's work begins")
+    if parents[1] != tip:
+        raise TrackerValidationError(
+            f"the merge commit's second parent is {parents[1]} and the task "
+            f"branch tip is {tip}; the second parent is what makes this merge "
+            "an integration OF THIS TASK rather than of whatever else was in "
+            "flight")
+    walked = _parse_range_transcript(_range_transcript(
+        run_command, integration_range_commands(
+            location, first_parent=parents[0], second_parent=parents[1])))
+    names = tuple(entry["commit"] for entry in walked)
+    if len(set(names)) != len(names):
+        raise TrackerValidationError(
+            f"the integration walk of {merge} names a commit more than once; "
+            "an implementation range is a chain of distinct commits and a "
+            "repeated record is a duplicated entry rather than a second "
+            "commit")
+    previous = parents[0]
+    for entry in walked:
+        if len(entry["parents"]) != 1 or entry["parents"][0] != previous:
+            raise TrackerValidationError(
+                f"the integration walk of {merge} is not a linear chain from "
+                f"{parents[0]}: {entry['commit']} names parents "
+                f"{list(entry['parents'])!r} where the record before it is "
+                f"{previous}")
+        previous = entry["commit"]
+    if previous != tip:
+        raise TrackerValidationError(
+            f"the integration walk ends at {previous}, not at the task branch "
+            f"tip {tip}; a walk that stops short leaves its last commits "
+            "outside every ancestry and scope check")
+    if names != commits:
+        raise TrackerValidationError(
+            "the merge's second-parent walk does not equal the recorded "
+            f"ordered task commit set: the controller's transcript names "
+            f"{list(names)!r} and the tracker records {list(commits)!r}")
+    return names
+
+
+def integrate_task(run_dir, *, task_id: str, merge_commit: str,
+                   run_command) -> dict:
+    """Record one task's ``--no-ff`` integration, or stop hard on a conflict.
+
+    ``run_command`` IS REQUIRED AND IS THE CONTROLLER'S CAPABILITY, for
+    ``import_worker_result``'s reasons exactly: the module emits the argv and
+    validates the transcript, so the ability to run one command arrives as an
+    argument rather than as an import, and it is asked for BEFORE the lock
+    because a caller that cannot supply it has not failed a check -- it has
+    called wrongly.
+
+    THE HARD STOP COMES FIRST, BEFORE EVERY ROW CHECK. A conflicted ``git merge
+    --no-ff`` leaves the tree mid-merge with unmerged paths and NO MERGE COMMIT
+    to validate, so anything checked before it would report a different fault
+    about a repository whose real problem is that two write scopes collided.
+    The one thing checked earlier is that the task id names a row, because a
+    diagnosis about a task this run does not have is not a diagnosis.
+
+    AND THE STOP IS RAISED ON A FACT THIS MODULE ESTABLISHED. ``MERGE_HEAD``
+    comes from the ref store this module reads itself; only the PATH LIST in
+    the message comes from the controller. A controller that answers the path
+    command with nothing still gets stopped -- less informatively, which is the
+    right direction for the one failure this phase refuses to recover from.
+    """
+    home = _run_path(run_dir)
+    if not callable(run_command):
+        raise TrackerValidationError(
+            f"integrate_task needs the controller's command runner; got "
+            f"{type(run_command).__name__} {run_command!r}, which is not "
+            "callable. This module emits the argv that proves an integration "
+            "and never runs one, so the ability to run it is an argument -- "
+            "and it is asked for before the lock, because a caller that cannot "
+            "supply it has not failed a check, it has called wrongly")
+
+    def mutate(tracker: dict) -> dict:
+        repo = _repo_dir(tracker)
+        row = _task_row(tracker, task_id)
+        if _merge_in_progress(repo) is not None:
+            paths = _conflicted_paths(repo, run_command)
+            implicated = _colliding_task(tracker, task_id, paths)
+            others = "; ".join(
+                f"task {other} declared {list(scopes)!r}"
+                + (f" and claims {list(claimed)!r}" if claimed else "")
+                for other, scopes, claimed in implicated)
+            if not others:
+                others = ("no other task at all, which means the conflicting "
+                          "path is outside every approved write scope this "
+                          "run knows about")
+            raise TrackerValidationError(
+                f"{_HARD_STOP}: the integration of task {task_id} conflicted, "
+                "which proves that a write scope declaration was wrong. The "
+                f"controller must now run `{_ABORT_ACTION}` -- this module "
+                "never writes to the repository, so the tree is still "
+                "mid-merge and the evidence is intact. The run stops here: the "
+                "task is NOT redone alone, because that papers over the broken "
+                "declaration and lets the next task hit the same collision; "
+                "the merge is NOT retried; and no resolution flag is offered, "
+                "because under typed write-scope validation this state should "
+                f"be unreachable. Conflicting paths: {list(paths)!r}. Task "
+                f"{task_id} declared {list(_declared_scopes(tracker, task_id))!r}. "
+                f"Also implicated: {others}")
+        if row["kind"] != TASK_KINDS[0]:
+            raise TrackerValidationError(
+                f"task {task_id!r} is {row['kind']!r} and only a source task "
+                "integrates; an artifact task produces no source range, so "
+                "there is no boundary to prove and nothing to merge")
+        if row["state"] != _TASK_STATES[3]:
+            raise TrackerValidationError(
+                f"task {task_id!r} is {row['state']} and only a completed task "
+                "integrates; recording an integration over work that has not "
+                "finished would make the merge commit the proof of a range "
+                "nobody has verified")
+        resolved = _resolved_commit(repo, merge_commit)
+        if row["integration"] == resolved:
+            return tracker                                 # replay: inert
+        if row["integration"] != _INTEGRATION_HELD:
+            raise TrackerValidationError(
+                f"task {task_id!r} is already integrated at "
+                f"{row['integration']!r} and this call names {resolved}; a "
+                "second answer under one identity is evidence to be "
+                "reconciled, never an update")
+        _integration_ancestry(
+            repo, commits=_csv(row["commits"]),
+            branch_tip=_resolved_commit(repo, row["source_ref"]),
+            merge_commit=resolved,
+            target_branch=_run_field(tracker, "target_branch"),
+            run_command=run_command)
+        updated = dict(row)
+        updated["integration"] = resolved
+        updated["checkpoints"] = _append_history(
+            row["checkpoints"],
+            f"{_INTEGRATED_CHECKPOINT}{row['attempt']}"
+            f"{_CHECKPOINT_DELIMITERS[1]}{resolved}")
+        return _replace_task(tracker, updated)
+
+    return locked_tracker_update(
+        home, transition_id=f"integrate-{task_id}-{merge_commit}",
+        mutate=mutate)

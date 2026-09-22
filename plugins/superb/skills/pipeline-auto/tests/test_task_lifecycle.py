@@ -10103,7 +10103,8 @@ class SourceRangeCommandTests(TempDirTestCase):
                 "-c", "core.quotePath=true",
                 "-c", "core.useReplaceRefs=false", "log",
                 "--reverse", "--no-renames", "--no-relative",
-                "--ignore-submodules=none", "--name-only", "--no-color",
+                "--ignore-submodules=none", "--name-only",
+                "--no-show-signature", "--no-color",
                 "--format=%x00%H %P", f"{base}..{head}", "--",
             ),))
 
@@ -10618,6 +10619,90 @@ class PathSpellingConfigTests(TempDirTestCase):
         self.assertIn("src/caf\u00e9.py", unpinned)
         self.assertFalse(unpinned.isascii())
 
+    def test_show_signature_injects_gpg_text_where_the_path_list_is_read(self):
+        """SIXTH instance, and the first this family caught itself LYING about.
+
+        `log.showSignature` was measured against this argv earlier in the
+        build, found inert, and written into `_range_argv`'s docstring as
+        inert -- over a history with NO SIGNED COMMIT in it, which measures
+        nothing at all. Measured again with a commit that actually carries a
+        `gpgsig` header: gpg's verification text goes to STDOUT and lands
+        INSIDE the transcript, in the BODY of the record before it, which is
+        exactly where the path list is read from.
+
+        It fails CLOSED -- no write scope claims a line beginning `gpg:` --
+        and that is why this is a diagnosis defect rather than a hole. The
+        refusal blames the worker's range for a config the REPOSITORY owns,
+        which is a false accusation against an honest worker and, in a real
+        run, an unfindable one. Found by Task 11, whose own argv was pinned
+        against it; this is the same token on Task 8's.
+
+        AND IT IS A PIN BY THIS BUILD'S RULE, which `core.useReplaceRefs`
+        taught: a flag is only a pin if the repository cannot switch it back
+        on. `--no-show-signature` is a `log` OPTION rather than a `git` one,
+        so it is parsed after the configuration and outranks every source
+        inside the repository. Measured here in the two that dominate the
+        rest: the hostile value in `.git/config`, which the worker owns, and
+        the same value as a command-line `-c`, which is the highest-precedence
+        source any config file could reach through. (Measured off-suite and
+        also holding: an `[include] path =` file, a `.git/config.worktree`
+        under `extensions.worktreeConfig`, `gpg.format`, and an `alias.log`,
+        which git refuses to let shadow a built-in.) So one token, and no `-c`
+        beside it -- the opposite of `--no-replace-objects`.
+        """
+        repo = make_repo(self.tmp)
+        git(repo, "checkout", "-q", "target")
+        (repo / "mine").mkdir()
+        (repo / "mine" / "f.py").write_text("x = 1\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-qm", "mine")
+        base = git(repo, "rev-parse", "target")
+        git(repo, "checkout", "-q", "-b", "task/T1", "target")
+        first = commit_file(repo, "mine/f.py", "x = 2\n", "first")
+        second = commit_file(repo, "mine/g.py", "x = 1\n", "second")
+        #: the same commit re-hashed with a `gpgsig` header. `git commit -S`
+        #: needs a key and an agent; the HEADER is what git reads, so the
+        #: object is written directly and the branch is moved onto it.
+        raw = self.tmp / "signed-commit"
+        raw.write_text(
+            f"tree {git(repo, 'rev-parse', second + '^{tree}')}\n"
+            f"parent {first}\n"
+            "author t <t@e.invalid> 1700000000 +0000\n"
+            "committer t <t@e.invalid> 1700000000 +0000\n"
+            "gpgsig -----BEGIN PGP SIGNATURE-----\n \n iHUEABYKAB0WIQR\n"
+            " -----END PGP SIGNATURE-----\n\nsigned second\n",
+            encoding="utf-8")
+        head = git(repo, "hash-object", "-w", "-t", "commit", str(raw))
+        git(repo, "update-ref", "refs/heads/task/T1", head)
+        #: the repository's own config, which the worker owns.
+        git(repo, "config", "log.showSignature", "true")
+
+        argv = self.argv(repo, base, head)
+        self.assertIn("--no-show-signature", argv)
+        pinned = run_commands((argv,))
+        self.assertNotIn("gpg:", pinned)
+        proof = state.verify_source_range(
+            repo, baseline=base, head=head, head_ref="task/T1",
+            scopes=["tree:mine"], transcript=pinned)
+        self.assertEqual(proof["changed_paths"], ("mine/f.py", "mine/g.py"))
+        self.assertEqual(proof["commits"], (first, head))
+
+        #: the highest-precedence config source there is, on the command line
+        #: itself, and the `log` option still outranks it.
+        outranked = argv[:1] + ("-c", "log.showSignature=true") + argv[1:]
+        self.assertNotIn("gpg:", run_commands((outranked,)))
+
+        injected = run_commands(
+            (self.without(argv, "--no-show-signature"),))
+        self.assertIn("gpg:", injected)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.verify_source_range(
+                repo, baseline=base, head=head, head_ref="task/T1",
+                scopes=["tree:mine"], transcript=injected)
+        #: THE FALSE ACCUSATION, spelled out: an honest range is refused, and
+        #: the thing named as the out-of-scope path is a line of gpg's text.
+        self.assertIn("gpg:", str(caught.exception))
+
     def test_every_pinned_token_is_on_the_one_argv_builder(self):
         """One builder, so the emitter and the diagnostic cannot disagree,
         and the pins are asserted as a set rather than by reading the
@@ -10626,8 +10711,8 @@ class PathSpellingConfigTests(TempDirTestCase):
         argv = self.argv(repo, base, head)
         for token in ("--no-renames", "--no-relative",
                       "--ignore-submodules=none", "--no-color",
-                      "--no-replace-objects", "core.quotePath=true",
-                      "core.useReplaceRefs=false"):
+                      "--no-show-signature", "--no-replace-objects",
+                      "core.quotePath=true", "core.useReplaceRefs=false"):
             with self.subTest(token=token):
                 self.assertEqual(argv.count(token), 1)
         #: ORDER IS PART OF THE PIN, not decoration. `--no-replace-objects` is
@@ -12597,7 +12682,7 @@ class PublishedRunDirectorySpellingTests(TempDirTestCase):
 #: defect was five entry points that did not.
 RUN_DIR_ENTRY_POINTS = (
     "initialize_run", "import_phase_plan", "reserve_task", "resume_task",
-    "publish_worker_result", "import_worker_result",
+    "publish_worker_result", "import_worker_result", "integrate_task",
 )
 RUN_DIR_CONTRACT_FUNCTIONS = ("validate_run", "locked_tracker_update")
 
@@ -12724,6 +12809,10 @@ class RunDirectoryCoercionSweepTests(TempDirTestCase):
                 value, result=worker_result()),
             "import_worker_result": lambda value: state.import_worker_result(
                 value, result_path=self.run_dir / "absent.md",
+                run_command=controller_git),
+            "integrate_task": lambda value: state.integrate_task(
+                value, task_id="T1",
+                merge_commit=git(self.repo, "rev-parse", "target"),
                 run_command=controller_git),
         }
         self.assertEqual(sorted(calls), sorted(RUN_DIR_ENTRY_POINTS))
@@ -14955,6 +15044,1128 @@ class ImportWorkerResultTotalityTests(TempDirTestCase):
         self.assertIn("callable", str(caught.exception))
         self.assertEqual((run_dir / "progress.md").read_bytes(), before)
 
+
+# --------------------------------------------------------------------------
+# Task 11 tests -- faults F9 and F10.
+#
+# THE BRIEF NAMED SIX CALLS THAT CANNOT RUN: `_git` x3 and `_git_out` x3, both
+# `subprocess.run` wrappers. `subprocess` is refused by name, the `os` command
+# family is refused by an AST screen, and `zlib` is unavailable -- so the shape
+# is the one Tasks 8 and 10 built: the module emits the exact argv, the
+# CONTROLLER executes it, and the module validates the transcript. The three
+# checks the brief spent git on that need none are moved off it entirely:
+# `MERGE_HEAD` is a pseudo-ref the ref-store reader already answers, the
+# colliding task is the one whose DECLARED SCOPE claims the conflicted path,
+# and "the merge commit is the target branch" is a ref-store equality that is
+# strictly stronger than "is an ancestor of".
+# --------------------------------------------------------------------------
+
+INTEGRATION_SCOPES = ("file:src/a1.py", "file:src/a2.py")
+
+#: The `git config` knobs a hostile repository would set to make one of the
+#: emitted commands answer about a different history. Applied as a block by
+#: `hostile_config` below, so a pin test measures the WHOLE family at once.
+HOSTILE_GIT_CONFIG = (
+    ("core.useReplaceRefs", "true"),
+    ("core.commitGraph", "true"),
+    ("log.showSignature", "true"),
+    ("log.abbrevCommit", "true"),
+    ("log.decorate", "full"),
+    ("log.diffMerges", "on"),
+    ("format.pretty", "oneline"),
+    ("diff.renames", "true"),
+    ("diff.relative", "true"),
+    ("diff.ignoreSubmodules", "all"),
+    ("diff.noprefix", "true"),
+    ("core.quotePath", "false"),
+)
+
+
+def two_task_body(scopes=INTEGRATION_SCOPES) -> str:
+    return (task_block("T1", order=1, batch="b1", write_scope=scopes[0])
+            + task_block("T2", order=2, batch="b2", write_scope=scopes[1]))
+
+
+def hostile_config(repo) -> None:
+    """Set every knob a worker could use to change what the argv reports."""
+    for key, value in HOSTILE_GIT_CONFIG:
+        git(repo, "config", key, value)
+
+
+def branch_commit(repo, name: str, relative: str, text: str,
+                  base: str = "target") -> str:
+    """One commit on `name`, cut from `base`, back on `target` afterwards.
+
+    `commit_only` RATHER THAN `commit_file`, for `source_result_commits`'
+    reason: `git add -A` sweeps the untracked run directory into the task
+    branch and the next checkout of a branch without it DELETES progress.md.
+    """
+    git(repo, "checkout", "-q", "-b", name, base)
+    head = commit_only(repo, relative, text, f"{name} work")
+    git(repo, "checkout", "-q", "target")
+    return head
+
+
+def merge_no_ff(repo, branch: str, message: str) -> str:
+    git(repo, "checkout", "-q", "target")
+    git(repo, "merge", "-q", "--no-ff", "--no-edit", "-m", message, branch)
+    return git(repo, "rev-parse", "HEAD")
+
+
+def integration_run(case, *, worker_limit: int = 8, scopes=INTEGRATION_SCOPES):
+    repo, run_dir, _ = make_run(case.tmp, two_task_body(scopes),
+                                worker_limit=worker_limit)
+    return repo, run_dir
+
+
+def complete_task(run_dir, task_id: str, *, commits, owner="impl-1",
+                  attempt="attempt-001", integration="held",
+                  transition=None) -> None:
+    """Put one source task in the state `import_worker_result` leaves it in.
+
+    `integration` defaults to `held` and NOT to `-`: P02's `_validate_tasks`
+    refuses a completed source row that records neither an integration commit
+    nor `held`, and Task 10's import writes `held`. A fixture using `-` would
+    be refused by the tracker validator before `integrate_task` ever ran, so
+    the brief's `row["integration"] not in {"-", ""}` guard is a guard on a
+    value this schema cannot hold.
+    """
+    entries = tuple(commits)
+    set_task_state(
+        run_dir, task_id, transition or f"t11-complete-{task_id}",
+        state="[x]", owner=owner, attempt=attempt,
+        result=f"{state.AGENT_OUTPUT_DIRNAME}/{task_id}.md#sha256={FAKE_DIGEST}",
+        checkpoints=f"started:{attempt},baseline:{attempt}@{OTHER_SHA}",
+        source_ref=entries[-1], commits=",".join(entries), artifacts="-",
+        integration=integration,
+        verification=f"evidence/{task_id}.md#sha256={OTHER_DIGEST}")
+
+
+def module_imports() -> set:
+    """Every module this file's subject imports, read off its syntax tree."""
+    source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+        encoding="utf-8")
+    names = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            names.add(node.module.split(".")[0])
+    return names
+
+
+def emitted(commands) -> tuple:
+    """The single argv out of a one-command emitter, asserted to be one."""
+    assert len(commands) == 1, commands
+    return tuple(commands[0])
+
+
+class IntegrationProducesBlockTests(unittest.TestCase):
+    """The brief's Produces block is a claim to CHECK, name by name.
+
+    Produces, as written: `_git_run`, `_merge_in_progress`, `_colliding_task`,
+    `_integration_ancestry`, `integrate_task`. Consumes, as written: `_git`,
+    `_git_out`, `_resolved_commit`, `_repo_dir`, `_approved_definition`,
+    `resolve_evidence`, `_task_row`, `_replace_task`, `_csv`,
+    `_commit_parents`.
+
+    Three of those fifteen CANNOT EXIST and one more does not: `_git_run`,
+    `_git` and `_git_out` are `subprocess.run` wrappers, and `_commit_parents`
+    is an object read that needs `zlib`. Every one of them is asserted absent
+    here rather than left to a reviewer's memory.
+    """
+
+    def test_the_three_subprocess_wrappers_are_absent_from_the_module(self):
+        for name in ("_git", "_git_out", "_git_run"):
+            with self.subTest(name=name):
+                self.assertFalse(
+                    hasattr(state, name),
+                    f"{name} is a subprocess.run wrapper; the module never "
+                    "executes git")
+
+    def test_commit_parents_is_absent_because_it_is_an_object_read(self):
+        self.assertFalse(hasattr(state, "_commit_parents"))
+
+    def test_the_refused_imports_stay_refused(self):
+        imported = module_imports()
+        for name in ("subprocess", "zlib", "re", "tempfile"):
+            with self.subTest(name=name):
+                self.assertNotIn(name, imported)
+
+    def test_merge_in_progress_answers_from_the_ref_store_alone(self):
+        """`MERGE_HEAD` is already in `_PSEUDO_REFS` and the ref-store reader
+        answers it today, so this needs no controller and takes none."""
+        signature = inspect.signature(state._merge_in_progress)
+        self.assertEqual(list(signature.parameters), ["repo"])
+
+    def test_colliding_task_takes_no_repository_and_no_runner(self):
+        """The colliding task is the one whose DECLARED SCOPE claims the
+        conflicted path -- which is more on point than `git show --name-only`,
+        since the message's whole claim is that a scope declaration was
+        wrong."""
+        signature = inspect.signature(state._colliding_task)
+        self.assertEqual(list(signature.parameters),
+                         ["tracker", "task_id", "paths"])
+
+    def test_the_two_transitions_require_the_controllers_runner(self):
+        for name in ("_integration_ancestry", "integrate_task"):
+            with self.subTest(name=name):
+                parameter = inspect.signature(
+                    getattr(state, name)).parameters["run_command"]
+                self.assertIs(parameter.default, inspect.Parameter.empty)
+                self.assertIs(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+
+    def test_the_emitters_replace_the_wrappers_name_for_name(self):
+        for name in ("merge_parents_commands", "integration_range_commands",
+                     "conflicted_paths_commands"):
+            with self.subTest(name=name):
+                self.assertTrue(callable(getattr(state, name, None)))
+
+    def test_merge_abort_is_named_as_an_action_and_never_taken(self):
+        """`merge --abort` must NOT return: the module never writes to the
+        user's repository. It raises the hard stop and names the abort as the
+        controller's next action."""
+        code = module_function_code("integrate_task")
+        self.assertNotIn('"merge"', code)
+        self.assertNotIn("'merge'", code)
+        self.assertIn("--abort", state._ABORT_ACTION)
+
+
+class IntegrationCommandPinTests(TempDirTestCase):
+    """A pin is only a pin if it cannot be undone from INSIDE the repository.
+
+    Every measurement here runs real `git`; none of it is reasoning about
+    documentation.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = make_repo(self.tmp)
+        self.tip = branch_commit(self.repo, "task/T1", "src/a1.py", "one = 1\n")
+        self.merge = merge_no_ff(self.repo, "task/T1", "integrate T1")
+
+    def every_emitted_argv(self) -> tuple:
+        return (
+            emitted(state.merge_parents_commands(
+                self.repo, merge_commit=self.merge)),
+            emitted(state.integration_range_commands(
+                self.repo, first_parent=git(self.repo, "rev-parse", "HEAD^1"),
+                second_parent=self.tip)),
+            emitted(state.conflicted_paths_commands(self.repo)),
+        )
+
+    def test_every_emitted_command_pins_replace_refs_both_ways(self):
+        for argv in self.every_emitted_argv():
+            with self.subTest(argv=argv[:4]):
+                self.assertIn("--no-replace-objects", argv)
+                self.assertIn("core.useReplaceRefs=false", argv)
+                self.assertEqual(argv[0], "git")
+
+    def test_every_emitted_command_pins_the_object_graph_and_the_spelling(self):
+        for argv in self.every_emitted_argv():
+            with self.subTest(argv=argv[:4]):
+                self.assertIn("core.commitGraph=false", argv)
+                self.assertIn("core.quotePath=true", argv)
+                self.assertIn("--no-color", argv)
+
+    def test_a_replace_ref_forges_a_second_parent_and_the_pin_defeats_it(self):
+        """F10, measured. A fast-forward commit is presented as a `--no-ff`
+        merge whose second parent is the task branch tip -- the exact boundary
+        clause 2 checks -- and the `-c` restores the real single parent."""
+        repo = self.repo
+        git(repo, "checkout", "-q", "-b", "ff", "target")
+        forward = commit_only(repo, "src/a1.py", "ff = 1\n", "ff")
+        parent = git(repo, "rev-parse", f"{forward}^1")
+        tree = git(repo, "rev-parse", f"{forward}^{{tree}}")
+        decoy = git(repo, "commit-tree", tree, "-p", parent, "-p", self.tip,
+                    "-m", "decoy")
+        git(repo, "replace", "-f", forward, decoy)
+        git(repo, "checkout", "-q", "target")
+        unpinned = subprocess.run(
+            ("git", "-C", str(repo), "log", "--no-walk",
+             "--format=%x00%H %P", forward, "--"),
+            capture_output=True, text=True, check=True).stdout
+        self.assertEqual(len(unpinned.split()), 3)          # forged two-parent
+        pinned = run_commands(
+            state.merge_parents_commands(repo, merge_commit=forward))
+        self.assertEqual(len(pinned.split()), 2)            # the real parent
+
+    def test_the_repository_config_defeats_the_flag_and_not_the_dash_c(self):
+        """`--no-replace-objects` ALONE is defeated by `core.useReplaceRefs =
+        true` in the repository's own config, which the worker owns."""
+        repo = self.repo
+        parent = git(repo, "rev-parse", f"{self.merge}^1")
+        tree = git(repo, "rev-parse", f"{self.merge}^{{tree}}")
+        decoy = git(repo, "commit-tree", tree, "-p", parent, "-m", "decoy")
+        git(repo, "replace", "-f", self.merge, decoy)
+        git(repo, "config", "core.useReplaceRefs", "true")
+        flag_only = subprocess.run(
+            ("git", "--no-replace-objects", "-C", str(repo), "log",
+             "--no-walk", "--format=%x00%H %P", self.merge, "--"),
+            capture_output=True, text=True, check=True).stdout
+        self.assertEqual(len(flag_only.split()), 2)         # DEFEATED
+        pinned = run_commands(
+            state.merge_parents_commands(repo, merge_commit=self.merge))
+        self.assertEqual(len(pinned.split()), 3)            # the `-c` holds
+
+    def test_show_signature_injects_into_stdout_and_the_pin_removes_it(self):
+        """Measured, and it is a defect in the transcript grammar rather than
+        in the history: `log.showSignature` puts gpg's verification text on
+        STDOUT, before the record separator, where the parser reads it."""
+        repo = self.repo
+        tree = git(repo, "rev-parse", f"{self.merge}^{{tree}}")
+        parents = git(repo, "rev-parse", f"{self.merge}^1",
+                      f"{self.merge}^2").split()
+        raw = self.tmp / "signed-commit"
+        raw.write_text(
+            f"tree {tree}\nparent {parents[0]}\nparent {parents[1]}\n"
+            "author t <t@e.invalid> 1700000000 +0000\n"
+            "committer t <t@e.invalid> 1700000000 +0000\n"
+            "gpgsig -----BEGIN PGP SIGNATURE-----\n \n iHUEABYKAB0WIQR\n"
+            " -----END PGP SIGNATURE-----\n\nsigned merge\n",
+            encoding="utf-8")
+        signed = git(repo, "hash-object", "-w", "-t", "commit", str(raw))
+        git(repo, "config", "log.showSignature", "true")
+        unpinned = subprocess.run(
+            ("git", "-C", str(repo), "log", "--no-walk",
+             "--format=%x00%H %P", signed, "--"),
+            capture_output=True, text=True, check=True).stdout
+        self.assertFalse(unpinned.startswith("\x00"))       # injected
+        self.assertIn("gpg:", unpinned)
+        pinned = run_commands(
+            state.merge_parents_commands(repo, merge_commit=signed))
+        self.assertTrue(pinned.startswith("\x00"))
+        self.assertNotIn("gpg:", pinned)
+
+    def test_the_conflict_command_pins_the_four_path_hiding_mechanisms(self):
+        argv = emitted(state.conflicted_paths_commands(self.repo))
+        for pin in ("--no-renames", "--no-relative", "--ignore-submodules=none",
+                    "core.useReplaceRefs=false"):
+            with self.subTest(pin=pin):
+                self.assertIn(pin, argv)
+
+    def test_every_emitted_command_survives_the_whole_hostile_config_block(self):
+        hostile_config(self.repo)
+        header = run_commands(
+            state.merge_parents_commands(self.repo, merge_commit=self.merge))
+        self.assertTrue(header.startswith("\x00"))
+        self.assertEqual(len(header.split()), 3)
+        walk = run_commands(state.integration_range_commands(
+            self.repo, first_parent=git(self.repo, "rev-parse", "HEAD^1"),
+            second_parent=self.tip))
+        self.assertEqual(
+            tuple(state._parse_range_transcript(walk)[0]["commit"] for _ in (0,)),
+            (self.tip,))
+
+    def test_a_graft_file_forges_a_parent_that_no_command_line_pin_defeats(self):
+        """Measured on this machine's git: `.git/info/grafts` rewrites `%P`,
+        `core.graftFile` is inert from BOTH a config file and a `-c`, and only
+        the `GIT_GRAFT_FILE` environment variable -- which is outside the
+        repository -- turns it off. An argv-only pin therefore cannot reach it,
+        so the module screens the FILE and refuses."""
+        repo = self.repo
+        git(repo, "checkout", "-q", "-b", "ff2", "target")
+        forward = commit_only(repo, "src/a1.py", "ff = 2\n", "ff2")
+        git(repo, "checkout", "-q", "target")
+        parent = git(repo, "rev-parse", f"{forward}^1")
+        (repo / ".git" / "info").mkdir(parents=True, exist_ok=True)
+        (repo / ".git" / "info" / "grafts").write_text(
+            f"{forward} {parent} {self.tip}\n", encoding="utf-8")
+        forged = run_commands(
+            state.merge_parents_commands(repo, merge_commit=forward))
+        self.assertEqual(len(forged.split()), 3,
+                         "the graft forged a second parent through the pin")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._integration_ancestry(
+                repo, commits=(self.tip,), branch_tip=self.tip,
+                merge_commit=forward, target_branch="target",
+                run_command=controller_git)
+        self.assertIn("graft", str(caught.exception))
+
+    def test_the_graft_screen_reads_the_common_directory_too(self):
+        info = self.repo / ".git" / "info"
+        info.mkdir(parents=True, exist_ok=True)
+        (info / "grafts").write_text("   \n", encoding="utf-8")
+        state._graft_screen(self.repo)          # empty is not a graft
+        (info / "grafts").write_text(f"{self.merge} {self.tip}\n",
+                                     encoding="utf-8")
+        with self.assertRaises(state.TrackerValidationError):
+            state._graft_screen(self.repo)
+
+
+class IntegrationAncestryTests(TempDirTestCase):
+    """Fault F10 and the three clauses of the ancestry predicate."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo, self.run_dir = integration_run(self)
+
+    def test_a_no_ff_merge_creates_the_boundary_the_predicate_checks(self):
+        tip = branch_commit(self.repo, "task/T1", "src/a1.py", "one = 1\n")
+        merge = merge_no_ff(self.repo, "task/T1", "integrate T1")
+        walked = state._integration_ancestry(
+            self.repo, commits=(tip,), branch_tip=tip, merge_commit=merge,
+            target_branch="target", run_command=controller_git)
+        self.assertEqual(walked, (tip,))
+
+    def test_a_fast_forward_integration_is_rejected(self):
+        """F10: `--no-ff` is load-bearing. A fast-forward collapses the merge
+        commit and destroys the boundary clause 2 checks."""
+        tip = branch_commit(self.repo, "task/T1", "src/a1.py", "one = 1\n")
+        git(self.repo, "merge", "-q", "--ff-only", "task/T1")
+        head = git(self.repo, "rev-parse", "HEAD")
+        self.assertEqual(head, tip)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._integration_ancestry(
+                self.repo, commits=(tip,), branch_tip=tip, merge_commit=head,
+                target_branch="target", run_command=controller_git)
+        self.assertIn("--no-ff", str(caught.exception))
+
+    def test_an_octopus_merge_is_rejected_by_the_same_clause(self):
+        first = branch_commit(self.repo, "task/T1", "src/a1.py", "one = 1\n")
+        second = branch_commit(self.repo, "task/T2", "src/a2.py", "two = 2\n")
+        git(self.repo, "checkout", "-q", "target")
+        git(self.repo, "merge", "-q", "--no-ff", "--no-edit", "-m", "octopus",
+            "task/T1", "task/T2")
+        merge = git(self.repo, "rev-parse", "HEAD")
+        self.assertEqual(len(git(self.repo, "rev-list", "--parents", "-1",
+                                 merge).split()), 4)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._integration_ancestry(
+                self.repo, commits=(first,), branch_tip=first,
+                merge_commit=merge, target_branch="target",
+                run_command=controller_git)
+        self.assertIn("--no-ff", str(caught.exception))
+        self.assertIn(str(len(git(self.repo, "rev-list", "--parents", "-1",
+                                  merge).split()) - 1), str(caught.exception))
+
+    def test_the_second_parent_must_be_the_task_branch_tip(self):
+        first = branch_commit(self.repo, "task/T1", "src/a1.py", "one = 1\n")
+        second = branch_commit(self.repo, "task/T2", "src/a2.py", "two = 2\n")
+        merge = merge_no_ff(self.repo, "task/T1", "integrate T1")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._integration_ancestry(
+                self.repo, commits=(second,), branch_tip=second,
+                merge_commit=merge, target_branch="target",
+                run_command=controller_git)
+        self.assertIn("second parent", str(caught.exception))
+
+    def test_clause_one_rejects_a_commit_outside_the_branch_tip(self):
+        tip = branch_commit(self.repo, "task/T1", "src/a1.py", "one = 1\n")
+        stray = branch_commit(self.repo, "task/T2", "src/a2.py", "two = 2\n")
+        merge = merge_no_ff(self.repo, "task/T1", "integrate T1")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._integration_ancestry(
+                self.repo, commits=(tip, stray), branch_tip=tip,
+                merge_commit=merge, target_branch="target",
+                run_command=controller_git)
+        self.assertIn(stray, str(caught.exception))
+
+    def test_clause_two_rejects_a_merge_outside_the_target_branch(self):
+        tip = branch_commit(self.repo, "task/T1", "src/a1.py", "one = 1\n")
+        git(self.repo, "checkout", "-q", "-b", "elsewhere", "target")
+        git(self.repo, "merge", "-q", "--no-ff", "--no-edit", "-m", "off",
+            "task/T1")
+        merge = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "checkout", "-q", "target")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._integration_ancestry(
+                self.repo, commits=(tip,), branch_tip=tip, merge_commit=merge,
+                target_branch="target", run_command=controller_git)
+        self.assertIn("target", str(caught.exception))
+
+    def test_clause_two_is_a_ref_store_equality_before_it_is_a_walk(self):
+        """The derived form is strictly stronger than "is an ancestor of", and
+        it is what the code reads: the target tip comes from `_resolved_commit`
+        on the ref store, never from a transcript a caller could shape."""
+        code = module_function_code("_integration_ancestry")
+        self.assertIn("_resolved_commit(location, target_branch)", code)
+
+    def test_clause_two_falls_back_to_a_walk_once_the_tip_has_moved(self):
+        first = branch_commit(self.repo, "task/T1", "src/a1.py", "one = 1\n")
+        merge = merge_no_ff(self.repo, "task/T1", "integrate T1")
+        second = branch_commit(self.repo, "task/T2", "src/a2.py", "two = 2\n")
+        later = merge_no_ff(self.repo, "task/T2", "integrate T2")
+        self.assertNotEqual(merge, later)
+        walked = state._integration_ancestry(
+            self.repo, commits=(first,), branch_tip=first, merge_commit=merge,
+            target_branch="target", run_command=controller_git)
+        self.assertEqual(walked, (first,))
+
+    def test_an_empty_recorded_commit_set_is_refused(self):
+        tip = branch_commit(self.repo, "task/T1", "src/a1.py", "one = 1\n")
+        merge = merge_no_ff(self.repo, "task/T1", "integrate T1")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._integration_ancestry(
+                self.repo, commits=(), branch_tip=tip, merge_commit=merge,
+                target_branch="target", run_command=controller_git)
+        self.assertIn("at least one", str(caught.exception))
+
+    def test_a_recorded_commit_that_is_not_an_object_name_is_refused(self):
+        tip = branch_commit(self.repo, "task/T1", "src/a1.py", "one = 1\n")
+        merge = merge_no_ff(self.repo, "task/T1", "integrate T1")
+        for bad in ("task/T1", "HEAD", "", "9" * 39, "\x00" + "9" * 39,
+                    "9" * 39 + "\x00", "\ud800" + "9" * 39, None, 7):
+            with self.subTest(bad=bad):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state._integration_ancestry(
+                        self.repo, commits=(bad,), branch_tip=tip,
+                        merge_commit=merge, target_branch="target",
+                        run_command=controller_git)
+                #: THE DIAGNOSIS, not "something in the family". Without this
+                #: the screen is dominated by the set comparison further down,
+                #: which also refuses every one of these -- and a dominated
+                #: clause is one nothing can tell the difference about.
+                self.assertIn("recorded commit", str(caught.exception))
+
+    def test_the_walk_must_be_a_chain_of_distinct_commits(self):
+        commits = source_result_commits(self.repo, count=3, branch="task/T1",
+                                        path="src/a1.py")
+        git(self.repo, "checkout", "-q", "target")
+        merge = merge_no_ff(self.repo, "task/T1", "integrate T1")
+        walked = state._integration_ancestry(
+            self.repo, commits=commits, branch_tip=commits[-1],
+            merge_commit=merge, target_branch="target",
+            run_command=controller_git)
+        self.assertEqual(walked, commits)
+        for mangled in (commits[::-1], commits[:-1], commits + commits[:1]):
+            with self.subTest(mangled=mangled):
+                with self.assertRaises(state.TrackerValidationError):
+                    state._integration_ancestry(
+                        self.repo, commits=mangled, branch_tip=commits[-1],
+                        merge_commit=merge, target_branch="target",
+                        run_command=controller_git)
+
+    def test_the_transcripts_come_from_the_commands_this_module_emitted(self):
+        """Behavioural tests cannot prove that: on a truthful controller every
+        argv passes. So the argv is CAPTURED and compared with the emitters."""
+        tip = branch_commit(self.repo, "task/T1", "src/a1.py", "one = 1\n")
+        merge = merge_no_ff(self.repo, "task/T1", "integrate T1")
+        controller = RecordingController()
+        state._integration_ancestry(
+            self.repo, commits=(tip,), branch_tip=tip, merge_commit=merge,
+            target_branch="target", run_command=controller)
+        first_parent = git(self.repo, "rev-parse", f"{merge}^1")
+        self.assertEqual(
+            controller.calls[0],
+            emitted(state.merge_parents_commands(self.repo,
+                                                 merge_commit=merge)))
+        self.assertEqual(
+            controller.calls[-1],
+            emitted(state.integration_range_commands(
+                self.repo, first_parent=first_parent, second_parent=tip)))
+
+    def test_a_controller_that_answers_bytes_is_refused(self):
+        tip = branch_commit(self.repo, "task/T1", "src/a1.py", "one = 1\n")
+        merge = merge_no_ff(self.repo, "task/T1", "integrate T1")
+        with self.assertRaises(state.TrackerValidationError):
+            state._integration_ancestry(
+                self.repo, commits=(tip,), branch_tip=tip, merge_commit=merge,
+                target_branch="target",
+                run_command=lambda argv: b"\x00" * 4)
+
+
+class IntegrateTaskTests(TempDirTestCase):
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo, self.run_dir = integration_run(self)
+        self.tip = branch_commit(self.repo, "task/T1", "src/a1.py", "one = 1\n")
+
+    def integrated(self, **kwargs):
+        complete_task(self.run_dir, "T1", commits=(self.tip,))
+        merge = merge_no_ff(self.repo, "task/T1", "integrate T1")
+        return merge, state.integrate_task(
+            self.run_dir, task_id="T1", merge_commit=merge,
+            run_command=controller_git, **kwargs)
+
+    def test_integrate_task_records_the_merge_commit(self):
+        merge, tracker = self.integrated()
+        self.assertEqual(task_row(tracker, "T1")["integration"], merge)
+        self.assertEqual(git(self.repo, "rev-parse", "target"), merge)
+
+    def test_the_integration_fact_is_a_checkpoint_and_not_the_evidence_cell(self):
+        """`Verification` holds digest-bound PASS DOCUMENTS a later phase
+        resolves. `integration:<sha>` is not a document, so writing it there
+        would be an entry nothing can resolve to a file; `Checkpoints` is where
+        per-attempt facts already live, keyed by the attempt token."""
+        merge, tracker = self.integrated()
+        row = task_row(tracker, "T1")
+        self.assertIn(f"{state._INTEGRATED_CHECKPOINT}attempt-001@{merge}",
+                      row["checkpoints"])
+        self.assertNotIn(merge, row["verification"])
+
+    def test_integrate_task_replay_is_inert(self):
+        merge, _ = self.integrated()
+        snapshot = (self.run_dir / "progress.md").read_bytes()
+        state.integrate_task(self.run_dir, task_id="T1", merge_commit=merge,
+                             run_command=controller_git)
+        self.assertEqual((self.run_dir / "progress.md").read_bytes(), snapshot)
+
+    def test_replay_is_still_inert_once_another_transition_has_landed(self):
+        """The `transition_id` key settles only the MOST RECENT transition, so
+        the second line -- the recorded integration commit itself -- is what
+        recognises the same merge arriving twice."""
+        merge, first = self.integrated()
+        bump(self.run_dir, "t11-bump")
+        again = state.integrate_task(self.run_dir, task_id="T1",
+                                     merge_commit=merge,
+                                     run_command=controller_git)
+        #: NOT byte equality: `locked_tracker_update` stamps `revision` and
+        #: `last_transition` on every call that reaches it, so a transition
+        #: this key no longer replays rewrites those two cells whatever its
+        #: `mutate` returns. What "inert" means here is that the TASK ROW is
+        #: untouched -- no second integration entry, no second checkpoint.
+        self.assertEqual(task_row(again, "T1"), task_row(first, "T1"))
+        self.assertEqual(
+            task_row(again, "T1")["checkpoints"].count(
+                state._INTEGRATED_CHECKPOINT), 1)
+
+    def test_a_second_merge_commit_for_one_task_is_conflicting_evidence(self):
+        merge, _ = self.integrated()
+        second = branch_commit(self.repo, "task/T1b", "src/a1.py", "one = 2\n")
+        other = merge_no_ff(self.repo, "task/T1b", "again")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.integrate_task(self.run_dir, task_id="T1",
+                                 merge_commit=other,
+                                 run_command=controller_git)
+        self.assertIn(merge, str(caught.exception))
+
+    def test_integrate_task_refuses_an_unfinished_task(self):
+        """THE DIAGNOSIS IS THE DISCRIMINATOR HERE, and the exception family
+        is not. This is the one guard in `integrate_task` whose removal cannot
+        be caught by a write: P02's `_validate_tasks` refuses an in-flight row
+        carrying ANY of `_TASK_COMPLETION` and an unstarted row carrying any
+        lifecycle cell at all, so `integration` is `-` for EVERY unfinished
+        state and no unfinished row can reach the recording arm, which needs
+        `held`. A module that had lost this guard would fall through to the
+        already-integrated check and raise there instead -- same family, same
+        absent write, ENTIRELY DIFFERENT ACCUSATION. It would tell the
+        controller that a task nobody has finished is already integrated at
+        `-` and that a second answer needs reconciling, sending whoever reads
+        it to look for an integration that never happened.
+
+        Measured, not supposed: the Task 11 mutation run replaced this guard's
+        condition with `False` (M39) and the assertion that used to stand here
+        -- `assertRaises(TrackerValidationError)` plus a byte-compare of
+        `progress.md` -- SURVIVED at all five `PYTHONHASHSEED`s. The three
+        unfinished states are swept because the guard is `!= _TASK_STATES[3]`
+        and a guard written against one state is a guard two states walk past.
+        """
+        merge = merge_no_ff(self.repo, "task/T1", "integrate T1")
+        started = {"owner": "impl-1", "attempt": "attempt-001",
+                   "checkpoints": "started:attempt-001"}
+        for label, unfinished, fields in (
+                ("unstarted", "[ ]", {}),
+                ("running", "[~]", started),
+                ("blocked", "[?]", dict(started, question=QUESTION_REF))):
+            with self.subTest(state=unfinished):
+                set_task_state(self.run_dir, "T1", f"t11-{label}",
+                               state=unfinished, **fields)
+                before = (self.run_dir / "progress.md").read_bytes()
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state.integrate_task(self.run_dir, task_id="T1",
+                                         merge_commit=merge,
+                                         run_command=controller_git)
+                message = str(caught.exception)
+                #: the row's ACTUAL state, spelled, and what it is missing.
+                self.assertIn(unfinished, message)
+                self.assertIn("completed", message)
+                #: and never the accusation the next check down would make.
+                self.assertNotIn("already integrated", message)
+                self.assertEqual((self.run_dir / "progress.md").read_bytes(),
+                                 before)
+
+    def test_integrate_task_refuses_an_artifact_task(self):
+        repo, run_dir, _ = make_run(
+            self.tmp / "artifact",
+            task_block("A1", order=1, batch="b1", kind="artifact",
+                       write_scope="tree:docs", outputs="docs/report.md"),
+            worker_limit=8)
+        set_task_state(run_dir, "A1", "t11-artifact", state="[x]",
+                       owner="impl-1", attempt="attempt-001",
+                       result=f"agent-output/A1.md#sha256={FAKE_DIGEST}",
+                       checkpoints="started:attempt-001",
+                       artifacts="docs/report.md", integration="N/A",
+                       verification=f"evidence/A1.md#sha256={OTHER_DIGEST}")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.integrate_task(run_dir, task_id="A1",
+                                 merge_commit=git(repo, "rev-parse", "target"),
+                                 run_command=controller_git)
+        self.assertIn("source", str(caught.exception))
+
+    def test_a_non_callable_run_command_is_refused_before_the_lock(self):
+        complete_task(self.run_dir, "T1", commits=(self.tip,))
+        before = (self.run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.integrate_task(self.run_dir, task_id="T1",
+                                 merge_commit=git(self.repo, "rev-parse",
+                                                  "target"),
+                                 run_command=None)
+        self.assertIn("callable", str(caught.exception))
+        self.assertEqual((self.run_dir / "progress.md").read_bytes(), before)
+
+    def test_the_capability_is_asked_before_the_run_is_even_read(self):
+        """BEFORE the lock AND before the tracker is read. Pointed at a
+        directory that is not a run at all, the diagnosis must still be the
+        missing capability -- a screen that fired later would report the
+        foreign directory and the caller would never learn what it forgot."""
+        nowhere = self.tmp / "not-a-run"
+        nowhere.mkdir()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.integrate_task(nowhere, task_id="T1",
+                                 merge_commit=git(self.repo, "rev-parse",
+                                                  "target"),
+                                 run_command=None)
+        self.assertIn("callable", str(caught.exception))
+
+    def test_a_multi_commit_task_integrates_its_whole_range(self):
+        """The F3 shape by another route: taking the source ref alone as the
+        range truncates a multi-commit task to its last commit."""
+        commits = source_result_commits(self.repo, count=3, branch="task/T3",
+                                        path="src/a1.py")
+        git(self.repo, "checkout", "-q", "target")
+        complete_task(self.run_dir, "T1", commits=commits)
+        merge = merge_no_ff(self.repo, "task/T3", "integrate T3")
+        tracker = state.integrate_task(
+            self.run_dir, task_id="T1", merge_commit=merge,
+            run_command=controller_git)
+        self.assertEqual(task_row(tracker, "T1")["integration"], merge)
+        self.assertEqual(task_row(tracker, "T1")["commits"], ",".join(commits))
+
+    def test_an_unknown_task_is_a_stop(self):
+        with self.assertRaises(state.TrackerValidationError):
+            state.integrate_task(self.run_dir, task_id="T9",
+                                 merge_commit=git(self.repo, "rev-parse",
+                                                  "target"),
+                                 run_command=controller_git)
+
+
+class MergeConflictHardStopTests(TempDirTestCase):
+    """Fault F9. A conflict proves a scope declaration was wrong."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo, self.run_dir = integration_run(self)
+        #: BOTH branches touch `src/shared.py`, which NEITHER declared.
+        #: Constructed directly at the git level: a correct declaration should
+        #: make this unreachable through the validated path, which is exactly
+        #: why reaching it must stop the run rather than recover.
+        self.first = branch_commit(self.repo, "task/T1", "src/shared.py",
+                                   "shared = 1\n")
+        self.second = branch_commit(self.repo, "task/T2", "src/shared.py",
+                                    "shared = 2\n")
+        self.merged = merge_no_ff(self.repo, "task/T1", "integrate T1")
+        complete_task(self.run_dir, "T1", commits=(self.first,),
+                      integration=self.merged)
+        complete_task(self.run_dir, "T2", commits=(self.second,),
+                      owner="impl-2")
+        conflicted = subprocess.run(
+            ("git", "-C", str(self.repo), "merge", "--no-ff", "--no-edit",
+             "-m", "integrate T2", "task/T2"),
+            capture_output=True, text=True, check=False)
+        self.assertNotEqual(conflicted.returncode, 0)
+
+    def stop(self):
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.integrate_task(self.run_dir, task_id="T2",
+                                 merge_commit=self.second,
+                                 run_command=controller_git)
+        return str(caught.exception)
+
+    def test_the_hard_stop_names_both_tasks_both_scopes_and_the_path(self):
+        message = self.stop()
+        for fragment in ("HARD STOP", "T1", "T2", "file:src/a1.py",
+                         "file:src/a2.py", "src/shared.py"):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, message)
+
+    def test_the_hard_stop_names_the_abort_as_the_controllers_action(self):
+        message = self.stop()
+        self.assertIn("git merge --abort", message)
+
+    def test_the_module_writes_nothing_to_the_users_repository(self):
+        """`merge --abort` must NOT return: the module never writes to the
+        user's repository, so the tree is STILL mid-merge afterwards and the
+        abort is the controller's next action, named in the message."""
+        before = git(self.repo, "status", "--short")
+        head = git(self.repo, "rev-parse", "HEAD")
+        merge_head = (self.repo / ".git" / "MERGE_HEAD").read_text()
+        self.stop()
+        self.assertEqual(git(self.repo, "status", "--short"), before)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), head)
+        self.assertEqual((self.repo / ".git" / "MERGE_HEAD").read_text(),
+                         merge_head)
+
+    def test_nothing_is_recorded_and_no_redo_alone_happens(self):
+        before = (self.run_dir / "progress.md").read_bytes()
+        self.stop()
+        self.assertEqual((self.run_dir / "progress.md").read_bytes(), before)
+        tracker = state.validate_run(self.run_dir)
+        self.assertEqual(task_row(tracker, "T2")["integration"], "held")
+
+    def test_the_module_offers_no_strategy_flag_and_no_retry(self):
+        code = "\n".join(
+            module_function_code(name) for name in
+            ("integrate_task", "_integration_ancestry", "_colliding_task",
+             "merge_parents_commands", "integration_range_commands",
+             "conflicted_paths_commands"))
+        for forbidden in ("--strategy", "-X", "ours", "theirs", "--abort"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, code)
+
+    def test_the_hard_stop_precedes_every_completion_check(self):
+        """A conflicted tree is a hard stop whatever the row says: a conflicted
+        `git merge --no-ff` leaves NO merge commit to validate, so anything
+        checked first would report the wrong fault."""
+        set_task_state(self.run_dir, "T2", "t11-unwind", state="[ ]",
+                       owner="-", attempt="-", result="-", checkpoints="-",
+                       source_ref="-", commits="-", artifacts="-",
+                       integration="-", verification="-", question="-")
+        self.assertIn("HARD STOP", self.stop())
+
+    def test_a_declared_scope_that_claims_the_path_names_that_task(self):
+        """When some task DID declare the conflicted path, that task is the
+        collider -- which is the whole claim the message makes."""
+        tracker = state.validate_run(self.run_dir)
+        self.assertEqual(
+            state._colliding_task(tracker, "T2", ("src/a1.py",))[0][0], "T1")
+
+
+class CollidingTaskTests(TempDirTestCase):
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo, self.run_dir = integration_run(self)
+        self.tracker = state.validate_run(self.run_dir)
+
+    def test_a_task_is_never_its_own_collider(self):
+        named = [entry[0] for entry in
+                 state._colliding_task(self.tracker, "T1", ("src/a1.py",))]
+        self.assertNotIn("T1", named)
+
+    def test_a_declaring_task_outranks_a_merely_completed_one(self):
+        found = state._colliding_task(self.tracker, "T2", ("src/a1.py",))
+        self.assertEqual(found[0][0], "T1")
+        self.assertEqual(found[0][2], ("src/a1.py",))
+
+    def test_a_path_no_scope_can_even_spell_yields_no_claimant(self):
+        """A C-quoted path -- what `core.quotePath=true` prints for a non-ASCII
+        name -- is refused by `_safe_relative`, so no scope claims it. The
+        collider list must come back empty-handed rather than raise: the hard
+        stop still has to be raised."""
+        for path in ('"src/caf\\303\\251.py"', "../escape", "/abs", "src/*.py"):
+            with self.subTest(path=path):
+                found = state._colliding_task(self.tracker, "T2", (path,))
+                self.assertEqual([entry[2] for entry in found] or [()], [()])
+
+    def test_an_unknown_subject_task_is_a_stop(self):
+        with self.assertRaises(state.TrackerValidationError):
+            state._colliding_task(self.tracker, "T9", ("src/a1.py",))
+
+
+class MergeInProgressTests(TempDirTestCase):
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = make_repo(self.tmp)
+
+    def test_a_clean_tree_is_not_mid_merge(self):
+        self.assertIsNone(state._merge_in_progress(self.repo))
+
+    def test_merge_head_is_read_through_the_pseudo_ref_the_store_knows(self):
+        self.assertIn("MERGE_HEAD", state._PSEUDO_REFS)
+        (self.repo / ".git" / "MERGE_HEAD").write_text(
+            git(self.repo, "rev-parse", "HEAD") + "\n", encoding="utf-8")
+        self.assertEqual(state._merge_in_progress(self.repo),
+                         git(self.repo, "rev-parse", "HEAD"))
+
+    def test_a_merge_head_that_is_not_an_object_name_is_a_stop(self):
+        (self.repo / ".git" / "MERGE_HEAD").write_text("ref: refs/heads/main\n",
+                                                       encoding="utf-8")
+        with self.assertRaises(state.TrackerValidationError):
+            state._merge_in_progress(self.repo)
+
+    def test_a_fifo_at_merge_head_does_not_block_under_the_run_lock(self):
+        path = self.repo / ".git" / "MERGE_HEAD"
+        os.mkfifo(path)
+        with publication_deadline(5, "reading MERGE_HEAD"):
+            with self.assertRaises(state.TrackerValidationError):
+                state._merge_in_progress(self.repo)
+
+
+class IntegrationTotalityTests(TempDirTestCase):
+    """The corpus derives from the CALL TREE and asserts the DIAGNOSIS.
+
+    A path argument needs a NUL at the LEADING offset as well as mid-string --
+    three rounds of this build were bitten by leading-offset blind spots -- and
+    a lone surrogate, which no filesystem call can encode.
+    """
+
+    NASTY = ("\x00repo", "re\x00po", "repo\x00", "\ud800", "re\ud800po")
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo, self.run_dir = integration_run(self)
+        self.tip = branch_commit(self.repo, "task/T1", "src/a1.py", "one = 1\n")
+        self.merge = merge_no_ff(self.repo, "task/T1", "integrate T1")
+        complete_task(self.run_dir, "T1", commits=(self.tip,))
+
+    def test_every_emitter_refuses_a_nasty_repository_location(self):
+        for value in self.NASTY:
+            for name, kwargs in (
+                ("merge_parents_commands", {"merge_commit": self.merge}),
+                ("integration_range_commands",
+                 {"first_parent": self.merge, "second_parent": self.tip}),
+                ("conflicted_paths_commands", {}),
+            ):
+                with self.subTest(value=value, name=name):
+                    with self.assertRaises(state.TrackerError):
+                        getattr(state, name)(value, **kwargs)
+
+    def test_the_ancestry_predicate_refuses_a_nasty_repository_location(self):
+        for value in self.NASTY:
+            with self.subTest(value=value):
+                with self.assertRaises(state.TrackerError):
+                    state._integration_ancestry(
+                        value, commits=(self.tip,), branch_tip=self.tip,
+                        merge_commit=self.merge, target_branch="target",
+                        run_command=controller_git)
+
+    def test_integrate_task_refuses_a_nasty_run_directory(self):
+        for value in self.NASTY:
+            with self.subTest(value=value):
+                with self.assertRaises(state.TrackerError):
+                    state.integrate_task(value, task_id="T1",
+                                         merge_commit=self.merge,
+                                         run_command=controller_git)
+
+    def test_integrate_task_refuses_a_nasty_merge_commit(self):
+        for value in self.NASTY + ("task/T1", "", None, 7):
+            with self.subTest(value=value):
+                with self.assertRaises(state.TrackerError):
+                    state.integrate_task(self.run_dir, task_id="T1",
+                                         merge_commit=value,
+                                         run_command=controller_git)
+
+    def test_integrate_task_refuses_a_nasty_task_id(self):
+        for value in self.NASTY + ("", None, 7):
+            with self.subTest(value=value):
+                with self.assertRaises(state.TrackerError):
+                    state.integrate_task(self.run_dir, task_id=value,
+                                         merge_commit=self.merge,
+                                         run_command=controller_git)
+
+    def test_the_graft_screen_refuses_a_nasty_repository_location(self):
+        for value in self.NASTY:
+            with self.subTest(value=value):
+                with self.assertRaises(state.TrackerError):
+                    state._graft_screen(value)
+
+
+def object_name_corpus() -> tuple:
+    """Derived from the CALL TREE of `_integration_end`, not from known bugs.
+
+    Every end of every command in the integration block goes through that one
+    screen, and the values that reach it are: a `## Tasks` `Commits` cell, a
+    `Source Ref` cell, a `merge_commit` argument, and the `%H`/`%P` fields the
+    transcript parser already screened. So the corpus is built as ALPHABET x
+    LENGTH x OFFSET rather than from mutants that were caught before.
+    """
+    hexadecimal = "0123456789abcdef"
+    body = (hexadecimal * 3)[:40]
+    cases = [
+        body,                                   # the canonical accept
+        "0" * 40, "f" * 40, "9" * 40,
+        body.upper(),                           # ASCII uppercase
+        body[:39], body + "0", "", " " * 40,
+        body[:39] + "g", body[:39] + "-", body[:39] + ".",
+        #: `\d` and `\w` are UNICODE by default, so an ASCII-only alphabet is a
+        #: DELIBERATE TIGHTENING and the corpus has to contain the characters
+        #: that separate the two readings.
+        body[:39] + "٠",                   # ARABIC-INDIC DIGIT ZERO
+        body[:39] + "０",                   # FULLWIDTH DIGIT ZERO
+        body[:39] + "०",                   # DEVANAGARI DIGIT ZERO
+        "٠" + body[1:],                    # ... at the LEADING offset
+        body[:20] + "０" + body[21:],       # ... and mid-string
+        #: A NUL at the LEADING offset as well as mid-string: three rounds of
+        #: this build were bitten by leading-offset blind spots.
+        "\x00" + body[1:], body[:20] + "\x00" + body[21:], body[:39] + "\x00",
+        "\ud800" + body[1:], body[:20] + "\ud800" + body[21:],
+        body + "\n", "\n" + body[1:], body[:39] + "\t",
+    ]
+    return tuple(cases)
+
+
+class IntegrationGrammarDivergenceTests(unittest.TestCase):
+    """This task adds NO new grammar, and that is a claim to CHECK.
+
+    `_integration_end` reuses `_COMMIT` -- P02's `_Hex(40)` -- rather than
+    re-spelling "forty hex characters", and a second spelling of one grammar is
+    two answers to one question. The divergence table below is measured in BOTH
+    directions against an independent reference predicate written in this file,
+    never against the screen under test.
+    """
+
+    @staticmethod
+    def reference(value) -> bool:
+        """Forty lowercase ASCII hex characters. Spelled here, independently."""
+        return (isinstance(value, str) and len(value) == 40
+                and all(character in "0123456789abcdef" for character in value))
+
+    def test_the_screen_and_the_reference_agree_in_both_directions(self):
+        divergences = []
+        for value in object_name_corpus():
+            try:
+                state._integration_end(value, field="test")
+                accepted = True
+            except state.TrackerValidationError:
+                accepted = False
+            if accepted != self.reference(value):
+                divergences.append((value, accepted))
+        self.assertEqual(divergences, [])
+
+    def test_the_corpus_exercises_both_verdicts(self):
+        """A corpus every member of which is refused proves nothing about the
+        accepting direction."""
+        verdicts = {self.reference(value) for value in object_name_corpus()}
+        self.assertEqual(verdicts, {True, False})
+
+    def test_the_unicode_digits_are_refused_and_that_is_the_tightening(self):
+        """`\\d` is Unicode by default: `re.fullmatch(r"\\d{40}", ...)` would
+        ACCEPT the Arabic-Indic, fullwidth and Devanagari spellings. The
+        hand-rolled screen refuses them, which is the whole point of hand
+        rolling it -- a repository never names an object with one, and a value
+        that looks like an object name and is not is the shape every screen in
+        this module exists to refuse."""
+        canonical = ("0123456789abcdef" * 3)[:40]
+        for digit in ("٠", "０", "०", "᱀"):
+            with self.subTest(digit=digit):
+                value = canonical[:39] + digit
+                self.assertEqual(len(value), 40)
+                self.assertTrue(value.isascii() is False)
+                with self.assertRaises(state.TrackerValidationError):
+                    state._integration_end(value, field="test")
+
+    def test_the_task_eleven_block_spells_no_new_grammar(self):
+        """No `_CharClass`, `_Hex` or `_Numbered` is constructed in this
+        block: every screen it applies is one the module already had."""
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        marker = "# P04 Task 11: integration -- faults F9 and F10."
+        self.assertEqual(source.count(marker), 1)
+        block = source[source.index(marker):]
+        for constructor in ("_CharClass(", "_Hex(", "_Numbered(",
+                            "_RefComponent(", "_Owner(", "_AttemptToken("):
+            with self.subTest(constructor=constructor):
+                self.assertNotIn(constructor, block)
+
+
+def transcript_record(commit: str, parents=()) -> str:
+    """One `%x00%H %P` record, built HERE and never through the module.
+
+    A corpus checked with the code under test measures agreement with itself.
+    """
+    return "\x00" + commit + " " + " ".join(parents) + "\n"
+
+
+class ScriptedController:
+    """Answer honestly, EXCEPT for the one command carrying a named argument.
+
+    The module's whole reading of an external process's stdout is the
+    transcript grammar, and a truthful controller exercises none of its
+    structural screens: a real repository never hands back a repeated commit,
+    a broken chain, a walk that stops short, or a header about another commit.
+    So those four screens are only reachable through a controller that lies,
+    which is exactly the party the grammar is written for.
+    """
+
+    def __init__(self, answers):
+        self.answers = dict(answers)
+        self.calls = []
+
+    def __call__(self, argv):
+        argv = tuple(argv)
+        self.calls.append(argv)
+        for marker, answer in self.answers.items():
+            if marker in argv:
+                return answer
+        return controller_git(argv)
+
+
+class LyingControllerTests(TempDirTestCase):
+    """The transcript is CHECKED from its own structure, not read off."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo, self.run_dir = integration_run(self)
+        self.tip = branch_commit(self.repo, "task/T1", "src/a1.py", "one = 1\n")
+        self.merge = merge_no_ff(self.repo, "task/T1", "integrate T1")
+        self.first_parent = git(self.repo, "rev-parse", f"{self.merge}^1")
+        self.walk_range = f"{self.first_parent}..{self.tip}"
+
+    def ancestry(self, controller):
+        return state._integration_ancestry(
+            self.repo, commits=(self.tip,), branch_tip=self.tip,
+            merge_commit=self.merge, target_branch="target",
+            run_command=controller)
+
+    def test_the_honest_controller_is_the_control(self):
+        self.assertEqual(self.ancestry(ScriptedController({})), (self.tip,))
+
+    def test_a_repeated_commit_in_the_walk_is_refused(self):
+        forged = (transcript_record(self.tip, (self.first_parent,))
+                  + transcript_record(self.tip, (self.tip,)))
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            self.ancestry(ScriptedController({self.walk_range: forged}))
+        self.assertIn("more than once", str(caught.exception))
+
+    def test_a_walk_that_is_not_a_chain_is_refused(self):
+        forged = (transcript_record(self.tip, (self.first_parent,))
+                  + transcript_record("b" * 40, ("c" * 40,)))
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            self.ancestry(ScriptedController({self.walk_range: forged}))
+        self.assertIn("linear chain", str(caught.exception))
+
+    def test_a_walk_that_stops_short_of_the_branch_tip_is_refused(self):
+        forged = transcript_record("a" * 40, (self.first_parent,))
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            self.ancestry(ScriptedController({self.walk_range: forged}))
+        self.assertIn("ends at", str(caught.exception))
+
+    def test_a_header_about_another_commit_is_refused(self):
+        forged = transcript_record("a" * 40, (self.first_parent, self.tip))
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            self.ancestry(ScriptedController({self.merge: forged}))
+        self.assertIn("rather than that one commit", str(caught.exception))
+
+    def test_a_header_carrying_two_records_is_refused(self):
+        forged = (transcript_record(self.merge, (self.first_parent, self.tip))
+                  + transcript_record("a" * 40, (self.first_parent,)))
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            self.ancestry(ScriptedController({self.merge: forged}))
+        self.assertIn("rather than that one commit", str(caught.exception))
+
+
+class LinkedWorktreeGraftTests(TempDirTestCase):
+    """The graft file lives in the COMMON directory, and this phase's whole
+    topology is one linked worktree per concurrently dispatched implementer --
+    so a screen that asked only the per-worktree `gitdir` would leave the
+    channel open in the ordinary case rather than in an exotic one."""
+
+    def test_a_graft_in_the_common_directory_is_seen_from_a_linked_worktree(self):
+        repo = make_repo(self.tmp)
+        linked = self.tmp / "linked"
+        git(repo, "worktree", "add", "-q", str(linked), "target")
+        gitdir, common = state._git_store(linked)
+        self.assertNotEqual(gitdir, common)          # the topology, asserted
+        state._graft_screen(linked)                  # clean: no refusal
+        tip = git(repo, "rev-parse", "target")
+        (common / "info").mkdir(parents=True, exist_ok=True)
+        (common / "info" / "grafts").write_text(f"{tip}\n", encoding="utf-8")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._graft_screen(linked)
+        self.assertIn("graft", str(caught.exception))
 
 if __name__ == "__main__":
     unittest.main()

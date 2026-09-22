@@ -8,8 +8,7 @@ A quorum decides an **open** question. It never overrules a **recorded** one.
 
 **Not yet enforced by code:** queueing a *non-quorum* escalation and batching the
 queue at a stage boundary (no function writes `asked`/`answered`); provisional
-propagation to dependent tasks; the any-blocker rule (code escalates only at two
-blockers — see Adoption). These are the controller's job until P05/P06.
+propagation to dependent tasks. These are the controller's job until P05/P06.
 
 ## Rungs, strongest first
 
@@ -142,7 +141,7 @@ never the mean, never headcount.
 the tracker lock. Never call it from inside a held lock. Adopt only if all hold:
 
 - three valid responses (a precondition, never a strength);
-- no response carries a blocker;
+- fewer than two responses carry a blocker;
 - winner at or above `current_floor`;
 - **more than one cluster:** winner strictly stronger than the runner-up;
 - a re-open: winner strictly stronger than the challenged decision's rung;
@@ -158,9 +157,13 @@ the tracker lock. Never call it from inside a held lock. Adopt only if all hold:
 | Three clusters, one strictly stronger than the rest | Adopt. Different answers alone are no reason to escalate. |
 | Winner adopted at `specified` | An ordinary adoption: `Provenance: quorum`, one phase and one run adoption charged. Never retroactively re-resolved by citation. |
 
-**Blockers:** code escalates automatically (`blocked`) only when two responses
-carry one. With exactly one, the rule above still holds: do not treat a
-`finalize_quorum` adoption as permission — escalate.
+**Blockers:** two or more responses carrying a blocker escalate automatically
+(`finalize_quorum` returns `blocked`) — two brains unable to proceed means the
+question is the problem. **One** blocker does not by itself stop an adoption:
+one brain unable to proceed is a brain, not the question. The spec states this
+threshold (adoption requires "fewer than two carrying a blocker"), and the code
+enforces it. A `finalize_quorum` adoption with one blocker present is legitimate
+— do not override it.
 
 An adoption records the answer, winning rung, runner-up rung, depth, and
 `Provenance: quorum` as `Q-<qid>`; the blocked task resumes via `task.resume`.

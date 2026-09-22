@@ -66,8 +66,9 @@ timeout or policy you write in advance. Two agreeing, well-cited responses are
 two responses.
 
 - **A missing response** (its worker died, or context was lost): re-dispatch only
-  the missing index, rebuilt by `build_payload(qid, index)` and checked against
-  its persisted digest. This is recovery, not a second chance. Never re-dispatch
+  the missing index, re-sent from its own persisted payload and checked against
+  its digest — never rebuilt from current state. This is recovery, not a second
+  chance. Never re-dispatch
   a brain that answered; never discard an answer to get a tidier set.
 - **A schema-invalid value** (for example a rung not in the list above): never
   map, default or demote it. Re-dispatch that index **once**, with its full
@@ -81,7 +82,7 @@ two responses.
 
 **Adoption.** Cluster by `answer_key`, then compare rungs. Adopt only when the
 winning cluster is **strictly stronger** than the runner-up, at or above the
-current floor, no response carries a blocker, nothing forecloses an irreversible
+current floor, fewer than two responses carry a blocker, nothing forecloses an irreversible
 axis, depth is within the cap, budget remains, and `check_contradiction` returns
 nothing.
 

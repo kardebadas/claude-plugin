@@ -221,7 +221,16 @@ reaches P06 as `record["grounding_rung"]` and `- **Scope:** P02-T01` as `record[
 ### Consumes from P04 and P05
 
 ```python
-def reconcile_run(run_dir: str) -> dict: ...
+def reconcile_run(run_dir: str, *, run_command) -> dict: ...
+#   `run_command` on `reconcile_run` and on `integrate_task` above is
+#   REQUIRED, not defaulted, for `import_worker_result`'s reason: the module
+#   never executes git, so the ability to run one command is the controller's
+#   capability and arrives as an argument. `reconcile_run` calls
+#   `import_worker_result` and `_integration_ancestry`, both of which already
+#   require it, so a reconciliation that could not supply one could not do
+#   either of the two things it exists to do.
+#   `integrate_task` changed by P04 Task 11; `reconcile_run` by P04 Task 12,
+#   which also propagated Task 11's change to the documents that pin it.
 def verify_source_range(repo: str, *, baseline: str, head: str, head_ref: str,
                         scopes: list, transcript: str) -> dict: ...
 def open_fix_round(run_dir: str, *, scope: str, findings: list) -> dict: ...

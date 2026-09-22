@@ -17341,3 +17341,218 @@ def integrate_task(run_dir, *, task_id: str, merge_commit: str,
     return locked_tracker_update(
         home, transition_id=f"integrate-{task_id}-{merge_commit}",
         mutate=mutate)
+
+
+# ---------------------------------------------------------------------------
+# P04 Task 12: file-first reconciliation -- fault F7.
+#
+# After a compaction, restart or interruption the run rebuilds its next action
+# from FILES AND THE REF STORE, never from conversation memory. A commit that
+# appeared immediately before the interruption is neither automatic success nor
+# grounds to repeat five hours of work. A MISSING result is neither: it is an
+# open question about a worker that may still be alive, and answering it either
+# way is F7.
+#
+# SO THIS FUNCTION DOES EXACTLY ONE THING BY ITSELF. It imports a published
+# result whose four-part identity -- run, task, attempt, owner -- matches the
+# assignment this controller persisted, through the transition that already
+# adjudicates that. Everything else it finds becomes a QUESTION (contradictory
+# evidence somebody has to settle) or a DIAGNOSTIC (a name in the results tree
+# this run cannot read), and neither channel changes a byte.
+#
+# ``run_command`` IS REQUIRED, and it is the Task 10 supersession reaching its
+# last consumer. The module never executes git: ``import_worker_result`` and
+# ``_integration_ancestry`` both take the controller's runner as a required
+# keyword-only argument, and a reconciliation is the caller of both. A default
+# here would be a capability nobody declared, discovered at the end of a
+# successful-looking recovery rather than at the call.
+# ---------------------------------------------------------------------------
+
+def _result_candidates(run_dir: Path, diagnostics: list) -> list:
+    """Every parsed worker result under ``agent-output``, and what could not be.
+
+    ``is_dir()`` IS NOT ASKED AS "IS THERE ANYTHING HERE". It answers False for
+    a regular file, a dangling symlink, a symlink loop and a NUL-bearing name,
+    and folding those into "no result has been published" is F7's fail-open
+    wearing a predicate: every live attempt would then be reported as awaiting
+    a worker whose answer is sitting on disk, unreadable. The name is therefore
+    asked about separately from the shape, and a name that is there and is not
+    a directory is corruption rather than absence.
+
+    THE PREDICATE IS INSTANT AND THE OPEN IS WHAT BLOCKS. A FIFO published
+    under this tree answers ``is_file()`` False in no time at all and then
+    hangs ``read_text`` for ever -- under the run lock, with no writer ever
+    coming. So the shape goes through this module's one door,
+    ``_require_regular_file``, BEFORE anything is opened, and the read is what
+    is bounded rather than the predicate.
+
+    A DIRECTORY IS SKIPPED DELIBERATELY AND IS NOT A DIAGNOSTIC.
+    ``worker_result_path`` is ``agent-output/<task id>/<attempt>.md``, so the
+    tree layer is the module's own layout; a door that refused it would report
+    this function's own directory structure as corruption.
+
+    A DOCUMENT WITH NO MARKER IS NAMED RATHER THAN SKIPPED. This tree is
+    written by ``publish_worker_result`` and by nothing else, so an unexplained
+    document in it is exactly the thing reconciliation may not read as absence.
+    """
+    root = run_dir / AGENT_OUTPUT_DIRNAME
+    try:
+        listing = sorted(root.rglob("*")) if root.is_dir() else None
+    except OSError as exc:
+        diagnostics.append(f"unreadable-result-store:{root}:{exc}")
+        return []
+    if listing is None:
+        if os.path.lexists(root):
+            diagnostics.append(
+                f"unreadable-result-store:{root}: a name this run directory "
+                "carries that is not a directory; the published results are "
+                "not known to be absent, only unreadable")
+        return []
+    candidates: list = []
+    for path in listing:
+        try:
+            if path.is_dir():
+                continue
+            _require_regular_file(path, "published worker result")
+            content = path.read_text(encoding="utf-8")
+        except (TrackerError, OSError, UnicodeError) as exc:
+            diagnostics.append(f"unreadable-result-candidate:{path}:{exc}")
+            continue
+        if not content.startswith(WORKER_RESULT_MARKER):
+            diagnostics.append(f"foreign-result-candidate:{path}")
+            continue
+        try:
+            candidates.append((path, parse_worker_result(content)))
+        except TrackerError as exc:
+            diagnostics.append(f"partial-or-malformed-result:{path}:{exc}")
+    return candidates
+
+
+def reconcile_run(run_dir, *, run_command) -> dict:
+    """Rebuild the next recovery action from authoritative files and Git evidence.
+
+    Returns ``{"actions": tuple, "questions": tuple, "diagnostics": tuple}``.
+    ``actions`` is what the controller may do next; ``questions`` is
+    contradictory evidence that a human or a quorum settles; ``diagnostics`` is
+    a name in the results tree this run could not read. Only the import arm
+    writes anything, and only through ``import_worker_result``.
+
+    EVERY APPROVED PHASE PLAN IS RE-READ BEFORE ANY TASK ROW IS TRUSTED. The
+    row is a mirror of the plan -- kind, write scope, dependencies and the
+    verification suite live there and nowhere else -- so recovering against
+    rows whose authority no longer parses is recovering against a document that
+    changed underneath the run. That is a read-only stop and it is raised, not
+    reported: a report derived from an unreadable authority is worse than no
+    report.
+
+    THE TRACKER IS RE-READ BETWEEN THE TWO PASSES. The first pass may import,
+    and an import is a durable transition under the run lock; the second pass
+    asks about completion and integration, so it must ask of the state the
+    first pass left rather than of the copy it started from.
+
+    AN UNROUTABLE ``Question`` CELL PRODUCES NO ACTION. The cell has exactly
+    two arms, ``quorum:<qid>@<path>#sha256=<digest>`` and ``halt:<reason>``,
+    and the route alone is not one of them: a cell spelled ``quorum`` with
+    nothing behind it would otherwise be routed as a quorum nobody can look up.
+    The detail is taken with ``partition`` rather than ``split`` because a halt
+    reason is free text and may carry colons of its own.
+
+    THE BRIEF'S TWO UNREACHABLE ARMS ARE NOT IMPLEMENTED, and both are asserted
+    unreachable by tests rather than argued here: ``integration in {"-", ""}``
+    and an artifact row whose integration is not ``N/A`` are states
+    ``_validate_tasks`` refuses to store, so ``validate_run`` -- called one
+    line above -- raises before either could be reached. The integration-held
+    sentinel is what a completed, unintegrated source task actually carries.
+    """
+    run_dir = _run_path(run_dir)
+    if not callable(run_command):
+        raise TrackerValidationError(
+            f"reconcile_run needs the controller's command runner; got "
+            f"{type(run_command).__name__} {run_command!r}, which is not "
+            "callable. This module emits the argv that proves a source range "
+            "and an integration and never runs one, so the ability to run it "
+            "is an argument -- and it is asked for before anything is opened, "
+            "because a caller that cannot supply it has not failed a check, it "
+            "has called wrongly")
+    tracker = validate_run(run_dir)
+    repo = _repo_dir(tracker)
+    run_id = _run_field(tracker, "run_id")
+    target = _run_field(tracker, "target_branch")
+    actions: list = []
+    questions: list = []
+    diagnostics: list = []
+
+    for phase in tracker.get("phases", ()) or ():
+        parse_plan_metadata(_phase_plan_path(tracker, phase["id"]))
+
+    candidates = _result_candidates(run_dir, diagnostics)
+
+    for row in tracker.get("tasks", ()) or ():
+        if row["state"] != _TASK_STATES[1]:
+            continue
+        same_task = [
+            (path, result) for path, result in candidates
+            if result["run_id"] == run_id and result["task_id"] == row["id"]
+        ]
+        matches = [(path, result) for path, result in same_task
+                   if _attempt_token(result["attempt"]) == row["attempt"]]
+        #: THE MAP FROM (task, attempt) TO A PATH IS INJECTIVE, so a second
+        #: document for one attempt is one no transition of this module wrote.
+        #: Which of the two is the real one is not a question a recovery
+        #: settles by picking one.
+        if len(matches) > 1:
+            questions.append(f"conflicting-results:{row['id']}:{row['attempt']}")
+            continue
+        if matches:
+            path, result = matches[0]
+            if result["owner"] != row["owner"]:
+                questions.append(
+                    f"result-owner-contradiction:{row['id']}:{row['attempt']}:"
+                    f"{path}")
+                continue
+            try:
+                import_worker_result(run_dir, result_path=path,
+                                     run_command=run_command)
+            except TrackerError as exc:
+                questions.append(
+                    f"result-evidence-contradiction:{row['id']}:"
+                    f"{row['attempt']}:{exc}")
+            else:
+                actions.append(f"imported:{row['id']}:{row['attempt']}")
+            continue
+        stale = [str(path) for path, _ in same_task]
+        if stale:
+            questions.append(
+                f"superseded-or-conflicting-result:{row['id']}:"
+                f"{row['attempt']}:{','.join(stale)}")
+        #: A MISSING RESULT IS NOT COMPLETION AND NOT GROUNDS TO REPEAT THE
+        #: WORK. It is a question about whether the owner is still alive, and
+        #: that is a question the controller can answer and this module cannot.
+        actions.append(
+            f"await-or-check-live-owner:{row['id']}:{row['attempt']}:"
+            f"{row['owner']}")
+
+    tracker = validate_run(run_dir)
+    for row in tracker.get("tasks", ()) or ():
+        if row["state"] == _TASK_STATES[3] and row["kind"] == TASK_KINDS[0]:
+            if row["integration"] == _INTEGRATION_HELD:
+                actions.append(f"integration-pending:{row['id']}")
+                continue
+            try:
+                _integration_ancestry(
+                    repo, commits=_csv(row["commits"]),
+                    branch_tip=_resolved_commit(repo, row["source_ref"]),
+                    merge_commit=row["integration"], target_branch=target,
+                    run_command=run_command)
+            except TrackerError as exc:
+                questions.append(f"integration-contradiction:{row['id']}:{exc}")
+        elif row["state"] == _TASK_STATES[2]:
+            route, _, detail = row["question"].partition(":")
+            if not detail or not _member(route, (QUORUM_ROUTE, HALT_ROUTE)):
+                questions.append(
+                    f"unroutable-block:{row['id']}:{row['question']}")
+            else:
+                actions.append(f"await-{route}:{row['id']}:{detail}")
+
+    return {"actions": tuple(actions), "questions": tuple(questions),
+            "diagnostics": tuple(diagnostics)}

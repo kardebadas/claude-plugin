@@ -6616,7 +6616,15 @@ class EvidenceResolutionTests(TempDirTestCase):
             "_question_record", "payload_digest", "_read_json",
             "_response_record", "_plan_text", "resolve_evidence",
             "_ref_text", "_published_result_bytes",
-            "_resolve_question_record", "_require_artifact_outputs"})
+            "_resolve_question_record", "_require_artifact_outputs",
+            "_result_candidates"})
+        #: THE ONE CALLER THAT CATCHES THE DOOR RATHER THAN PROPAGATING IT, so
+        #: "does it escape the family on a NUL" is not a question it can
+        #: answer. Task 12's `_result_candidates` turns the door's refusal into
+        #: a DIAGNOSTIC, because a reconciliation that raised on one unreadable
+        #: name would lose the findings about every other row. Two facts are
+        #: asserted for it instead of a drive, immediately below the loop.
+        reporters = {"_result_candidates"}
 
         nul = "\x00rd"
         probe = pathlib.Path("\x00x")
@@ -6643,11 +6651,30 @@ class EvidenceResolutionTests(TempDirTestCase):
             "_require_artifact_outputs": lambda: state._require_artifact_outputs(
                 nul, ("docs/out.md",)),
         }
-        self.assertEqual(set(drives), callers)
+        self.assertEqual(set(drives) | reporters, callers)
+        self.assertEqual(set(drives) & reporters, set())
         for name, drive in sorted(drives.items()):
             with self.subTest(caller=name):
                 with self.assertRaises(state.TrackerError):
                     drive()
+        #: Fact one: a NUL never reaches the reporter at all. `validate_run`
+        #: runs one line above it in `reconcile_run` and refuses such a run
+        #: directory -- `is_file()` answers False for a NUL-bearing name, so
+        #: the refusal is "missing progress.md", which is inside the family.
+        with self.subTest(caller="_result_candidates", fact="never reached"):
+            with self.assertRaises(state.TrackerError):
+                state.reconcile_run("\x00rd", run_command=controller_git)
+        #: Fact two: driven directly with one anyway, it answers the empty
+        #: listing rather than raising anything at all -- the behaviour its
+        #: caller depends on, and the reason it is not in the loop above. The
+        #: shapes that DO reach its door are driven by
+        #: `test_every_unreadable_candidate_shape_is_named_rather_than_skipped`.
+        with self.subTest(caller="_result_candidates", fact="reports"):
+            diagnostics: list = []
+            self.assertEqual(
+                state._result_candidates(pathlib.Path("\x00rd"), diagnostics),
+                [])
+            self.assertEqual(diagnostics, [])
 
     def test_a_name_that_is_not_there_is_still_answered_by_falling_through(self):
         """THE HALF THE SPLIT MUST NOT BREAK. `FileNotFoundError` and
@@ -12718,6 +12745,7 @@ class PublishedRunDirectorySpellingTests(TempDirTestCase):
 RUN_DIR_ENTRY_POINTS = (
     "initialize_run", "import_phase_plan", "reserve_task", "resume_task",
     "publish_worker_result", "import_worker_result", "integrate_task",
+    "reconcile_run",
 )
 RUN_DIR_CONTRACT_FUNCTIONS = ("validate_run", "locked_tracker_update")
 
@@ -12858,6 +12886,8 @@ class RunDirectoryCoercionSweepTests(TempDirTestCase):
                 value, task_id="T1",
                 merge_commit=git(self.repo, "rev-parse", "target"),
                 run_command=controller_git),
+            "reconcile_run": lambda value: state.reconcile_run(
+                value, run_command=controller_git),
         }
         self.assertEqual(sorted(calls), sorted(RUN_DIR_ENTRY_POINTS))
         shapes = (None, 5, b"/runs/r", ["/runs/r"], str(self.run_dir))
@@ -17490,6 +17520,771 @@ class LinkedWorktreeGraftTests(TempDirTestCase):
         with self.assertRaises(state.TrackerValidationError) as caught:
             state._graft_screen(linked)
         self.assertIn("graft", str(caught.exception))
+
+
+# --------------------------------------------------------------------------
+# Task 12 tests -- fault F7: reconstructing the next action from files.
+#
+# A commit that appeared immediately before an interruption is neither
+# automatic success nor grounds to repeat five hours of work. A MISSING result
+# is neither.
+#
+# THE BRIEF'S STEP-3 CODE CANNOT RUN, and the reason is the Task 10
+# supersession arriving one task late. It calls `import_worker_result(run_dir,
+# result_path=path)` and `_integration_ancestry(...)` with no `run_command`;
+# both made that argument REQUIRED and KEYWORD-ONLY, so the brief's
+# reconciliation raises `TypeError` -- outside `TrackerError` -- on its own
+# happy path. `reconcile_run` therefore grows the same required argument, for
+# the same reason the other two give: a default is a capability nobody
+# declared.
+# --------------------------------------------------------------------------
+
+def reconcile(run_dir, controller=None):
+    """The call under test, with the controller capability supplied."""
+    return state.reconcile_run(
+        run_dir,
+        run_command=controller_git if controller is None else controller)
+
+
+def reconcile_report(case, run_dir, controller=None) -> dict:
+    """`reconcile`, with the report's own shape asserted on the way through.
+
+    Three channels, every one a tuple of strings. A report that answered a
+    list would be mutable state handed to a caller, and one that answered a
+    bare string per channel would make every `assertIn` below a substring
+    test -- which passes for a prefix of a name nobody emitted.
+    """
+    report = reconcile(run_dir, controller)
+    case.assertIsInstance(report, dict)
+    case.assertEqual(sorted(report), ["actions", "diagnostics", "questions"])
+    for key, value in report.items():
+        case.assertIsInstance(value, tuple, key)
+        for item in value:
+            case.assertIsInstance(item, str, key)
+    return report
+
+
+#: A `Question` cell that is NEITHER arm. Derived from the grammar rather than
+#: remembered: the cell is `<route>:<detail>` and there are exactly two legal
+#: routes, so the shapes are (no separator), (separator, empty detail), (a
+#: detail with no route), (the right letters in the wrong case), and (a route
+#: this one only resembles). The middle one is the fail-open the brief's
+#: `partition` walks into: `quorum` with nothing behind it routes as a quorum.
+UNROUTABLE_QUESTION_CELLS = (
+    "pending",
+    state.QUORUM_ROUTE,
+    state.HALT_ROUTE,
+    f"{state.QUORUM_ROUTE}:",
+    f"{state.HALT_ROUTE}:",
+    f"{state.QUORUM_ROUTE.upper()}:a",
+    f"{state.HALT_ROUTE.title()}:a",
+    f"{state.QUORUM_ROUTE}ish:a",
+    f"{state.QUORUM_ROUTE} :a",
+    ":a",
+)
+
+#: NOT IN THE CORPUS, AND MEASURED RATHER THAN ASSUMED: a cell spelled
+#: `" quorum:a"` never reaches this screen at all. P02's `_cells` strips every
+#: cell on the way in, so the tracker stores `quorum:a` and the route is legal
+#: by the time anything here reads it. A case whose input the fixture cannot
+#: hold measures nothing, so the interior space -- which does survive -- is
+#: what the corpus carries instead.
+
+
+class ReconcileProducesBlockTests(unittest.TestCase):
+    """The brief's Produces block is a claim to CHECK, name by name.
+
+    Produces: `reconcile_run(run_dir) -> dict` returning `{"actions": tuple,
+    "questions": tuple, "diagnostics": tuple}`.
+
+    Consumes, as written: `validate_run`, `parse_worker_result`,
+    `import_worker_result`, `_integration_ancestry`, `_repo_dir`,
+    `WORKER_RESULT_MARKER`.
+
+    All six exist. TWO OF THEM NO LONGER HAVE THE SIGNATURE THE BRIEF CALLS
+    THEM WITH, and the Step-3 code the brief ships passes neither argument.
+    The brief's body also reaches for `_field(phase, "ID")` -- P02's `_field`
+    takes ONE parameter and Task 6 already refused that redeclaration -- and
+    guards `row["integration"] in {"-", ""}`, a value P02's `_validate_tasks`
+    refuses to store on a completed source row, so the arm it guards could
+    never have fired.
+    """
+
+    def test_every_consumed_name_exists(self):
+        for name in ("validate_run", "parse_worker_result",
+                     "import_worker_result", "_integration_ancestry",
+                     "_repo_dir", "WORKER_RESULT_MARKER"):
+            with self.subTest(name=name):
+                self.assertTrue(hasattr(state, name))
+
+    def test_the_two_consumed_transitions_require_the_controllers_runner(self):
+        """The reason `reconcile_run` grows the argument: it cannot call
+        either of these without one."""
+        for name in ("import_worker_result", "_integration_ancestry"):
+            with self.subTest(name=name):
+                parameter = inspect.signature(
+                    getattr(state, name)).parameters["run_command"]
+                self.assertIs(parameter.default, inspect.Parameter.empty)
+                self.assertIs(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+
+    def test_reconcile_run_requires_it_on_the_same_terms(self):
+        parameter = inspect.signature(
+            state.reconcile_run).parameters["run_command"]
+        self.assertIs(parameter.default, inspect.Parameter.empty)
+        self.assertIs(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertEqual(
+            [name for name, value in
+             inspect.signature(state.reconcile_run).parameters.items()
+             if value.kind is not inspect.Parameter.KEYWORD_ONLY],
+            ["run_dir"])
+
+    def test_the_row_accessor_is_consumed_and_never_redeclared(self):
+        """`_field(phase, "ID")` is the Task 6 defect in the brief's own body:
+        P02's `_field` is the one-argument header-to-key map read at every
+        section-column site, and a two-argument redefinition would move all of
+        them at once. A row is indexed by its snake_case key directly."""
+        self.assertEqual(
+            list(inspect.signature(state._field).parameters), ["column"])
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        body = next(node for node in ast.parse(source).body
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name == "reconcile_run")
+        #: The SYNTAX TREE and not the text: `_run_field(` contains `_field(`,
+        #: so a substring test here is red for a function that never mentions
+        #: `_field` at all.
+        self.assertEqual(
+            [ast.unparse(call) for call in ast.walk(body)
+             if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+             and call.func.id == "_field"],
+            [])
+
+    def test_the_names_this_task_defines_are_exactly_these_two(self):
+        """Located by the section banner, bounded at both ends, and asserted
+        to be the LAST section -- so the first thing a later phase appends
+        fails here rather than being silently counted as Task 12's."""
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        lines = source.splitlines()
+        banners = [index for index, line in enumerate(lines, start=1)
+                   if line.startswith("# P04 Task 1")]
+        self.assertEqual(
+            [lines[index - 1] for index in banners][-1],
+            "# P04 Task 12: file-first reconciliation -- fault F7.")
+        banner = banners[-1]
+        tree = ast.parse(source)
+        defined = sorted(
+            name for node in tree.body if node.lineno > banner
+            for name in module_bindings([node]))
+        self.assertEqual(defined, ["_result_candidates", "reconcile_run"])
+        self.assertEqual([name for name in defined
+                          if not name.startswith("_")], ["reconcile_run"])
+
+    def test_no_module_level_name_is_bound_twice(self):
+        """The mechanical form, repeated inside this task's own sub-suite so a
+        Task 12 rebinding is red here and not only in somebody else's."""
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        counts = module_bindings(ast.parse(source).body)
+        self.assertEqual(
+            sorted(name for name, count in counts.items() if count > 1), [])
+
+    def test_the_module_still_imports_nothing_outside_the_twelve(self):
+        imported = module_imports()
+        self.assertEqual(imported, {
+            "__future__", "contextlib", "copy", "errno", "fcntl", "hashlib",
+            "json", "msvcrt", "os", "pathlib", "time", "types"})
+        for name in ("re", "subprocess", "zlib", "tempfile"):
+            with self.subTest(name=name):
+                self.assertNotIn(name, imported)
+
+    def test_every_membership_question_this_task_asks_goes_through_member(self):
+        """The rule is not about today. `in` against a container raises
+        `TypeError` for an unhashable left operand, and `TypeError` is outside
+        `TrackerError`, so it escapes every `except TrackerError` a controller
+        has written. `_member` answers False for every non-`str`.
+
+        THE PIN IS STRUCTURAL because a behavioural one cannot exist while the
+        equivalence holds: `route` comes out of `str.partition` and is always
+        a `str` today. The equivalence rests entirely on a type invariant
+        somewhere else, which is exactly the case this shape was written for.
+        """
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        bodies = [node for node in ast.parse(source).body
+                  if isinstance(node, ast.FunctionDef)
+                  and node.name in ("reconcile_run", "_result_candidates")]
+        self.assertEqual(len(bodies), 2)
+        self.assertEqual(
+            sorted(ast.unparse(call) for body in bodies
+                   for call in ast.walk(body)
+                   if isinstance(call, ast.Call)
+                   and isinstance(call.func, ast.Name)
+                   and call.func.id == "_member"),
+            ["_member(route, (QUORUM_ROUTE, HALT_ROUTE))"])
+        self.assertEqual(
+            [ast.unparse(node) for body in bodies for node in ast.walk(body)
+             if isinstance(node, ast.Compare)
+             and any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops)],
+            [])
+        with self.assertRaises(TypeError):
+            ["not a string"] in {"a"}
+        self.assertFalse(state._member(["not a string"], {"a"}))
+
+
+class ReconcileScheduleContradictionTests(unittest.TestCase):
+    """The two arms of the brief's Step-3 code that CANNOT FIRE, executable.
+
+    Both are guards on values P02's `_validate_tasks` refuses to store, so
+    `validate_run` -- which `reconcile_run` calls one line above them --
+    raises before either could be reached. Recorded as tests rather than as
+    prose, because "measured against a corpus that lacks the feature" is the
+    shape a claim of inertness takes when nobody checks it.
+    """
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.tmp = Path(temporary.name)
+        self.repo, self.run_dir, _ = make_run(
+            self.tmp, three_disjoint_tasks(), worker_limit=6)
+
+    def test_a_completed_source_row_can_never_carry_an_unrecorded_integration(self):
+        """`row["integration"] in {"-", ""}` is the brief's integration-pending
+        guard. `held` is the only spelling a completed source row can carry
+        besides a commit, so the brief's reconciliation would have reported
+        integration-pending for NO task at all."""
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            complete_task(self.run_dir, "T1", commits=(COMMIT,),
+                          integration="-")
+        self.assertIn("never written down", str(caught.exception))
+        self.assertEqual(state._INTEGRATION_HELD, "held")
+
+    def test_a_completed_artifact_row_can_never_carry_a_wrong_integration(self):
+        """`row["integration"] != "N/A"` on a `[x]` artifact task is the
+        brief's `artifact-integration-contradiction` question. The schema
+        refuses the row, so the arm is unreachable and is not implemented."""
+        def mutate(tracker):
+            task_row(tracker, "T2").update(
+                state="[x]", kind="artifact", owner="impl-1",
+                attempt="attempt-001", checkpoints="started:attempt-001",
+                result=f"agent-output/T2.md#sha256={FAKE_DIGEST}",
+                verification=f"evidence/T2.md#sha256={OTHER_DIGEST}",
+                artifacts="docs/out.md", integration=state._INTEGRATION_HELD)
+            return tracker
+
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.locked_tracker_update(
+                self.run_dir, transition_id="t12-artifact", mutate=mutate)
+        self.assertIn(state._INTEGRATION_NA, str(caught.exception))
+
+
+class ReconcileTestCase(TempDirTestCase):
+    """A fresh repository and a reserved `[~]` attempt per case."""
+
+    def scratch(self) -> Path:
+        self._case = getattr(self, "_case", 0) + 1
+        root = self.tmp / f"case-{self._case}"
+        root.mkdir()
+        return root
+
+    def active_run(self, *, worker_limit: int = 6):
+        """T1 reserved to `impl-1` at `attempt-001`; T2 and T3 untouched."""
+        repo, run_dir, _ = make_run(
+            self.scratch(), three_disjoint_tasks(), worker_limit=worker_limit)
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        return repo, run_dir
+
+    def done_result(self, run_dir, made, **overrides) -> dict:
+        """`made` is what the repository REALLY holds. It is spelled apart from
+        the `commits` override on purpose: a helper taking both under one name
+        raises `TypeError` from the HELPER, and an `assertRaises` looking for a
+        `TrackerValidationError` then errors instead of asserting -- which is
+        how the F5 test in Task 4's brief could never run."""
+        digest = write_evidence(
+            Path(run_dir) / "evidence", code_state=made[-1],
+            commands=json.dumps([EVIDENCE_COMMAND]))
+        return worker_result(**{
+            "source_ref": made[-1], "commits": made,
+            "tests": (EVIDENCE_COMMAND,),
+            "evidence": (f"evidence/T1.md#sha256={digest}",),
+            **overrides,
+        })
+
+    def publish(self, repo, run_dir, result) -> Path:
+        return Path(repo) / state.publish_worker_result(run_dir, result=result)
+
+    def published(self, repo, run_dir, made, **overrides) -> Path:
+        return self.publish(
+            repo, run_dir, self.done_result(run_dir, made, **overrides))
+
+    def completed_run(self):
+        """A reserved attempt carried to `[x]` BY RECONCILIATION, not by hand."""
+        repo, run_dir = self.active_run()
+        commits = source_result_commits(repo)
+        self.published(repo, run_dir, commits)
+        report = reconcile_report(self, run_dir)
+        self.assertIn("imported:T1:attempt-001", report["actions"])
+        return repo, run_dir, commits, report
+
+    def bytes_of(self, run_dir) -> bytes:
+        return (Path(run_dir) / "progress.md").read_bytes()
+
+
+class ReconcileMissingResultTests(ReconcileTestCase):
+    """F7 itself: a missing result is neither completion nor grounds to repeat."""
+
+    def test_a_missing_result_is_neither_completion_nor_grounds_to_repeat(self):
+        repo, run_dir = self.active_run()
+        before = self.bytes_of(run_dir)
+        report = reconcile_report(self, run_dir)
+        self.assertIn("await-or-check-live-owner:T1:attempt-001:impl-1",
+                      report["actions"])
+        self.assertEqual(self.bytes_of(run_dir), before)
+        row = task_row(state.validate_run(run_dir), "T1")
+        self.assertEqual(row["state"], "[~]")
+        self.assertEqual(row["attempt"], "attempt-001")
+        self.assertEqual(report["questions"], ())
+        self.assertEqual(report["diagnostics"], ())
+
+    def test_a_commit_without_a_result_does_not_complete_the_task(self):
+        repo, run_dir = self.active_run()
+        source_result_commits(repo, 1)
+        before = self.bytes_of(run_dir)
+        report = reconcile_report(self, run_dir)
+        self.assertIn("await-or-check-live-owner:T1:attempt-001:impl-1",
+                      report["actions"])
+        self.assertNotIn("imported:T1:attempt-001", report["actions"])
+        self.assertEqual(self.bytes_of(run_dir), before)
+        self.assertEqual(
+            task_row(state.validate_run(run_dir), "T1")["state"], "[~]")
+
+    def test_an_unstarted_task_is_not_awaited_and_not_reported(self):
+        """`[ ]` rows have no owner and no attempt: reporting one as awaited
+        would name `-` as a live worker."""
+        repo, run_dir = self.active_run()
+        report = reconcile_report(self, run_dir)
+        self.assertEqual(
+            [item for item in report["actions"]
+             if item.startswith("await-or-check-live-owner")],
+            ["await-or-check-live-owner:T1:attempt-001:impl-1"])
+
+    def test_nothing_to_prove_runs_no_command_at_all(self):
+        """Reconciliation of a run with no evidence is READ-ONLY end to end:
+        it opens the tracker and the plan and hands the controller nothing to
+        run."""
+        repo, run_dir = self.active_run()
+        controller = RecordingController()
+        reconcile_report(self, run_dir, controller)
+        self.assertEqual(controller.calls, [])
+
+
+class ReconcileImportTests(ReconcileTestCase):
+    """The one thing reconciliation may do by itself, and its boundaries."""
+
+    def test_a_matching_result_is_imported_once(self):
+        repo, run_dir, commits, first = self.completed_run()
+        #: ONE PASS SEES THE STATE THE PASS BEFORE IT LEFT. The import is a
+        #: durable transition under the run lock, so the completion pass reads
+        #: the tracker again; a reconciliation that carried its opening copy
+        #: through would report the row it had just completed as still running
+        #: and would name no integration at all.
+        self.assertIn("integration-pending:T1", first["actions"])
+        row = task_row(state.validate_run(run_dir), "T1")
+        self.assertEqual(row["state"], "[x]")
+        self.assertEqual(row["commits"], ",".join(commits))
+        again = reconcile_report(self, run_dir)
+        self.assertNotIn("imported:T1:attempt-001", again["actions"])
+        self.assertIn("integration-pending:T1", again["actions"])
+
+    def test_the_import_carries_the_controllers_own_transcript(self):
+        """The evidence comparison only means anything if the transcript came
+        from a command the MODULE emitted and the CONTROLLER ran."""
+        repo, run_dir = self.active_run()
+        commits = source_result_commits(repo)
+        self.published(repo, run_dir, commits)
+        controller = RecordingController()
+        report = reconcile_report(self, run_dir, controller)
+        self.assertIn("imported:T1:attempt-001", report["actions"])
+        row = task_row(state.validate_run(run_dir), "T1")
+        self.assertEqual(
+            controller.calls,
+            list(state.source_range_commands(
+                repo, baseline=state.reserved_baseline(row, attempt=1),
+                head=commits[-1], head_ref="task/T1")))
+
+    def test_a_result_with_a_contradicting_owner_raises_a_question(self):
+        repo, run_dir = self.active_run()
+        commits = source_result_commits(repo)
+        path = self.published(repo, run_dir, commits, owner="impostor")
+        before = self.bytes_of(run_dir)
+        report = reconcile_report(self, run_dir)
+        self.assertIn(
+            f"result-owner-contradiction:T1:attempt-001:{path}",
+            report["questions"])
+        self.assertEqual(self.bytes_of(run_dir), before)
+        self.assertEqual(report["actions"], ())
+
+    def test_a_result_whose_evidence_contradicts_the_range_raises_a_question(self):
+        """F4 through the recovery door: a truncated range is a question, and
+        the attempt is left exactly where it was."""
+        repo, run_dir = self.active_run()
+        commits = source_result_commits(repo, 2)
+        self.published(repo, run_dir, commits, commits=(commits[-1],))
+        before = self.bytes_of(run_dir)
+        report = reconcile_report(self, run_dir)
+        self.assertTrue(
+            any(item.startswith("result-evidence-contradiction:T1:attempt-001")
+                for item in report["questions"]), report)
+        self.assertEqual(self.bytes_of(run_dir), before)
+        self.assertEqual(
+            task_row(state.validate_run(run_dir), "T1")["state"], "[~]")
+        self.assertNotIn("imported:T1:attempt-001", report["actions"])
+
+    def test_a_result_from_another_run_completes_nothing(self):
+        repo, run_dir = self.active_run()
+        commits = source_result_commits(repo)
+        self.published(repo, run_dir, commits, run_id="run-9")
+        before = self.bytes_of(run_dir)
+        report = reconcile_report(self, run_dir)
+        self.assertIn("await-or-check-live-owner:T1:attempt-001:impl-1",
+                      report["actions"])
+        self.assertNotIn("imported:T1:attempt-001", report["actions"])
+        self.assertEqual(report["questions"], ())
+        self.assertEqual(self.bytes_of(run_dir), before)
+
+    def test_a_result_for_another_attempt_is_surfaced_and_never_imported(self):
+        repo, run_dir = self.active_run()
+        commits = source_result_commits(repo)
+        path = self.published(repo, run_dir, commits, attempt=2)
+        before = self.bytes_of(run_dir)
+        report = reconcile_report(self, run_dir)
+        self.assertIn(
+            f"superseded-or-conflicting-result:T1:attempt-001:{path}",
+            report["questions"])
+        self.assertIn("await-or-check-live-owner:T1:attempt-001:impl-1",
+                      report["actions"])
+        self.assertEqual(self.bytes_of(run_dir), before)
+
+    def test_two_results_for_one_attempt_import_neither(self):
+        """The map from (task, attempt) to a path is injective, so a second
+        document for one attempt is something nobody's transition wrote. Which
+        of the two is the real one is not a question a reconciliation settles
+        by picking one."""
+        repo, run_dir = self.active_run()
+        commits = source_result_commits(repo)
+        self.published(repo, run_dir, commits)
+        twin = (Path(run_dir) / state.AGENT_OUTPUT_DIRNAME / "T1" / "salvaged"
+                / "attempt-001.md")
+        twin.parent.mkdir(parents=True, exist_ok=True)
+        twin.write_text(
+            state.render_worker_result(
+                self.done_result(run_dir, commits, concerns="a second copy")),
+            encoding="utf-8")
+        before = self.bytes_of(run_dir)
+        report = reconcile_report(self, run_dir)
+        self.assertIn("conflicting-results:T1:attempt-001", report["questions"])
+        self.assertNotIn("imported:T1:attempt-001", report["actions"])
+        self.assertEqual(report["actions"], ())
+        self.assertEqual(self.bytes_of(run_dir), before)
+
+
+class ReconcileCandidateStoreTests(ReconcileTestCase):
+    """`is_dir()` NEVER MEANS "THERE IS NOTHING HERE".
+
+    It is false for a regular file, a dangling symlink, a symlink loop and a
+    NUL-bearing name, and folding those into "no results have been published"
+    is F7's fail-open wearing a predicate: every live attempt would be
+    reported as awaiting a worker whose answer is on disk, unreadable.
+
+    And the predicate is not what blocks. It answers instantly; the OPEN is
+    what waits for ever on a FIFO, under the run lock, with no writer coming.
+    """
+
+    def test_an_absent_results_tree_is_absence_and_says_nothing(self):
+        repo, run_dir = self.active_run()
+        self.assertFalse((Path(run_dir) / state.AGENT_OUTPUT_DIRNAME).exists())
+        report = reconcile_report(self, run_dir)
+        self.assertEqual(report["diagnostics"], ())
+
+    def test_a_results_tree_that_is_not_a_directory_is_a_diagnostic(self):
+        repo, run_dir = self.active_run()
+        root = Path(run_dir) / state.AGENT_OUTPUT_DIRNAME
+        root.write_text("not a tree\n", encoding="utf-8")
+        report = reconcile_report(self, run_dir)
+        self.assertTrue(any(item.startswith(f"unreadable-result-store:{root}")
+                            for item in report["diagnostics"]), report)
+        self.assertIn("await-or-check-live-owner:T1:attempt-001:impl-1",
+                      report["actions"])
+
+    def test_a_dangling_results_tree_link_is_a_diagnostic(self):
+        repo, run_dir = self.active_run()
+        root = Path(run_dir) / state.AGENT_OUTPUT_DIRNAME
+        root.symlink_to(Path(run_dir) / "nowhere")
+        report = reconcile_report(self, run_dir)
+        self.assertTrue(any(item.startswith(f"unreadable-result-store:{root}")
+                            for item in report["diagnostics"]), report)
+
+    def test_every_unreadable_candidate_shape_is_named_rather_than_skipped(self):
+        """The cross product is derived from what a NAME under this tree can
+        be, not from a list of characters someone remembers: a FIFO (the one
+        that blocks), a dangling symlink, a symlink loop, bytes that are not
+        UTF-8, and a regular file this run may not read."""
+        shapes = {
+            "fifo": lambda path: os.mkfifo(path),
+            "dangling-symlink": lambda path: path.symlink_to(
+                path.parent / "nowhere"),
+            "symlink-loop": lambda path: path.symlink_to(path),
+            "not-utf8": lambda path: path.write_bytes(b"\xff\xfe\x00 bad\n"),
+        }
+        if os.geteuid() != 0:
+            shapes["unreadable"] = lambda path: (
+                path.write_text("x\n", encoding="utf-8"), os.chmod(path, 0))
+        for label, build in shapes.items():
+            with self.subTest(shape=label):
+                repo, run_dir = self.active_run()
+                path = state.worker_result_path(
+                    run_dir, task_id="T1", attempt=1)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                build(path)
+                before = self.bytes_of(run_dir)
+                with publication_deadline(6, f"reconcile_run over a {label}"):
+                    report = reconcile_report(self, run_dir)
+                self.assertTrue(
+                    any(item.startswith(f"unreadable-result-candidate:{path}")
+                        for item in report["diagnostics"]), (label, report))
+                self.assertIn(
+                    "await-or-check-live-owner:T1:attempt-001:impl-1",
+                    report["actions"])
+                self.assertEqual(self.bytes_of(run_dir), before)
+
+    def test_a_malformed_result_candidate_becomes_a_diagnostic(self):
+        repo, run_dir = self.active_run()
+        broken = state.worker_result_path(run_dir, task_id="T1", attempt=1)
+        broken.parent.mkdir(parents=True, exist_ok=True)
+        broken.write_text(state.WORKER_RESULT_MARKER + "\n| Field | Value |\n",
+                          encoding="utf-8")
+        before = self.bytes_of(run_dir)
+        report = reconcile_report(self, run_dir)
+        self.assertTrue(
+            any(item.startswith(f"partial-or-malformed-result:{broken}")
+                for item in report["diagnostics"]), report)
+        self.assertIn("await-or-check-live-owner:T1:attempt-001:impl-1",
+                      report["actions"])
+        self.assertEqual(
+            task_row(state.validate_run(run_dir), "T1")["state"], "[~]")
+        self.assertEqual(self.bytes_of(run_dir), before)
+
+    def test_a_document_without_the_marker_is_named_rather_than_hidden(self):
+        """A skip here is the F7 fail-open one layer down: the immutable
+        results tree is written by `publish_worker_result` and by nothing
+        else, so a document in it that carries no marker is unexplained -- and
+        an unexplained document reported as absence is exactly the reading
+        this function exists to refuse."""
+        repo, run_dir = self.active_run()
+        stray = (Path(run_dir) / state.AGENT_OUTPUT_DIRNAME / "T1" / "notes.md")
+        stray.parent.mkdir(parents=True, exist_ok=True)
+        stray.write_text("# notes\n", encoding="utf-8")
+        report = reconcile_report(self, run_dir)
+        self.assertIn(f"foreign-result-candidate:{stray}",
+                      report["diagnostics"])
+        self.assertEqual(report["questions"], ())
+
+    def test_a_published_result_leaves_no_diagnostic_at_all(self):
+        """The control. `agent-output/T1/` is a DIRECTORY and the tree layer
+        is skipped deliberately; a door that refused it would report the
+        module's own layout as corruption."""
+        repo, run_dir = self.active_run()
+        commits = source_result_commits(repo)
+        self.published(repo, run_dir, commits)
+        report = reconcile_report(self, run_dir)
+        self.assertEqual(report["diagnostics"], ())
+
+    def test_candidates_are_read_in_a_deterministic_order(self):
+        """Directory order is the filesystem's, not the name's. A report whose
+        lines move between two runs over the same tree is one nobody can diff
+        across an interruption, which is the only use it has."""
+        repo, run_dir = self.active_run()
+        root = Path(run_dir) / state.AGENT_OUTPUT_DIRNAME / "T1"
+        root.mkdir(parents=True, exist_ok=True)
+        names = [f"{index:02d}-{'zqmapl'[index % 6]}.md" for index in range(14)]
+        for name in names:
+            (root / name).write_text("# stray\n", encoding="utf-8")
+        report = reconcile_report(self, run_dir)
+        found = [item for item in report["diagnostics"]
+                 if item.startswith("foreign-result-candidate:")]
+        self.assertEqual(len(found), len(names))
+        self.assertEqual(found, sorted(found))
+
+
+class ReconcileIntegrationTests(ReconcileTestCase):
+    """Completion and integration are separate facts, and so are their reports."""
+
+    def test_a_completed_unintegrated_source_task_reports_integration_pending(self):
+        repo, run_dir, commits, first = self.completed_run()
+        row = task_row(state.validate_run(run_dir), "T1")
+        self.assertEqual(row["integration"], state._INTEGRATION_HELD)
+        report = reconcile_report(self, run_dir)
+        self.assertIn("integration-pending:T1", report["actions"])
+        self.assertEqual(report["questions"], ())
+
+    def test_an_integrated_task_contradicts_nothing_and_awaits_nothing(self):
+        repo, run_dir, commits, first = self.completed_run()
+        merge = merge_no_ff(repo, "task/T1", "integrate T1")
+        state.integrate_task(run_dir, task_id="T1", merge_commit=merge,
+                             run_command=controller_git)
+        report = reconcile_report(self, run_dir)
+        self.assertEqual(report["questions"], ())
+        self.assertNotIn("integration-pending:T1", report["actions"])
+
+    def test_a_completed_artifact_task_is_neither_pending_nor_contradicted(self):
+        """An artifact task produces no source range, so there is no boundary
+        to prove and nothing to merge. Asking the ancestry predicate about one
+        hands it `N/A` as a merge commit and turns a correctly finished task
+        into a contradiction report."""
+        repo, run_dir = self.active_run()
+
+        def mutate(tracker):
+            task_row(tracker, "T2").update(
+                state="[x]", kind="artifact", owner="impl-2",
+                attempt="attempt-001", checkpoints="started:attempt-001",
+                result=f"agent-output/T2/attempt-001.md#sha256={FAKE_DIGEST}",
+                verification=f"evidence/T2.md#sha256={OTHER_DIGEST}",
+                artifacts="docs/out.md", integration=state._INTEGRATION_NA)
+            return tracker
+
+        state.locked_tracker_update(
+            run_dir, transition_id="t12-artifact-done", mutate=mutate)
+        report = reconcile_report(self, run_dir)
+        self.assertEqual(report["questions"], ())
+        self.assertNotIn("integration-pending:T2", report["actions"])
+
+    def test_a_recorded_integration_outside_the_target_raises_a_question(self):
+        repo, run_dir, commits, first = self.completed_run()
+        git(repo, "checkout", "-q", "-b", "elsewhere", "target")
+        git(repo, "merge", "-q", "--no-ff", "--no-edit", "-m", "off target",
+            "task/T1")
+        merge = git(repo, "rev-parse", "HEAD")
+        git(repo, "checkout", "-q", "target")
+        set_task_state(run_dir, "T1", "t12-off-target", integration=merge)
+        before = self.bytes_of(run_dir)
+        report = reconcile_report(self, run_dir)
+        self.assertTrue(any(item.startswith("integration-contradiction:T1")
+                            for item in report["questions"]), report)
+        self.assertNotIn("integration-pending:T1", report["actions"])
+        self.assertEqual(self.bytes_of(run_dir), before)
+
+    def test_a_recorded_integration_whose_commits_vanished_raises_a_question(self):
+        """A ref store that no longer resolves the recorded source ref is a
+        contradiction to report, never an exception to escape with: the other
+        eleven rows still have findings."""
+        repo, run_dir, commits, first = self.completed_run()
+        merge = merge_no_ff(repo, "task/T1", "integrate T1")
+        state.integrate_task(run_dir, task_id="T1", merge_commit=merge,
+                             run_command=controller_git)
+        set_task_state(run_dir, "T1", "t12-lost-tip", source_ref=OTHER_SHA)
+        report = reconcile_report(self, run_dir)
+        self.assertTrue(any(item.startswith("integration-contradiction:T1")
+                            for item in report["questions"]), report)
+
+
+class ReconcileBlockedRouteTests(ReconcileTestCase):
+    """The `Question` cell has exactly two arms. A cell that is neither stops."""
+
+    def block(self, run_dir, cell, transition="t12-block"):
+        set_task_state(run_dir, "T1", transition, state="[?]", question=cell)
+
+    def test_the_quorum_arm_is_carried_through_whole(self):
+        """Task 10's supersession: the arm is the COMPLETE
+        `quorum:<qid>@<path>#sha256=<digest>` and not a bare path, because
+        `_validate_decision` reads the qid out of it to bind a resume grant."""
+        repo, run_dir = self.active_run()
+        reference = (f"{BLOCK_QID}@quorum/{BLOCK_QID}/question.md"
+                     f"#sha256={DIGEST}")
+        self.block(run_dir, f"{state.QUORUM_ROUTE}:{reference}")
+        report = reconcile_report(self, run_dir)
+        self.assertEqual(report["actions"],
+                         (f"await-{state.QUORUM_ROUTE}:T1:{reference}",))
+        self.assertEqual(report["questions"], ())
+
+    def test_the_halt_arm_keeps_every_colon_its_reason_contains(self):
+        """A reason is free text. Split on every colon rather than on the
+        first and the report truncates the blocker at its first punctuation."""
+        repo, run_dir = self.active_run()
+        reason = "no credential: the vault host is unreachable"
+        self.block(run_dir, f"{state.HALT_ROUTE}:{reason}")
+        report = reconcile_report(self, run_dir)
+        self.assertEqual(report["actions"],
+                         (f"await-{state.HALT_ROUTE}:T1:{reason}",))
+
+    def test_a_cell_that_is_neither_arm_is_a_question_and_never_an_action(self):
+        for cell in UNROUTABLE_QUESTION_CELLS:
+            with self.subTest(cell=cell):
+                repo, run_dir = self.active_run()
+                self.block(run_dir, cell)
+                before = self.bytes_of(run_dir)
+                report = reconcile_report(self, run_dir)
+                self.assertEqual(report["questions"],
+                                 (f"unroutable-block:T1:{cell}",))
+                self.assertEqual(report["actions"], ())
+                self.assertEqual(self.bytes_of(run_dir), before)
+
+
+class ReconcileRunnerContractTests(ReconcileTestCase):
+    """`run_command` is asked for BEFORE the run is read."""
+
+    def test_a_non_callable_runner_is_refused_before_anything_is_opened(self):
+        """A caller that cannot supply it has not failed a check -- it has
+        called wrongly, and it must be told THAT rather than told its tracker
+        is missing."""
+        absent = self.tmp / "no-such-run"
+        for runner in (None, "git", 5, ["git"], {"argv": 1}):
+            with self.subTest(runner=type(runner).__name__):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state.reconcile_run(absent, run_command=runner)
+                self.assertIn("command runner", str(caught.exception))
+        self.assertFalse(absent.exists())
+
+    def test_the_run_directory_is_normalised_before_it_is_used(self):
+        repo, run_dir = self.active_run()
+        report = reconcile_report(self, str(run_dir))
+        self.assertIn("await-or-check-live-owner:T1:attempt-001:impl-1",
+                      report["actions"])
+
+
+class ReconcilePlanRevalidationTests(ReconcileTestCase):
+    """Every approved phase plan is re-read before any task row is trusted.
+
+    The row is a MIRROR of the plan -- kind, write scope, dependencies and the
+    verification suite all live there and nowhere else -- so a reconciliation
+    that reported actions derived from rows whose authority no longer parses
+    would be recovering against a document that has changed underneath it.
+    """
+
+    def test_a_phase_plan_that_no_longer_parses_stops_the_reconciliation(self):
+        repo, run_dir = self.active_run()
+        before = self.bytes_of(run_dir)
+        (Path(run_dir) / "phase-04.md").write_text(
+            "# Phase 04 plan\n\nprose and no metadata at all\n",
+            encoding="utf-8")
+        with self.assertRaises(state.PlanMetadataError):
+            reconcile(run_dir)
+        self.assertEqual(self.bytes_of(run_dir), before)
+
+    def test_a_phase_plan_that_has_gone_missing_stops_the_reconciliation(self):
+        repo, run_dir = self.active_run()
+        before = self.bytes_of(run_dir)
+        (Path(run_dir) / "phase-04.md").unlink()
+        with self.assertRaises(state.TrackerError):
+            reconcile(run_dir)
+        self.assertEqual(self.bytes_of(run_dir), before)
+
+    def test_a_phase_plan_that_still_parses_stops_nothing(self):
+        """The control: without it the two refusals above are satisfied by a
+        function that refuses every run."""
+        repo, run_dir = self.active_run()
+        self.assertIsInstance(reconcile(run_dir), dict)
+
 
 if __name__ == "__main__":
     unittest.main()

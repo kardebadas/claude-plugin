@@ -199,7 +199,16 @@ def resume_task(run_dir: str, *, task_id: str, prior_attempt: int,
                 new_owner: str, new_attempt: int, decision_ref: str) -> dict: ...
 def scopes_overlap(a: str, b: str) -> bool: ...          # file:/tree: with ancestor rules
 def publish_worker_result(run_dir: str, *, result: dict) -> str: ...
-def import_worker_result(run_dir: str, *, result_path: str) -> dict: ...
+def import_worker_result(run_dir: str, *, result_path: str,
+                         run_command) -> dict: ...
+#   `run_command(argv: tuple[str, ...]) -> str` is REQUIRED, not defaulted.
+#   The module never executes git: it emits the argv and validates the
+#   transcript, so the ability to run one command is the controller's
+#   capability and arrives as an argument. The callable is handed the exact
+#   argv and must return the captured stdout RAW -- no `.strip()`: the
+#   leading NUL record separator and the trailing newline are both
+#   load-bearing in the grammar `_parse_range_transcript` reads.
+#   Changed by P04 Task 10; see the master plan's supersession note.
 def verify_source_range(repo: str, *, baseline: str, head: str, head_ref: str,
                         scopes: list, transcript: str) -> dict: ...
 def reconcile_run(run_dir: str) -> dict: ...
@@ -2010,7 +2019,12 @@ class ProvisionalPropagationTests(unittest.TestCase):
         tracker["tasks"][1]["owner"] = "impl-2"
         tracker["tasks"][1]["attempt"] = "attempt-001"
         tracker["tasks"][1]["checkpoints"] = "red"
-        tracker["tasks"][1]["question"] = "scratch/p07-t02-question.md"
+        # P04 Task 10 owns this cell's shape: the quorum arm is
+        # `quorum:<qid>@<path>#sha256=<digest>`, NOT a bare path. A bare path
+        # is neither arm, so `_validate_decision` refuses every resume of the
+        # row this fixture builds.
+        tracker["tasks"][1]["question"] = (
+            f"quorum:{'d' * 12}@scratch/p07-t02-question.md#sha256={'e' * 64}")
         tracker["quorum"].append({
             "qid": "d" * 12, "axis": "axis-1", "phase": "P07", "state": "finalized",
             "owners": "brain-1,brain-2,brain-3", "payload_digest": "b" * 64,
@@ -2211,8 +2225,10 @@ class InheritedRungCapTests(unittest.TestCase):
         tracker = pipeline_auto_state.parse_tracker(final_only_text())
         tracker["tasks"][1].update({
             "state": "[?]", "owner": "impl-2", "attempt": "attempt-001",
-            "checkpoints": "blocked:attempt-001@scratch/p07-t02-question.md",
-            "question": "scratch/p07-t02-question.md",
+            "checkpoints": "blocked:attempt-001",
+            # The full quorum arm — see the note in `_tainted` above.
+            "question":
+                f"quorum:{'d' * 12}@scratch/p07-t02-question.md#sha256={'e' * 64}",
         })
         tracker["quorum"].extend([
             {"qid": "d" * 12, "axis": "axis-1", "phase": "P07",

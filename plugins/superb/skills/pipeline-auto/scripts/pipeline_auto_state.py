@@ -10830,8 +10830,14 @@ def _cell_safe(value: str) -> bool:
     multi-valued: ``review_reason`` is one free-text cell a human auditor
     reads, and ordinary English prose carries commas. The comma bar therefore
     belongs on the writer that KNOWS a cell is list-valued -- ``_cell_list`` --
-    not on a value screen that cannot know. Whether ``commands`` ever lands in
-    a comma-separated cell is Task 2/6 work; if it does, the bar goes there.
+    not on a value screen that cannot know.
+
+    THREE WRITERS NOW KNOW, and each carries the bar: ``_cell_list``, which
+    joins the members; ``_table_safe(list_valued=True)``, for a worker result's
+    list fields; and ``_safe_relative``, because a repository-relative path is
+    never the free-text case this screen kept the comma for -- every cell this
+    module writes one into is read back with ``_csv``. ``_safe_relative``'s own
+    note records why that bar arrived late and what it cost.
     """
     return (isinstance(value, str)
             and "|" not in value
@@ -10983,17 +10989,84 @@ def _safe_relative(value) -> PurePosixPath:
     reads as a guarantee that something is being checked here which is not --
     the same ruling that removed ``line != line.strip()`` from
     ``_comment_fields``.
+
+    ``_CELL_SEPARATORS`` IS REFUSED WHOLE, AND THAT SUPERSEDES TASK 2'S RULING
+    THAT NO COMMA SCREEN BELONGS HERE. Task 2 argued -- correctly, for the
+    direction it could see -- that ``_parse_write_scope`` SPLITS on the comma
+    before it ever calls this, so from a scope cell a comma-bearing path is not
+    a smuggled value but two members, the second refused on its own merits; a
+    screen here would then be one no input could reach. What that argument
+    could not see is the OTHER direction. A repository-relative path does not
+    only come out of a list cell one member at a time; Tasks 6 and 10 put one
+    IN, whole and unsplit, from two sources no split ever touches -- a run
+    directory's NAME (``_citable_repo_relative``) and a worker document's
+    reference field (``_digest_reference``). There the comma is reachable, and
+    it was reached: a worker checkpoint's evidence spelled
+    ``e/x,attempt-002,attempt-003,baseline:attempt-001@<40 hex>,y.md``
+    ``#sha256=<64 hex>`` is appended verbatim to the comma-separated
+    ``Checkpoints`` cell, where ``_csv`` reads the injected members back as two
+    spent attempt tokens and a SECOND baseline for the attempt just completed.
+    The attempt the forged ``baseline:`` names is load-bearing and is the
+    COMPLETED one: ``reserved_baseline`` requires exactly one marker per
+    attempt, so a second for ``attempt-001`` makes the finished attempt's own
+    anchor unreadable to every later phase, while a marker naming some other
+    attempt would sit there inert. Both halves land in one value:
+    ``reserved_baseline`` refuses the row for ever and ``_require_fresh_attempt``
+    refuses every resume, on a row the run has already marked complete. A run directory spelled ``runs/run,1`` splits the
+    ``Result`` cell the same way and with it the "an exact replay is inert"
+    contract. One character, three cells, and the bar is one screen.
+
+    THE WHOLE CONSTANT IS ASKED RATHER THAN THE COMMA WRITTEN DOWN, and it
+    leads ``_cell_safe`` rather than trailing it. ``_CELL_SEPARATORS`` is the
+    module's own statement of "the characters that re-column a row, and the
+    whole of them"; asking it means a third separator added there is refused
+    here without this line being touched, and means this screen does not rest
+    on ``_cell_safe`` continuing to refuse ``|`` for its own, different reason.
+    The row-break half is NOT copied from it -- that half is asked of the
+    reader inside ``_cell_safe``, which this still calls.
+
+    A PATH IS NEVER THE FREE-TEXT CASE ``_cell_safe`` KEPT THE COMMA FOR.
+    ``_cell_safe`` admits a comma because it is shared with ``review_reason``
+    and ``concerns``, prose a human reads and English punctuates. A
+    repository-relative path is the opposite: every cell this module writes one
+    into -- ``phase_plans``, ``Result``, ``Checkpoints``, ``Verification``,
+    ``evidence``, the scope cells -- is read back with ``_csv``. So this IS the
+    writer that knows its value is a list member, which is exactly where
+    ``_cell_safe``'s own note said the bar belongs.
     """
     if not isinstance(value, str) or not value:
         raise PlanMetadataError(
             f"a repository-relative path must be a nonempty string: {value!r}")
-    if ("\\" in value
-            or not _cell_safe(value)
-            or any(character in value for character in _GLOB_CHARACTERS)):
+    #: FOUR REFUSALS AND NOT ONE, because a corpus over this grammar has to be
+    #: able to assert WHICH rule it tripped. The single message that used to
+    #: stand here named all four clauses for every input, so a NUL and a glob
+    #: character produced byte-identical prose and a totality corpus asserting
+    #: "the diagnosis" was asserting a constant. Each clause now says the one
+    #: thing that is true of its own input.
+    if any(character in value for character in _CELL_SEPARATORS):
         raise PlanMetadataError(
-            f"unsupported repository-relative path: {value!r}; it must be "
-            "relative, POSIX-spelled, glob-free and carry nothing a tracker "
-            "cell cannot hold")
+            f"unsupported repository-relative path: {value!r}; it carries one "
+            f"of {_CELL_SEPARATORS!r}, which re-column a tracker row -- a path "
+            "holding one comes back out of its cell as two members, both of "
+            "which parse, so the cell says something nobody wrote")
+    if "\\" in value:
+        raise PlanMetadataError(
+            f"unsupported repository-relative path: {value!r}; it is not "
+            "POSIX-spelled, and a Windows-spelled path is ONE segment here, so "
+            "every segment rule below reads it as a single name and it escapes "
+            "the repository on the machine that wrote it")
+    if any(character in value for character in _GLOB_CHARACTERS):
+        raise PlanMetadataError(
+            f"unsupported repository-relative path: {value!r}; it carries a "
+            f"glob character ({_GLOB_CHARACTERS!r}), so what it names is a SET "
+            "whose members depend on when it is expanded, and two scopes like "
+            "that cannot be checked against each other for overlap")
+    if not _cell_safe(value):
+        raise PlanMetadataError(
+            f"unsupported repository-relative path: {value!r}; it carries "
+            "something a tracker cell cannot hold -- a '|', an ASCII control "
+            "character, something the section reader breaks a LINE on, "
+            "something the UTF-8 encoder refuses, or surrounding whitespace")
     for segment in value.split("/"):
         if segment in ("", ".", "..") or segment != segment.strip():
             raise PlanMetadataError(
@@ -12393,6 +12466,15 @@ def _digest_reference(value, *, field: str = "reference") -> tuple[str, str]:
     counting the delimiter once removes the ambiguity rather than resolving it
     by picking a side. Task 10's ``_result_identity`` refuses ``#`` in a
     published result path for the same reason, so the two agree.
+
+    ``,`` IS REFUSED ONE LEVEL DOWN, IN ``_safe_relative``, AND IT IS THE SAME
+    ARGUMENT. A reference is a citable token, and every cell that carries one
+    -- ``evidence``, ``Verification``, ``Result``, ``Checkpoints``,
+    ``phase_plans`` -- is read back with ``_csv``, so a comma inside the path
+    half re-columns the cell rather than the reference: the reader gets two
+    members, both syntactically fine, neither the one that was written. That
+    one is a SPLIT and this one is an AMBIGUITY is why they sit at different
+    levels: ``#`` has two readings of one member, ``,`` has one reading of two.
 
     ``PlanMetadataError`` IS WRAPPED. ``_safe_relative`` belongs to the plan
     grammar and raises the plan grammar's exception; a controller importing a
@@ -15649,10 +15731,21 @@ def _citable_repo_relative(resolved_run: Path, root: Path, inside: str) -> str:
     ``_safe_relative`` and refuses ``#`` inside it, because
     ``docs/a#sha256=<hex>.md#sha256=<hex>`` has two plausible readings and the
     module counts the delimiter once rather than picking a side. A run
-    directory spelled with a ``#``, a glob character, a backslash or anything a
-    tracker cell cannot carry therefore produces a record nothing can bind a
-    digest to -- so it is refused BEFORE the record exists, rather than
-    discovered by Task 10 after an immutable file is already on disk.
+    directory spelled with a ``#``, a ``,``, a glob character, a backslash or
+    anything a tracker cell cannot carry therefore produces a record nothing
+    can bind a digest to -- so it is refused BEFORE the record exists, rather
+    than discovered by Task 10 after an immutable file is already on disk.
+
+    THE ``,`` IS ``_safe_relative``'s AND IS NOT SPELLED AGAIN HERE, which is
+    the difference between it and the ``#`` above. ``#`` is a delimiter of the
+    REFERENCE and so is asked where the reference is assembled; ``,`` is the
+    delimiter of the CELL, and every cell that holds a repository-relative path
+    is read back with ``_csv``, so the bar belongs on the path grammar itself
+    and is inherited here. It was not always: a run directory at ``runs/run,1``
+    published without complaint, and the ``Result`` cell it produced split into
+    two members -- so ``_member(identity, accepted)`` could never match and the
+    documented "an exact replay is inert" contract RAISED, while the
+    conflicting-evidence screen beside it became unreachable.
 
     IT IS THE RUN DIRECTORY THAT IS RESOLVED, AND THE RECORD'S OWN SEGMENTS
     ARE APPENDED LEXICALLY. Resolving the record's full path would follow a
@@ -15855,8 +15948,17 @@ def publish_worker_result(run_dir, *, result: dict) -> str:
 #   transition writes and Task 11 is what replaces it.
 # * ``.is_file()`` on an artifact output is the predicate this build has ruled
 #   against four times: it is False for a directory, a dangling link, a symlink
-#   loop, a FIFO and a NUL-bearing name, and the FIFO arm HANGS under the run
-#   lock. ``_require_regular_file`` is the door.
+#   loop, a FIFO and a NUL-bearing name. THE PREDICATE DOES NOT HANG, and this
+#   correction matters because the claim that it does has been repeated
+#   forward: measured, ``is_file()`` on a FIFO answers False in 0.000s and
+#   ``os.path.lexists`` answers True in 0.000s. ``stat`` never blocks. What
+#   blocks for ever is the OPEN a later reader performs on the name the
+#   predicate has just mis-classified as absent -- and under the run lock that
+#   reader is an unattended controller with no diagnostic and no timeout. So
+#   the defect ``is_file()`` introduces here is a WRONG ANSWER, and the hang is
+#   what the wrong answer leads the next caller into.
+#   ``_require_regular_file`` is the door, and it is the door because it
+#   answers the shape question before anyone opens anything.
 # * one command comparison over BOTH kinds cannot hold: an artifact task
 #   declares no suite, so its approved tuple is empty, and
 #   ``_parse_command_suite`` refuses an empty array -- no evidence record can
@@ -16361,10 +16463,49 @@ def import_worker_result(run_dir, *, result_path, run_command) -> dict:
         updated = dict(row)
         updated["result"] = _append_history(row["result"], identity)
         for checkpoint in result[_WORKER_CHECKPOINTS]:
+            entry = (f"{_WORKER_CHECKPOINT}{token}:{checkpoint['id']}:"
+                     f"{checkpoint['status']}@{checkpoint['evidence']}")
+            #: THE READER IS ASKED WHETHER THIS ENTRY SPENDS AN ATTEMPT, and
+            #: it is asked rather than a character list written down, for
+            #: ``_splits_the_section``'s reason one layer up.
+            #:
+            #: This entry is assembled from ``_CHECKPOINT_DELIMITERS`` and
+            #: ``_recorded_attempts`` RE-SPLITS it on exactly those, so every
+            #: delimiter the assembly uses is one the worker's own
+            #: ``evidence`` reference can spell again. ``_safe_relative`` bars
+            #: the CELL's delimiters -- a path may not re-column the list --
+            #: but ``:`` and ``@`` are ordinary path characters that a scope
+            #: path is explicitly allowed to carry, so the ENTRY's delimiters
+            #: cannot be barred there without narrowing the path grammar for
+            #: everyone. Measured: a checkpoint whose evidence is published at
+            #: ``evidence/a@attempt-002@b.md`` imports at ``[x]`` and
+            #: ``_recorded_attempts`` then reports ``attempt-002`` as spent, so
+            #: ``_require_fresh_attempt`` refuses that resume for ever. A
+            #: worker blocking itself could pick the tokens it would never be
+            #: allowed to retry on -- a durable denial written by the party
+            #: this whole transition exists to distrust.
+            #:
+            #: The screen is therefore the READER's own answer over the entry
+            #: alone: the only attempt an imported checkpoint may name is the
+            #: one the controller is importing. Asking the reader means a
+            #: delimiter added to ``_CHECKPOINT_DELIMITERS`` tomorrow is
+            #: covered without this line being touched, and means the screen
+            #: cannot drift from the scan it is protecting.
+            spent = _recorded_attempts(
+                {"id": row["id"], "attempt": token, "checkpoints": entry})
+            if spent != {token}:
+                raise TrackerValidationError(
+                    f"checkpoint {checkpoint['id']!r} of task "
+                    f"{result['task_id']} names "
+                    f"{sorted(spent - {token})!r} where only {token} belongs: "
+                    "an imported checkpoint is appended to the controller's "
+                    f"{_WORKER_CHECKPOINT.rstrip(':')!r} history, which "
+                    "_recorded_attempts re-splits on the same delimiters this "
+                    "entry is built from -- so a reference spelling one of "
+                    "them would SPEND an attempt this task has not had, and no "
+                    "resume to it could ever be granted again")
             updated["checkpoints"] = _append_history(
-                updated["checkpoints"],
-                f"{_WORKER_CHECKPOINT}{token}:{checkpoint['id']}:"
-                f"{checkpoint['status']}@{checkpoint['evidence']}")
+                updated["checkpoints"], entry)
 
         if _member(result["status"], COMPLETION_STATUSES):
             #: ``head_ref`` IS DERIVED BY THE CONTROLLER and the evidence

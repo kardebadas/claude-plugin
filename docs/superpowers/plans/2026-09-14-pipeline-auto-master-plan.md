@@ -182,7 +182,16 @@ def resume_task(run_dir: str, *, task_id: str, prior_attempt: int,
 def scopes_overlap(a: str, b: str) -> bool: ...   # file:/tree: with ancestor rules
 def parse_plan_metadata(path: str) -> dict: ...   # strict comment grammar, pinned key order; raises PlanMetadataError
 def publish_worker_result(run_dir: str, *, result: dict) -> str: ...
-def import_worker_result(run_dir: str, *, result_path: str) -> dict: ...
+def import_worker_result(run_dir: str, *, result_path: str,
+                         run_command) -> dict: ...
+#   `run_command(argv: tuple[str, ...]) -> str` is REQUIRED, not defaulted.
+#   The module never executes git: it emits the argv and validates the
+#   transcript, so the ability to run one command is the controller's
+#   capability and arrives as an argument. The callable is handed the exact
+#   argv and must return the captured stdout RAW -- no `.strip()`: the
+#   leading NUL record separator and the trailing newline are both
+#   load-bearing in the grammar `_parse_range_transcript` reads.
+#   Changed by P04 Task 10; see the master plan's supersession note.
 def verify_source_range(repo: str, *, baseline: str, head: str, head_ref: str,
                         scopes: list, transcript: str) -> dict: ...
 def reconcile_run(run_dir: str) -> dict: ...
@@ -721,6 +730,16 @@ interface amends every document that pins it, in the same commit, and says so in
 its report — the way the `verify_source_range` signature change was propagated to
 four plan files.** Being adjacent to the next task is not propagation.
 
+**Propagated in the Task 10 fix round.** The signature is amended here (`:185`),
+in the P04 preamble and in P05's own interface block; resolved question 6 in the
+P04 preamble records the supersession and why the brief's shorter arm breaks
+every resume; P05's two `Question`-cell fixtures and P06's fix-round writer,
+all three of which wrote a bare path into that cell, now carry the arm; and P07's
+stage-prose task names both contracts. Two of those consumers turned out to be
+writing the old shape into *code*, not just describing it — which is the answer
+to "would anyone really have noticed": P06's `open_fix_round` would have blocked
+a task in a way no decision could ever unblock.
+
 ## "Measured inert" over a corpus that lacks the feature proves nothing
 
 Task 8 measured `log.showSignature` against the emitted argv and recorded it
@@ -751,6 +770,37 @@ near-impossible to diagnose from the message. `--no-show-signature` is the
 one-token fix, and unlike `--no-replace-objects` a `log` option is parsed after
 the config, so the flag alone is a real pin — verified against `.git/config`, a
 command-line `-c`, an `[include]` file, `.git/config.worktree` and `gpg.format`.)
+
+## A corpus of remembered hostile characters has a blind spot shaped like the delimiter
+
+P04 Task 10's run-directory corpus covered `#`, `*`, a space, a NUL and a lone
+surrogate. Its cell is comma-separated. **The one character it did not hold is
+the one the cell splits on**, and both Major findings of the round arrived
+through it: a worker's checkpoint evidence reference carried commas into the
+`Checkpoints` cell and forged a second `baseline:` marker and three spent
+attempt tokens onto its own `[x]` row, and a run directory at `runs/run,1` split
+the `Result` cell so that the documented "an exact replay is inert" contract
+raised instead and the conflicting-evidence screen beside it went unreachable.
+
+A remembered list is a list of characters that once hurt someone. It is not a
+statement about the grammar, so it cannot tell you what it is missing, and
+widening it only moves the blind spot. **Derive the corpus from the structure
+the value lands in**: what does something downstream READ? For a tracker cell
+that is `_CELL_SEPARATORS`, `_DIGEST_DELIMITER`, `_GLOB_CHARACTERS`,
+`_CONTROL_CHARACTERS`, and — asked rather than listed — `_splits_the_section`
+and `_survives_the_encoder` over the whole code point space.
+
+**And derive it at every level, because a value lands in more than one.** Fixing
+the comma closed the cell and left the *entry* open: a checkpoint entry is
+assembled from `_CHECKPOINT_DELIMITERS` and `_recorded_attempts` re-splits it on
+exactly those, so a worker whose evidence was published at
+`evidence/a@attempt-002@b.md` — a wholly legal path, since `:` and `@` are
+ordinary path characters a scope path may carry — still imported at `[x]` and
+still spent an attempt it had never had. That screen cannot live in the path
+grammar without narrowing it for everyone, so it lives where the entry is
+assembled, and it **asks the reader** (`_recorded_attempts` over the entry
+alone) instead of naming delimiters. Ask the reader and a delimiter added
+tomorrow is covered untouched.
 
 ## Cross-phase clarifications
 

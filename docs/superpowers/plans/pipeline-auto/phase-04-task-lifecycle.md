@@ -169,7 +169,16 @@ def scopes_overlap(a: str, b: str) -> bool: ...
 def parse_plan_metadata(path: str) -> dict: ...
 def import_phase_plan(run_dir: str, *, phase_plan: str) -> dict: ...
 def publish_worker_result(run_dir: str, *, result: dict) -> str: ...
-def import_worker_result(run_dir: str, *, result_path: str) -> dict: ...
+def import_worker_result(run_dir: str, *, result_path: str,
+                         run_command) -> dict: ...
+#   `run_command(argv: tuple[str, ...]) -> str` is REQUIRED, not defaulted.
+#   The module never executes git: it emits the argv and validates the
+#   transcript, so the ability to run one command is the controller's
+#   capability and arrives as an argument. The callable is handed the exact
+#   argv and must return the captured stdout RAW -- no `.strip()`: the
+#   leading NUL record separator and the trailing newline are both
+#   load-bearing in the grammar `_parse_range_transcript` reads.
+#   Changed by P04 Task 10; see the master plan's supersession note.
 def verify_source_range(repo: str, *, baseline: str, head: str, head_ref: str,
                         scopes: list, transcript: str) -> dict: ...
 def integrate_task(run_dir: str, *, task_id: str, merge_commit: str) -> dict: ...
@@ -4483,7 +4492,7 @@ The nine items P04 originally reported back have all been answered. They are rec
 | 3 | No public integration transition | `integrate_task(run_dir, *, task_id, merge_commit) -> dict` is public and P04's; a private helper could not be called by P05's gate or exercised by P06's tests | Task 11 |
 | 4 | `## Quorum` columns unpinned | Pinned by P02's committed fixture: 12 columns. P04 reads `QID`, `State`, `Owners` and writes none | Tracker column contract |
 | 5 | `## Tasks` columns unpinned | Pinned by the same fixture: 16 columns, **no `Deps`**, and `Attempt` is the token `attempt-001` | Tracker column contract, `_attempt_token` |
-| 6 | `derive_next_action` vocabulary for the new routes | P04 persists `quorum:<question-record>` / `halt:<reason>` in the task's `Question` cell; the action strings stay P02/P03's | Task 10 |
+| 6 | `derive_next_action` vocabulary for the new routes | **SUPERSEDED BY TASK 10.** The halt arm is `halt:<reason>` as answered. The quorum arm is the complete `quorum:<qid>@<path>#sha256=<digest>` and NOT `quorum:<question-record>`: Task 7's `_validate_decision` reads the qid out of this cell to bind a resume grant, splitting on `@`, and a cell holding only the reference yields the whole reference as the "qid" — so the grant it looks for is `Q-<whole reference>`, which no decision id can ever be, and every resume of a quorum-blocked task is refused by the `Q-<qid>` mismatch. (It is refused by THAT arm and not by the "names no qid" arm: the reference is non-empty, so the empty-qid arm never fires. A diagnosis quoted that the code never produces is the same defect in a smaller size.) The action strings stay P02/P03's. Consumers must write and read the full arm — see the note under the interface block above | Task 10 |
 | 7 | Marker and comment strings | Accepted as derived, now pinned in this plan so P05 cites rather than re-derives | Pinned marker and comment strings |
 | 8 | Artifact-task evidence binding | Accepted as derived: exact outputs on disk, `code_state` bound to the target tip | Task 10 |
 | 9 | `EVIDENCE_PURPOSES` after `## Remediation` was dropped | Each phase appends the purposes it needs. P04 ships three; P05 adds `task-review`, `adversarial`; P06 adds `branch-review`, `completeness`, `final`. An unregistered purpose is rejected by design | Task 5, Pinned strings |

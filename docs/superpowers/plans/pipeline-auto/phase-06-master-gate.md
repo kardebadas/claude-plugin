@@ -2851,7 +2851,24 @@ def open_reconciliation(run_dir: str, *, finding_id: str, decision_id: str,
         task = next((row for row in tracker["tasks"] if row["id"] == scope), None)
         if task is not None and task["state"] == "[~]":
             task["state"] = "[?]"
-            task["question"] = relative
+            #: THE CELL'S SHAPE IS P04 TASK 10's, AND A BARE PATH IS NEITHER
+            #: ARM. `_validate_decision` splits this cell on `quorum:` /
+            #: `halt:` and binds a resume grant to the qid it reads out of the
+            #: quorum arm; a bare relative path matches neither prefix, so the
+            #: task this function blocks could never be resumed at all --
+            #: which is the whole purpose of blocking it.
+            #:
+            #: THIS LINE IS THEREFORE BLOCKED ON A P04 INTERFACE, and that is
+            #: stated rather than worked around. The arm is
+            #: `quorum:<qid>@<path>#sha256=<digest>` and the only function that
+            #: builds it today is `_resolve_question_record`, which is
+            #: PRIVATE. P06 must not hand-spell it: a second typing of this
+            #: cell is a second answer to "what is this task blocked on" in
+            #: the one cell that says so, and the one that goes stale is
+            #: silent. So P04 owes a PUBLIC spelling before this task is
+            #: implemented -- the same debt `_RANGE_CHECKPOINT` carries for
+            #: P07 -- and until it exists this assignment is a placeholder.
+            task["question"] = question_cell_for(relative)   # P04, public, owed
         return tracker
 
     locked_tracker_update(str(directory),

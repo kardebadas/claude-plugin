@@ -1715,26 +1715,61 @@ class WriteScopeTests(PlanFileTestCase):
                 self._expect_rejection(task_block("T1", write_scope=scope),
                                        name="scope.md")
 
-    def test_a_comma_inside_a_path_is_unspellable_rather_than_unscreened(self):
-        """THE RULING THIS TASK INHERITED AND IS NOW MAKING EXPLICIT.
+    def test_a_comma_inside_a_path_is_now_screened_and_not_merely_unreachable(self):
+        """THE RULING THIS TASK MADE, AND WHY P04 TASK 10 SUPERSEDED IT.
 
         Task 1 left ``,`` deliberately unscreened in ``_cell_safe``, because
         that predicate is shared by values that are not all multi-valued, and
         it said the bar belongs on whoever KNOWS a cell is list-valued.
         ``write_scope`` and ``outputs`` are the first list-valued plan fields,
-        so the ruling is this task's to make -- and the decision is that NO NEW
-        COMMA SCREEN IS ADDED, because the comma is the separator: the split
-        happens first, so a path containing one is not smuggled through, it is
-        two members, and the second is then refused on its own merits. A screen
-        would be a rule with no input that can reach it. Both halves are
-        asserted so that adding one later is a decision somebody makes rather
-        than a tidy-up.
+        so the ruling fell to this task, and it was: NO NEW COMMA SCREEN,
+        because from a scope cell the comma is the SEPARATOR -- the split
+        happens first, so a path carrying one is never a smuggled value, it is
+        two members and the second is refused on its own merits. A screen would
+        have been a rule with no input that could reach it.
+
+        THAT ARGUMENT IS STILL SOUND AND IT WAS STILL ONE DIRECTION ONLY. It
+        reasons about paths coming OUT of a list cell, one member at a time.
+        Tasks 6 and 10 put one IN -- whole, unsplit, from two sources no split
+        ever touches: a run directory's own NAME through
+        ``_citable_repo_relative``, and a worker document's reference field
+        through ``_digest_reference``. There the comma is reachable, and a
+        review reached it: a worker's checkpoint evidence carried commas into
+        the comma-separated ``Checkpoints`` cell and forged a second
+        ``baseline:`` marker and three spent attempt tokens onto its own
+        completed row. So the screen moved to ``_safe_relative``, and the
+        unreachability this test once asserted is now what the FIRST half
+        asserts -- the scope direction still cannot reach it, because the split
+        still happens first.
+
+        ``_cell_safe`` KEEPS THE COMMA, and that half of Task 1's ruling is
+        untouched: ``review_reason`` and ``concerns`` are prose, and English
+        has commas. What changed is only that a repository-relative path was
+        never the prose case.
         """
+        #: Task 1's half, unchanged: the shared value screen still admits it.
         self.assertTrue(state._cell_safe("src/a,b.py"))
-        self.assertEqual(state._safe_relative("src/a,b.py").as_posix(),
-                         "src/a,b.py")
+        #: The path grammar's half, superseded.
+        with self.assertRaises(state.PlanMetadataError) as caught:
+            state._safe_relative("src/a,b.py")
+        self.assertIn("re-column a tracker row", str(caught.exception))
+        #: DERIVED FROM THE CONSTANT, not from the character: a third
+        #: separator added to ``_CELL_SEPARATORS`` is refused here without
+        #: this test being touched.
+        for separator in state._CELL_SEPARATORS:
+            with self.subTest(separator=separator):
+                with self.assertRaises(state.PlanMetadataError):
+                    state._safe_relative(f"src/a{separator}b.py")
+        #: The scope direction is still the unreachable one -- the split runs
+        #: first, so what fails is the SECOND member's missing type prefix and
+        #: never the new screen. Both refusals are the plan grammar's, so the
+        #: discriminator is which member the message names.
         canonical, _ = state._parse_write_scope("file:src/a.py,tree:docs")
         self.assertEqual(len(canonical), 2)
+        with self.assertRaises(state.PlanMetadataError) as scoped:
+            state._parse_write_scope("file:src/a,b.py")
+        self.assertIn("b.py", str(scoped.exception))
+        self.assertNotIn("re-column a tracker row", str(scoped.exception))
         self._expect_rejection(task_block("T1", write_scope="file:src/a,b.py"),
                                name="comma.md")
 
@@ -13178,6 +13213,81 @@ class PublishedNameCrossProductTests(TempDirTestCase):
         self.assertEqual(path.read_bytes(), b"\xff\xfe\x00not utf 8")
 
 
+#: THE CELL'S OWN GRAMMAR, DERIVED CHARACTER BY CHARACTER.
+#:
+#: The string `_citable_repo_relative` returns is not a path in the abstract.
+#: It is a MEMBER of a tracker cell that is comma-separated, pipe-columned,
+#: row-split by whatever `str.splitlines` breaks on, and that carries
+#: `#sha256=` inside each member. So the question a corpus over it must ask is
+#: not "which characters are hostile" -- that is a list somebody remembers, and
+#: the list this suite remembered covered `#`, `*`, a space, a NUL and a lone
+#: surrogate: every character with meaning in that cell EXCEPT the one the cell
+#: splits on. A worker put a comma in a checkpoint evidence reference and
+#: forged a second `baseline:` marker and three spent attempt tokens onto its
+#: own completed row; a run directory spelled `runs/run,1` split the `Result`
+#: cell in two and broke the "an exact replay is inert" contract. Both were
+#: inside the remembered corpus's blind spot, and a wider remembered list would
+#: only have moved the blind spot.
+#:
+#: So the alphabet is DERIVED, from the four module constants that say what the
+#: cell reads and the two module predicates that ASK rather than remember:
+#:
+#:   `_CELL_SEPARATORS`   -- the characters that re-column a row or a member
+#:                           list. Whole constant, not the comma alone: a third
+#:                           separator added there is covered here untouched.
+#:   `_DIGEST_DELIMITER`  -- the reference's own delimiter, first character.
+#:   `_GLOB_CHARACTERS`   -- a path whose membership depends on expansion time.
+#:   `_CONTROL_CHARACTERS`-- what breaks a subprocess and a cell's width.
+#:   `_splits_the_section`-- ASKED over the whole code point space, because the
+#:                           row-break set is whatever `str.splitlines` breaks
+#:                           on and a written-down list of it was wrong twice.
+#:   `_survives_the_encoder` -- ASKED for the same reason; the surrogate block
+#:                           is 2048 characters and nobody lists it.
+#:
+#: The sweep is over `range(0x110000)` -- every code point Python has -- rather
+#: than over the BMP, so "no astral character breaks a line" is a MEASUREMENT
+#: this corpus makes and not an assumption it inherits.
+_CITABLE_SEPARATOR = "separator"
+_CITABLE_REFERENCE = "reference"
+_CITABLE_GLOB = "glob"
+_CITABLE_WINDOWS = "windows"
+_CITABLE_CELL = "cell"
+
+#: The diagnosis each reason must produce, and they are DIFFERENT strings on
+#: purpose. A corpus whose every case asserts one shared sentence asserts a
+#: constant; these discriminate, so a screen that started refusing a NUL for
+#: the separator's reason is a red test rather than a silent re-label.
+CITABLE_DIAGNOSIS = {
+    _CITABLE_SEPARATOR: "re-column a tracker row",
+    _CITABLE_REFERENCE: "delimiter of a bound reference",
+    _CITABLE_GLOB: "glob character",
+    _CITABLE_WINDOWS: "not POSIX-spelled",
+    _CITABLE_CELL: "a tracker cell cannot hold",
+}
+
+
+def citable_cell_alphabet() -> dict:
+    """`{character: reason}` for every character the citing cell READS."""
+    alphabet = {character: _CITABLE_SEPARATOR
+                for character in state._CELL_SEPARATORS}
+    alphabet[state._DIGEST_DELIMITER[0]] = _CITABLE_REFERENCE
+    for character in state._GLOB_CHARACTERS:
+        alphabet.setdefault(character, _CITABLE_GLOB)
+    #: The one hand-named member, and it is named because no reader derives
+    #: it: `\\` is a path separator on the machine that WROTE the path and an
+    #: ordinary segment character on the one reading it back.
+    alphabet.setdefault("\\", _CITABLE_WINDOWS)
+    for code in range(0x110000):
+        character = chr(code)
+        if character in alphabet:
+            continue
+        if (character in state._CONTROL_CHARACTERS
+                or state._splits_the_section(character)
+                or not state._survives_the_encoder(character)):
+            alphabet[character] = _CITABLE_CELL
+    return alphabet
+
+
 class PublishedPathCitabilityTests(TempDirTestCase):
     """What Task 10 must be able to DO with the string this returns.
 
@@ -13215,6 +13325,81 @@ class PublishedPathCitabilityTests(TempDirTestCase):
         run_dir = make_run_in(self.repo, "runs/run*1", import_plan=False)
         with self.assertRaises(state.TrackerValidationError):
             state.publish_worker_result(run_dir, result=worker_result())
+        self.assertFalse((run_dir / state.AGENT_OUTPUT_DIRNAME).exists())
+
+    def test_every_character_the_citing_cell_reads_is_refused_with_its_own_reason(self):
+        """THE CORPUS IS DERIVED FROM THE CELL, NOT REMEMBERED.
+
+        See `citable_cell_alphabet`. Every code point Python has is put to the
+        module's own constants and the module's own two ASKING predicates, and
+        every character that answers is spelled into a run directory name and
+        required to be refused -- with the reason that is TRUE OF IT rather
+        than with one sentence shared by five rules.
+        """
+        alphabet = citable_cell_alphabet()
+        #: The derivation is asserted before it is used. A builder that
+        #: silently produced the empty dict would pass every case below.
+        self.assertEqual(alphabet[","], _CITABLE_SEPARATOR)
+        self.assertEqual(alphabet["#"], _CITABLE_REFERENCE)
+        self.assertEqual(sorted(set(alphabet.values())),
+                         sorted(CITABLE_DIAGNOSIS))
+        #: 33 ASCII controls + 3 row breaks no ASCII list holds + the 2048
+        #: lone surrogates the encoder refuses, and none of it written down.
+        self.assertEqual(
+            sum(1 for reason in alphabet.values() if reason == _CITABLE_CELL),
+            33 + 3 + 2048)
+        #: NOT WIDER THAN THE GRAMMAR. A screen that swept these would refuse
+        #: run directories the master plan's own layout is free to use.
+        for ordinary in "abzAZ09._-+@: \u00e9\u0661\u00b3":
+            with self.subTest(ordinary=repr(ordinary)):
+                self.assertNotIn(ordinary, alphabet)
+
+        root = Path("/repo")
+        inside = f"{state.AGENT_OUTPUT_DIRNAME}/T1/attempt-001.md"
+        wrong = []
+        for character, reason in sorted(alphabet.items()):
+            try:
+                state._citable_repo_relative(
+                    root / f"runs/run{character}1", root, inside)
+            except state.TrackerValidationError as exc:
+                #: EXACTLY ONE reason string may match, and it must be this
+                #: character's. A message carrying two would mean the corpus
+                #: cannot tell which rule fired; a message carrying the wrong
+                #: one would mean a screen was silently re-labelled.
+                matched = sorted(key for key, phrase in CITABLE_DIAGNOSIS.items()
+                                 if phrase in str(exc))
+                if matched != [reason]:
+                    wrong.append((repr(character), reason, matched))
+            else:
+                wrong.append((repr(character), reason, "ACCEPTED"))
+        self.assertEqual(wrong, [])
+
+    def test_a_run_directory_carrying_the_list_delimiter_is_refused_before_any_write(self):
+        """THE CHARACTER THE REMEMBERED CORPUS DID NOT HOLD.
+
+        `Result` is comma-separated and `_csv` is its reader, so a run
+        directory at `runs/run,1` produced an identity that splits in two.
+        `_member(identity, accepted)` could then never match -- the documented
+        "an exact replay is an idempotent no-op" contract RAISED instead --
+        and `entry.split(_DIGEST_DELIMITER, 1)[0] == relative` could never
+        match either, so the conflicting-evidence screen beside it was
+        unreachable.
+
+        BOTH DOORS ARE ASSERTED, and the earlier one is the interesting half:
+        the same path grammar screens the `phase_plans` cell, so a comma in the
+        run directory is now refused at `import_phase_plan` -- before the run
+        can reach Task 10 at all. The publication door is asserted with the
+        plan import skipped, which is the only way to reach it.
+        """
+        with self.assertRaises(state.TrackerValidationError) as early:
+            make_run_in(self.repo, "runs/early,1")
+        self.assertIn("phase plan path", str(early.exception))
+        self.assertIn("re-column a tracker row", str(early.exception))
+
+        run_dir = make_run_in(self.repo, "runs/run,1", import_plan=False)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.publish_worker_result(run_dir, result=worker_result())
+        self.assertIn("re-column a tracker row", str(caught.exception))
         self.assertFalse((run_dir / state.AGENT_OUTPUT_DIRNAME).exists())
 
     def test_a_run_outside_the_recorded_repository_root_is_refused(self):
@@ -13730,8 +13915,15 @@ class TaskIdDeadlockIsClosedTests(TempDirTestCase):
 #   asserts the value the schema rejects, so the import it describes could
 #   never have been written at all.
 # * `.is_file()` on an artifact output -- false for a directory, a dangling
-#   link, a loop, a FIFO and a NUL-bearing name, and the FIFO arm is a HANG
-#   under the run lock. `_require_regular_file` is this module's door.
+#   link, a loop, a FIFO and a NUL-bearing name. THE PREDICATE ITSELF DOES NOT
+#   HANG: measured, it answers False on a FIFO in 0.000s, as `lexists` answers
+#   True in 0.000s. `stat` never blocks. The hang is the OPEN a later reader
+#   performs on the name this predicate has just called absent, and under the
+#   run lock that reader is an unattended controller. So `is_file()`'s defect
+#   here is a MIS-DIAGNOSIS -- "there is nothing here" about a name that
+#   exists -- and the hang is where the mis-diagnosis leads.
+#   `_require_regular_file` is this module's door because it settles the shape
+#   before anything is opened.
 # * `tests:<commands>` into the `Verification` cell -- that column holds the
 #   digest-bound typed PASS records, which is what `_validate_tasks` means by
 #   "its verification evidence"; the command tuple is already in the record.
@@ -13930,6 +14122,24 @@ class ImportResultProducesBlockTests(unittest.TestCase):
         a citable path is `_safe_relative` and a cell spelling is
         `_cell_safe`. A new grammar object appearing in this section fails
         here, which is the point at which a divergence table would be owed.
+
+        THE SWEEP IS `ast.walk` AND NOT `tree.body`, AND THAT IS A CORRECTION.
+        The first version of this test collected `ast.Assign` nodes out of
+        `tree.body` -- module level only -- while its NAME claimed the task
+        hand-rolls no new grammar anywhere. Measured: a screen minted at module
+        level after the banner failed it, and the SAME screen minted inside
+        `import_worker_result`'s `mutate` passed with `Ran 53 tests` and
+        nothing red. A test that claims more than it checks is worse than no
+        test, because the next reader stops looking.
+
+        IT IS ALSO A CALL SWEEP AND NOT AN ASSIGNMENT SWEEP. A pattern object
+        does not have to be bound to a name to be a second answer:
+        `if _CharClass(_ALNUM, "").fullmatch(value)` mints one, uses it and
+        drops it, and an `ast.Assign` sweep never sees it. `node.targets[0].id`
+        is gone with it -- it raised `AttributeError` for any non-`Name`
+        target, so `_X.y = _CharClass(...)` or a tuple unpacking would have
+        ERRORED rather than been swept, and an errored sweep reports as a
+        broken test rather than as the divergence it found.
         """
         source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
             encoding="utf-8")
@@ -13941,18 +14151,69 @@ class ImportResultProducesBlockTests(unittest.TestCase):
         #: Derived, so a constructor added by a later task is still swept.
         tree = ast.parse(source)
         constructors |= {
-            node.name for node in tree.body
+            node.name for node in ast.walk(tree)
             if isinstance(node, ast.ClassDef) and node.name.startswith("_")
             and any(isinstance(inner, ast.FunctionDef)
                     and inner.name == "fullmatch" for inner in node.body)}
         self.assertIn("_CharClass", constructors)
         minted = [
-            node.targets[0].id for node in tree.body
-            if node.lineno > banner and isinstance(node, ast.Assign)
+            f"{node.value.func.id} at line {node.value.lineno}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
             and isinstance(node.value, ast.Call)
             and isinstance(node.value.func, ast.Name)
-            and node.value.func.id in constructors]
-        self.assertEqual(minted, [])
+            and node.value.func.id in constructors
+            and node.value.lineno > banner]
+        minted += [
+            f"{node.func.id} at line {node.lineno}" for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id in constructors and node.lineno > banner]
+        self.assertEqual(sorted(set(minted)), [])
+
+    def test_every_membership_question_this_task_asks_goes_through_member(self):
+        """R07. `_member(identity, accepted)` survived a mutation to a bare
+        `identity in accepted` at every seed, because `identity` is built by
+        this function and is always a `str` -- so the two really are equal on
+        every input that reaches them TODAY.
+
+        The rule is not about today. `in` against a container raises
+        `TypeError` for an unhashable left operand and `TypeError` is outside
+        `TrackerError`, so it escapes every `except TrackerError` a controller
+        has written: the run dies on a malformed value instead of refusing it.
+        `_member` answers False for every non-`str`. The equivalence therefore
+        rests entirely on a type invariant somewhere else, and this task's
+        three membership questions all read values that arrive from a parsed
+        worker document.
+
+        SO THE PIN IS STRUCTURAL, because a behavioural one cannot exist while
+        the equivalence holds -- exactly the case the AST test beside this one
+        was written for. Three `_member` calls, no `in` comparison, and the
+        assertion names both halves so a fourth question added with a bare `in`
+        is red here and nowhere else.
+        """
+        source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
+            encoding="utf-8")
+        body = next(node for node in ast.parse(source).body
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name == "import_worker_result")
+        self.assertEqual(
+            sorted(ast.unparse(call) for call in ast.walk(body)
+                   if isinstance(call, ast.Call)
+                   and isinstance(call.func, ast.Name)
+                   and call.func.id == "_member"),
+            ["_member(identity, accepted)",
+             "_member(result['status'], COMPLETION_STATUSES)",
+             "_member(result['status'], QUORUM_STATUSES)"])
+        self.assertEqual(
+            [ast.unparse(node) for node in ast.walk(body)
+             if isinstance(node, ast.Compare)
+             and any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops)],
+            [])
+        #: The discriminator for the rule itself: the two spellings disagree on
+        #: an unhashable value, and only one of them stays inside the family.
+        with self.assertRaises(TypeError):
+            ["not a string"] in {"a"}
+        self.assertFalse(state._member(["not a string"], {"a"}))
 
     def test_the_worker_result_grammar_names_no_branch_and_no_transcript(self):
         """`head_ref` is DERIVED and the transcript is CAPTURED. Fourteen
@@ -14078,6 +14339,37 @@ class RangeTranscriptTests(unittest.TestCase):
             state._range_transcript(angry, self.ARGV)
         self.assertIn("git --version", str(caught.exception))
 
+    def test_a_controllers_own_family_error_passes_through_unrestated(self):
+        """R04. The `except TrackerError: raise` arm is deliberate and was
+        untested, so a mutant that re-wrapped it survived every seed.
+
+        A controller may itself raise this module's family -- it holds the run
+        lock's vocabulary and may have decided the command must not run. That
+        is already a diagnosis, made by the party that knows why; restating it
+        as "the controller supplied no transcript" would replace a real reason
+        with a guess about it. The IDENTITY of the object is asserted, not just
+        its type: a re-wrap that chained the original as `__cause__` would keep
+        the type and lose the sentence.
+        """
+        raised = state.TrackerValidationError("the operator stopped this run")
+
+        def refuses(argv):
+            raise raised
+
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._range_transcript(refuses, (("git", "log"),))
+        self.assertIs(caught.exception, raised)
+        self.assertIsNone(caught.exception.__cause__)
+        #: The contrast, so the arm is shown to DECIDE something: a failure
+        #: from outside the family is restated, and names the command.
+        def explodes(argv):
+            raise RuntimeError("boom")
+
+        with self.assertRaises(state.TrackerValidationError) as restated:
+            state._range_transcript(explodes, (("git", "log"),))
+        self.assertIn("git log", str(restated.exception))
+        self.assertIsInstance(restated.exception.__cause__, RuntimeError)
+
     def test_a_controller_answering_with_anything_but_text_is_a_stop(self):
         """`capture_output=True` without `text=True` answers `bytes`, and
         `_parse_range_transcript` would refuse it one call later with a
@@ -14146,6 +14438,34 @@ class ResultIdentityTests(TempDirTestCase):
         with self.assertRaises(state.TrackerValidationError) as caught:
             state._result_identity(odd, b"x\n", self.repo)
         self.assertIn("#", str(caught.exception))
+
+    def test_a_comma_in_the_path_is_refused_because_the_cell_splits_on_it(self):
+        """M2, and the sibling of the `#` case above. `#` gives ONE member two
+        readings; `,` gives TWO members one reading each, and the second is the
+        more dangerous because both halves parse.
+
+        `Result` is read with `_csv`, so an identity carrying a comma comes
+        back as two accepted entries and neither is the one that was written.
+        Two documented behaviours rest on that comparison and both break: an
+        exact replay stops being an idempotent no-op and RAISES instead, and
+        the conflicting-evidence screen -- which compares the path half of each
+        accepted entry against `relative` -- becomes unreachable, so a second,
+        different document at an accepted path is refused by the wrong screen
+        with the wrong diagnosis.
+        """
+        odd = self.repo / "r,1.md"
+        odd.write_text("x\n", encoding="utf-8")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state._result_identity(odd, b"x\n", self.repo)
+        self.assertIn("re-column a tracker row", str(caught.exception))
+        #: THE MEASUREMENT THAT SAYS WHY. Had the identity been built, this is
+        #: what the cell would have held -- two members, both legal -- so the
+        #: refusal above is not a screen against a character that could never
+        #: have hurt anything.
+        would_have_been = f"r,1.md{state._DIGEST_DELIMITER}{'a' * 64}"
+        self.assertEqual(len(state._csv(would_have_been)), 2)
+        self.assertFalse(state._member(would_have_been,
+                                       state._csv(would_have_been)))
 
     def test_the_record_name_itself_is_never_resolved_through(self):
         """Resolving the record's own name would answer with what a symlink at
@@ -14730,6 +15050,227 @@ class ImportWorkerResultTests(TempDirTestCase):
         self.assertIn("approved plan", str(caught.exception))
 
 
+class WorkerCheckpointsReachTheControllersCellTests(TempDirTestCase):
+    """The import loop copies a WORKER-SUPPLIED reference into the controller's
+    own comma-separated `Checkpoints` cell. This class is about what that cell
+    can be made to say.
+
+    `Checkpoints` is not decoration. `_recorded_attempts` reads every
+    `attempt-NNN` token out of it and `_require_fresh_attempt` refuses a resume
+    to any of them; `reserved_baseline` reads the `baseline:<attempt>@<sha>`
+    marker out of it and is the ANCHOR of the range proof. Both are read with
+    `_csv`. So a worker that can put a comma into the cell can write entries the
+    controller never wrote, into the two readers whose whole purpose is to be
+    the controller's word against the worker's.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo, self.run_dir, _ = make_run(
+            self.tmp, three_disjoint_tasks(), worker_limit=6)
+        state.reserve_task(self.run_dir, task_id="T1", owner="impl-1",
+                           attempt=1)
+        self.commits = source_result_commits(self.repo, 2)
+        digest = write_evidence(
+            Path(self.run_dir) / "evidence", code_state=self.commits[-1],
+            commands=json.dumps([EVIDENCE_COMMAND]))
+        self.evidence = f"evidence/T1.md#sha256={digest}"
+
+    def result(self, **overrides) -> dict:
+        """OVERRIDES LAST, for `quorum_result`'s reason: a helper that spells a
+        field positionally and then splats a caller's override of the same
+        field raises `TypeError` out of the HELPER, before the code under test
+        is reached."""
+        return worker_result(**{
+            "source_ref": self.commits[-1], "commits": self.commits,
+            "tests": (EVIDENCE_COMMAND,), "evidence": (self.evidence,),
+            **overrides})
+
+    def test_a_legal_checkpoint_lands_in_the_cell_as_one_member(self):
+        """THE POSITIVE CONTROL, and it is what makes the refusal below mean
+        something: the loop really does copy a worker's reference into the
+        cell, so a reference that could re-column the cell would really land
+        there."""
+        path = Path(self.repo) / state.publish_worker_result(
+            self.run_dir, result=self.result(checkpoints=(
+                {"id": "cp1", "status": "complete",
+                 "evidence": self.evidence},)))
+        row = task_row(import_result(self.run_dir, path), "T1")
+        members = state._csv(row["checkpoints"])
+        self.assertIn(
+            f"{state._WORKER_CHECKPOINT}attempt-001:cp1:complete@"
+            f"{self.evidence}", members)
+        #: THE MEMBERS ARE NAMED RATHER THAN COUNTED. A count is a number the
+        #: next reader cannot check; this says which markers the cell holds and
+        #: that the worker contributed exactly one of them. It is the same
+        #: property the case below measures under attack.
+        self.assertEqual(
+            [member.split(":", 1)[0] for member in members],
+            ["started", "baseline", "worker", "range", "completed"])
+
+    def test_a_checkpoint_reference_carrying_the_list_delimiter_never_reaches_the_cell(self):
+        """M1. A digest reference's path half is repository-relative and
+        `_safe_relative` used to admit a comma, so the reference below is a
+        LEGAL field value that the import appended to the cell verbatim.
+
+        The refusal is at the CODEC, which means it is refused at publication
+        (before an immutable record exists) and again at parse (so a
+        hand-written document cannot carry it past the renderer's byte
+        comparison either). Both doors are asserted.
+        """
+        forged = (f"evidence/x,attempt-002,attempt-003,"
+                  f"baseline:attempt-004@{'b' * 40},y.md#sha256={'a' * 64}")
+        poisoned = self.result(checkpoints=(
+            {"id": "cp1", "status": "complete", "evidence": forged},))
+        with self.assertRaises(state.TrackerValidationError) as published:
+            state.publish_worker_result(self.run_dir, result=poisoned)
+        self.assertIn("checkpoint evidence", str(published.exception))
+        self.assertIn("re-column a tracker row", str(published.exception))
+        self.assertFalse(
+            (Path(self.run_dir) / state.AGENT_OUTPUT_DIRNAME).exists())
+        #: The other door. `render_worker_result` is what a hand-written
+        #: document is compared against, so the parse side is screened too.
+        with self.assertRaises(state.TrackerValidationError):
+            state.parse_worker_result(
+                state.render_worker_result(self.result(checkpoints=(
+                    {"id": "cp1", "status": "complete",
+                     "evidence": self.evidence},))).replace(
+                        self.evidence, forged))
+
+    def test_a_checkpoint_reference_may_not_spell_the_entrys_own_delimiters(self):
+        """M1 AGAIN, ONE LAYER IN, AND THE COMMA FIX DOES NOT REACH IT.
+
+        The cell splits on `,` and the path grammar now bars that. The ENTRY
+        splits on `_CHECKPOINT_DELIMITERS` -- `:`, `@`, `->` -- and
+        `_recorded_attempts` re-splits every member on exactly those before
+        matching `_ATTEMPT_TOKEN`. `:` and `@` are ordinary path characters
+        that `_safe_relative` is explicitly allowed to carry (a scope path may
+        name a colon), so barring them in the path grammar would narrow it for
+        everyone; the screen belongs where the entry is assembled.
+
+        Measured before the screen existed: this result imported at `[x]`, the
+        cell held FIVE well-formed members, every P02 validator passed, and
+        `_recorded_attempts` reported `attempt-002` spent -- so the worker had
+        made its own next resume impossible while its task sat green.
+
+        THE SCREEN ASKS `_recorded_attempts` ITSELF rather than listing the
+        delimiters, so it cannot drift from the scan it protects.
+        """
+        digest = write_evidence(
+            Path(self.run_dir) / "evidence", name="a@attempt-002@b.md",
+            code_state=self.commits[-1],
+            commands=json.dumps([EVIDENCE_COMMAND]))
+        forged = f"evidence/a@attempt-002@b.md#sha256={digest}"
+        #: THE REFERENCE IS LEGAL, and that is the point: nothing upstream has
+        #: anything to complain about, so the entry assembly is the only place
+        #: the question can be asked.
+        self.assertEqual(state._digest_reference(forged, field="probe")[0],
+                         "evidence/a@attempt-002@b.md")
+        path = Path(self.repo) / state.publish_worker_result(
+            self.run_dir, result=self.result(
+                checkpoints=({"id": "cp1", "status": "complete",
+                              "evidence": forged},)))
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(self.run_dir, path)
+        self.assertIn("attempt-002", str(caught.exception))
+        self.assertIn("SPEND an attempt", str(caught.exception))
+        #: THE ROW IS UNTOUCHED. The refusal is inside `mutate`, so the whole
+        #: transition is discarded rather than half-applied.
+        row = task_row(state.parse_tracker(
+            (Path(self.run_dir) / "progress.md").read_text(
+                encoding="utf-8")), "T1")
+        self.assertEqual(row["state"], state._TASK_STATES[1])
+        self.assertEqual(state._recorded_attempts(row), {"attempt-001"})
+
+    def test_no_member_a_worker_contributes_is_one_the_baseline_scan_reads(self):
+        """WHY `reserved_baseline(row, ...)` AND `reserved_baseline(updated,
+        ...)` ARE THE SAME CALL, pinned rather than argued.
+
+        A review's mutation pass found `reserved_baseline(updated, ...)`
+        surviving at every seed and built a discriminator for it: at that line
+        `updated` is `row` PLUS the worker's imported checkpoints, so the two
+        differ exactly when a worker has written into the checkpoint cell --
+        which, with the comma admitted, it could, injecting a second
+        `baseline:attempt-001@<sha>` member and poisoning the anchor of its own
+        completed row.
+
+        THAT DISCRIMINATOR WAS A CONSEQUENCE OF THE DEFECT, so closing the
+        defect retires it rather than answering it. What is left is an
+        invariant, and it is the invariant that makes the mutant equivalent:
+        `_append_history` can only add MEMBERS; every member a worker
+        contributes begins with `_WORKER_CHECKPOINT`; `reserved_baseline`
+        matches on `baseline:<token>@`; and the only way a worker member could
+        begin with anything else is the cell delimiter, which the path grammar
+        now refuses. Pin the invariant and the equivalence is checkable by the
+        next reader instead of being a claim in a report.
+        """
+        self.assertNotEqual(state._WORKER_CHECKPOINT,
+                            state._BASELINE_CHECKPOINT)
+        self.assertFalse(
+            state._WORKER_CHECKPOINT.startswith(state._BASELINE_CHECKPOINT))
+        path = Path(self.repo) / state.publish_worker_result(
+            self.run_dir, result=self.result(checkpoints=(
+                {"id": "cp1", "status": "complete",
+                 "evidence": self.evidence},)))
+        row = task_row(import_result(self.run_dir, path), "T1")
+        contributed = [member for member in state._csv(row["checkpoints"])
+                       if member.startswith(state._WORKER_CHECKPOINT)]
+        self.assertEqual(len(contributed), 1)
+        marker = f"{state._BASELINE_CHECKPOINT}attempt-001@"
+        self.assertEqual(
+            [member for member in contributed if member.startswith(marker)],
+            [])
+        #: The reading that matters: the two spellings of the call agree, and
+        #: they agree because of the line above and not by luck.
+        self.assertEqual(state.reserved_baseline(row, attempt=1),
+                         state.reserved_baseline(
+                             {"id": row["id"],
+                              "checkpoints": row["checkpoints"]}, attempt=1))
+
+    def test_the_cell_that_screen_prevents_is_one_no_later_reader_can_use(self):
+        """WHAT THE SCREEN IS WORTH, measured rather than asserted.
+
+        A refusal test alone says a value is refused; it does not say the value
+        mattered. So the forged cell is built HERE, by hand, on a row that has
+        already completed -- exactly the cell the import produced before the
+        screen existed -- and the two readers that cell exists for are run
+        against it. Both refuse, for ever, on a row the run believes is `[x]`.
+        That is the durable denial, and it is what the comma bought.
+        """
+        path = Path(self.repo) / state.publish_worker_result(
+            self.run_dir, result=self.result())
+        tracker = import_result(self.run_dir, path)
+        row = task_row(tracker, "T1")
+        self.assertEqual(row["state"], "[x]")
+        #: Healthy first, so the refusals below are the injection's doing.
+        self.assertEqual(state.reserved_baseline(row, attempt=1),
+                         state._csv(row["checkpoints"])[1].split("@", 1)[1])
+        self.assertEqual(state._recorded_attempts(row), {"attempt-001"})
+
+        #: THE INJECTED BASELINE NAMES THE COMPLETED ATTEMPT, not a later one,
+        #: and that is what makes the denial permanent rather than theoretical:
+        #: `reserved_baseline` requires EXACTLY ONE marker per attempt, so a
+        #: second one for `attempt-001` makes the finished attempt's own anchor
+        #: unreadable by every later phase. The spent-token half rides along in
+        #: the same value.
+        forged = dict(row)
+        forged["checkpoints"] = state._append_history(
+            row["checkpoints"],
+            f"{state._WORKER_CHECKPOINT}attempt-001:cp1:complete@evidence/x,"
+            f"attempt-002,attempt-003,baseline:attempt-001@{'c' * 40},"
+            f"y.md#sha256={'a' * 64}")
+        with self.assertRaises(state.TrackerValidationError) as baseline:
+            state.reserved_baseline(forged, attempt=1)
+        self.assertIn("2 baselines", str(baseline.exception))
+        self.assertEqual(
+            state._recorded_attempts(forged),
+            {"attempt-001", "attempt-002", "attempt-003"})
+        for token in ("attempt-002", "attempt-003"):
+            with self.subTest(token=token):
+                with self.assertRaises(state.TrackerValidationError):
+                    state._require_fresh_attempt(forged, token)
+
+
 class WorkerClaimAgainstControllerEvidenceTests(TempDirTestCase):
     """THE DEFENCE TASK 8 DEFERRED HERE, and the proof that it is not a
     self-comparison.
@@ -15002,11 +15543,20 @@ class ImportWorkerResultTotalityTests(TempDirTestCase):
                 previous = signal.signal(signal.SIGALRM, _alarm)
                 signal.alarm(5)
                 try:
-                    with self.assertRaises(state.TrackerValidationError):
+                    with self.assertRaises(
+                            state.TrackerValidationError) as caught:
                         import_result(self.run_dir, path)
                 finally:
                     signal.alarm(0)
                     signal.signal(signal.SIGALRM, previous)
+                #: THE DIAGNOSIS, not just the family. This is the corpus
+                #: where "something in the family" is most likely to be some
+                #: OTHER refusal: all four of these names exist, so an
+                #: absence diagnosis here would be a wrong answer that still
+                #: passed an `assertRaises`. The sibling artifact corpus
+                #: already asserts this and this one did not.
+                self.assertIn("cannot read", str(caught.exception))
+                self.assertNotIn("is not there", str(caught.exception))
 
     def test_an_absent_result_is_an_absent_result_and_not_a_completion(self):
         """F7's neighbour: a missing worker result is never evidence of
@@ -15025,12 +15575,20 @@ class ImportWorkerResultTotalityTests(TempDirTestCase):
         self.assertIn("UTF-8", str(caught.exception))
 
     def test_a_run_dir_of_the_wrong_type_stops_inside_the_family(self):
+        """THE DIAGNOSIS IS ASSERTED AND THE FAMILY ALONE IS NOT ENOUGH.
+        `import_worker_result` refuses several things about its arguments
+        before it refuses anything about the run, so a case that asserted only
+        `TrackerError` would have passed on a stop about `result_path` -- and
+        the argument this case is about is the OTHER one.
+        """
         for value in (None, 5, b"/tmp/x"):
             with self.subTest(value=type(value).__name__):
-                with self.assertRaises(state.TrackerError):
+                with self.assertRaises(state.TrackerError) as caught:
                     state.import_worker_result(
                         value, result_path=self.run_dir / "x.md",
                         run_command=controller_git)
+                self.assertIn("run_dir", str(caught.exception))
+                self.assertNotIn("result_path", str(caught.exception))
 
     def test_a_non_callable_run_command_is_refused_before_the_lock(self):
         """Before the lock and before the read: a capability that is not one

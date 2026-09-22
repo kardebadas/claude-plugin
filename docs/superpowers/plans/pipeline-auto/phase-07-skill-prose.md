@@ -2614,6 +2614,13 @@ git commit -m "docs(pipeline-auto): planning reference for stages 01-07"
 - Consumes: `prompts/implementer.md`, `prompts/task-reviewer.md`, `prompts/adversarial-reviewer.md` (Tasks 5, 6); `scripts/task-brief`, `scripts/review-package` (Task 3); `scripts/sdd-workspace` (P02); `reserve_task`, `resume_task`, `scopes_overlap`, `publish_worker_result`, `import_worker_result`, `verify_source_range` (P04); `adversarial_required`, `record_task_review`, `open_fix_round`, `ratchet_phase`, `propagate_provisional` (P05).
 - Produces: the reference `SKILL.md` routes to for stages 08–10. It owns the dial, the per-task gate, and the ratchet table.
 
+**Two P04 contracts this stage prose must describe correctly, both changed by P04 Task 10:**
+
+- `import_worker_result(run_dir, *, result_path, run_command)`. `run_command` is **required**, not defaulted. The module never executes git; it emits the argv and validates the transcript, so the ability to run one command is the controller's capability and arrives as an argument. The stage prose must say that the controller supplies it and that it returns the captured stdout **raw** — no `.strip()`, because the leading NUL record separator and the trailing newline are both load-bearing in the transcript grammar. A default here would be a capability nobody declared.
+- The `Question` cell's quorum arm is the complete `quorum:<qid>@<path>#sha256=<digest>`, not a bare question-record reference. Any stage prose that shows a parked `[?]` row must show that arm, because Task 7's `_validate_decision` reads the qid out of it to bind the resume grant.
+
+The terminal report's "attested-only completions" list reads the `range:<attempt>@<proof_mode>` checkpoint marker. That marker's constant is **private** (`_RANGE_CHECKPOINT`) while `PROOF_ATTESTED` is public, so a reader here would hand-spell `"range:"` — a second typing of the marker, and the one that goes stale is silent. **P04 owes a public spelling** before this stage is implemented; the same debt blocks P06's fix-round writer for the `Question` cell.
+
 This is where the inlined SDD protocol lives. Its load-bearing paragraph is the list of things the dial may never switch off — that list is the answer to "we're only on `final-only`, so we can skip this".
 
 - [ ] **Step 1: Write the failing test**

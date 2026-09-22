@@ -6272,19 +6272,25 @@ def _require_regular_file(path: Path, what: str) -> None:
     between them: a name longer than ``NAME_MAX`` -- measured, a 312-character
     reference, ``ENAMETOOLONG`` -- and a name under a directory this run may not
     search -- measured, a parent at mode ``000``, ``EACCES``. Both escaped this
-    function raw, so every one of its seven call sites inherited the escape; a
-    local ``except OSError`` at the one that found it would have been a rule
-    scoped to where it was learned, and the other six would have stayed open.
+    function raw, so every call site it then had inherited the escape; a local
+    ``except OSError`` at the one that found it would have been a rule scoped
+    to where it was learned, and the others would have stayed open.
     THE CALLERS ARE ENUMERATED FROM THIS MODULE'S AST RATHER THAN REMEMBERED,
-    because the count moves with the module and a stale count reads as a
-    checked one: ``_question_record``, ``payload_digest``, ``_read_json``,
-    ``_response_record``, ``_plan_text``, ``resolve_evidence``, ``_ref_text``
-    and ``_published_result_bytes``. It was five when this argument was first
-    written, six when the hole was found, seven when ``_ref_text`` arrived and
-    eight when Task 9 added ``_published_result_bytes`` -- each of the last two
-    inherited the wrap without knowing it existed, which is the argument for
-    wrapping the door rather than the call site, stated by the module instead
-    of about it.
+    and they are named here rather than counted, because a count moves with the
+    module and a stale count reads as a checked one:
+    ``_question_record``, ``payload_digest``, ``_read_json``,
+    ``_response_record``, ``_plan_text``, ``resolve_evidence``, ``_ref_text``,
+    ``_published_result_bytes``, ``_resolve_question_record``,
+    ``_require_artifact_outputs`` and ``_result_candidates``. The authority is
+    ``test_every_door_caller_is_enumerated_and_none_escapes_on_a_nul``, which
+    derives the set from the syntax tree; this list is its copy. Every caller
+    added after the wrap inherited it without knowing it existed, which is the
+    argument for wrapping the door rather than the call site. Five callers
+    (``_plan_text``, ``resolve_evidence``, ``_ref_text``,
+    ``_resolve_question_record``, ``_require_artifact_outputs``) catch the
+    refusal and re-raise it as another ``TrackerError``; ``_result_candidates``
+    is the only one that catches it and does NOT re-raise, turning it into a
+    diagnostic; the rest let it propagate.
 
     A NUL BYTE IS SCREENED RATHER THAN CAUGHT, and the difference is measured
     rather than assumed. ``os.stat('\x00x')`` raises ``ValueError`` -- not an
@@ -6303,7 +6309,7 @@ def _require_regular_file(path: Path, what: str) -> None:
     ``ValueError`` OUTSIDE this module's exception family -- measured on
     ``_read_json`` and ``payload_digest``. The standing rule names THIS
     function as the place a NUL is refused, and it is refused here rather than
-    at the eight call sites for the reason the paragraph above gives.
+    at every call site enumerated above, for the reason given there.
 
     THE SPLIT IS THE READ ARM'S SPLIT, SPELLED ONE LEVEL EARLIER.
     ``FileNotFoundError`` and ``NotADirectoryError`` are the two spellings of
@@ -6342,7 +6348,7 @@ def _require_regular_file(path: Path, what: str) -> None:
     NARROW (only EBADF and ELOOP, the direction that makes the arm live): 3
     loud failures with the arm, 41 without. The 38 in between are one outcome
     with one shape -- every absent file under a run directory becoming
-    corruption at all SEVEN call sites at once -- which is the fail-open this
+    corruption at every call site the door then had, at once -- which is the fail-open this
     door exists to refuse, arriving by the one route the door cannot see. The
     arm does not make the module correct under a narrowing (a dangling symlink
     stops being corruption and becomes absence, which is wrong in the other
@@ -17389,6 +17395,85 @@ def integrate_task(run_dir, *, task_id: str, merge_commit: str,
 # successful-looking recovery rather than at the call.
 # ---------------------------------------------------------------------------
 
+def _result_store_names(root: Path, diagnostics: list) -> list:
+    """Every name in the results tree, and every directory that could not be listed.
+
+    ``Path.rglob`` IS NOT ASKED, because it lies by omission. CPython's
+    recursive selector swallows ``PermissionError`` while it walks: measured on
+    this interpreter, a task directory at mode ``000`` holding a genuine
+    published result lists as the directory alone, and the store itself at mode
+    ``000`` lists as nothing at all -- no exception either way, while
+    ``is_dir()`` on the store still answers True. Every live attempt was then
+    reported as awaiting a worker whose answer was on disk behind a door this
+    run could not open, which is F7's fail-open arriving through the walk
+    rather than through a name. It is the fourth "is anything here?" question
+    in this module found answering "no" for "cannot tell", after directories,
+    FIFOs and NUL-bearing names.
+
+    SO EACH DIRECTORY IS LISTED BY ``os.scandir`` ITSELF, AND A LISTING THAT
+    FAILS IS A FINDING. The ``OSError`` is caught per directory -- one
+    unsearchable task directory must not hide the others -- and reported as
+    ``unreadable-result-store:<dir>:<exc>``. A directory that vanishes
+    between its parent's listing and its own is the same finding: this tree is
+    append-only, so a name disappearing from it is not a result known absent.
+
+    ONE ABSENCE IS REAL, AND IT IS ASKED BY ``lexists`` RATHER THAN BY THE
+    LISTING'S ERRNO. A store that was never created is a run in which nothing
+    has been published yet. A store that is a regular file, a dangling link or
+    a loop also fails the listing -- ``ENOTDIR``, ``ENOENT``, ``ELOOP`` -- and
+    ``ENOENT`` is the same errno the genuine absence raises, so the errno cannot
+    be the test; the name is.
+
+    THE MODULE OWNS THE LAYOUT, SO THE TASK LAYER IS THE ONLY SILENT ONE.
+    ``worker_result_path`` is ``agent-output/<task id>/<attempt>.md``: a real
+    directory directly under the store is the module's own structure and is
+    only descended into. A real directory anywhere deeper -- including one AT a
+    canonical result name -- is descended into AND returned as a name, so the
+    door refuses it as the corruption it is. Descending matters as much as
+    naming: a second copy of a result filed one level down is still a second
+    answer for one attempt, and a walk that stopped at the layout would import
+    the first copy without ever seeing the conflict. A symlink anywhere, to a
+    directory or looping back up the tree, is a name and is never followed, so
+    the walk visits each real directory once and a loop cannot make it revisit
+    anything.
+
+    A NUL BYTE IS SCREENED, not handed to ``os.scandir``, which raises
+    ``ValueError`` -- outside ``OSError`` and outside this module's family.
+    ``reconcile_run`` cannot reach it (``validate_run`` refuses such a run
+    directory first), and the screen reports rather than answers "empty".
+
+    The names come back SORTED: directory order is the filesystem's, and a
+    report whose lines move between two runs over one tree cannot be diffed
+    across an interruption, which is the only use it has.
+    """
+    if _NUL in str(root):
+        diagnostics.append(
+            f"unreadable-result-store:{root!r}: the results tree's name "
+            "carries a NUL byte, which no syscall accepts; nothing under it is "
+            "known to be absent")
+        return []
+    names: list = []
+    pending = [(root, 0)]
+    while pending:
+        directory, depth = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                children = sorted(
+                    (Path(entry.path), entry.is_dir(follow_symlinks=False))
+                    for entry in entries)
+        except OSError as exc:
+            if depth == 0 and not os.path.lexists(directory):
+                return []
+            diagnostics.append(f"unreadable-result-store:{directory}:{exc}")
+            continue
+        for child, is_directory in reversed(children):
+            if is_directory:
+                pending.append((child, depth + 1))
+            if not is_directory or depth > 0:
+                names.append(child)
+    return sorted(names)
+
+
 def _result_candidates(run_dir: Path, diagnostics: list) -> list:
     """Every parsed worker result under ``agent-output``, and what could not be.
 
@@ -17396,9 +17481,9 @@ def _result_candidates(run_dir: Path, diagnostics: list) -> list:
     a regular file, a dangling symlink, a symlink loop and a NUL-bearing name,
     and folding those into "no result has been published" is F7's fail-open
     wearing a predicate: every live attempt would then be reported as awaiting
-    a worker whose answer is sitting on disk, unreadable. The name is therefore
-    asked about separately from the shape, and a name that is there and is not
-    a directory is corruption rather than absence.
+    a worker whose answer is sitting on disk, unreadable. Neither is the walk
+    asked by a predicate that swallows its own failures -- see
+    ``_result_store_names``.
 
     THE PREDICATE IS INSTANT AND THE OPEN IS WHAT BLOCKS. A FIFO published
     under this tree answers ``is_file()`` False in no time at all and then
@@ -17407,33 +17492,24 @@ def _result_candidates(run_dir: Path, diagnostics: list) -> list:
     ``_require_regular_file``, BEFORE anything is opened, and the read is what
     is bounded rather than the predicate.
 
-    A DIRECTORY IS SKIPPED DELIBERATELY AND IS NOT A DIAGNOSTIC.
-    ``worker_result_path`` is ``agent-output/<task id>/<attempt>.md``, so the
-    tree layer is the module's own layout; a door that refused it would report
-    this function's own directory structure as corruption.
+    NO NAME BELOW THE TASK LAYER IS SKIPPED. Every such name reaches the door,
+    so a directory or a symlink at the document layer is refused as what it is
+    rather than dropped before the door could see it.
+    ``publish_worker_result`` writes neither.
+
+    THIS IS THE ONE CALLER OF THE DOOR THAT CATCHES ITS REFUSAL AND DOES NOT
+    RE-RAISE. Five others catch it and translate it into another
+    ``TrackerError``, and still stop; a reconciliation that stopped on one
+    unreadable name would lose the findings about every other row.
 
     A DOCUMENT WITH NO MARKER IS NAMED RATHER THAN SKIPPED. This tree is
     written by ``publish_worker_result`` and by nothing else, so an unexplained
     document in it is exactly the thing reconciliation may not read as absence.
     """
-    root = run_dir / AGENT_OUTPUT_DIRNAME
-    try:
-        listing = sorted(root.rglob("*")) if root.is_dir() else None
-    except OSError as exc:
-        diagnostics.append(f"unreadable-result-store:{root}:{exc}")
-        return []
-    if listing is None:
-        if os.path.lexists(root):
-            diagnostics.append(
-                f"unreadable-result-store:{root}: a name this run directory "
-                "carries that is not a directory; the published results are "
-                "not known to be absent, only unreadable")
-        return []
     candidates: list = []
-    for path in listing:
+    root = run_dir / AGENT_OUTPUT_DIRNAME
+    for path in _result_store_names(root, diagnostics):
         try:
-            if path.is_dir():
-                continue
             _require_regular_file(path, "published worker result")
             content = path.read_text(encoding="utf-8")
         except (TrackerError, OSError, UnicodeError) as exc:

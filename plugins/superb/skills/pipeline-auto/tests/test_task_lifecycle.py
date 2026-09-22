@@ -6591,8 +6591,9 @@ class EvidenceResolutionTests(TempDirTestCase):
         """THE CALLER SWEEP, and the count comes out of the AST.
 
         "Widened at the single door" is only true if the door is the door, so
-        the eight callers are enumerated from the module's own syntax tree and
-        then each is DRIVEN with a NUL-bearing name. `_question_record`,
+        the callers are enumerated from the module's own syntax tree -- the set
+        literal below names them, and no count is written anywhere -- and then
+        each is DRIVEN with a NUL-bearing name. `_question_record`,
         `_response_record`, `resolve_evidence` and `_published_result_bytes`
         are reached through the run directory or the result they build their
         path from -- the last is driven through its public caller
@@ -6618,9 +6619,10 @@ class EvidenceResolutionTests(TempDirTestCase):
             "_ref_text", "_published_result_bytes",
             "_resolve_question_record", "_require_artifact_outputs",
             "_result_candidates"})
-        #: THE ONE CALLER THAT CATCHES THE DOOR RATHER THAN PROPAGATING IT, so
+        #: THE ONE CALLER THAT CATCHES THE DOOR AND DOES NOT RE-RAISE, so
         #: "does it escape the family on a NUL" is not a question it can
-        #: answer. Task 12's `_result_candidates` turns the door's refusal into
+        #: answer. Five others catch it too and re-raise another
+        #: `TrackerError`; that split is asserted from the AST below. Task 12's `_result_candidates` turns the door's refusal into
         #: a DIAGNOSTIC, because a reconciliation that raised on one unreadable
         #: name would lose the findings about every other row. Two facts are
         #: asserted for it instead of a drive, immediately below the loop.
@@ -6664,17 +6666,43 @@ class EvidenceResolutionTests(TempDirTestCase):
         with self.subTest(caller="_result_candidates", fact="never reached"):
             with self.assertRaises(state.TrackerError):
                 state.reconcile_run("\x00rd", run_command=controller_git)
-        #: Fact two: driven directly with one anyway, it answers the empty
-        #: listing rather than raising anything at all -- the behaviour its
-        #: caller depends on, and the reason it is not in the loop above. The
-        #: shapes that DO reach its door are driven by
+        #: Fact two: driven directly with one anyway, it raises nothing and
+        #: REPORTS the name rather than answering an empty tree -- `os.scandir`
+        #: would raise `ValueError` on it, and "nothing here" is the one
+        #: answer a NUL may never produce. The shapes that DO reach its door
+        #: are driven by
         #: `test_every_unreadable_candidate_shape_is_named_rather_than_skipped`.
         with self.subTest(caller="_result_candidates", fact="reports"):
             diagnostics: list = []
             self.assertEqual(
                 state._result_candidates(pathlib.Path("\x00rd"), diagnostics),
                 [])
-            self.assertEqual(diagnostics, [])
+            self.assertEqual(len(diagnostics), 1, diagnostics)
+            self.assertTrue(diagnostics[0].startswith(
+                "unreadable-result-store:"), diagnostics)
+            self.assertIn("NUL byte", diagnostics[0])
+        #: Fact three: who catches the door, from the syntax tree.
+        catching = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or node.name not in callers:
+                continue
+            for guard in ast.walk(node):
+                if isinstance(guard, ast.Try) and any(
+                        isinstance(inner, ast.Call)
+                        and isinstance(inner.func, ast.Name)
+                        and inner.func.id == "_require_regular_file"
+                        for stmt in guard.body for inner in ast.walk(stmt)):
+                    catching[node.name] = all(
+                        any(isinstance(inner, ast.Raise)
+                            for inner in ast.walk(handler))
+                        for handler in guard.handlers)
+        self.assertEqual(
+            {name for name, reraises in catching.items() if reraises},
+            {"_plan_text", "resolve_evidence", "_ref_text",
+             "_resolve_question_record", "_require_artifact_outputs"})
+        self.assertEqual(
+            {name for name, reraises in catching.items() if not reraises},
+            {"_result_candidates"})
 
     def test_a_name_that_is_not_there_is_still_answered_by_falling_through(self):
         """THE HALF THE SPLIT MUST NOT BREAK. `FileNotFoundError` and
@@ -17796,7 +17824,8 @@ class ReconcileProducesBlockTests(unittest.TestCase):
         defined = sorted(
             name for node in tree.body if banner < node.lineno < end
             for name in module_bindings([node]))
-        self.assertEqual(defined, ["_result_candidates", "reconcile_run"])
+        self.assertEqual(defined, ["_result_candidates",
+                                   "_result_store_names", "reconcile_run"])
         self.assertEqual([name for name in defined
                           if not name.startswith("_")], ["reconcile_run"])
 
@@ -17824,10 +17853,15 @@ class ReconcileProducesBlockTests(unittest.TestCase):
         `TrackerError`, so it escapes every `except TrackerError` a controller
         has written. `_member` answers False for every non-`str`.
 
-        THE PIN IS STRUCTURAL because a behavioural one cannot exist while the
-        equivalence holds: `route` comes out of `str.partition` and is always
-        a `str` today. The equivalence rests entirely on a type invariant
-        somewhere else, which is exactly the case this shape was written for.
+        AT THIS CALL SITE THAT HAZARD CANNOT OCCUR, and the pin is structural
+        for that reason: `route` is `str.partition`'s first element, always a
+        `str`, and the container is a TUPLE, whose `in` compares with `==` and
+        never hashes -- so a bare `in` and `_member` agree here for every value,
+        and `_member` is used only because the module has one spelling for
+        membership against an agent-supplied value. The final assertions show
+        exactly that against the container the call site passes; a set-based
+        demonstration here would be a measurement of a container the code does
+        not use.
         """
         source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
             encoding="utf-8")
@@ -17847,9 +17881,12 @@ class ReconcileProducesBlockTests(unittest.TestCase):
              if isinstance(node, ast.Compare)
              and any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops)],
             [])
-        with self.assertRaises(TypeError):
-            ["not a string"] in {"a"}
-        self.assertFalse(state._member(["not a string"], {"a"}))
+        container = (state.QUORUM_ROUTE, state.HALT_ROUTE)
+        for value in (["x"], {"a": 1}, None, 5, b"quorum", state.QUORUM_ROUTE,
+                      state.HALT_ROUTE, "halt:x"):
+            with self.subTest(value=repr(value)):
+                self.assertEqual(value in container,
+                                 state._member(value, container))
 
 
 class ReconcileScheduleContradictionTests(unittest.TestCase):
@@ -18145,6 +18182,74 @@ class ReconcileCandidateStoreTests(ReconcileTestCase):
         self.assertTrue(any(item.startswith(f"unreadable-result-store:{root}")
                             for item in report["diagnostics"]), report)
 
+    @contextlib.contextmanager
+    def unsearchable(self, directory):
+        """Mode 000 for the body, restored in `finally` so a failing assertion
+        cannot leave a directory the temp-dir cleanup cannot remove."""
+        os.chmod(directory, 0)
+        try:
+            yield
+        finally:
+            os.chmod(directory, 0o700)
+
+    def assert_one_store_diagnostic(self, report, directory):
+        self.assertEqual(len(report["diagnostics"]), 1, report)
+        self.assertTrue(report["diagnostics"][0].startswith(
+            f"unreadable-result-store:{directory}:"), report)
+        self.assertIn("Permission denied", report["diagnostics"][0])
+        self.assertNotIn("imported:T1:attempt-001", report["actions"])
+
+    def test_an_unsearchable_task_directory_is_reported_not_read_as_empty(self):
+        """C1. `Path.rglob` swallowed the `PermissionError` while walking, so a
+        task directory at mode 000 holding a GENUINE published result listed
+        as the directory alone: identical actions to "nothing was published",
+        and no diagnostic at all. The walk now lists each directory itself and
+        a listing that fails is a finding."""
+        if os.geteuid() == 0:
+            self.skipTest("root searches a mode-000 directory")
+        repo, run_dir = self.active_run()
+        path = self.published(repo, run_dir, source_result_commits(repo))
+        with self.unsearchable(path.parent):
+            report = reconcile_report(self, run_dir)
+        self.assert_one_store_diagnostic(report, path.parent)
+        self.assertEqual(
+            task_row(state.validate_run(run_dir), "T1")["state"], "[~]")
+
+    def test_an_unsearchable_results_tree_is_reported_not_read_as_empty(self):
+        """C1, the store itself: `is_dir()` answers True for it and `rglob`
+        listed nothing, with no exception."""
+        if os.geteuid() == 0:
+            self.skipTest("root searches a mode-000 directory")
+        repo, run_dir = self.active_run()
+        self.published(repo, run_dir, source_result_commits(repo))
+        root = Path(run_dir) / state.AGENT_OUTPUT_DIRNAME
+        with self.unsearchable(root):
+            report = reconcile_report(self, run_dir)
+        self.assert_one_store_diagnostic(report, root)
+
+    def test_a_directory_or_link_at_a_result_name_is_corruption(self):
+        """W1. `publish_worker_result` writes neither a leaf directory nor a
+        symlink, so either at `agent-output/T1/attempt-001.md` is refused by
+        the door -- it used to be dropped by an unconditional `is_dir()` skip
+        before the door could see it, in total silence."""
+        shapes = {
+            "directory": lambda path: path.mkdir(),
+            "symlink-to-directory": lambda path: path.symlink_to(
+                path.parent, target_is_directory=True),
+        }
+        for label, build in shapes.items():
+            with self.subTest(shape=label):
+                repo, run_dir = self.active_run()
+                path = state.worker_result_path(
+                    run_dir, task_id="T1", attempt=1)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                build(path)
+                report = reconcile_report(self, run_dir)
+                self.assertEqual(len(report["diagnostics"]), 1, report)
+                self.assertTrue(report["diagnostics"][0].startswith(
+                    f"unreadable-result-candidate:{path}:"), report)
+                self.assertIn("cannot be read", report["diagnostics"][0])
+
     def test_every_unreadable_candidate_shape_is_named_rather_than_skipped(self):
         """The cross product is derived from what a NAME under this tree can
         be, not from a list of characters someone remembers: a FIFO (the one
@@ -18348,6 +18453,37 @@ class ReconcileBlockedRouteTests(ReconcileTestCase):
                                  (f"unroutable-block:T1:{cell}",))
                 self.assertEqual(report["actions"], ())
                 self.assertEqual(self.bytes_of(run_dir), before)
+
+
+class ReconcileBlockedArtifactRouteTests(ReconcileTestCase):
+    """W5. The blocked-route arm is not narrowed to source tasks: a `[?]`
+    ARTIFACT row is routed exactly as a source row is. `_validate_tasks`
+    constrains `kind` only on completed rows, so the state is reachable, and
+    without this case narrowing the arm left a blocked artifact task with no
+    action, no question and no diagnostic."""
+
+    def test_a_blocked_artifact_task_is_routed_on_both_arms_and_refused_else(self):
+        reference = (f"{BLOCK_QID}@quorum/{BLOCK_QID}/question.md"
+                     f"#sha256={DIGEST}")
+        reason = "no credential: the vault host is unreachable"
+        cases = (
+            (f"{state.QUORUM_ROUTE}:{reference}",
+             (f"await-{state.QUORUM_ROUTE}:T1:{reference}",), ()),
+            (f"{state.HALT_ROUTE}:{reason}",
+             (f"await-{state.HALT_ROUTE}:T1:{reason}",), ()),
+            (state.QUORUM_ROUTE, (), (f"unroutable-block:T1:{state.QUORUM_ROUTE}",)),
+        )
+        for cell, actions, questions in cases:
+            with self.subTest(cell=cell):
+                repo, run_dir = self.active_run()
+                set_task_state(run_dir, "T1", "t12-artifact-block",
+                               state="[?]", kind="artifact", question=cell)
+                self.assertEqual(
+                    task_row(state.validate_run(run_dir), "T1")["kind"],
+                    "artifact")
+                report = reconcile_report(self, run_dir)
+                self.assertEqual(report["actions"], actions)
+                self.assertEqual(report["questions"], questions)
 
 
 class ReconcileRunnerContractTests(ReconcileTestCase):

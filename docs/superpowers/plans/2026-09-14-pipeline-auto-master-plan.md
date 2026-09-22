@@ -325,6 +325,39 @@ P04's `_OWNER_LINE_PREFIX = "- **Owner:** "` — the translation is not a screen
 all but a `startswith` against that same constant, which is strictly better than
 a regex: it keeps one definition of the grammar instead of two.
 
+## SUPERSEDED — the gate's baseline is now EIGHT packaging failures, not one
+
+Measured on committed content at `19c8657`, when `SKILL.md` landed. The
+"exactly one failure" baseline below was **a short-circuit, not a count**: the
+gate stops checking a skill that has no `SKILL.md`, so `pipeline-auto has no
+SKILL.md` was the only failure it could reach. With the file present it checks
+the skill's registration and reports eight:
+
+```
+pipeline-auto/README.md missing
+pipeline-auto missing from the root README
+pipeline-auto missing from the plugin README
+pipeline-auto missing from the claude description
+pipeline-auto missing from the claude keywords
+pipeline-auto missing from the codex description
+pipeline-auto missing from the codex longDescription
+pipeline-auto missing from the marketplace description
+```
+
+**Assert these eight and no others.** A ninth is a regression; fewer means
+someone registered the skill.
+
+**They are left failing on purpose.** Registering `pipeline-auto` in the READMEs
+and plugin manifests advertises it as usable, and the committed `SKILL.md`
+covers the controller's judgment only — not the operational workflow. The gate
+is right to refuse it until the skill is complete. Two of the eight touch the
+codex manifest, which carries the user's uncommitted change; never commit that
+file.
+
+The general lesson, since this is the second baseline in this build that turned
+out to be something other than what it looked like: **a check that stops early
+reports the first thing it hit, not how far you are from passing.**
+
 ## The plugin gate's real baseline is ONE failure, not three
 
 `./tools/check-plugin.sh` reports three failures in this working tree and

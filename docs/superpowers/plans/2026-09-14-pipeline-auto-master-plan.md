@@ -536,6 +536,47 @@ forbids any of them.** A worker could satisfy any of the above with
 exists to state. The screen must refuse the whole family **by name**, enumerated
 from `dir(os)` rather than from a remembered list.
 
+## Execution policy from 2026-09-22 — the skill is the product (SUPERSEDES the policy below)
+
+Set by the user after ~45 of 92 tasks, having found the build inverted relative
+to `superpowers:writing-skills`: RED was captured in P01, then ~50 tasks built
+machinery before any SKILL.md existed, so nothing had checked whether the
+machinery made an agent behave correctly. A 1,484-word SKILL.md written against
+P01's baselines then fixed the controller's reasoning in about twenty short agent
+runs (`19c8657`).
+
+**Order is now P07 → P05 → P06 → P08 → P09.** P07 writes the operational half
+of the skill next, so a usable skill exists first and shows which machinery the
+workflow actually needs.
+
+**P05 and P06 build only what the approved spec requires to be enforced by the
+state machine** — for example the completeness freeze, which the spec says is
+enforced "by the state machine… rather than the controller's restraint", and
+the review ratchet. A task whose job the SKILL.md already does, with no spec
+line requiring code enforcement, is dropped and recorded as dropped with the
+reason.
+
+**Process, for every remaining task:**
+
+- **GREEN against real agents is the primary check.** Behavioural work is not
+  done until an agent given the skill behaves correctly under the P01 pressure
+  suffix. Unit tests verify the code; they do not verify the skill.
+- **One implementer, one review, at most one fix round.** No verification of the
+  fix, no escalating re-review.
+- **Mutation only on security-bearing screens, at one seed.** No five-seed
+  campaigns and no generated cross-product corpora by default — together those
+  were most of the spend and are what drove tests to 2.22 lines per line of code
+  against the predecessor's 1.19.
+- **Coordinated prose is written together.** References, prompts and SKILL.md
+  must agree, so related documentation tasks may be batched to one implementer
+  rather than split across agents who each see only a slice.
+- **The corrected skill rules are authoritative.** Where a phase plan predates
+  the GREEN probe — P07's `references/quorum.md` in particular — the committed
+  SKILL.md and its scoring record win over the plan's prose: rung order is
+  strongest-first and stated explicitly; recovering a missing response is not
+  the one-shot retry for an invalid one; the floor rises under the inflation
+  check.
+
 ## Execution policy from 2026-09-21 — risk-graded review
 
 Set by the user after ~35 of 92 tasks. The full bar was earning its keep on

@@ -1,0 +1,178 @@
+# Execution: stages 08–10
+
+Load while selecting work, dispatching implementers, running the per-task gate,
+integrating, verifying a phase, or debugging.
+
+**Not yet enforced by code (P05):** the adversarial trigger check, the ratchet,
+writers for `## Task Review` and `## Fix Rounds` (their grammar is validated;
+write rows through `locked_tracker_update`), phase verification and phase
+advance, and the agent-dispatch ceiling. Until then these rules are yours to
+follow exactly.
+
+**The module never executes git.** It emits argv and validates a transcript you
+supply. Functions that need git take `run_command`: a callable that runs one
+argv tuple and returns captured stdout as `str`, **raw** — never `.strip()`; the
+leading NUL separator and trailing newline are part of the grammar.
+
+## Required sub-skills
+
+- `superpowers:test-driven-development` — every testable behaviour and every
+  behaviour-changing fix. RED before GREEN, recorded in the implementer's report.
+- `superpowers:systematic-debugging` — stage 10. Cause before fix.
+- `superpowers:using-git-worktrees` — one worktree per concurrent implementer,
+  merged `--no-ff` in task order.
+- `superpowers:dispatching-parallel-agents` — only for ready independent batches.
+
+## The review dial
+
+`review_class` is fixed at stage 04 in plan metadata and mirrored to
+`## Phases`. You never write it.
+
+| Class | Buys |
+| --- | --- |
+| `required` | Full per-task gate (below) |
+| `final-only` | Mechanical verification only; stage 11 is the net |
+
+**Never switched off at any class:** the adversarial trigger check; typed write
+scopes and conflict detection; digest-bound PASS evidence; the
+`baseline..source-head` range proof and integration ancestry; four-part result
+identity (`run_id + task_id + attempt + owner`); TDD RED evidence; the
+most-capable-model policy; the zero-open-findings bar. The dial decides whether a
+reviewer runs, never what bar it applies.
+
+### Adversarial triggers — any single one fires
+
+`concurrency` · `authz` · `crypto` · `schema` · `migration` · `delete` ·
+`regulated` · `public-api` · `large-surface` (> 300 changed source lines)
+
+Independent of each other, of diff size, and of `review_class`. A 10-line auth
+change fires. Record which trigger fired. A fired trigger dispatches the
+adversarial reviewer before the task completes.
+
+### The ratchet — `final-only → required`, upward only
+
+| Trigger | Fires when |
+| --- | --- |
+| `adversarial-finding` | the adversarial reviewer returned CONFIRMED or unrefuted PLAUSIBLE |
+| `repeated-suite-failure` | the phase suite failed twice or more |
+| `debug-locality` | a stage-10 root cause is in a file inside this phase's scopes |
+| `low-confidence-dependency` | a quorum adopted a decision in this phase below `specified` |
+| `accumulated-surface` | cumulative changed source lines in the phase > 300 |
+
+A ratchet record you write from your own reading of the diff is not a trigger.
+Never downward, never by quorum. A ratchet gates every remaining task and adds a
+phase-scoped review; it does not re-review completed tasks. `## Phases`
+`Review Class` differing from the plan is legal only with a matching `Ratchet`
+record (`Class Source: ratchet`).
+
+Never degrade a quorum, review or class to fit capacity or budget. Escalate or
+halt.
+
+## Stage 08 — RED
+
+The failing test is written and committed before the change. The report records
+the RED command, the failing output, why that failure was expected, then the
+GREEN command and output. GREEN with no RED is unevidenced.
+
+Run the runner the plan recorded. If it is not installed: `PLAN_CONFLICT`. Never
+substitute a runner.
+
+## Stage 09 — GREEN
+
+### Starting a task
+
+| Transition | Function | Requires |
+| --- | --- | --- |
+| `[ ] → [~]` | `reserve_task(run_dir, task_id=, owner=, attempt=)` | deps done, no overlapping active scope, slot under `implementation_slot_cap`. Records `baseline:<attempt>@<target-sha>` for a `source` task |
+| `[?] → [~]` | `resume_task(run_dir, task_id=, prior_attempt=, new_owner=, new_attempt=, decision_ref=)` | a `task.resume` decision bound to the block; a new unused attempt; a fresh baseline (the old one is kept) |
+
+Persist before dispatch. Several individually ready tasks are not jointly
+authorised: check pairwise `scopes_overlap` across the whole batch. Context
+compaction is not a retry — reconcile first; a consistent `[~]` stays the same
+attempt.
+
+Dispatch each implementer with its task brief file —
+`scripts/task-brief RUN_DIR PLAN_FILE TASK_NUMBER [OUTFILE]`, never pasted plan
+text — plus its governing decisions, write scope, task suite and four-part
+identity.
+
+### Worker statuses
+
+| Status | Route |
+| --- | --- |
+| `DONE`, `DONE_WITH_CONCERNS` | Evidence, not acceptance. Import validates it. |
+| `NEEDS_CONTEXT`, `PLAN_CONFLICT` | `[?]` with a question record → `quorum.md`. `Question` cell: `quorum:<qid>@<path>#sha256=<digest>`. |
+| `BLOCKED` | Halt. `Question` cell: `halt:<reason>`. Never sent to a quorum. |
+
+A worker's only state call is `publish_worker_result(run_dir, result=...)`,
+which returns the result's repository-relative path. A worker never dispatches
+anyone, edits `progress.md`, integrates, or accepts a phase.
+
+### Import, completion, integration — three separate facts
+
+1. **Import:** `import_worker_result(run_dir, result_path=, run_command=)`.
+   Validates identity, task definition, files, and the range: every commit in
+   `baseline..source-head` for **this attempt's** baseline (`reserved_baseline`,
+   never `HEAD~1`), every changed path inside scope, and one `task-test` PASS
+   record matching run, task, attempt, head and exact suite. The range proof is
+   reported `attested`: the transcript is yours, the anchors are the module's.
+2. **Integration:** merge `--no-ff`, then
+   `integrate_task(run_dir, task_id=, merge_commit=, run_command=)`. Every
+   implementation commit must be an ancestor of the merge, the merge an ancestor
+   of the target branch, with one `task-integration` PASS record for the merge
+   commit. No squash, rebase or cherry-pick equivalence.
+3. **A merge conflict is a hard stop.** Typed scopes make it impossible, so a
+   conflict proves the scopes were wrong. Never auto-resolve.
+
+An `artifact` task needs exactly its declared outputs, integration `N/A`, and no
+invented commit.
+
+Evidence records are written only by `render_verification_evidence`; purposes
+are `task-test`, `task-integration`, `phase`. Outcome is only `PASS` — a failure
+leaves no record.
+
+### The per-task gate (`required`, or any fired trigger)
+
+1. Build the review package from the persisted baseline:
+   `scripts/review-package RUN_DIR BASE HEAD [OUTFILE]`, with `BASE` the
+   attempt's `reserved_baseline`. It prints a path; the package never enters
+   your context.
+2. Dispatch the task reviewer with brief, report, package, decisions and test
+   commands. The reviewer is never the implementer. It returns three verdicts:
+   spec, quality, independent verification.
+3. Resolve every "cannot verify from diff" item yourself; a confirmed gap fails
+   spec review.
+4. On a fired trigger, dispatch the adversarial reviewer on the same package.
+   CONFIRMED → Critical; unrefuted PLAUSIBLE → Important.
+5. Fix to **zero open findings at every severity**: one fixer per round with all
+   findings, re-review after each, at most three rounds, then escalate.
+6. Complete only after a round returns zero.
+
+Minor findings are fixed, not deferred. One recorded exception: a Minor or
+quality-part finding that would reverse a recorded decision goes to
+reconciliation (`review.md`). The task moves to `[?]`, its slot releases, and the
+fix-round counter does not increment. If the decision survives, the finding
+closes `REFUTED — governed by <D-ID>`.
+
+## Stage 10 — Debug
+
+Cause before behaviour change. Mechanical failures are unfinished work: repair
+and rerun — do not open a formal finding for work that has not reached its gate.
+A root cause inside this phase's scopes is ratchet trigger `debug-locality`:
+record it.
+
+## The phase boundary
+
+Before recording phase verification:
+
+- every task `[x]` with verified evidence;
+- every `source` task has implementation → integration → target ancestry;
+- every `artifact` task has validated outputs and integration `N/A`;
+- every command of the plan's **exact ordered** phase suite passes on the
+  integrated state; one `phase` PASS record binds run, phase, code state,
+  command tuple, inputs and environment.
+
+Your command text is checked against the approved tuple; it cannot substitute,
+omit, add or reorder a command. A failing suite keeps the phase open. Finishing
+the last task does not advance the phase; the last phase advances to stage 11,
+not to completion.

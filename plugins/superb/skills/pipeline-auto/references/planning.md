@@ -1,0 +1,143 @@
+# Planning: stages 01–07
+
+Load during the intent read, question synthesis, the human gate, design, spec,
+master plan and phase fan-out. After stage 06 closes the phase set is immutable.
+
+**Not yet enforced by code:** stage transitions 01–07 have no dedicated
+functions (write them through `locked_tracker_update`; the `## Stage`,
+`## Intent` and `## Questions` grammars are validated); phase-set immutability
+after stage 06 (P06). Until then, not creating phases after stage 06 is your
+restraint.
+
+## Stage 01 — Intent read
+
+- Dispatch **exactly three** `pipeline-auto-intent-reader` agents. Sequentially
+  if `worker_limit < 3`; never fewer.
+- Each returns strict JSON: what the request says (user's words quoted), implies
+  (basis named), leaves unstated, puts out of scope, and what the repository
+  already provides (`file:line`).
+- Reconcile into one intent brief. **Conflicts are flagged, never resolved** —
+  record all three readings verbatim. Never take the majority reading.
+- Unresolved stage-01 conflicts take stage-03 slots **before** any stage-02
+  question (`## Questions` origin `intent-conflict` ranks first).
+- The brief is frozen after stage 03. A later contradiction escalates; the human
+  amends it.
+
+Tracker: `## Intent` rows `reader-1`, `reader-2`, `reader-3`, `brief`; states
+`pending → dispatched → published → frozen`.
+
+## Stage 02 — Question synthesis
+
+- Dispatch **exactly three** `pipeline-auto-brain` agents to propose open
+  decisions (same reading assignments and payload rules as `quorum.md`).
+- Rank by blast radius, dedupe, cut to **four**. Ranking and cutting are
+  routing: answer none, add none of your own.
+- Drop any question failing admissibility (`quorum.md`). Do not spend a slot on
+  what the repository or a quorum could decide.
+
+## Stage 03 — The one gate
+
+**One `AskUserQuestion` call, at most four questions.** The only guaranteed
+human interaction in the run.
+
+- Spend slots on what only the user knows: budget, deadline, users, purpose,
+  which product this is.
+- Record each answer as `H-<n>`, `Provenance: human`, a stable axis id,
+  `Decision action: none` unless it grants a transition.
+- "Sounds good", "continue", "you decide" answers nothing. Never record it as an
+  answer.
+- Everything decided later traces to these answers through `consistent_with`, or
+  it escalates.
+
+There is no second approval gate. After stage 03, everything is quorum or
+escalation.
+
+## Stage 04 — Design and review class
+
+**REQUIRED SUB-SKILL:** `superpowers:brainstorming`.
+
+Fix each phase's `review_class` (`final-only` or `required`) **here, before any
+plan exists**, with a specific risk reason. See `execution.md` for what each
+class buys. A phase is never reclassified downward — not on reflection, not by
+quorum, not to fit capacity or budget. You never write `review_class` after this
+stage; only the ratchet raises it.
+
+## Stage 05 — Spec
+
+**REQUIRED SUB-SKILL:** `superpowers:writing-plans`. Records the selected
+architecture and boundaries, not a chat summary. Save under the repository's
+convention, else `docs/superpowers/specs/<feature>-design.md`.
+
+## Stage 06 — Master plan
+
+**REQUIRED SUB-SKILL:** `superpowers:writing-plans`. Every phase, its
+dependencies, its phase-plan path, its planned verification, its `review_class`
+and reason.
+
+- **The phase set is immutable once stage 06 closes.** The run cannot create
+  work for itself afterwards. This is what makes the completeness freeze in
+  `review.md` a guarantee.
+- **Discover the target repository's test runner** from its CI config, manifest
+  and existing tests, and record it. Never assume one. Record the lint, format
+  and coverage commands the same way. Never invent a coverage percentage: no
+  explicit policy means a stage-03 question or behaviour-focused testing with no
+  number.
+
+## Stage 07 — Phase fan-out
+
+One `superpowers:writing-plans` worker per phase, capped by `worker_limit`.
+
+- At most `MAX_TASKS_PER_PHASE` (12) genuine tasks per phase; more means split.
+- **A planner never invents an interface.** An unresolved interface returns
+  `NEEDS_CONTEXT` or `PLAN_CONFLICT` with a question record — the only route into
+  `quorum.md`. A planner never dispatches brains.
+- Each approved plan is imported with `import_phase_plan(run_dir,
+  phase_plan=...)`, which appends the phase row, task rows and path in one
+  transition. A second import of the same phase raises.
+
+### Phase-plan metadata (parsed by `parse_plan_metadata`)
+
+Header, before the first section:
+
+```text
+<!-- pipeline-auto-phase: id=<phase-id>; deps=<none-or-phase-ids>; review_class=<final-only|required>; review_reason=<nonempty-reason> -->
+<!-- pipeline-auto-phase-suite: id=<same-phase-id>; commands=["<exact-command>","<next-command>"] -->
+```
+
+Immediately below each task heading:
+
+```text
+<!-- pipeline-auto-task: id=<stable-id>; deps=<none-or-task-ids>; kind=<source|artifact>; batch=<batch-id>; order=<positive-integer>; write_scope=<typed-scopes>; outputs=<none-or-exact-files> -->
+<!-- pipeline-auto-task-suite: id=<same-task-id>; commands=["<exact-command>"] -->
+```
+
+| Rule | Detail |
+| --- | --- |
+| Key order | Exactly as shown; `; ` separated |
+| Commands | Nonempty JSON string array, execution order, no duplicates |
+| Suites | Phase suite always; task suite only for `source` tasks |
+| `source` | Changes repository content; `outputs=none`; needs commits, test evidence and separate integration evidence |
+| `artifact` | Creates exactly the files in `outputs`; integration `N/A`; never an empty or unrelated commit |
+| Kind | Chosen by the plan, never by whether a diff happened to be empty |
+| `write_scope` | Comma-separated `file:<repo-relative-file>` or `tree:<repo-relative-dir>` |
+| Refused, not normalised | Absolute paths, `..`, backslashes, empty segments, globs, symlink aliases |
+| Conflict | Equal files; trees by equality or ancestry; a tree conflicts with every file inside it (`scopes_overlap`) |
+
+No absolute home-directory path in any committed file, scope, output or command.
+
+## The executable-plan gate
+
+Before stage 08, confirm:
+
+- spec, master plan and every phase plan exist on disk;
+- shared interfaces settled; no escalation outstanding;
+- every phase has 1–12 tasks; task and phase dependencies acyclic and executable
+  in master order;
+- every metadata comment parses;
+- test runner, coverage policy, batches, `worker_limit` and every
+  `review_class` explicit.
+
+**Concurrency needs `worker_limit >= 4`.** Brains hold three slots, so
+implementation gets `implementation_slot_cap(worker_limit)` = `worker_limit - 3`,
+floored at 1 (tasks serialise). Otherwise a blocked task holds the slot needed to
+unblock it.

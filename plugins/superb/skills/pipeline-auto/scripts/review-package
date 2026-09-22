@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Generate a review package -- commit list, stat summary, and the net diff with
+# extended context -- written to one file the reviewer reads in a single call.
+# Using the persisted reservation baseline (never HEAD~1) keeps multi-commit
+# tasks intact; HEAD~1 silently drops all but the last commit.
+#
+# Provenance: inlined from superpowers:subagent-driven-development,
+# scripts/review-package, superpowers 6.4.1 (https://github.com/obra/superpowers,
+# MIT License, Copyright (c) 2025 Jesse Vincent). The package format and the
+# range guards are the original's, unchanged.
+#
+# Inlined rather than invoked for the reasons given in task-brief: a review
+# protocol an unrelated plugin update can overwrite is not reproducible.
+#
+# Changed here:
+#   - The default output directory is the run's own scratch/, resolved by this
+#     skill's sdd-workspace, never .superpowers/sdd at the repository root.
+#   - RUN_DIR replaces upstream's PLAN_FILE as the first argument and is
+#     required, never guessed: the workspace is keyed to the run, not the plan.
+#
+# Usage: review-package RUN_DIR BASE HEAD [OUTFILE]
+# Default OUTFILE: <RUN_DIR>/scratch/review-<base7>..<head7>.diff
+# (named per range, so a re-review after fixes gets a distinct fresh file).
+set -euo pipefail
+
+if [ $# -lt 3 ] || [ $# -gt 4 ]; then
+  echo "usage: review-package RUN_DIR BASE HEAD [OUTFILE]" >&2
+  exit 2
+fi
+
+run_dir=$1
+base=$2
+head=$3
+[ -d "$run_dir" ] || { echo "not a run directory: $run_dir" >&2; exit 2; }
+
+git rev-parse --verify --quiet "$base" >/dev/null || { echo "bad BASE: $base" >&2; exit 2; }
+git rev-parse --verify --quiet "$head" >/dev/null || { echo "bad HEAD: $head" >&2; exit 2; }
+
+# Range guards (exit 3): a wrong-branch HEAD yields a range that is empty or
+# not rooted at BASE; either would silently produce a bogus review package.
+git merge-base --is-ancestor "$base" "$head" || { echo "HEAD is not a descendant of BASE: ${base}..${head}" >&2; exit 3; }
+[ "$(git rev-list --count "${base}..${head}")" -gt 0 ] || { echo "empty commit range: ${base}..${head}" >&2; exit 3; }
+
+if [ $# -eq 4 ]; then
+  out=$4
+else
+  # Invoke via bash rather than direct exec: some extractors (Python zipfile)
+  # strip Unix exec bits when unpacking marketplace packages (upstream #2040).
+  dir=$("${BASH:-bash}" "$(cd "$(dirname "$0")" && pwd)/sdd-workspace" "$run_dir")
+  out="$dir/review-$(git rev-parse --short "$base")..$(git rev-parse --short "$head").diff"
+fi
+
+{
+  echo "# Review package: ${base}..${head}"
+  echo
+  echo "## Commits"
+  git log --oneline "${base}..${head}"
+  echo
+  echo "## Files changed"
+  git diff --stat "${base}..${head}"
+  echo
+  echo "## Diff"
+  git diff -U10 "${base}..${head}"
+} > "$out"
+
+commits=$(git rev-list --count "${base}..${head}")
+echo "wrote ${out}: ${commits} commit(s), $(wc -c < "$out" | tr -d ' ') bytes"

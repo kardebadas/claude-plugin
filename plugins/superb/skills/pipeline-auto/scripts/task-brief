@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Extract one task's full text from a phase plan into a file the implementer
+# reads in one call, so the task text never passes through the controller's
+# context.
+#
+# Provenance: inlined from superpowers:subagent-driven-development,
+# scripts/task-brief, superpowers 6.4.1 (https://github.com/obra/superpowers,
+# MIT License, Copyright (c) 2025 Jesse Vincent). The extraction logic is the
+# original's, unchanged.
+#
+# Inlined rather than invoked because the plugin-cache copy is a mirror that an
+# unrelated superpowers update silently overwrites -- a review protocol that can
+# change underneath a run is not reproducible -- and because pipeline-auto
+# modifies the surrounding protocol anyway.
+#
+# Changed here:
+#   - The default output directory is the run's own scratch/, resolved by this
+#     skill's sdd-workspace, never .superpowers/sdd at the repository root.
+#     Run ephemera that outlive the run directory are ephemera nobody can
+#     reconcile.
+#   - RUN_DIR is therefore a required argument and is never guessed, for the
+#     reason sdd-workspace gives: a forgotten argument must fail, not silently
+#     write one run's briefs into a path shared by every run.
+#   - TASK_NUMBER must be digits. It is spliced into an awk regex; "1.*" would
+#     otherwise match every task.
+#   - A task that is not found leaves no empty brief behind.
+#
+# Usage: task-brief RUN_DIR PLAN_FILE TASK_NUMBER [OUTFILE]
+# Default OUTFILE: <RUN_DIR>/scratch/task-<N>-brief.md
+set -euo pipefail
+
+if [ $# -lt 3 ] || [ $# -gt 4 ]; then
+  echo "usage: task-brief RUN_DIR PLAN_FILE TASK_NUMBER [OUTFILE]" >&2
+  exit 2
+fi
+
+run_dir=$1
+plan=$2
+n=$3
+[ -d "$run_dir" ] || { echo "not a run directory: $run_dir" >&2; exit 2; }
+[ -f "$plan" ] || { echo "no such plan file: $plan" >&2; exit 2; }
+case "$n" in
+  ''|*[!0-9]*) echo "TASK_NUMBER must be digits: $n" >&2; exit 2 ;;
+esac
+
+if [ $# -eq 4 ]; then
+  out=$4
+else
+  # Invoke via bash rather than direct exec: some extractors (Python zipfile)
+  # strip Unix exec bits when unpacking marketplace packages (upstream #2040).
+  dir=$("${BASH:-bash}" "$(cd "$(dirname "$0")" && pwd)/sdd-workspace" "$run_dir")
+  out="$dir/task-${n}-brief.md"
+fi
+
+awk -v n="$n" '
+  /^```/ { infence = !infence }
+  !infence && /^#+[ \t]+Task[ \t]+[0-9]+/ {
+    intask = ($0 ~ ("^#+[ \t]+Task[ \t]+" n "([^0-9]|$)"))
+  }
+  intask { print }
+' "$plan" > "$out"
+
+if [ ! -s "$out" ]; then
+  rm -f -- "$out"
+  echo "task ${n} not found in ${plan} (no heading matching 'Task ${n}')" >&2
+  exit 3
+fi
+
+echo "wrote ${out}: $(wc -l < "$out" | tr -d ' ') lines"

@@ -13804,7 +13804,7 @@ def _ref_name(value) -> str:
     return value
 
 
-def _ref_text(path: Path, what: str):
+def _ref_text(path: Path, what: str, *, namespace_ok: bool = True):
     """The contents of one ref-store file, ``None`` if no ref file is there.
 
     ``is_file()`` NEVER MEANS "there is nothing here": it is false for a
@@ -13829,6 +13829,18 @@ def _ref_text(path: Path, what: str):
     unreachable by construction: that candidate can only ever be reached
     THROUGH the directory ``refs/remotes/<name>/``.
 
+    ``namespace_ok=False`` IS THE EXEMPTION WITHDRAWN WHERE ITS JUSTIFICATION
+    DOES NOT EXIST, and it is not a second opinion about directories. The
+    whole argument above is "look further" -- the exemption's entire content
+    is that there is a NEXT candidate to look at. For a pseudo-ref there is
+    not: ``_ref_candidates`` returns a ONE-element tuple for every name in
+    ``_PSEUDO_REFS``, and ``$GIT_DIR/MERGE_HEAD/`` is never a ref namespace
+    because no name is ever spelled beneath it. So for those callers a
+    directory carries no information about a further candidate and falls back
+    into the sentence the other four are refused by. Withdrawing it there
+    cannot regress the ``refs/tags/target/`` case it was written for, because
+    that case is reached only through a multi-candidate name.
+
     THE OTHER FOUR STILL RAISE, and the difference is that none of them is a
     shape the ref store legitimately has. A directory means "look further"; a
     FIFO, a dangling link, a symlink loop and a name this process cannot read
@@ -13839,16 +13851,24 @@ def _ref_text(path: Path, what: str):
     baseline is one end of a range proof, and guessing past a ref store this
     run cannot read is how a proof acquires an end nobody checked.
     """
+    is_directory = False
     try:
         #: Asked BEFORE the door, because the door's answer for a directory is
         #: "corruption" and here it is "keep looking". ``is_dir()`` raises for
         #: exactly the errnos ``is_file()`` raises for, and those are the
         #: door's business rather than this branch's -- so they fall through
         #: to it and are reported there, once, in the door's own words.
-        if path.is_dir():
-            return None
+        is_directory = path.is_dir()
     except OSError:
         pass
+    if is_directory:
+        if namespace_ok:
+            return None
+        raise TrackerValidationError(
+            f"{what} at {str(path)!r} is a directory at a name that has no "
+            "namespace beneath it; a pseudo-ref has exactly one candidate and "
+            "nothing further to look at, so this is a corrupt store and never "
+            "an absent reference")
     try:
         _require_regular_file(path, what)
     except QuorumError as exc:
@@ -13856,9 +13876,9 @@ def _ref_text(path: Path, what: str):
             f"{what} at {str(path)!r} is a name this run cannot read ({exc}); "
             "a dangling link, a symlink loop, a FIFO or a name this process "
             "cannot examine is corruption and never an absent reference. A "
-            "DIRECTORY is not in that list and never reaches here: a ref "
+            "DIRECTORY never reaches here: where a next candidate exists a ref "
             "namespace is a directory, so it reads as absence and the search "
-            "moves to the next candidate") from exc
+            "moves on, and where one does not it is refused above") from exc
     try:
         return path.read_text(encoding="utf-8")
     except (FileNotFoundError, NotADirectoryError):
@@ -16699,12 +16719,29 @@ def _integration_pins(location: str) -> tuple:
     The commit-graph is a cache of the parent and reachability data these two
     commands are entirely about, it is an unsigned file in
     ``.git/objects/info/`` that the worker can write, and git does not verify
-    it before trusting it. No witness is recorded for a forged one: the cheap
-    construction -- write grafts, ``git commit-graph write``, delete the grafts
-    -- is refused by git itself, which declines to write a graph while grafts
-    or replace refs are in effect (measured). The pin costs nothing and closes
-    the channel by precedence; it is recorded as applied-without-witness rather
-    than claimed as proved.
+    it before trusting it.
+
+    THE WITNESS IS CONSTRUCTED, and it took the third construction rather than
+    the first. Re-measured on git 2.39.5: git declines to write a graph while
+    ``.git/info/grafts`` is in effect (rc=0, NO file written), but under a
+    REPLACE REF it writes one happily (rc=0, file present) that records the
+    REAL parents. So neither borrowed construction yields a forgery -- and an
+    earlier revision of this paragraph claimed the replace-refs half as
+    measured when it does not reproduce, which is ``8a0a0da``'s defect (a
+    config measured against a repository that cannot trigger it) arriving in a
+    docstring instead of in a fixture.
+
+    WHAT DOES FORGE ONE is the property the sentence above actually asserts:
+    the file is unsigned and unverified, so it is EDITED rather than coaxed out
+    of git. One 4-byte field -- the second-parent slot of a fast-forward
+    commit's ``CDAT`` record, set from ``0x70000000`` ("no second parent") to
+    the task branch tip's index -- makes ``%P`` print fault F10 exactly: a
+    one-parent commit presented as a ``--no-ff`` merge whose second parent is
+    the tip clause 2 looks for, with no object written and no config touched.
+    ``git commit-graph verify`` rejects the file afterwards; ``git log`` never
+    asks it to. The pin restores the real single parent, and
+    ``test_a_forged_commit_graph_invents_a_second_parent_and_the_pin_kills_it``
+    is the witness this paragraph used to say did not exist.
 
     ``--no-show-signature`` is added HERE for a hazard that IS witnessed.
     Measured: with a commit carrying a ``gpgsig`` header and
@@ -16819,6 +16856,29 @@ def conflicted_paths_commands(repo) -> tuple:
     collision the hard stop cannot name, which is the whole content of the
     message fault F9 demands.
 
+    BUT ONLY TWO OF THE FOUR CAN FIRE AGAINST THE UNMERGED SET, which is
+    measured rather than assumed, because "pinned" and "proved" are different
+    words and this build has already been caught calling a config load-bearing
+    over a corpus that could not trigger it. Measured on git 2.39.5 against a
+    tree carrying a real content conflict, a real rename-rename conflict, a
+    real conflicted gitlink and a real non-ASCII conflicted path:
+
+    * ``core.quotePath`` FIRES. Set to ``false`` by the repository the non-
+      ASCII path is printed raw; pinned, it is C-quoted.
+    * ``diff.relative`` FIRES, but ONLY WHEN THE LOCATION IS A SUBDIRECTORY of
+      the work tree -- which is reachable rather than hypothetical, because
+      the location is the run's ``repo_root`` and nothing requires that to be
+      the top level of the git repository. From the top level the setting
+      changes nothing.
+    * ``diff.renames`` and ``diff.ignoreSubmodules`` DO NOT FIRE, and cannot:
+      ``--diff-filter=U`` selects unmerged INDEX entries, which are emitted by
+      stage rather than paired into renames or classified as submodule
+      changes. Both tokens stay -- they cost nothing, the argv stays uniform
+      with Task 8's where they DO fire, and a pin whose absence nobody would
+      notice is how a later git changes its mind unobserved.
+      ``ConflictPathSpellingTests`` asserts all four measurements, the two
+      negative ones included, so that later git fails a test instead.
+
     ``--diff-filter=U`` IS WHAT MAKES IT THE UNMERGED SET rather than the
     working tree's ordinary diff. It is read for a DIAGNOSIS, never for a
     decision: the hard stop is raised on ``MERGE_HEAD`` alone, which this
@@ -16898,9 +16958,67 @@ def _merge_in_progress(repo):
     that name is a repository state this run cannot classify, and folding it
     into "no merge in progress" would let the one screen that fault F9 rests on
     be switched off by writing a junk file.
+
+    AND THAT SENTENCE WAS NOT TRUE OF THE CODE THAT CARRIED IT. ``_lookup_ref``
+    is the general resolver, and it is general in two ways this one name cannot
+    afford. ``_ref_text`` reads a DIRECTORY as absence, because a ref namespace
+    is a directory and the search must move to the next candidate; and
+    ``_lookup_ref`` reads an EMPTY or whitespace-only loose file as ``broken``,
+    which cancels that candidate's packed fallback and then falls off the end
+    as ``None``. Both are right for ``refs/heads/<branch>``. Both answered "no
+    merge in progress" over a tree with unmerged index entries -- measured
+    against a real ``git merge`` conflict, where ``git commit`` itself says
+    ``error: Committing is not possible because you have unmerged files`` --
+    and ``integrate_task`` then recorded a durable integration over it.
+
+    A ZERO-BYTE ``MERGE_HEAD`` NEEDS NO ADVERSARY: it is what an interrupted or
+    crashed ``git merge`` leaves behind. The directory needs one ``mkdir``, and
+    it is the same adversary ``_graft_screen`` already exists for -- a file
+    written inside a repository the worker owns.
+
+    SO THE TWO STORES ARE ASKED HERE RATHER THAN THROUGH THE RESOLVER, and the
+    reason the withdrawal is safe is structural rather than a judgement call:
+    ``_ref_candidates(_MERGE_HEAD)`` is a ONE-element tuple, so there is no
+    next candidate for a directory to send the search to, no namespace beneath
+    the name, and no ``packed-refs`` entry -- ``git pack-refs`` packs
+    ``refs/``, never a pseudo-ref. Every shape a ``.git/MERGE_HEAD`` can have
+    is therefore one of three answers: absent (no merge), a regular file whose
+    content is one object name (that merge), or a stop. The FIFO, the dangling
+    link, the loop and the unreadable name are still ``_ref_text``'s to refuse,
+    and the ``namespace_ok=False`` flag hands it the directory as well.
+
+    BOTH STORES ARE ASKED, for ``_graft_screen``'s reason and measured the
+    same way. Git writes this name into the PER-WORKTREE gitdir -- which is
+    why a merge in the main worktree lands at ``$GIT_COMMON_DIR/MERGE_HEAD``,
+    where the two directories coincide, and why a linked worktree's own gitdir
+    carries none and ``git rev-parse MERGE_HEAD`` there answers "not
+    mid-merge". This phase runs one linked worktree per concurrently
+    dispatched implementer, so asking only ``gitdir`` would let a run record a
+    durable integration while the shared repository is mid-merge. Asking both
+    ERRS CLOSED: the cost is a stop while another worktree is mid-merge, and
+    the alternative is a record written over a merge state this run never
+    read.
     """
     gitdir, common = _git_store(repo)
-    value = _lookup_ref(gitdir, common, _MERGE_HEAD)
+    value = None
+    for store in (gitdir, common):
+        text = _ref_text(store / _MERGE_HEAD, f"the git ref {_MERGE_HEAD!r}",
+                         namespace_ok=False)
+        if text is None:
+            continue
+        #: NOT ``continue`` ON AN EMPTY FILE, which is what the resolver does.
+        #: There is no packed fallback and no later candidate to reach, so the
+        #: only thing "keep looking" could reach is ``return None`` -- the one
+        #: answer a tree mid-merge must never get.
+        if not text.strip():
+            raise TrackerValidationError(
+                f"{_MERGE_HEAD} at {str(store / _MERGE_HEAD)!r} carries no "
+                "object name; an empty or whitespace-only file there is what "
+                "an interrupted `git merge` leaves behind, and a tree whose "
+                "merge state this run cannot read is never a tree it may "
+                "record an integration over")
+        value = text.strip()
+        break
     if value is None:
         return None
     if not _COMMIT.fullmatch(value):
@@ -16984,11 +17102,21 @@ def _colliding_task(tracker: dict, task_id, paths) -> tuple:
 def _conflicted_paths(repo, run_command) -> tuple:
     """The unmerged paths, deduplicated, in the order the command printed them.
 
-    ONE PATH PER LINE IS SAFE ONLY BECAUSE ``core.quotePath=true`` IS PINNED: a
-    path carrying a newline is C-quoted by that setting, so the newline arrives
-    as the two characters ``\\n`` inside one quoted token rather than as a
-    record separator. Unpinned, the same path would split into two lines and
-    the message would name two paths that do not exist.
+    ONE PATH PER LINE IS SAFE BECAUSE GIT QUOTES CONTROL CHARACTERS
+    UNCONDITIONALLY, WHICH IS NOT WHAT ``core.quotePath`` GOVERNS. An earlier
+    revision of this sentence said the newline safety came from the pin and
+    offered a counterfactual -- "unpinned, the same path would split into two
+    lines" -- that is false. Measured on git 2.39.5 with paths spelled
+    ``a\\nb.py`` and ``tab\\there.py``: under ``core.quotePath=true`` AND under
+    ``core.quotePath=false``, git prints ``"a\\nb.py"``, one C-quoted token
+    either way. The setting changes only the NON-ASCII case, where ``true``
+    gives ``"h\\303\\251llo.py"`` and ``false`` gives the raw UTF-8 bytes.
+
+    So the record separator survives a newline whatever the repository says,
+    and ``core.quotePath=true`` is pinned for the reason
+    ``conflicted_paths_commands`` gives instead: a pure-ASCII transcript that
+    is decodable by whatever captured it, and a C-quoted path that begins with
+    ``"``, which no write scope claims, so it fails closed.
     """
     text = _range_transcript(run_command, conflicted_paths_commands(repo))
     return tuple(dict.fromkeys(line for line in text.split("\n") if line))

@@ -12737,9 +12737,10 @@ class RunDirectoryCoercionSweepTests(TempDirTestCase):
             self.tmp, three_disjoint_tasks(), worker_limit=6)
 
     def test_every_public_entry_point_taking_a_run_directory_is_listed(self):
-        """The roster is checked against the module, so a sixth entry point
+        """The roster is checked against the module, so an entry point
         added by a later phase fails here rather than silently escaping the
-        sweep below."""
+        sweep below. NO COUNT IS SPELLED: this sentence said "a sixth" while
+        the roster already held seven."""
         source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
             encoding="utf-8")
         found = []
@@ -12759,8 +12760,16 @@ class RunDirectoryCoercionSweepTests(TempDirTestCase):
                       "resolve_evidence", "worker_result_path")))
 
     def test_every_entry_point_normalises_its_run_directory(self):
-        """The mechanical half: each of the five puts the argument through
-        `_run_path` somewhere in its body."""
+        """The mechanical half: each entry point ON THE ROSTER puts the
+        argument through `_run_path` somewhere in its body.
+
+        THE COUNT IS NOT SPELLED HERE, and that is the fix: this sentence said
+        "the five" while `RUN_DIR_ENTRY_POINTS` had grown to seven, which is
+        the number-with-no-referent shape this build has been bitten by three
+        times. The roster is checked against the module by
+        `test_every_public_entry_point_taking_a_run_directory_is_listed`
+        above, so the count has somewhere to live that cannot go stale.
+        """
         for name in RUN_DIR_ENTRY_POINTS:
             with self.subTest(function=name):
                 self.assertIn("_run_path(run_dir)",
@@ -15670,6 +15679,37 @@ def merge_no_ff(repo, branch: str, message: str) -> str:
     return git(repo, "rev-parse", "HEAD")
 
 
+def sign_commit(repo, scratch, commit: str) -> str:
+    """The same commit re-hashed with a `gpgsig` header and nothing else changed.
+
+    `git commit -S` needs a key and an agent; the HEADER is what
+    `log.showSignature` reads, so the object is written directly and the
+    caller moves a branch onto it.
+
+    THIS EXISTS BECAUSE A CONFIG MEASURED AGAINST A CORPUS THAT CANNOT TRIGGER
+    IT MEASURES NOTHING. `HOSTILE_GIT_CONFIG` has carried
+    `log.showSignature=true` since it was written, over fixtures with no
+    signed commit in them -- which invokes gpg zero times and changes no byte
+    of output. That is verbatim the defect this task diagnosed in Task 8's
+    `_range_argv` docstring, committed one screen away in the same change, and
+    it is why `integration_range_commands` could lose `--no-show-signature`
+    with the whole suite still green.
+    """
+    raw = subprocess.run(
+        ("git", "-C", str(repo), "cat-file", "commit", commit),
+        capture_output=True, text=True, check=True).stdout
+    header, separator, body = raw.partition("\n\n")
+    assert separator, raw
+    path = Path(scratch) / f"signed-{commit}"
+    path.write_text(
+        header + "\ngpgsig -----BEGIN PGP SIGNATURE-----\n \n"
+        " iHUEABYKAB0WIQR\n -----END PGP SIGNATURE-----\n\n" + body,
+        encoding="utf-8")
+    signed = git(repo, "hash-object", "-w", "-t", "commit", str(path))
+    assert "gpgsig" in git(repo, "cat-file", "commit", signed), signed
+    return signed
+
+
 def integration_run(case, *, worker_limit: int = 8, scopes=INTEGRATION_SCOPES):
     repo, run_dir, _ = make_run(case.tmp, two_task_body(scopes),
                                 worker_limit=worker_limit)
@@ -15799,8 +15839,28 @@ class IntegrationCommandPinTests(TempDirTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.repo = make_repo(self.tmp)
-        self.tip = branch_commit(self.repo, "task/T1", "src/a1.py", "one = 1\n")
+        #: THE TIP IS SIGNED, AND THAT IS A FIXTURE FIX RATHER THAN A FLOURISH.
+        #: `HOSTILE_GIT_CONFIG` sets `log.showSignature=true`; over a history
+        #: with no `gpgsig` header in it that config invokes gpg zero times,
+        #: so `test_every_emitted_command_survives_the_whole_hostile_config_
+        #: block` was measuring nothing about that entry and
+        #: `integration_range_commands` could lose `--no-show-signature` with
+        #: the suite still green. The tip is where the signature has to be:
+        #: it is the RIGHT end of `<first parent>..<second parent>`, so it is
+        #: inside the walk that emitter's transcript is read from.
+        unsigned = branch_commit(self.repo, "task/T1", "src/a1.py", "one = 1\n")
+        self.tip = sign_commit(self.repo, self.tmp, unsigned)
+        git(self.repo, "branch", "-f", "task/T1", self.tip)
         self.merge = merge_no_ff(self.repo, "task/T1", "integrate T1")
+
+    def test_the_fixture_carries_a_signed_commit_inside_the_walk_range(self):
+        """What in this fixture lets `log.showSignature` fire, asserted rather
+        than assumed -- this is the check the whole class was missing."""
+        self.assertIn("gpgsig", git(self.repo, "cat-file", "commit", self.tip))
+        self.assertEqual(git(self.repo, "rev-parse", f"{self.merge}^2"),
+                         self.tip)
+        walk = git(self.repo, "rev-list", f"{self.merge}^1..{self.merge}^2")
+        self.assertEqual(walk.split(), [self.tip])
 
     def every_emitted_argv(self) -> tuple:
         return (
@@ -15866,6 +15926,113 @@ class IntegrationCommandPinTests(TempDirTestCase):
             state.merge_parents_commands(repo, merge_commit=self.merge))
         self.assertEqual(len(pinned.split()), 3)            # the `-c` holds
 
+    def test_a_file_named_the_merge_commit_needs_the_argv_terminator(self):
+        """The `--` at the end of the header argv, witnessed rather than
+        assumed -- it was the ONE token in the three emitted argv that a
+        five-seed pass over every other token could remove with the suite
+        still green.
+
+        `git log ... <sha>` where a FILE of that exact name exists is refused
+        outright: `fatal: ambiguous argument ... both revision and filename`,
+        returncode 128, written to stderr. That refusal lands in the
+        CONTROLLER's process, outside this module's exception family and far
+        from anything that was wrong -- the identical harm `_repo_argument`'s
+        NUL screen exists to prevent. And it needs no adversary: a worker that
+        writes an artifact named after the commit it describes is following a
+        convention, not attacking anything.
+
+        MEASURED FOR THE OTHER TWO EMITTERS TOO, and they do not share it: a
+        file named `<base>..<tip>` does NOT make the walk's range argument
+        ambiguous on git 2.39.5 (rc=0, tracked or untracked), and the conflict
+        argv names no revision at all. Their terminators are kept as structure
+        -- nothing may follow them that git could read as an option -- and are
+        reported as pinned-without-witness rather than claimed as proved.
+        """
+        (self.repo / self.merge).write_text("", encoding="utf-8")
+        argv = emitted(state.merge_parents_commands(self.repo,
+                                                    merge_commit=self.merge))
+        self.assertEqual(argv[-1], "--")
+        ambiguous = subprocess.run(argv[:-1], capture_output=True, text=True,
+                                   check=False)
+        self.assertNotEqual(ambiguous.returncode, 0)
+        self.assertIn("ambiguous argument", ambiguous.stderr)
+        self.assertTrue(run_commands((argv,)).startswith("\x00"))
+
+        #: The other two, in the same fixture, so the asymmetry is measured
+        #: here rather than remembered from a scratch repository.
+        base = git(self.repo, "rev-parse", f"{self.merge}^1")
+        (self.repo / f"{base}..{self.tip}").write_text("", encoding="utf-8")
+        walk = emitted(state.integration_range_commands(
+            self.repo, first_parent=base, second_parent=self.tip))
+        self.assertEqual(walk[-1], "--")
+        self.assertEqual(
+            subprocess.run(walk[:-1], capture_output=True, text=True,
+                           check=False).returncode, 0)
+        conflict = emitted(state.conflicted_paths_commands(self.repo))
+        self.assertEqual(conflict[-1], "--")
+        self.assertEqual(
+            subprocess.run(conflict[:-1], capture_output=True, text=True,
+                           check=False).returncode, 0)
+
+    def test_a_forged_commit_graph_invents_a_second_parent_and_the_pin_kills_it(self):
+        """The witness `core.commitGraph=false` was applied WITHOUT, now built.
+
+        The cheap construction the module's docstring describes -- write
+        grafts, `git commit-graph write`, delete the grafts -- yields nothing,
+        and neither does the replace-ref variant: measured on git 2.39.5, the
+        graft run writes NO graph file at all (rc=0, silently declining) and
+        the replace-ref run writes one that records the REAL parents. So the
+        witness has to come from the thing the docstring actually claims: the
+        graph is an UNSIGNED FILE in `.git/objects/info/` that the worker can
+        write and that git does not verify before trusting.
+
+        Edited directly, one 4-byte field: the second-parent slot of a
+        fast-forward commit's record, set from `0x70000000` ("no second
+        parent") to the task branch tip's index. That is fault F10 exactly --
+        a one-parent commit presented as a `--no-ff` merge whose second parent
+        is the tip clause 2 looks for -- with no object written and no config
+        touched. `git commit-graph verify` rejects the file afterwards; `git
+        log` never asks it to.
+        """
+        repo = self.repo
+        git(repo, "checkout", "-q", "-b", "ff3", "target")
+        forward = commit_only(repo, "src/a1.py", "ff = 3\n", "ff3")
+        git(repo, "checkout", "-q", "target")
+        self.assertEqual(
+            subprocess.run(("git", "-C", str(repo), "commit-graph", "write",
+                            "--reachable"), capture_output=True).returncode, 0)
+        graph = repo / ".git" / "objects" / "info" / "commit-graph"
+        raw = bytearray(graph.read_bytes())
+        self.assertEqual(bytes(raw[:4]), b"CGPH")
+        if raw[5] != 1:                       # SHA-256 repository: 32-byte oids
+            self.skipTest("the record layout under test is the SHA-1 one")
+        offsets, cursor = {}, 8
+        for _ in range(raw[6] + 1):
+            offsets[bytes(raw[cursor:cursor + 4])] = int.from_bytes(
+                raw[cursor + 4:cursor + 12], "big")
+            cursor += 12
+        names, data = offsets[b"OIDL"], offsets[b"CDAT"]
+        oids = [bytes(raw[names + 20 * i:names + 20 * i + 20]).hex()
+                for i in range((data - names) // 20)]
+        self.assertIn(forward, oids)
+        record = data + 36 * oids.index(forward)
+        self.assertEqual(int.from_bytes(raw[record + 24:record + 28], "big"),
+                         0x70000000)          # no second parent, honestly
+        raw[record + 24:record + 28] = oids.index(self.tip).to_bytes(4, "big")
+        graph.chmod(0o644)
+        graph.write_bytes(bytes(raw))
+        forged = subprocess.run(
+            ("git", "-C", str(repo), "log", "--no-walk", "--format=%P",
+             forward, "--"), capture_output=True, text=True,
+            check=True).stdout.split()
+        self.assertEqual(len(forged), 2)                  # FORGED
+        self.assertEqual(forged[1], self.tip)             # and it is the tip
+        argv = emitted(state.merge_parents_commands(repo, merge_commit=forward))
+        self.assertIn("core.commitGraph=false", argv)
+        #: `%x00%H %P` -- so two tokens is ONE parent, and that is the field
+        #: the parent-count clause reads. The forged graph offered three.
+        self.assertEqual(len(run_commands((argv,)).split()), 2)
+
     def test_show_signature_injects_into_stdout_and_the_pin_removes_it(self):
         """Measured, and it is a defect in the transcript grammar rather than
         in the history: `log.showSignature` puts gpg's verification text on
@@ -15896,9 +16063,20 @@ class IntegrationCommandPinTests(TempDirTestCase):
         self.assertNotIn("gpg:", pinned)
 
     def test_the_conflict_command_pins_the_four_path_hiding_mechanisms(self):
+        """THE FOUR THE MODULE'S OWN DOCSTRING NAMES, and that is the fix: an
+        earlier revision asserted `core.useReplaceRefs=false` as the fourth,
+        which is a parent-graph pin rather than a path-hiding one, so the test
+        and the prose it is named after checked different sets. `core.quotePath
+        =true` -- the actual fourth -- was covered elsewhere, so nothing was
+        unpinned; the test simply was not about what it said it was.
+
+        `--diff-filter=U` is asserted here too. It is not one of the four --
+        it is what makes this the UNMERGED set at all -- and
+        `test_a_merely_dirty_file_is_never_named_as_a_conflicting_path`
+        carries its behavioural witness."""
         argv = emitted(state.conflicted_paths_commands(self.repo))
         for pin in ("--no-renames", "--no-relative", "--ignore-submodules=none",
-                    "core.useReplaceRefs=false"):
+                    "core.quotePath=true", "--diff-filter=U"):
             with self.subTest(pin=pin):
                 self.assertIn(pin, argv)
 
@@ -15911,9 +16089,37 @@ class IntegrationCommandPinTests(TempDirTestCase):
         walk = run_commands(state.integration_range_commands(
             self.repo, first_parent=git(self.repo, "rev-parse", "HEAD^1"),
             second_parent=self.tip))
+        #: ASSERTED SEPARATELY FROM THE PARSE, because the parse is the thing
+        #: `log.showSignature` breaks and a transcript that starts with gpg's
+        #: verification text is the exact false accusation this pin prevents.
+        self.assertTrue(walk.startswith("\x00"))
+        self.assertNotIn("gpg:", walk)
         self.assertEqual(
             tuple(state._parse_range_transcript(walk)[0]["commit"] for _ in (0,)),
             (self.tip,))
+
+    def test_the_walk_emitter_is_signature_pinned_and_the_mutant_is_visible(self):
+        """R03, in both directions. The same measurement
+        `test_show_signature_injects_into_stdout_and_the_pin_removes_it` makes
+        for `merge_parents_commands`, made for the OTHER emitter -- whose
+        `--no-show-signature` survived a five-seed mutation pass because no
+        corpus in this file put a signed commit inside its walk range."""
+        git(self.repo, "config", "log.showSignature", "true")
+        argv = emitted(state.integration_range_commands(
+            self.repo, first_parent=git(self.repo, "rev-parse", "HEAD^1"),
+            second_parent=self.tip))
+        self.assertIn("--no-show-signature", argv)
+        unpinned = tuple(part for part in argv if part != "--no-show-signature")
+        self.assertEqual(len(unpinned), len(argv) - 1)
+        loose = subprocess.run(unpinned, capture_output=True, text=True,
+                               check=True).stdout
+        self.assertIn("gpg:", loose)
+        self.assertFalse(loose.startswith("\x00"))
+        with self.assertRaises(state.TrackerError):
+            state._parse_range_transcript(loose)
+        pinned = run_commands((argv,))
+        self.assertTrue(pinned.startswith("\x00"))
+        self.assertNotIn("gpg:", pinned)
 
     def test_a_graft_file_forges_a_parent_that_no_command_line_pin_defeats(self):
         """Measured on this machine's git: `.git/info/grafts` rewrites `%P`,
@@ -16382,6 +16588,72 @@ class MergeConflictHardStopTests(TempDirTestCase):
                        integration="-", verification="-", question="-")
         self.assertIn("HARD STOP", self.stop())
 
+    def test_a_merely_dirty_file_is_never_named_as_a_conflicting_path(self):
+        """`--diff-filter=U` is what makes this the UNMERGED set, and the
+        witness is a false accusation inside the one message fault F9 exists
+        to produce. `src/seed.py` is tracked, unmodified by either branch and
+        merely DIRTY in the working tree; without the token `git diff
+        --name-only` prints it beside the real conflict, so the hard stop
+        names a file nobody conflicted on -- and any task whose declared scope
+        claims it is then implicated BY NAME, at the worst possible moment.
+
+        Measured in both directions rather than asserted: the module's own
+        argv, and the module's own argv with exactly that token removed."""
+        (self.repo / "src" / "seed.py").write_text("seed = 99\n",
+                                                   encoding="utf-8")
+        argv = emitted(state.conflicted_paths_commands(self.repo))
+        self.assertIn("--diff-filter=U", argv)
+        unpinned = tuple(part for part in argv if part != "--diff-filter=U")
+        self.assertEqual(len(unpinned), len(argv) - 1)
+        loose = subprocess.run(unpinned, capture_output=True, text=True,
+                               check=True).stdout
+        self.assertIn("src/seed.py", loose)          # the intruder, unpinned
+        self.assertEqual(state._conflicted_paths(self.repo, controller_git),
+                         ("src/shared.py",))
+        message = self.stop()
+        self.assertIn("src/shared.py", message)
+        self.assertNotIn("src/seed.py", message)
+
+    def test_no_junk_at_merge_head_switches_the_hard_stop_off(self):
+        """C1, end to end. The tree below is REALLY conflicted -- `git commit`
+        in it says `error: Committing is not possible because you have
+        unmerged files` -- and the only thing changed is the shape of
+        `.git/MERGE_HEAD`. A directory needs one `mkdir`; a ZERO-BYTE file is
+        what an interrupted `git merge` leaves behind and needs no adversary
+        at all. Before the fix both answered "no merge in progress" and
+        `integrate_task` RECORDED an integration over the tree.
+
+        The assertion is the one that matters: no recording. The message is
+        allowed to be the shape diagnosis rather than the `HARD STOP`, because
+        a store this run cannot classify is a worse thing to know than which
+        paths conflicted -- but a WRITE is not allowed either way."""
+        unmerged = git(self.repo, "diff", "--name-only", "--diff-filter=U")
+        self.assertIn("src/shared.py", unmerged)
+        refused = subprocess.run(
+            ("git", "-C", str(self.repo), "commit", "-m", "x"),
+            capture_output=True, text=True, check=False)
+        self.assertNotEqual(refused.returncode, 0)
+        merge_head = self.repo / ".git" / "MERGE_HEAD"
+        for name, build in (("directory", lambda path: path.mkdir()),
+                            ("empty", lambda path: path.write_bytes(b"")),
+                            ("newline", lambda path: path.write_text(
+                                "\n", encoding="utf-8"))):
+            with self.subTest(shape=name):
+                if merge_head.is_dir():
+                    shutil.rmtree(merge_head)
+                elif os.path.lexists(merge_head):
+                    merge_head.unlink()
+                build(merge_head)
+                before = (self.run_dir / "progress.md").read_bytes()
+                with self.assertRaises(state.TrackerValidationError):
+                    state.integrate_task(self.run_dir, task_id="T2",
+                                         merge_commit=self.second,
+                                         run_command=controller_git)
+                self.assertEqual((self.run_dir / "progress.md").read_bytes(),
+                                 before)
+                tracker = state.validate_run(self.run_dir)
+                self.assertEqual(task_row(tracker, "T2")["integration"], "held")
+
     def test_a_declared_scope_that_claims_the_path_names_that_task(self):
         """When some task DID declare the conflicted path, that task is the
         collider -- which is the whole claim the message makes."""
@@ -16422,45 +16694,476 @@ class CollidingTaskTests(TempDirTestCase):
             state._colliding_task(self.tracker, "T9", ("src/a1.py",))
 
 
-class MergeInProgressTests(TempDirTestCase):
+@unittest.skipUnless(sys.getfilesystemencodeerrors() == "surrogateescape",
+                     "the surrogateescape round trip is what is under test")
+class SurrogateEscapeRepositoryTests(TempDirTestCase):
+    """The ACCEPTANCE half of `_repo_argument`'s surrogate screen.
+
+    A SCREEN TESTED ONLY ON WHAT IT REJECTS CANNOT SEE A FIX THAT REJECTS TOO
+    MUCH. Every corpus in this file carried `\\ud800` -- the lone surrogate no
+    filesystem ever produced, which must be REFUSED -- and none carried
+    `\\udc80`, which `surrogateescape` produces for a real byte and which must
+    be ACCEPTED. So swapping `os.fsencode(repo)` for `repo.encode("utf-8")`,
+    the exact change the module's own comment argues against at length, was
+    invisible to the whole suite at five seeds: both screens refuse `\\ud800`,
+    and nothing asked either of them about a path that exists.
+
+    The strongest form of the acceptance half is a REAL DIRECTORY, so this
+    class makes one -- `root-\\x80`, created with `os.mkdir` on raw bytes --
+    and drives the full Task 11 call tree over it end to end. `str.encode`
+    refuses that directory at the door, which is a live repository lost to a
+    simplification nobody would have caught.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.raw = os.fsencode(str(self.tmp)) + b"/root-\x80"
+        os.mkdir(self.raw)
+        self.root = os.fsdecode(self.raw)
+        self.repo = make_repo(self.root)
+        self.tip = branch_commit(self.repo, "task/T1", "src/a1.py", "one = 1\n")
+        self.merge = merge_no_ff(self.repo, "task/T1", "integrate T1")
+
+    def test_the_fixture_really_holds_a_byte_utf_8_cannot_spell(self):
+        """What in this fixture would let the mutant fire, said out loud."""
+        self.assertIn("\udc80", str(self.repo))
+        self.assertEqual(os.fsencode(str(self.repo)),
+                         self.raw + b"/repo")
+        self.assertTrue(os.path.isdir(self.raw))
+        with self.assertRaises(UnicodeEncodeError):
+            str(self.repo).encode("utf-8")
+
+    def test_a_surrogateescape_repository_is_accepted_unchanged(self):
+        self.assertEqual(state._repo_argument(self.repo), str(self.repo))
+        self.assertEqual(state._repo_argument(str(self.repo)), str(self.repo))
+
+    def test_the_lone_surrogate_no_filesystem_produced_is_still_refused(self):
+        """The rejection half, beside the acceptance half, so the pair is what
+        discriminates: `\\ud800` is not one of `surrogateescape`'s and
+        `os.fsencode` raises for it."""
+        for value in ("\ud800", f"{self.root}\ud800", f"{self.root}\x00x"):
+            with self.subTest(value=value):
+                with self.assertRaises(state.TrackerValidationError):
+                    state._repo_argument(value)
+
+    def test_every_emitted_command_runs_over_the_raw_byte_repository(self):
+        header = run_commands(
+            state.merge_parents_commands(self.repo, merge_commit=self.merge))
+        self.assertTrue(header.startswith("\x00"))
+        first, second = header.split()[1:3]
+        walk = run_commands(state.integration_range_commands(
+            self.repo, first_parent=first, second_parent=second))
+        self.assertEqual(
+            tuple(record["commit"]
+                  for record in state._parse_range_transcript(walk)),
+            (self.tip,))
+        self.assertEqual(
+            state._conflicted_paths(self.repo, controller_git), ())
+
+    def test_the_whole_task_11_call_tree_answers_over_it(self):
+        self.assertIsNone(state._merge_in_progress(self.repo))
+        self.assertIsNone(state._graft_screen(self.repo))
+        self.assertEqual(state._resolved_commit(self.repo, "target"),
+                         self.merge)
+        self.assertEqual(
+            state._integration_ancestry(
+                self.repo, commits=(self.tip,), branch_tip=self.tip,
+                merge_commit=self.merge, target_branch="target",
+                run_command=controller_git),
+            (self.tip,))
+
+
+class ConflictPathSpellingTests(TempDirTestCase):
+    """WHICH OF `conflicted_paths_commands`' PINS CAN ACTUALLY FIRE, measured
+    one knob at a time against a tree that really is mid-conflict.
+
+    `test_the_conflict_command_pins_the_four_path_hiding_mechanisms` asserts
+    the four tokens are ON THE ARGV, which is a spelling assertion. `8a0a0da`'s
+    lesson -- a config measured against a repository that cannot trigger it
+    measures nothing -- is the same defect this task found in its own
+    `log.showSignature` fixture, so the fixture here is built to trigger all
+    four and each assertion names what in it would have let the mechanism fire.
+    One merge, four shapes:
+
+    * `src/shared.py`       -- an ordinary content conflict,
+    * `deep/sub/h<e9>llo.py` -- a NON-ASCII conflicted path,
+    * `deep/sub/moved.py`   -- a rename-on-one-side content conflict,
+    * `theirs/sub`          -- a CONFLICTED GITLINK, written straight into the
+      index with `update-index --cacheinfo 160000` the way Task 8's submodule
+      witness does, because the mode is what the diff reports on and a checked
+      out submodule is not needed to have one.
+
+    The measurement's answer is that only TWO of the four reach the unmerged
+    set, and the negative half is asserted too -- a pin nobody can see the
+    absence of is how a later git changes its mind unobserved.
+    """
+
+    NON_ASCII = "deep/sub/h\u00e9llo.py"
+    GITLINK = ("1" * 40, "2" * 40, "3" * 40)      # base, ours, theirs
+    #: TEN SHARED LINES, AND THEY ARE LOAD-BEARING. Rename detection is a
+    #: SIMILARITY test: with a one-line file, `orig.py` and `moved.py` are
+    #: 100% dissimilar, git pairs nothing, and the conflict lands on the
+    #: SOURCE path as a modify/delete -- which would make this fixture prove
+    #: the opposite of what it is for. Measured: with the shared body the
+    #: conflict is at `deep/sub/moved.py`, the DESTINATION.
+    BODY = "".join(f"line_{n} = {n}\n" for n in range(2, 12))
 
     def setUp(self) -> None:
         super().setUp()
         self.repo = make_repo(self.tmp)
+        git(self.repo, "checkout", "-q", "target")
+        for relative in ("src/shared.py", self.NON_ASCII, "deep/sub/orig.py"):
+            path = self.repo / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("top = 0\n" + self.BODY, encoding="utf-8")
+        git(self.repo, "add", "--", "src/shared.py", self.NON_ASCII,
+            "deep/sub/orig.py")
+        git(self.repo, "update-index", "--add", "--cacheinfo",
+            f"160000,{self.GITLINK[0]},theirs/sub")
+        git(self.repo, "commit", "-qm", "the conflict fixture's base")
+
+        git(self.repo, "checkout", "-q", "-b", "task/T1", "target")
+        self.write_side("ours", self.GITLINK[1], rename=True)
+        git(self.repo, "checkout", "-q", "target")
+        self.write_side("theirs", self.GITLINK[2], rename=False)
+        conflicted = subprocess.run(
+            ("git", "-C", str(self.repo), "merge", "--no-ff", "--no-edit",
+             "-m", "integrate T1", "task/T1"),
+            capture_output=True, text=True, check=False)
+        self.assertNotEqual(conflicted.returncode, 0)
+
+    def write_side(self, text: str, gitlink: str, *, rename: bool) -> None:
+        """One side of the merge. `rename` is what makes `deep/sub/orig.py` a
+        rename on ONE side and a plain content change on the other, which is
+        the shape that leaves a conflict at the DESTINATION path."""
+        moved = "deep/sub/moved.py" if rename else "deep/sub/orig.py"
+        if rename:
+            git(self.repo, "mv", "deep/sub/orig.py", moved)
+        for relative in ("src/shared.py", self.NON_ASCII, moved):
+            (self.repo / relative).write_text(f"top = {text}\n" + self.BODY,
+                                              encoding="utf-8")
+        git(self.repo, "add", "--", "src/shared.py", self.NON_ASCII, moved)
+        git(self.repo, "update-index", "--cacheinfo",
+            f"160000,{gitlink},theirs/sub")
+        git(self.repo, "commit", "-qm", text)
+
+    def unmerged(self, *settings) -> str:
+        """The UNPINNED counterfactual: `git diff --name-only --diff-filter=U`
+        carrying `settings` and none of the module's pins."""
+        argv = ["git", "-C", str(self.repo)]
+        for setting in settings:
+            argv += ["-c", setting]
+        argv += ["diff", "--name-only", "--diff-filter=U", "--"]
+        return subprocess.run(tuple(argv), capture_output=True, text=True,
+                              check=True).stdout
+
+    @staticmethod
+    def without(argv: tuple, token: str) -> tuple:
+        """`argv` with one token removed -- and its `-c` when it is a setting,
+        because a bare `-c` swallows the next element and would measure
+        something else entirely."""
+        index = argv.index(token)
+        start = index - 1 if argv[index - 1] == "-c" else index
+        return argv[:start] + argv[index + 1:]
+
+    def test_the_fixture_conflicts_on_all_four_shapes(self):
+        """WHAT IN THIS FIXTURE WOULD LET EACH MECHANISM FIRE, asserted before
+        anything is concluded from it -- this is the check whose absence made
+        the `log.showSignature` corpus measure nothing."""
+        raw = self.unmerged("core.quotePath=false")
+        for path in ("src/shared.py", "deep/sub/h\u00e9llo.py",
+                     "deep/sub/moved.py", "theirs/sub"):
+            with self.subTest(path=path):
+                self.assertIn(path, raw.split("\n"))
+        self.assertTrue(
+            git(self.repo, "ls-files", "-u", "--", "theirs/sub")
+            .startswith("160000"))
+        #: The rename's SOURCE is gone, which is what makes `moved.py` the
+        #: destination a rename-detecting diff would report alone.
+        self.assertNotIn("deep/sub/orig.py", raw.split("\n"))
+
+    def test_core_quote_path_fires_and_the_pin_holds_the_spelling(self):
+        """The first of the two that CAN fire. The repository sets `false`;
+        unpinned the non-ASCII path arrives raw, pinned it is C-quoted --
+        which is what keeps the transcript ASCII and what makes a leading `"`
+        fail closed against every write scope."""
+        git(self.repo, "config", "core.quotePath", "false")
+        argv = emitted(state.conflicted_paths_commands(self.repo))
+        self.assertIn("core.quotePath=true", argv)
+        pinned = run_commands((argv,))
+        self.assertIn('"deep/sub/h\\303\\251llo.py"', pinned.split("\n"))
+        self.assertNotIn("deep/sub/h\u00e9llo.py", pinned)
+        loose = run_commands((self.without(argv, "core.quotePath=true"),))
+        self.assertIn("deep/sub/h\u00e9llo.py", loose.split("\n"))
+        self.assertEqual(
+            state._conflicted_paths(self.repo, controller_git),
+            tuple(line for line in pinned.split("\n") if line))
+
+    def test_diff_relative_fires_only_from_a_subdirectory(self):
+        """The second, and the reason it is reachable rather than decorative:
+        the location is the run's `repo_root`, and NOTHING requires that to be
+        the top level of the git repository. From the top level the setting
+        changes nothing; from `deep/` it drops `src/shared.py` outright."""
+        git(self.repo, "config", "diff.relative", "true")
+        self.assertIn("src/shared.py", self.unmerged().split("\n"))   # at top
+
+        argv = emitted(state.conflicted_paths_commands(self.repo / "deep"))
+        self.assertIn("--no-relative", argv)
+        pinned = run_commands((argv,)).split("\n")
+        self.assertIn("src/shared.py", pinned)
+        loose = run_commands((self.without(argv, "--no-relative"),)).split("\n")
+        self.assertNotIn("src/shared.py", loose)          # DROPPED
+        self.assertIn("sub/moved.py", loose)              # and re-spelled
+
+    def test_renames_and_submodule_ignoring_cannot_reach_the_unmerged_set(self):
+        """THE NEGATIVE MEASUREMENT, asserted rather than assumed in either
+        direction. `--diff-filter=U` selects unmerged INDEX entries, which are
+        emitted by stage: never paired into a rename, never classified as a
+        submodule change. So `diff.renames=true` cannot hide the rename's
+        destination here and `diff.ignoreSubmodules=all` cannot hide the
+        conflicted gitlink -- measured on this git, with a fixture that really
+        carries both. The tokens stay; this test is what a later git that
+        changes its mind would fail."""
+        for setting, path in (("diff.renames=true", "deep/sub/moved.py"),
+                              ("diff.ignoreSubmodules=all", "theirs/sub")):
+            with self.subTest(setting=setting):
+                self.assertIn(path, self.unmerged(setting).split("\n"))
+        argv = emitted(state.conflicted_paths_commands(self.repo))
+        for key, token in (("diff.renames", "--no-renames"),
+                           ("diff.ignoreSubmodules", "--ignore-submodules=none")):
+            with self.subTest(token=token):
+                git(self.repo, "config", key,
+                    "true" if key == "diff.renames" else "all")
+                self.assertIn(token, argv)
+                self.assertEqual(run_commands((self.without(argv, token),)),
+                                 run_commands((argv,)))
+
+    def test_git_quotes_control_characters_whatever_quote_path_says(self):
+        """W3. `_conflicted_paths` said the one-path-per-line grammar was safe
+        BECAUSE `core.quotePath=true` was pinned, and offered a counterfactual
+        -- "unpinned, the same path would split into two lines" -- that is
+        false. Measured here in a clean repository, because the claim is about
+        git's quoting rather than about a merge: a newline and a tab are
+        C-quoted under BOTH settings, and only the non-ASCII spelling moves."""
+        repo = make_repo(self.tmp / "spelling")
+        for relative in ("a\nb.py", "tab\there.py", "h\u00e9llo.py"):
+            (repo / relative).write_text("x = 1\n", encoding="utf-8")
+            git(repo, "add", "--", relative)
+        printed = {}
+        for value in ("true", "false"):
+            printed[value] = subprocess.run(
+                ("git", "-C", str(repo), "-c", f"core.quotePath={value}",
+                 "diff", "--cached", "--name-only", "--"),
+                capture_output=True, text=True, check=True).stdout.split("\n")
+        for value in ("true", "false"):
+            with self.subTest(quotePath=value):
+                self.assertIn('"a\\nb.py"', printed[value])
+                self.assertIn('"tab\\there.py"', printed[value])
+        self.assertIn('"h\\303\\251llo.py"', printed["true"])
+        self.assertIn("h\u00e9llo.py", printed["false"])
+        #: The grammar's own claim, end to end: one line per path even with a
+        #: newline in one of them.
+        self.assertEqual(len([line for line in printed["true"] if line]), 3)
+
+
+class MergeInProgressTests(TempDirTestCase):
+    """THE CORPUS IS THE SHAPES `.git/MERGE_HEAD` CAN HAVE, not the four an
+    earlier revision of this class happened to think of.
+
+    That earlier revision covered clean / a valid object name / a symref /
+    a FIFO, and a review found the hole by enumerating instead of
+    remembering: a DIRECTORY and an EMPTY FILE both answered "no merge in
+    progress" over a tree `git commit` itself refuses, because `_ref_text`
+    reads a directory as absence (a ref namespace IS a directory) and
+    `_lookup_ref` reads an empty loose file as a cancelled candidate. Neither
+    generality has anything to reach for a pseudo-ref -- one candidate, no
+    namespace beneath it, no packed entry -- and a zero-byte `MERGE_HEAD` is
+    what a crashed `git merge` leaves behind, so it needs no adversary.
+
+    `SHAPES` is the enumeration, and each entry names the DISTINCT diagnosis
+    that shape must produce: four reasons, not one family, so a case cannot
+    pass by meeting some other rule's refusal.
+    """
+
+    #: (name, how to build it at `path`, the fragment its diagnosis must carry)
+    SHAPES = (
+        ("directory", lambda path: path.mkdir(),
+         "is a directory at a name that has no namespace beneath it"),
+        ("empty", lambda path: path.write_bytes(b""), "carries no object name"),
+        ("whitespace", lambda path: path.write_text("   \t  ", encoding="utf-8"),
+         "carries no object name"),
+        ("newline", lambda path: path.write_text("\n", encoding="utf-8"),
+         "carries no object name"),
+        ("fifo", os.mkfifo, "is a name this run cannot read"),
+        ("dangling-symlink",
+         lambda path: path.symlink_to(path.parent / "no-such-name"),
+         "is a name this run cannot read"),
+        ("symref", lambda path: path.write_text("ref: refs/heads/main\n",
+                                                encoding="utf-8"),
+         "not one 40-character object name"),
+        ("abbreviated", lambda path: path.write_text("0" * 12 + "\n",
+                                                     encoding="utf-8"),
+         "not one 40-character object name"),
+        ("two-object-names",
+         lambda path: path.write_text(f"{'a' * 40}\n{'b' * 40}\n",
+                                      encoding="utf-8"),
+         "not one 40-character object name"),
+    )
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = make_repo(self.tmp)
+        self.merge_head = self.repo / ".git" / "MERGE_HEAD"
 
     def test_a_clean_tree_is_not_mid_merge(self):
         self.assertIsNone(state._merge_in_progress(self.repo))
 
     def test_merge_head_is_read_through_the_pseudo_ref_the_store_knows(self):
         self.assertIn("MERGE_HEAD", state._PSEUDO_REFS)
-        (self.repo / ".git" / "MERGE_HEAD").write_text(
-            git(self.repo, "rev-parse", "HEAD") + "\n", encoding="utf-8")
+        self.merge_head.write_text(git(self.repo, "rev-parse", "HEAD") + "\n",
+                                   encoding="utf-8")
         self.assertEqual(state._merge_in_progress(self.repo),
                          git(self.repo, "rev-parse", "HEAD"))
 
-    def test_a_merge_head_that_is_not_an_object_name_is_a_stop(self):
-        (self.repo / ".git" / "MERGE_HEAD").write_text("ref: refs/heads/main\n",
-                                                       encoding="utf-8")
-        with self.assertRaises(state.TrackerValidationError):
-            state._merge_in_progress(self.repo)
+    def test_a_pseudo_ref_has_exactly_one_candidate(self):
+        """The whole safety argument for withdrawing the directory exemption
+        here: there is no NEXT candidate for a directory to send the search
+        to, and no namespace is ever spelled beneath `$GIT_DIR/MERGE_HEAD`.
+        A namespaced name still has five, and still gets the exemption."""
+        self.assertEqual(state._ref_candidates(state._MERGE_HEAD),
+                         (state._MERGE_HEAD,))
+        self.assertEqual(len(state._ref_candidates("target")), 5)
 
-    def test_a_fifo_at_merge_head_does_not_block_under_the_run_lock(self):
-        path = self.repo / ".git" / "MERGE_HEAD"
-        os.mkfifo(path)
-        with publication_deadline(5, "reading MERGE_HEAD"):
-            with self.assertRaises(state.TrackerValidationError):
-                state._merge_in_progress(self.repo)
+    def test_a_merge_in_the_common_directory_is_seen_from_a_linked_worktree(self):
+        """BOTH STORES ARE ASKED, and this phase's topology is the reason.
+
+        Measured on git 2.39.5: a `git merge` in the MAIN worktree writes
+        `$GIT_COMMON_DIR/MERGE_HEAD` -- there `gitdir` IS `commondir` -- and a
+        linked worktree's own gitdir carries none, so `git rev-parse
+        MERGE_HEAD` inside the linked tree answers "not mid-merge". This phase
+        dispatches ONE LINKED WORKTREE PER CONCURRENT IMPLEMENTER and
+        `integrate_task` is handed a repository location, so a screen that
+        asked only the per-worktree gitdir would let a run record a durable
+        integration while the shared repository is mid-merge -- the same
+        sentence `_graft_screen` asks both stores for, and
+        `LinkedWorktreeGraftTests` is its sibling.
+
+        IT ERRS CLOSED ON PURPOSE. The cost is a stop while some other
+        worktree of the same repository is mid-merge; the alternative is a
+        record written over a merge state this run never read. F9 is the fault
+        that says which way to be wrong.
+        """
+        linked = self.tmp / "linked"
+        git(self.repo, "worktree", "add", "-q", str(linked), "target")
+        gitdir, common = state._git_store(linked)
+        self.assertNotEqual(gitdir, common)          # the topology, asserted
+        self.assertIsNone(state._merge_in_progress(linked))
+        head = git(self.repo, "rev-parse", "HEAD")
+        (common / state._MERGE_HEAD).write_text(head + "\n", encoding="utf-8")
+        #: `lexists` rather than `is_file`, and only to assert the FIXTURE's
+        #: shape: git's own place for this name is the per-worktree gitdir,
+        #: and nothing wrote one there.
+        self.assertFalse(os.path.lexists(gitdir / state._MERGE_HEAD))
+        self.assertEqual(state._merge_in_progress(linked), head)
+
+    def test_a_ref_namespace_directory_is_still_walked_past(self):
+        """The case the exemption exists for, asserted here so the withdrawal
+        cannot be widened by accident: `refs/tags/target/` sits EARLIER in
+        gitrevisions' order than the `refs/heads/target` the run wants."""
+        head = git(self.repo, "rev-parse", "target")
+        tags = self.repo / ".git" / "refs" / "tags" / "target"
+        tags.mkdir(parents=True)
+        (tags / "rc1").write_text(head + "\n", encoding="utf-8")
+        self.assertEqual(state._resolved_commit(self.repo, "target"), head)
+
+    def clear_merge_head(self) -> None:
+        if self.merge_head.is_symlink():
+            self.merge_head.unlink()
+        elif self.merge_head.is_dir():
+            shutil.rmtree(self.merge_head)
+        elif os.path.lexists(self.merge_head):
+            self.merge_head.unlink()
+
+    def test_every_shape_of_merge_head_gets_exactly_its_own_diagnosis(self):
+        """`d84bf73`'s rule, applied: each case must require exactly ONE
+        reason string and that it is its OWN. So every shape's message is
+        asserted to carry its own fragment AND to carry none of the other
+        three -- a corpus that asserted only `TrackerValidationError`, or a
+        fragment four rules share, would assert a constant."""
+        fragments = {fragment for _, _, fragment in self.SHAPES}
+        self.assertEqual(len(fragments), 4)
+        for name, build, fragment in self.SHAPES:
+            with self.subTest(shape=name):
+                self.clear_merge_head()
+                build(self.merge_head)
+                #: BOUNDED, because the FIFO's hazard is the OPEN blocking
+                #: under the run lock while every predicate answers instantly.
+                with publication_deadline(15, f"reading MERGE_HEAD ({name})"):
+                    with self.assertRaises(state.TrackerValidationError) as bad:
+                        state._merge_in_progress(self.repo)
+                message = str(bad.exception)
+                self.assertIn(fragment, message)
+                for other in fragments - {fragment}:
+                    self.assertNotIn(other, message)
 
 
 class IntegrationTotalityTests(TempDirTestCase):
-    """The corpus derives from the CALL TREE and asserts the DIAGNOSIS.
+    """The corpus derives from the CALL TREE and ASSERTS THE DIAGNOSIS.
 
     A path argument needs a NUL at the LEADING offset as well as mid-string --
     three rounds of this build were bitten by leading-offset blind spots -- and
     a lone surrogate, which no filesystem call can encode.
+
+    AND THE DIAGNOSIS IS NOW ACTUALLY ASSERTED, which was this class's own
+    unmet claim: every test below asserted `state.TrackerError` and nothing
+    else, so a corpus of five values proved the same one thing five times.
+    `d84bf73`'s rule is that each case must require exactly ONE reason string
+    and that it is its OWN, and applying it here showed at once three things
+    the family assertion had hidden.
+
+    1. THE LOCATION CORPUS SPLITS INTO TWO REASONS at `_repo_argument` -- the
+       record-separator screen for a NUL, the argv-encodability screen for a
+       lone surrogate. Each value is required to carry its own and NOT the
+       other, so neither screen can be deleted behind the other.
+    2. `_graft_screen` NEVER CALLS `_repo_argument`. It reads the `.git`
+       pointer, so its refusals are the POINTER screen's, in different words,
+       and the surrogate case is refused by a different sentence again. A
+       corpus that asserted one family across both callers was reporting a
+       shared screen that does not exist; `GRAFT` is a separate table because
+       the two really are separate code.
+    3. EVERY NASTY `run_dir`, `task_id` AND `merge_commit` IS REFUSED EARLIER
+       THAN ANY SCREEN TASK 11 WROTE. A bad `run_dir` never gets past
+       `validate_run` (`missing progress.md`); a bad `task_id` or
+       `merge_commit` never gets past the transition-id token screen inside
+       `locked_tracker_update`, because the transition id is built from both.
+       That is correct, and it means this corpus was reporting coverage of a
+       block it never entered. Naming the reason is what makes it say which
+       code it exercises -- and the tests below that assert a reason is NOT
+       the transition one are what keep the two apart.
     """
 
-    NASTY = ("\x00repo", "re\x00po", "repo\x00", "\ud800", "re\ud800po")
+    #: (value, the fragment its diagnosis must carry) through `_repo_argument`.
+    LOCATIONS = (
+        ("\x00repo", "carries a NUL byte, which no argv element may hold"),
+        ("re\x00po", "carries a NUL byte, which no argv element may hold"),
+        ("repo\x00", "carries a NUL byte, which no argv element may hold"),
+        ("\ud800", "cannot be spelled as an argv element"),
+        ("re\ud800po", "cannot be spelled as an argv element"),
+    )
+    #: The same values through `_graft_screen`, which answers in the `.git`
+    #: pointer screen's words instead -- see point 2 of the class docstring.
+    GRAFT = (
+        ("\x00repo", "is a name this run cannot read"),
+        ("re\x00po", "is a name this run cannot read"),
+        ("repo\x00", "is a name this run cannot read"),
+        ("\ud800", "unreadable the .git pointer at"),
+        ("re\ud800po", "unreadable the .git pointer at"),
+    )
+    NASTY = tuple(zip(*LOCATIONS))[0]
+    #: The two screens that refuse `integrate_task`'s arguments BEFORE Task
+    #: 11's block runs, measured rather than assumed.
+    TRANSITION = "a transition id is one token"
+    FOREIGN = "missing progress.md"
 
     def setUp(self) -> None:
         super().setUp()
@@ -16469,8 +17172,24 @@ class IntegrationTotalityTests(TempDirTestCase):
         self.merge = merge_no_ff(self.repo, "task/T1", "integrate T1")
         complete_task(self.run_dir, "T1", commits=(self.tip,))
 
+    def assert_own_reason(self, caught, fragment: str, table) -> None:
+        """The diagnosis carries ITS fragment and none of the table's others."""
+        message = str(caught.exception)
+        self.assertIn(fragment, message)
+        for other in {reason for _value, reason in table} - {fragment}:
+            self.assertNotIn(other, message)
+
+    def test_the_corpus_needs_more_than_one_reason_to_discriminate(self):
+        """The guard on the guard: if a table ever collapsed onto one
+        fragment, `assert_own_reason` would assert a constant and pass."""
+        for table in (self.LOCATIONS, self.GRAFT):
+            with self.subTest(table=table[0][1]):
+                self.assertEqual(len({reason for _v, reason in table}), 2)
+                self.assertEqual(len(table), len(self.NASTY))
+        self.assertEqual(tuple(zip(*self.GRAFT))[0], self.NASTY)
+
     def test_every_emitter_refuses_a_nasty_repository_location(self):
-        for value in self.NASTY:
+        for value, fragment in self.LOCATIONS:
             for name, kwargs in (
                 ("merge_parents_commands", {"merge_commit": self.merge}),
                 ("integration_range_commands",
@@ -16478,48 +17197,95 @@ class IntegrationTotalityTests(TempDirTestCase):
                 ("conflicted_paths_commands", {}),
             ):
                 with self.subTest(value=value, name=name):
-                    with self.assertRaises(state.TrackerError):
+                    with self.assertRaises(state.TrackerValidationError) as bad:
                         getattr(state, name)(value, **kwargs)
+                    self.assert_own_reason(bad, fragment, self.LOCATIONS)
 
     def test_the_ancestry_predicate_refuses_a_nasty_repository_location(self):
-        for value in self.NASTY:
+        for value, fragment in self.LOCATIONS:
             with self.subTest(value=value):
-                with self.assertRaises(state.TrackerError):
+                with self.assertRaises(state.TrackerValidationError) as bad:
                     state._integration_ancestry(
                         value, commits=(self.tip,), branch_tip=self.tip,
                         merge_commit=self.merge, target_branch="target",
                         run_command=controller_git)
+                self.assert_own_reason(bad, fragment, self.LOCATIONS)
+
+    def test_the_graft_screen_refuses_a_nasty_repository_location(self):
+        for value, fragment in self.GRAFT:
+            with self.subTest(value=value):
+                with self.assertRaises(state.TrackerValidationError) as bad:
+                    state._graft_screen(value)
+                self.assert_own_reason(bad, fragment, self.GRAFT)
 
     def test_integrate_task_refuses_a_nasty_run_directory(self):
+        """And it is `validate_run` that refuses it, not Task 11 -- asserted,
+        because a corpus that cannot say which screen answered cannot notice
+        the day Task 11's own screen stops being reached."""
         for value in self.NASTY:
             with self.subTest(value=value):
-                with self.assertRaises(state.TrackerError):
+                with self.assertRaises(state.TrackerError) as bad:
                     state.integrate_task(value, task_id="T1",
                                          merge_commit=self.merge,
                                          run_command=controller_git)
+                self.assertIn(self.FOREIGN, str(bad.exception))
+                self.assertNotIn(self.TRANSITION, str(bad.exception))
 
     def test_integrate_task_refuses_a_nasty_merge_commit(self):
-        for value in self.NASTY + ("task/T1", "", None, 7):
+        for value in self.NASTY:
             with self.subTest(value=value):
-                with self.assertRaises(state.TrackerError):
+                with self.assertRaises(state.TrackerError) as bad:
                     state.integrate_task(self.run_dir, task_id="T1",
                                          merge_commit=value,
                                          run_command=controller_git)
+                self.assertIn(self.TRANSITION, str(bad.exception))
+                #: `!r` IS HOW THE MODULE SPELLS IT, so the assertion uses the
+                #: same spelling: a NUL printed raw into a diagnosis is a
+                #: diagnosis a terminal eats.
+                self.assertIn(repr(f"integrate-T1-{value}"),
+                              str(bad.exception))
 
     def test_integrate_task_refuses_a_nasty_task_id(self):
-        for value in self.NASTY + ("", None, 7):
+        for value in self.NASTY:
             with self.subTest(value=value):
-                with self.assertRaises(state.TrackerError):
+                with self.assertRaises(state.TrackerError) as bad:
                     state.integrate_task(self.run_dir, task_id=value,
                                          merge_commit=self.merge,
                                          run_command=controller_git)
+                self.assertIn(self.TRANSITION, str(bad.exception))
+                self.assertIn(repr(f"integrate-{value}-{self.merge}"),
+                              str(bad.exception))
 
-    def test_the_graft_screen_refuses_a_nasty_repository_location(self):
-        for value in self.NASTY:
+    def test_an_unusable_reference_is_refused_in_its_own_words(self):
+        """The NON-nasty half of the `merge_commit` corpus, kept apart because
+        its values are refused for a DIFFERENT reason -- and `task/T1`, which
+        is usable as a reference and dies three screens later on the parent
+        count, for a third. Folding the three lists into one is exactly how a
+        corpus goes back to asserting a family."""
+        for value in ("", None, 7):
             with self.subTest(value=value):
-                with self.assertRaises(state.TrackerError):
-                    state._graft_screen(value)
+                with self.assertRaises(state.TrackerError) as bad:
+                    state.integrate_task(self.run_dir, task_id="T1",
+                                         merge_commit=value,
+                                         run_command=controller_git)
+                self.assertIn("unusable git reference", str(bad.exception))
+                self.assertNotIn(self.TRANSITION, str(bad.exception))
+        with self.assertRaises(state.TrackerError) as branch:
+            state.integrate_task(self.run_dir, task_id="T1",
+                                 merge_commit="task/T1",
+                                 run_command=controller_git)
+        self.assertIn("exactly 2 parents", str(branch.exception))
+        self.assertNotIn("unusable git reference", str(branch.exception))
 
+    def test_a_task_id_that_names_no_row_is_refused_in_its_own_words(self):
+        for value in ("", None, 7):
+            with self.subTest(value=value):
+                with self.assertRaises(state.TrackerError) as bad:
+                    state.integrate_task(self.run_dir, task_id=value,
+                                         merge_commit=self.merge,
+                                         run_command=controller_git)
+                self.assertIn("unknown task", str(bad.exception))
+                self.assertNotIn(self.TRANSITION, str(bad.exception))
 
 def object_name_corpus() -> tuple:
     """Derived from the CALL TREE of `_integration_end`, not from known bugs.

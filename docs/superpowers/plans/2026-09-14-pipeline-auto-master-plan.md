@@ -818,6 +818,38 @@ assembled, and it **asks the reader** (`_recorded_attempts` over the entry
 alone) instead of naming delimiters. Ask the reader and a delimiter added
 tomorrow is covered untouched.
 
+## "Assert the diagnosis" is vacuous when four rules share one message
+
+Refinement found by P04 Task 10's fix round. The standing rule says a totality
+corpus must assert **the diagnosis**, not merely that something in the error
+family was raised — because a corpus that only asks "did it refuse?" cannot see
+a screen that refuses for the wrong reason.
+
+But `_safe_relative` raised **one message for four distinct rules**. A corpus
+asserting "the diagnosis" against that message was therefore asserting a
+**constant**: every case matched, so the assertion distinguished nothing, and a
+mutant collapsing the four rules into one survived it.
+
+**So the rule needs its second half: each case must require exactly one reason
+string, and that it is its own.** If several rules can refuse the same input,
+they need distinguishable messages before the corpus can assert anything. The
+mechanical check is the same as for argv pins — collapse the messages into one
+and see whether a test dies.
+
+## Propagating a changed contract found a defect in a phase not yet written
+
+Task 10 changed the `Question` cell's quorum arm and was required to amend every
+document pinning it. Doing so turned up that **P06's `open_fix_round` writes the
+cell as a bare path — neither the quorum arm nor the halt arm — so a task it
+blocked could never have been resumed.** One P05 fixture also carried a
+checkpoint shape no transition produces.
+
+Neither would have been found by building P06, because its own tests would have
+been written against its own wrong spelling and would have passed. They were
+found only because a *producer* changed and went looking for its consumers.
+That is the argument for the propagation rule being same-commit and exhaustive
+rather than best-effort.
+
 ## Cross-phase clarifications
 
 Resolved after the phase plans were written, where two phases needed the same

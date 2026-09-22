@@ -721,6 +721,37 @@ interface amends every document that pins it, in the same commit, and says so in
 its report — the way the `verify_source_range` signature change was propagated to
 four plan files.** Being adjacent to the next task is not propagation.
 
+## "Measured inert" over a corpus that lacks the feature proves nothing
+
+Task 8 measured `log.showSignature` against the emitted argv and recorded it
+**inert**. Task 11 re-measured it and found 13 `gpg:` lines on stdout, landing
+inside the preceding record's body where paths are read.
+
+Both measurements were honest and only one was meaningful: **Task 8's history
+contained no signed commit**, so the config it was testing had nothing to act
+on. The corpus lacked the feature under test, so the result was predetermined.
+
+This is the build's signature defect — *a test that passes without exercising
+what it names* — wearing the clothes of a measurement rather than a test, and it
+is more dangerous there, because a measurement gets written down as a fact and
+is then trusted by everyone downstream. The seventeen configs recorded as
+"measured inert" in this plan are each only as good as the repository they were
+measured against.
+
+**So: when recording a mechanism as inert, state what the fixture contained that
+would have let it fire.** A signed commit for `log.showSignature`, a submodule
+for `diff.ignoreSubmodules`, a rename for `--no-renames`, a replace ref for
+`core.useReplaceRefs`. If you cannot name it, you have not measured the
+mechanism — you have measured its absence.
+
+(The failure direction was benign here: Task 8 fails **closed**, refusing the
+gpg text as out-of-scope paths. But it blames the worker's range for the
+repository's config, which is a false accusation against an honest worker and
+near-impossible to diagnose from the message. `--no-show-signature` is the
+one-token fix, and unlike `--no-replace-objects` a `log` option is parsed after
+the config, so the flag alone is a real pin — verified against `.git/config`, a
+command-line `-c`, an `[include]` file, `.git/config.worktree` and `gpg.format`.)
+
 ## Cross-phase clarifications
 
 Resolved after the phase plans were written, where two phases needed the same

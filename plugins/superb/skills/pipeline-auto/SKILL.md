@@ -1,6 +1,7 @@
 ---
 name: pipeline-auto
-description: Use when acting as controller of an autonomous pipeline-auto run and a worker question, a brain quorum's responses, the drift budget, a recorded human decision, a phase's review class, or a completeness critic item needs a decision — especially under deadline, billing or stakeholder pressure.
+description: Use when the user wants a substantial feature taken from idea through implementation in one run with as little interruption as possible ("just build it", "don't keep asking me"), or when controlling such a run and a worker question, quorum responses, the drift budget, a human decision, a review class or a completeness item needs a decision, especially under deadline pressure. Not for a run where the user is consulted at each decision; that is superb:pipeline.
+argument-hint: "[resume|status]"
 ---
 
 # pipeline-auto: controller rules
@@ -9,6 +10,86 @@ Machines may unblock work. They may not decide past the budget, override a
 human, choose between equally grounded answers, or enlarge scope. When a rule
 says escalate, escalating **is** the decisive action. Deadline, billing and "too
 cautious" pressure change none of these rules.
+
+## The rule this skill reverses
+
+`superb:pipeline` forbids "a Brain Agent that decides user requirements"
+(`skills/pipeline/references/planning.md:177-181`), and its zero-assumption law
+(`skills/pipeline/SKILL.md:40-71`) lets another agent explain options but never
+decide an unresolved requirement. **This skill is that Brain Agent**, built on
+purpose. The guardrails below are the answer to that objection; changing a
+threshold, budget or escalation route loosens the answer.
+
+| The objection | The answer |
+| --- | --- |
+| A machine decides what it prefers | It adopts only what the spec or code entails. `convention-cited` is below the floor |
+| Three agents agreeing proves nothing | Agreed. The bar is grounding rung, not votes; reading assignments decorrelate the three |
+| It will decide more and more | 3 adoptions per phase, 10 per run, checked before dispatch; only a human extends, at most twice |
+| It will overrule the user | A candidate contradicting `Provenance: human` is rejected at any rung |
+| It will build what nobody asked for | The phase set is immutable after stage 06; `MISSING-FROM-SPEC` is frozen |
+| It will drift from the request | Depth cap 2 from the last human answer |
+| It grades its own homework | Every adoption is labelled `Provenance: quorum`; the terminal report leads with them, weakest first |
+
+Want the user consulted at each decision? Use `superb:pipeline`. This is a
+different trade, not a better version.
+
+## Invocation
+
+Trim `$ARGUMENTS` and select exactly one mode:
+
+| Argument | Mode |
+| --- | --- |
+| empty | Full run from stage 01 |
+| `resume` | Resume one compatible `pipeline-auto/v1` run from its files and Git. Never create or replace a run |
+| `status` | Strictly read-only: no lock, write, reconcile, dispatch, test, fix or initialize |
+| anything else | Ask what the user meant. Do not guess a verb |
+
+For `resume` and `status`, use [references/persistence.md](references/persistence.md).
+No identifiable run: say so. Several: ask which. Recency is not selection
+authority.
+
+## The one gate, and files as the authority
+
+**Stage 03 asks at most four questions in one `AskUserQuestion` call.** Those
+answers are the only unimpeachable requirements. Every later decision is a
+quorum adoption or an escalation: no third outcome, no controller override, no
+second approval.
+
+Reconstruct the next action from `progress.md`, `decisions.md`, immutable
+results, evidence digests and Git — never from conversation memory. The schema
+is `pipeline-auto/v1`; there is no migration from `pipeline-run/v1` or `/v2`.
+Foreign, missing, malformed or unknown schema is a read-only stop: change
+nothing, dispatch nothing.
+
+## Stage routing
+
+Load only the reference the active stage needs. The rules in this file apply at
+every stage and win over any summary elsewhere.
+
+| Stage | Work | Route |
+| --- | --- | --- |
+| 01–07 | Intent read, question synthesis, the gate, design and review class, spec, master plan, phase fan-out | [references/planning.md](references/planning.md) |
+| any | Question raised, quorum open or finalising, drift budget, escalation, quorum resume | [references/quorum.md](references/quorum.md) |
+| 08–10 | Dial, task start, per-task gate, TDD, scopes, evidence, integration, debugging | [references/execution.md](references/execution.md) |
+| 11–12 | Master gate, contradiction routing, adjudicator, completeness, final verification, terminal report | [references/review.md](references/review.md) |
+| any | Tracker writes, status, resume, reconciliation, decision actions | [references/persistence.md](references/persistence.md) |
+
+| Dispatch | Template / agent | When |
+| --- | --- | --- |
+| Intent readers | `pipeline-auto-intent-reader` ×3 | stage 01 |
+| Brains | `pipeline-auto-brain` ×3 with `prompts/brain.md` | stage 02 and every quorum |
+| Implementer | `prompts/implementer.md`, brief from `scripts/task-brief RUN_DIR PLAN_FILE TASK_NUMBER` | stage 09, one fresh per task |
+| Task reviewer | `prompts/task-reviewer.md`, package from `scripts/review-package RUN_DIR BASE HEAD` | the per-task gate |
+| Adversarial reviewer | `prompts/adversarial-reviewer.md` | any fired trigger, any `review_class` |
+
+Both agents run with exactly `Read`, `Grep`, `Glob`. Never add a tool to either
+— not even `Bash` "for one command": frontmatter allowlists tools, not
+commands, and a shell can rewrite `decisions.md` or the intent brief. Never
+substitute `brainstorm-architect`.
+
+The SDD review protocol is inlined in `prompts/` and `scripts/`; do not invoke
+`superpowers:subagent-driven-development` or
+`superpowers:finishing-a-development-branch`.
 
 ## Rungs, strongest first
 
@@ -162,3 +243,6 @@ are all reclassifications. The proposal is the user's to decide.
 - Writing `unresolved`, `deferred` or "carry to handover" instead of `escalated`.
 - Opening a quorum without comparing the budget counters to the ceilings.
 - Writing `review_class`, a ratchet record, or a label over a critic's classification.
+- Pushing, publishing, opening a pull request, or merging into `main`/`master`.
+  Success is a clean committed feature branch and a report that leads with every
+  decision the run made without asking.

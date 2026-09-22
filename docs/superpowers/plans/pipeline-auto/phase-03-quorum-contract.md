@@ -162,8 +162,9 @@ def validate_run(run_dir: Path) -> dict: ...          # Path, and never coerced
 def initialize_run(run_dir: Path, *, run_id: str, base_commit: str,
                    target_branch: str, worker_limit: int,
                    repo_root: str) -> dict: ...            # repo_root is REQUIRED
-def classify_filesystem(path: str) -> str: ...             # unknown => the run does not start
-def locked_tracker_update(run_dir: str, *, transition_id: str, mutate) -> dict: ...
+def classify_filesystem(path: Path) -> str: ...            # unknown => the run does not start
+def locked_tracker_update(run_dir: Path, *, transition_id: str, mutate,
+                          timeout_s: float = 10.0) -> dict: ...   # Path, and never coerced
 def publish_immutable(path: Path, content: str) -> str: ...   # takes a PATH, returns a DIGEST
 def derive_next_action(tracker: dict) -> str: ...
 

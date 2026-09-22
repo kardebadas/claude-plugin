@@ -14916,6 +14916,98 @@ class ImportWorkerResultTests(TempDirTestCase):
         self.assertEqual(row["question"], HALT_REF)
         self.assertEqual(row["question"], f"{state.HALT_ROUTE}:{HALT_BLOCKER}")
 
+    def test_the_blocked_checkpoint_names_the_question_and_not_only_the_attempt(self):
+        """`blocked:<attempt>@<question>`, both arms, and the `@` is the whole
+        point of the checkpoint.
+
+        THE TWO CELLS ARE NOT THE SAME KIND OF RECORD. `Question` holds ONE
+        value and the next block OVERWRITES it; `Checkpoints` is append-only.
+        A bare `blocked:<attempt>` therefore records that a block happened and
+        loses WHAT it was -- so the audit pointer P04's own resolved question
+        says this checkpoint exists to be (`phase-04-task-lifecycle.md:2437`,
+        "makes the audit pointer survive every resume") points at nothing the
+        moment a resumed task blocks a second time.
+
+        THREE AUTHORITIES AGREE AND THE MODULE DID NOT. The plan ships
+        `f"blocked:{_attempt_token(result['attempt'])}@{marker}"`
+        (`phase-04-task-lifecycle.md:3822`); the committed fixture carries
+        `blocked:attempt-001@scratch/p02-t02-question.md`
+        (`tests/fixtures/valid-progress.md:71`); and the predecessor both
+        WRITES this shape (`pipeline_state.py:3050`) and VALIDATES it --
+        `item.startswith(f"blocked:{task.attempt}@")` or `SchemaError`
+        (`pipeline_state.py:528-531`). The writer emitted the bare form
+        against all three and nothing pinned it, which is this test.
+        """
+        repo, run_dir = self.reserved_run()
+        path = self.publish(repo, run_dir, worker_result(
+            status="BLOCKED", source_ref="-", commits=(), evidence=(),
+            tests=(), blocking_reason=HALT_BLOCKER))
+        row = task_row(import_result(run_dir, path), "T1")
+        self.assertIn(f"blocked:attempt-001@{HALT_REF}",
+                      state._csv(row["checkpoints"]))
+        #: THE PAYLOAD IS THE CELL, not a second spelling of it. One writer,
+        #: one string, so the pointer cannot go stale against the cell it
+        #: points at.
+        self.assertIn(f"blocked:attempt-001@{row['question']}",
+                      state._csv(row["checkpoints"]))
+
+    def test_the_blocked_checkpoint_carries_the_quorum_arm_whole(self):
+        """The other arm. `_validate_decision` reads the qid out of this
+        string to bind a resume grant, so a pointer that dropped it would name
+        a block no grant could be matched against."""
+        repo, run_dir = self.reserved_run()
+        publish_question_record(run_dir)
+        path = self.publish(repo, run_dir, quorum_result(
+            "NEEDS_CONTEXT", question_record=QUESTION_REF.split("@", 1)[1],
+            tests=()))
+        row = task_row(import_result(run_dir, path), "T1")
+        self.assertEqual(row["question"], QUESTION_REF)
+        self.assertIn(f"blocked:attempt-001@{QUESTION_REF}",
+                      state._csv(row["checkpoints"]))
+
+    def test_the_pointer_survives_the_resume_that_overwrites_the_question_cell(self):
+        """THE PROPERTY, not the spelling. A task blocks on a quorum, is
+        resumed, and blocks again on a halt: the `Question` cell now holds only
+        the second block and the first is recoverable ONLY from the history."""
+        repo, run_dir = self.reserved_run()
+        publish_question_record(run_dir)
+        first = self.publish(repo, run_dir, quorum_result(
+            "NEEDS_CONTEXT", question_record=QUESTION_REF.split("@", 1)[1],
+            tests=()))
+        import_result(run_dir, first)
+        write_decisions(run_dir, RESUME_DECISION)
+        state.resume_task(run_dir, task_id="T1", prior_attempt=1,
+                          new_owner="impl-2", new_attempt=2,
+                          decision_ref=QUORUM_GRANT)
+        second = self.publish(repo, run_dir, worker_result(
+            status="BLOCKED", attempt=2, owner="impl-2", source_ref="-",
+            commits=(), evidence=(), tests=(),
+            blocking_reason=HALT_BLOCKER))
+        row = task_row(import_result(run_dir, second), "T1")
+        self.assertEqual(row["question"], HALT_REF)
+        members = state._csv(row["checkpoints"])
+        self.assertIn(f"blocked:attempt-001@{QUESTION_REF}", members)
+        self.assertIn(f"blocked:attempt-002@{HALT_REF}", members)
+
+    def test_a_blocking_reason_carrying_a_comma_is_refused_at_the_import(self):
+        """`Checkpoints` is comma-separated and `_table_safe`'s own rule is
+        that "the bar goes on the writer that knows the cell is list-valued".
+        `blocking_reason` is free text a human reads and `_cell_safe`
+        deliberately admits a comma in it, so the bar cannot live there -- and
+        without one here the pointer appends TWO history members, silently,
+        with the tracker still valid. The quorum arm needs no such screen: the
+        qid is hex and `_safe_relative` bars the cell's delimiters in the path.
+        """
+        repo, run_dir = self.reserved_run()
+        path = self.publish(repo, run_dir, worker_result(
+            status="BLOCKED", source_ref="-", commits=(), evidence=(),
+            tests=(), blocking_reason="the host is down, and nobody knows why"))
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(run_dir, path)
+        self.assertIn("comma-separated cell", str(caught.exception))
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
     def test_a_parked_attempt_claims_no_completion_cell(self):
         """`_validate_tasks` refuses a `[?]` row carrying any of the four
         completion cells, so a route that wrote one would be refused by the
@@ -17591,6 +17683,13 @@ UNROUTABLE_QUESTION_CELLS = (
 #: what the corpus carries instead.
 
 
+#: A PHASE SECTION BANNER, of any phase and any task number. The roster below
+#: bounds its section between its own banner and the NEXT one, and this is the
+#: predicate that finds the next one -- so `# P05 Task 1:` closes P04 Task 12's
+#: section without this file being touched again.
+_SECTION_BANNER = re.compile(r"# P\d\d Task \d+:")
+
+
 class ReconcileProducesBlockTests(unittest.TestCase):
     """The brief's Produces block is a claim to CHECK, name by name.
 
@@ -17660,9 +17759,27 @@ class ReconcileProducesBlockTests(unittest.TestCase):
             [])
 
     def test_the_names_this_task_defines_are_exactly_these_two(self):
-        """Located by the section banner, bounded at both ends, and asserted
-        to be the LAST section -- so the first thing a later phase appends
-        fails here rather than being silently counted as Task 12's."""
+        """Located by its own banner and BOUNDED AT BOTH ENDS.
+
+        The closing bound used to be the bottom of the file, and the docstring
+        called that a feature: "asserted to be the LAST section -- so the first
+        thing a later phase appends fails here rather than being silently
+        counted as Task 12's". That is the EXACT shape the Task 9 roster at
+        `Task9ModuleSurfaceTests` was already converted away from one task
+        earlier, for the reason written there: "everything the module defines
+        from here to the bottom of the file" is Task 12's section only while
+        Task 12 is the last section. P05's FIRST appended name would have
+        failed a test about P04 Task 12's surface -- a P04 test red for a
+        reason that has nothing to do with P04, whose only available repair
+        looks like editing the expected list, which is how a roster stops
+        being a roster.
+
+        THE OPENING BOUND IS STILL ASSERTED to be Task 12's banner, so this
+        still fails on a thirteenth P04 task appended with no banner of its
+        own, and on a name misplaced into this section from anywhere else. It
+        is the CLOSING bound that moved: the next section banner of any phase,
+        and the end of the file only while there is not one yet.
+        """
         source = (SKILL_DIR / "scripts" / "pipeline_auto_state.py").read_text(
             encoding="utf-8")
         lines = source.splitlines()
@@ -17672,9 +17789,12 @@ class ReconcileProducesBlockTests(unittest.TestCase):
             [lines[index - 1] for index in banners][-1],
             "# P04 Task 12: file-first reconciliation -- fault F7.")
         banner = banners[-1]
+        later = [index for index, line in enumerate(lines, start=1)
+                 if index > banner and _SECTION_BANNER.match(line)]
+        end = later[0] if later else len(lines) + 1
         tree = ast.parse(source)
         defined = sorted(
-            name for node in tree.body if node.lineno > banner
+            name for node in tree.body if banner < node.lineno < end
             for name in module_bindings([node]))
         self.assertEqual(defined, ["_result_candidates", "reconcile_run"])
         self.assertEqual([name for name in defined

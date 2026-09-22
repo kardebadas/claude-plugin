@@ -103,18 +103,30 @@ class PlanMetadataError(TrackerError): ...
 
 def parse_tracker(text: str) -> dict: ...
 def render_tracker(tracker: dict) -> str: ...
-def validate_run(run_dir: str) -> dict: ...
-def initialize_run(run_dir: str, *, run_id: str, base_commit: str,
-                   target_branch: str, worker_limit: int, repo_root: str) -> dict: ...
-def locked_tracker_update(run_dir: str, *, transition_id: str, mutate) -> dict: ...
-def publish_immutable(path: str, content: str) -> str: ...   # returns the sha256 hex digest
+def validate_run(run_dir: Path) -> dict: ...
+def initialize_run(run_dir: Path, *, run_id: str, base_commit: str,
+                   target_branch: str, repo_root: str,
+                   worker_limit: int) -> dict: ...
+def locked_tracker_update(run_dir: Path, *, transition_id: str, mutate,
+                          timeout_s: float = 10.0) -> dict: ...
+def publish_immutable(path: Path, content: str) -> str: ...   # returns the sha256 hex digest
+#   THE FIRST PARAMETER IS `Path` ON ALL FIVE AND NONE OF THEM COERCES.
+#   Measured: handed a `str`, `validate_run` and `locked_tracker_update` raise
+#   `TypeError: unsupported operand type(s) for /: 'str' and 'str'` and
+#   `publish_immutable` raises `AttributeError: 'str' object has no attribute
+#   'parent'` -- all outside the `TrackerError` family. It is deliberate:
+#   `RUN_DIR_CONTRACT_FUNCTIONS = ("validate_run", "locked_tracker_update")`
+#   and the roster test
+#   `test_no_entry_point_hands_a_raw_run_directory_to_a_path_typed_callee`
+#   assert it. The P03/P04 entry points are the opposite and normalise a `str`
+#   through `_run_path`. NEVER write `str(...)` at one of these call sites.
 def derive_next_action(tracker: dict) -> str: ...
 
 SECTIONS: dict[str, tuple[str, ...]]
 def section_columns(name: str) -> tuple[str, ...]: ...
 def append_row(tracker: dict, section: str, row: dict) -> dict: ...
 def repo_root(tracker: dict) -> str: ...
-def classify_filesystem(path: str) -> str: ...
+def classify_filesystem(path: Path) -> str: ...
 ```
 
 Three consequences P04 must honour:
@@ -153,7 +165,9 @@ P04 reads exactly three of them — `QID`, `State`, `Owners` — and treats `Sta
 
 `## Run` fields P04 reads: `run_id`, `target_branch`, `worker_limit`, `phase_plans`, `decisions`. The repository root comes from P02's `repo_root(tracker)` **function**, never from a run field and never from `run_dir` depth.
 
-**Key form.** Column headers are title-case with spaces (`Source Ref`, `Payload Digest`); P04 addresses rows by the snake_case form of the header (`source_ref`, `payload_digest`) through `_field(row, "Source Ref")`, which accepts either spelling. That one function is the whole coupling to P02's key convention.
+**Key form.** Column headers are title-case with spaces (`Source Ref`, `Payload Digest`); a row is addressed by the snake_case key **directly** — `row["source_ref"]`, `row["payload_digest"]`. `_field` is P02's one-argument header-to-key **map**, not a row accessor: measured, `inspect.signature(_field)` is `(column: str) -> str` and `_field("Source Ref")` returns `"source_ref"`. That one function is the whole coupling to P02's key convention.
+
+> **`_field(row, "Source Ref")` is the two-argument redefinition this suite was written to catch**, and this paragraph used to spell it. `test_the_row_accessor_is_consumed_and_never_redeclared` (`tests/test_task_lifecycle.py`) asserts both halves — `list(inspect.signature(_field).parameters) == ["column"]`, and a walk of `reconcile_run`'s AST finding **zero** `_field(...)` calls — with the docstring "`_field(phase, "ID")` is the Task 6 defect in the brief's own body … a two-argument redefinition would move all of them at once". A later phase that follows the old sentence redefines `_field` and moves every section-column site in the module at once.
 
 Every cell is a table-safe string; `-` is the empty marker; multi-valued cells are comma-separated. `worker_limit` is read with `int(...)`.
 
@@ -196,6 +210,45 @@ def reconcile_run(run_dir: str, *, run_command) -> dict: ...
 ```
 
 Plus `templates/worker-result.md` and `templates/verification-evidence.md`.
+
+**What is and is not a boundary crossing — the rule that settles both "owed API"
+debts.** P05 and P06 **append to `pipeline_auto_state.py` itself** (P05 a
+`# --- dial and gate ---` section, P06 a `# --- master gate ---` section below
+it). A private name called from module code is therefore *not* a phase-boundary
+crossing and needs no public spelling: `_owner_line`, `_screen_owner_line`,
+`_OWNER_LINE_PREFIX`, `_require_regular_file`, `_csv`, `_field`, `_digest`,
+`_dumps`, `_integration_ancestry`, `_QUESTION_HALT_ARM`, `_RANGE_CHECKPOINT` and
+the `_validate_*` family are all consumed this way and all stay private.
+
+Two names were nevertheless recorded as debts. Both are **discharged as not
+owed**, with the measurement:
+
+- **`_resolve_question_record` → a public `resolve_question`.** *Not owed, and
+  promoting it would not have helped.* The only site told to call it is
+  `open_reconciliation` in P06, which is module code. And measured, the function
+  **cannot serve that call site at all**: handed a reconciliation document it
+  raises *"the question record at 'gate-master/reconciliations/F-101.md' is not
+  one this run can read back (QuorumSchemaInvalid: a question record holds
+  exactly one ## section, not 0)"*. It resolves a record `open_quorum` filed at
+  `<run>/quorum/<qid>/question.md` and nothing else. `open_reconciliation` opens
+  no quorum, so its cell is the **halt** arm — see the comment at that call site.
+- **`_RANGE_CHECKPOINT` → a public marker prefix.** *Not owed.* The reader is
+  `render_terminal_report`, which is **P06 module code** and reaches the private
+  constant directly. P07's mention is stage *prose* read by a controller agent
+  that has no module at all — and prose necessarily spells a grammar literally;
+  the same paragraph already spells `quorum:<qid>@<path>#sha256=<digest>` in full
+  and nobody calls that a debt.
+
+**The `blocked:` checkpoint grammar, settled.** `import_worker_result` writes
+`blocked:<attempt>@<question>` — the `@` payload is the `Question` cell it wrote
+in the same transition, whichever arm that is. The module had shipped a **bare**
+`blocked:<attempt>`, against this plan's own Task 10 code, against the committed
+fixture (`valid-progress.md:71`) and against the predecessor, which both writes
+that shape and *validates* it (`pipeline_state.py:528-531`,
+`item.startswith(f"blocked:{task.attempt}@")` or `SchemaError`). It is corrected
+and pinned by four tests. The payload is screened with
+`_table_safe(..., list_valued=True)`, because `Checkpoints` is comma-separated and
+`blocking_reason` is free text that may carry a comma.
 
 ## Pinned marker and comment strings
 
@@ -246,7 +299,8 @@ The phase-plan metadata comment is what stops a plan being prose a worker reinte
 
 **Interfaces:**
 - Consumes: `PlanMetadataError` from P02.
-- Produces: `REVIEW_CLASSES`; `_TOKEN`; `_parse_command_suite(raw) -> tuple[str, ...]`; `_safe_relative(value) -> PurePosixPath`; `_parse_phase_header(lines) -> dict` with keys `id`, `deps`, `review_class`, `review_reason`, `commands`; and the test harness `phase_header`, `task_block`, `write_phase_plan`, `TempDirTestCase`.
+- Consumes: `_TOKEN` and `_TASK_ID` from P02 — **neither is produced here**; see the note under Step 3.
+- Produces: `REVIEW_CLASSES`; `_parse_command_suite(raw) -> tuple[str, ...]`; `_safe_relative(value) -> PurePosixPath`; `_parse_phase_header(lines) -> dict` with keys `id`, `deps`, `review_class`, `review_reason`, `commands`; and the test harness `phase_header`, `task_block`, `write_phase_plan`, `TempDirTestCase`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -470,10 +524,25 @@ Append to `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py`. 
 # ---------------------------------------------------------------------------
 
 import json
-import re
 from pathlib import Path, PurePosixPath
 
-_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
+#: `_TOKEN` IS P02's AND IS NOT REDEFINED HERE. Two facts, both measured
+#: against the built module:
+#:
+#: 1. **`re` is not importable.** The allowlist is exactly the twelve
+#:    `{__future__, contextlib, copy, errno, fcntl, hashlib, json, msvcrt, os,
+#:    pathlib, time, types}`, pinned by
+#:    `test_the_module_still_imports_nothing_outside_the_twelve`, and the
+#:    string `re.compile(` occurs nowhere in the module source. The body this
+#:    plan used to ship here could not have run.
+#: 2. **`_TOKEN` is not the task-id grammar.** It is a `_CharClass`: permissive,
+#:    and it admits path separators and `..`. Measured `fullmatch`:
+#:    `P05-T01` -> `_TOKEN` True / `_TASK_ID` True; `a/b`, `x..y` and
+#:    `P05-T01/../x` -> `_TOKEN` **True** / `_TASK_ID` False; `-lead` -> both
+#:    False. `_TASK_ID` (a `_RefComponent`) is the one that screens a task id
+#:    or a ref component, and it is the name to reach for wherever a task id
+#:    is being validated. The master plan already records that Task 1 narrowing
+#:    `_TOKEN` broke sixteen sites, and says "Do NOT tighten `_TOKEN`".
 
 _PHASE_METADATA = re.compile(
     r"<!-- pipeline-auto-phase: id=([^;]+); deps=([^;]+); "
@@ -3265,7 +3334,7 @@ def publish_worker_result(run_dir, *, result: dict) -> str:
                 f"a conflicting immutable result already exists at {path}"
             )
     else:
-        digest = publish_immutable(str(path), content)   # returns the sha256 digest
+        digest = publish_immutable(path, content)   # `Path`-typed; returns the sha256 digest
         if digest != hashlib.sha256(content.encode("utf-8")).hexdigest():
             raise TrackerValidationError(
                 "published content digest does not match the rendered result"
@@ -4499,7 +4568,7 @@ The nine items P04 originally reported back have all been answered. They are rec
 | --- | --- | --- | --- |
 | 1 | `initialize_run` seeds no artifact references and no task rows | `initialize_run` writes `phase_plans`, `decisions`, `findings`, `repo_root` and an **empty** `## Tasks`; appending task rows is P04's | Task 6, `import_phase_plan` |
 | 2 | No evidence-specific exception type | Reuse `TrackerValidationError`; do **not** invent `EvidenceError` | every rejection path |
-| 3 | No public integration transition | `integrate_task(run_dir, *, task_id, merge_commit) -> dict` is public and P04's; a private helper could not be called by P05's gate or exercised by P06's tests | Task 11 |
+| 3 | No public integration transition | **AMENDED BY TASK 11.** `integrate_task(run_dir, *, task_id: str, merge_commit: str, run_command) -> dict` is public and P04's; a private helper could not be called by P05's gate or exercised by P06's tests. `run_command` is **required, not defaulted** — the module never executes git, so the ability to run one command is the controller's capability and arrives as an argument; pinned keyword-only with no default by `tests/test_task_lifecycle.py`. Task 12 amended question 6 and this row with it | Task 11 |
 | 4 | `## Quorum` columns unpinned | Pinned by P02's committed fixture: 12 columns. P04 reads `QID`, `State`, `Owners` and writes none | Tracker column contract |
 | 5 | `## Tasks` columns unpinned | Pinned by the same fixture: 16 columns, **no `Deps`**, and `Attempt` is the token `attempt-001` | Tracker column contract, `_attempt_token` |
 | 6 | `derive_next_action` vocabulary for the new routes | **SUPERSEDED BY TASK 10.** The halt arm is `halt:<reason>` as answered. The quorum arm is the complete `quorum:<qid>@<path>#sha256=<digest>` and NOT `quorum:<question-record>`: Task 7's `_validate_decision` reads the qid out of this cell to bind a resume grant, splitting on `@`, and a cell holding only the reference yields the whole reference as the "qid" — so the grant it looks for is `Q-<whole reference>`, which no decision id can ever be, and every resume of a quorum-blocked task is refused by the `Q-<qid>` mismatch. (It is refused by THAT arm and not by the "names no qid" arm: the reference is non-empty, so the empty-qid arm never fires. A diagnosis quoted that the code never produces is the same defect in a smaller size.) The action strings stay P02/P03's. Consumers must write and read the full arm — see the note under the interface block above | Task 10 |

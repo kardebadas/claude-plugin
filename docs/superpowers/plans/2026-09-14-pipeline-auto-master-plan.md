@@ -126,11 +126,23 @@ class PlanMetadataError(TrackerError): ...        # phase-plan comment grammar v
 
 def parse_tracker(text: str) -> dict: ...
 def render_tracker(tracker: dict) -> str: ...
-def validate_run(run_dir: str) -> dict: ...
-def initialize_run(run_dir: str, *, run_id: str, base_commit: str,
-                   target_branch: str, worker_limit: int, repo_root: str) -> dict: ...
-def locked_tracker_update(run_dir: str, *, transition_id: str, mutate) -> dict: ...
-def publish_immutable(path: str, content: str) -> str: ...   # returns the sha256 hex digest, not the path
+def validate_run(run_dir: Path) -> dict: ...
+def initialize_run(run_dir: Path, *, run_id: str, base_commit: str,
+                   target_branch: str, repo_root: str,
+                   worker_limit: int) -> dict: ...
+def locked_tracker_update(run_dir: Path, *, transition_id: str, mutate,
+                          timeout_s: float = 10.0) -> dict: ...
+def publish_immutable(path: Path, content: str) -> str: ...   # returns the sha256 hex digest, not the path
+#   THE FIRST PARAMETER IS `Path` ON ALL FIVE AND NONE OF THEM COERCES.
+#   Measured: handed a `str`, `validate_run` and `locked_tracker_update` raise
+#   `TypeError: unsupported operand type(s) for /: 'str' and 'str'` and
+#   `publish_immutable` raises `AttributeError: 'str' object has no attribute
+#   'parent'` -- all outside the `TrackerError` family. It is deliberate:
+#   `RUN_DIR_CONTRACT_FUNCTIONS = ("validate_run", "locked_tracker_update")`
+#   and the roster test
+#   `test_no_entry_point_hands_a_raw_run_directory_to_a_path_typed_callee`
+#   assert it. The P03/P04 entry points are the opposite and normalise a `str`
+#   through `_run_path`. NEVER write `str(...)` at one of these call sites.
 def derive_next_action(tracker: dict) -> str: ...
 
 # Section column grammar — P02 OWNS ALL OF IT, including sections whose rows
@@ -145,7 +157,7 @@ def append_row(tracker: dict, section: str, row: dict) -> dict: ...
 # stops at the raising phase and a P05 decision tainting a P07 task is silently
 # unmarked — the exact cascade the taint rule exists to catch.
 def repo_root(tracker: dict) -> str: ...   # recorded at init; NEVER derived from run_dir depth
-def classify_filesystem(path: str) -> str: ...  # unclassified => read-only stop BEFORE the run starts
+def classify_filesystem(path: Path) -> str: ...  # unclassified => read-only stop BEFORE the run starts
 ```
 
 `locked_tracker_update` contract: validate, acquire exclusive lock, re-read, revalidate, apply `mutate`, render, **reparse the render**, write to a temp file in the run directory, fsync, atomic replace, fsync the directory. A replayed `transition_id` returns current state without mutating. A post-replace sync failure raises `UpdateOutcomeUncertain`, never `TrackerWriteError`.
@@ -181,6 +193,12 @@ def resume_task(run_dir: str, *, task_id: str, prior_attempt: int,
                 new_owner: str, new_attempt: int, decision_ref: str) -> dict: ...
 def scopes_overlap(a: str, b: str) -> bool: ...   # file:/tree: with ancestor rules
 def parse_plan_metadata(path: str) -> dict: ...   # strict comment grammar, pinned key order; raises PlanMetadataError
+def import_phase_plan(run_dir, *, phase_plan) -> dict: ...
+#   THE ONLY THING THAT PUTS ROWS INTO `## Tasks`. P04 resolved question 1
+#   assigns it that job: `initialize_run` writes an EMPTY `## Tasks`, so a
+#   consumer phase that never names this function has no story for how the
+#   rows it operates on arrive. It is on `RUN_DIR_ENTRY_POINTS`, so it
+#   normalises its run directory and accepts a `str`.
 def publish_worker_result(run_dir: str, *, result: dict) -> str: ...
 def import_worker_result(run_dir: str, *, result_path: str,
                          run_command) -> dict: ...
@@ -194,6 +212,8 @@ def import_worker_result(run_dir: str, *, result_path: str,
 #   Changed by P04 Task 10; see the master plan's supersession note.
 def verify_source_range(repo: str, *, baseline: str, head: str, head_ref: str,
                         scopes: list, transcript: str) -> dict: ...
+def integrate_task(run_dir, *, task_id: str, merge_commit: str,
+                   run_command) -> dict: ...
 def reconcile_run(run_dir: str, *, run_command) -> dict: ...
 #   `run_command` on `reconcile_run` and on `integrate_task` above is
 #   REQUIRED, not defaulted, for `import_worker_result`'s reason: the module

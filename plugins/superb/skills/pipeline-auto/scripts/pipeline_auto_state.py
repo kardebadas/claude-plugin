@@ -16606,8 +16606,29 @@ def import_worker_result(run_dir, *, result_path, run_command) -> dict:
                 marker = f"{_QUESTION_HALT_ARM}{result['blocking_reason']}"
             updated["state"] = _TASK_STATES[2]
             updated["question"] = marker
+            #: THE CHECKPOINT NAMES THE BLOCK, AND A BARE ``blocked:<attempt>``
+            #: names only that there was one. ``Question`` holds ONE cell and
+            #: the next block OVERWRITES it, while ``Checkpoints`` is
+            #: append-only -- so a bare marker loses the first question the
+            #: moment a resumed task blocks a second time, and the audit
+            #: pointer this checkpoint exists to be is then a pointer to
+            #: nothing. The committed fixture (``valid-progress.md``) and the
+            #: predecessor -- which both WRITES this shape and VALIDATES it,
+            #: ``pipeline_state.py:528-531`` -- carry the ``@`` payload, and
+            #: this module wrote the bare form against both.
+            #:
+            #: SCREENED AS A LIST MEMBER, because ``Checkpoints`` is
+            #: comma-separated and ``_table_safe``'s own rule is that "the bar
+            #: goes on the writer that knows the cell is list-valued". The
+            #: quorum arm is comma-free by construction -- ``_safe_relative``
+            #: bars the cell's delimiters in the path and the qid is hex -- but
+            #: ``blocking_reason`` is free text a human reads, and a comma in
+            #: it would append TWO history members, silently and still valid.
             updated["checkpoints"] = _append_history(
-                updated["checkpoints"], f"{_BLOCKED_CHECKPOINT}{token}")
+                updated["checkpoints"],
+                f"{_BLOCKED_CHECKPOINT}{token}{_CHECKPOINT_DELIMITERS[1]}"
+                + _table_safe(marker, field="the blocked checkpoint's question",
+                              list_valued=True))
         return _replace_task(tracker, updated)
 
     return locked_tracker_update(home, transition_id=transition, mutate=mutate)

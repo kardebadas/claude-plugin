@@ -81,7 +81,7 @@ Three reasons, and each of them is a bug someone will otherwise introduce.
 
 **`## Gates` already sets the precedent.** A gate is a repeating record about a phase and it lives in its own section rather than as columns on `## Phases`. A review round is a repeating record about a task; it gets the same treatment for the same reason.
 
-**`## Tasks` is already fifteen columns and at its practical limit.** Adding fourteen more produces a twenty-nine-column table that no renderer diff is readable in and no reviewer can check by eye.
+**`## Tasks` is already sixteen columns and at its practical limit.** Adding fourteen more produces a thirty-column table that no renderer diff is readable in and no reviewer can check by eye.
 
 ### Why `Intensity` is recorded per round
 
@@ -156,11 +156,13 @@ class TrackerValidationError(TrackerError): ...
 
 def parse_tracker(text: str) -> dict: ...
 def render_tracker(tracker: dict) -> str: ...
-def validate_run(run_dir: str) -> dict: ...
-def initialize_run(run_dir: str, *, run_id: str, base_commit: str,
-                   target_branch: str, worker_limit: int) -> dict: ...
-def locked_tracker_update(run_dir: str, *, transition_id: str, mutate) -> dict: ...
-def publish_immutable(path: str, content: str) -> str: ...  # returns the sha256 hex digest, NOT the path
+def validate_run(run_dir: Path) -> dict: ...
+def initialize_run(run_dir: Path, *, run_id: str, base_commit: str,
+                   target_branch: str, repo_root: str,
+                   worker_limit: int) -> dict: ...
+def locked_tracker_update(run_dir: Path, *, transition_id: str, mutate,
+                          timeout_s: float = 10.0) -> dict: ...
+def publish_immutable(path: Path, content: str) -> str: ...  # returns the sha256 hex digest, NOT the path
 def derive_next_action(tracker: dict) -> str: ...
 
 _SECTIONS, _TASK_REVIEW_HEADER, _FIX_ROUND_HEADER, _COMMIT, _csv, _field
@@ -170,6 +172,43 @@ _REVIEW_CLASSES = ("final-only", "required")
 _CLASS_SOURCES = ("plan", "ratchet")
 _TASK_STATES = ("[ ]", "[~]", "[?]", "[x]")
 ```
+
+**`Path` IS THE TYPE, AND THESE FOUR DELIBERATELY DO NOT COERCE.** Measured with
+`inspect.signature` against the built module, and then by calling each with a
+`str`:
+
+| Name | Handed a `str` — the measured result |
+| --- | --- |
+| `validate_run` | `TypeError: unsupported operand type(s) for /: 'str' and 'str'` |
+| `locked_tracker_update` | `TypeError: unsupported operand type(s) for /: 'str' and 'str'` |
+| `publish_immutable` | `AttributeError: 'str' object has no attribute 'parent'` |
+| `initialize_run` | also `Path`-typed; `classify_filesystem` is the fifth |
+
+`TypeError` and `AttributeError` are **outside** the `TrackerError` family, so no
+`except TrackerError` a controller has written catches any of them. This is not
+an oversight: `RUN_DIR_CONTRACT_FUNCTIONS = ("validate_run",
+"locked_tracker_update")` and
+`test_the_two_contract_functions_deliberately_do_not` assert those two never call
+`_run_path`, and the roster test
+`test_no_entry_point_hands_a_raw_run_directory_to_a_path_typed_callee` states the
+rule outright: *a function whose FIRST parameter is annotated `Path` has declared
+that it will not coerce, and handing one a `str` is a `TypeError` waiting at its
+first `/`.* **Never wrap the argument in `str(...)` at any of these call sites** —
+this plan carried eleven such wrappers and every one of them raised. Pass the
+`Path`.
+
+**The asymmetry to hold.** The P04 entry points — `reserve_task`, `resume_task`,
+`publish_worker_result`, `import_worker_result`, `integrate_task`,
+`reconcile_run`, `import_phase_plan`, `worker_result_path`, and the P03 quorum
+functions — *do* normalise through `_run_path` and take a `str` happily. Only the
+five above refuse it.
+
+**`initialize_run` takes a required `repo_root` keyword.** It is keyword-only with
+no default, so the old five-argument call raises
+`TypeError: initialize_run() missing 1 required keyword-only argument:
+'repo_root'` — again outside `TrackerError`. The master plan's supersession note
+already recorded that `initialize_run` writes `repo_root`; this block was the one
+that missed it.
 
 `## Tasks` carries a `Phase` column, settled in P02. Every P05 function that needs a task's phase reads `task["phase"]` and never infers it from a task-id prefix — the per-phase drift budget and the ratchet are otherwise underivable from the tracker.
 
@@ -211,6 +250,9 @@ def import_worker_result(run_dir: str, *, result_path: str,
 #   Changed by P04 Task 10; see the master plan's supersession note.
 def verify_source_range(repo: str, *, baseline: str, head: str, head_ref: str,
                         scopes: list, transcript: str) -> dict: ...
+def import_phase_plan(run_dir, *, phase_plan) -> dict: ...
+def integrate_task(run_dir, *, task_id: str, merge_commit: str,
+                   run_command) -> dict: ...
 def reconcile_run(run_dir: str, *, run_command) -> dict: ...
 #   `run_command` on `reconcile_run` and on `integrate_task` above is
 #   REQUIRED, not defaulted, for `import_worker_result`'s reason: the module
@@ -222,6 +264,126 @@ def reconcile_run(run_dir: str, *, run_command) -> dict: ...
 #   `integrate_task` changed by P04 Task 11; `reconcile_run` by P04 Task 12,
 #   which also propagated Task 11's change to the documents that pin it.
 ```
+
+**Task rows arrive through `import_phase_plan` and through no P05 code.**
+`initialize_run` writes an **empty** `## Tasks` (P04 resolved question 1), and
+`import_phase_plan` is the only function in the module that appends rows to it.
+P05 operates on rows that are already there; it never creates one. A P05 test
+fixture that needs tasks either parses a committed fixture or calls
+`import_phase_plan`.
+
+### Consumes from P04 — the verification-evidence codec
+
+`## Task Review` carries an `Evidence` column and P06's `## Gates` carries
+`Verification`. Both hold **verification-evidence references**, and the codec
+that writes and reads them is public and belongs to P04 — the master plan says so
+in terms: *"P05 and P06 both consume evidence records and neither can reach a
+private codec."* Until now no consumer plan named any of it, so P05 would have
+written `Evidence` cells with no declared contract.
+
+```python
+EVIDENCE_MARKER = "<!-- pipeline-auto-verification-evidence/v1 -->"
+EVIDENCE_FIELDS = ("purpose", "run_id", "subject", "attempt", "code_state",
+                   "outcome", "commands", "environment", "inputs")
+EVIDENCE_PURPOSES = ("task-test", "task-integration", "phase")   # a plain tuple
+
+def render_verification_evidence(record: dict) -> str: ...   # THE only writer
+def parse_verification_evidence(text: str) -> dict: ...
+def resolve_evidence(run_dir, repo_dir, reference: str) -> dict: ...
+#   THREE POSITIONAL PARAMETERS, no keywords. Run directory first: it is
+#   searched before the repository root, and a digest mismatch stops there
+#   rather than reading as "not the file I meant".
+```
+
+Four binding rules, each measured against the built module:
+
+1. **A record is rendered and only then published.**
+   `render_verification_evidence` is the only legal writer, because
+   `parse_verification_evidence`'s last screen is a byte comparison against its
+   output — a document assembled any other way cannot be read back. Render, then
+   `publish_immutable` (which is `Path`-typed; see above).
+2. **Every `inputs` member is digest-bound.** Measured rejection of a bare path:
+   *"inputs member='a.md' must be `<repository-relative-path>#sha256=<64
+   lowercase hex>`; an unbound path names a file whose contents may have changed
+   since, and a short or upper-case digest matches nothing while looking exactly
+   like a match"*.
+3. **P05 must register its purposes, and the gate is real.** Measured, rendering
+   a record with `purpose="task-review"` today raises: *"unknown evidence purpose
+   'task-review'; the registered purposes are ['task-test', 'task-integration',
+   'phase'] and each phase adds the one it needs, because a purpose nobody
+   declared is a record nobody validates"*. So the `Evidence` column cannot be
+   populated until P05 extends `EVIDENCE_PURPOSES`.
+4. **`+=` IS THE ONLY LEGAL EXTENSION FORM.** `EVIDENCE_PURPOSES` is a plain
+   `tuple`, so the obvious extension is a second module-level assignment — and
+   that is a duplicate module-level binding.
+   `test_no_module_level_name_is_bound_twice` appears in **four** sub-suites, one
+   per task section, deliberately, and all four go red at once.
+   `module_bindings` documents the single exemption: *"`AugAssign` is
+   deliberately absent: `x += 1` rebinds a name that must already exist, which is
+   not a second definition of it."* Measured against the real
+   `module_bindings` with each form appended to the module source:
+
+   ```python
+   EVIDENCE_PURPOSES += ("task-review", "adversarial")          # duplicates: []
+   EVIDENCE_PURPOSES = EVIDENCE_PURPOSES + ("task-review", ...) # duplicates: ['EVIDENCE_PURPOSES']
+   ```
+
+   The `+=` form also passes roster A, which is built on `module_bindings`. Write
+   it exactly that way, in P05's own banner section. P06 extends it the same way
+   for `branch-review`, `completeness` and `final`.
+
+### The three AST rosters P05 will trip over, before it writes its first `def`
+
+All three live in `plugins/superb/skills/pipeline-auto/tests/test_task_lifecycle.py`
+and fire on **any** new module-level name.
+
+**Roster A — `test_the_names_this_task_defines_are_exactly_these_two`.** It
+asserts what P04 Task 12's section defines. It used to scan from Task 12's banner
+to the **bottom of the file**, so P05's first appended name — a `def` or a
+constant; it catches both — failed a P04 test. **That has been fixed ahead of
+P05**, on the precedent already in the file at `Task9ModuleSurfaceTests`
+(*"BOUNDED AT BOTH ENDS … the first thing Task 10 appended failed a test about
+Task 9's surface"*): the scan now ends at the next section banner, and falls back
+to the end of file only while there is not one. Verified in four states — as
+built (pass), with a `# P05 Task 1:` banner and P05 names below it (pass), with a
+name misplaced *inside* Task 12's section (fail), and with a name appended under
+no banner at all (fail). **What P05 must do: open its own banner section**, a
+line matching `# P0<n> Task <n>:` — `# P05 Task 1: …` — and append below it.
+Nothing in roster A needs editing.
+
+**Roster B — `test_every_public_entry_point_taking_a_run_directory_is_listed`.**
+It walks the module AST and collects every public `FunctionDef` whose first
+positional parameter is literally named `run_dir`; that set must equal
+`RUN_DIR_ENTRY_POINTS` + `RUN_DIR_CONTRACT_FUNCTIONS` + an eleven-name literal
+tuple. Measured today: 21 names, exact match. Measured with
+`record_task_review(run_dir, …)` appended: **fail**, *"missing from roster"*. The
+docstring says it is meant to: *"an entry point added by a later phase fails here
+rather than silently escaping the sweep below. NO COUNT IS SPELLED."* **What P05
+must do:** add every P05 function taking `run_dir` first — `record_task_review`,
+`open_fix_round`, `ratchet_phase`, `close_fix_round` — to **one** roster, chosen
+deliberately and never both:
+
+- `RUN_DIR_ENTRY_POINTS` also opts the function into
+  `test_every_entry_point_normalises_its_run_directory`, which requires the
+  literal `_run_path(run_dir)` in its body, **and** into roster C.
+- The extra literal tuple gives the existence check only.
+
+A function that opens paths under the run directory belongs in
+`RUN_DIR_ENTRY_POINTS`; one that only mutates a tracker through
+`locked_tracker_update` belongs in the extra tuple.
+
+**Roster C — `test_no_entry_point_hands_a_raw_run_directory_to_a_path_typed_callee`.**
+It *derives* its sink list from the AST — every module-level `FunctionDef` whose
+first parameter is annotated `Path` (47 today, 5 public) — so it will **not** fail
+spuriously on a new name. It goes live the moment a P05 function joins
+`RUN_DIR_ENTRY_POINTS`. The rule it enforces: inside such a function write
+`run_dir = _run_path(run_dir)` as an assignment **to the name `run_dir` itself**
+before any call to a `Path`-typed sink. Assigning to a differently-named local
+(`home = _run_path(run_dir)`) and then passing `run_dir` on is the exact defect it
+was written for — it is what `publish_worker_result` did. Its anti-vacuity floor
+asserts `{"validate_run", "classify_filesystem"} <= sinks`, so **P05 may never
+strip the `Path` annotations** from those two to dodge the `str`/`Path` rule
+above: that empties `sinks` and fails the `assertLessEqual`.
 
 ### Produces — consumed by P06
 
@@ -406,6 +568,24 @@ def seed(run_dir, text):
 
 ### Task 1: Widen `## Task Review` to the round-scoped fourteen columns
 
+> **MEASURED AT `e7cfd3e`: the fourteen-column schema is already committed.**
+> `SECTIONS["task_review"]` and `_TASK_REVIEW_HEADER` are both
+> `Task, Round, Intensity, State, Reviewer, Package, Report, Critical,
+> Important, Minor, Adversarial, Adversarial Verdict, Open, Evidence`, and both
+> `tests/fixtures/valid-progress.md` and `templates/progress.md` carry that
+> header. So Step 1's fixture migration and the `_TASK_REVIEW_HEADER` widening
+> are **verifications, not migrations** — run them, confirm the bytes already
+> match, and move on. What is genuinely unbuilt in this task is the P05
+> vocabulary: `INTENSITIES`, `INTENSITY_ORDER`, `TASK_REVIEW_STATES`,
+> `CLASS_INTENSITY`, `DialError`. Measured, none of those five exists, while
+> `_REVIEW_INTENSITIES` is still `("standard", "adversarial")` and
+> `_REVIEW_STATES` is still `("pending", "reviewing", "blocked", "accepted")` —
+> so the `mechanical` / `approved` cells in this plan's own fixtures are legal
+> only after this task widens those two. `_validate_task_review` **also already
+> exists** (it enforces one reviewer per round, no self-review, and "a task may
+> not reach `[x]` until the round that speaks for it is accepted at zero open
+> findings"); this task extends it rather than producing it.
+
 **Files:**
 - Modify: `plugins/superb/skills/pipeline-auto/scripts/pipeline_auto_state.py` (the `_TASK_REVIEW_HEADER` constant; append a `# --- dial and gate (P05) ---` section below P04's code)
 - Modify: `plugins/superb/skills/pipeline-auto/tests/fixtures/valid-progress.md`
@@ -450,6 +630,7 @@ Create `plugins/superb/skills/pipeline-auto/tests/fixtures/final-only-progress.m
 | schema | pipeline-auto/v1 |
 | base_commit | c8bddd610119f52b54bf077d284c7f5d8362ae77 |
 | target_branch | feat/pipeline-auto |
+| repo_root | /srv/checkouts/claude-plugin |
 | worker_limit | 4 |
 | agent_dispatch_count | 6 |
 | spec | docs/superpowers/specs/2026-09-14-pipeline-auto-design.md |
@@ -499,10 +680,10 @@ Create `plugins/superb/skills/pipeline-auto/tests/fixtures/final-only-progress.m
 | --- | --- | --- | --- | --- | --- |
 
 ## Tasks
-| ID | Phase | Kind | State | Owner | Attempt | Result | Checkpoints | Source Ref | Commits | Artifacts | Integration | Verification | Question | Provisional |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| P07-T01 | P07 | source | [x] | impl-1 | attempt-001 | scratch/p07-t01-result.md | red,green | refs/heads/feat/pipeline-auto | 3333333333333333333333333333333333333333 | - | 4444444444444444444444444444444444444444 | scratch/p07-t01-tests.txt | - | no |
-| P07-T02 | P07 | source | [ ] | - | - | - | - | - | - | - | - | - | - | no |
+| ID | Phase | Kind | State | Owner | Attempt | Result | Checkpoints | Source Ref | Commits | Artifacts | Integration | Verification | Question | Decisions | Provisional |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| P07-T01 | P07 | source | [x] | impl-1 | attempt-001 | scratch/p07-t01-result.md | red,green | refs/heads/feat/pipeline-auto | 3333333333333333333333333333333333333333 | - | 4444444444444444444444444444444444444444 | scratch/p07-t01-tests.txt | - | - | no |
+| P07-T02 | P07 | source | [ ] | - | - | - | - | - | - | - | - | - | - | - | no |
 
 ## Task Review
 | Task | Round | Intensity | State | Reviewer | Package | Report | Critical | Important | Minor | Adversarial | Adversarial Verdict | Open | Evidence |
@@ -1131,7 +1312,7 @@ class RecordTaskReviewTests(unittest.TestCase):
             pipeline_auto_state.record_task_review(
                 str(run_dir), task_id="P07-T02", attempt="attempt-001",
                 verdict=self._verdict(state="approved"))
-            tracker = pipeline_auto_state.validate_run(str(run_dir))
+            tracker = pipeline_auto_state.validate_run(run_dir)
             rows = [r for r in tracker["task_review"] if r["task"] == "P07-T02"]
             self.assertEqual([(r["round"], r["minor"], r["open"]) for r in rows],
                              [("1", "2", "0"), ("2", "0", "0")])
@@ -1158,7 +1339,7 @@ class RecordTaskReviewTests(unittest.TestCase):
             pipeline_auto_state.record_task_review(
                 str(run_dir), task_id="P07-T02", attempt="attempt-001",
                 verdict=verdict)
-            tracker = pipeline_auto_state.validate_run(str(run_dir))
+            tracker = pipeline_auto_state.validate_run(run_dir)
             rows = [r for r in tracker["task_review"] if r["task"] == "P07-T02"]
             self.assertEqual(len(rows), 1)
 ```
@@ -1782,7 +1963,7 @@ class RatchetPhaseTests(unittest.TestCase):
                 str(run_dir), phase="P07", trigger="adversarial-finding",
                 evidence_ref="scratch/p07-adversarial.md")
             self.assertEqual(result["status"], "ratcheted")
-            tracker = pipeline_auto_state.validate_run(str(run_dir))
+            tracker = pipeline_auto_state.validate_run(run_dir)
             phase = next(r for r in tracker["phases"] if r["id"] == "P07")
             self.assertEqual(
                 (phase["review_class"], phase["class_source"], phase["ratchet"]),
@@ -1795,11 +1976,11 @@ class RatchetPhaseTests(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             _, run_dir = new_run(stack)
             seed(run_dir, final_only_text())
-            before = pipeline_auto_state.validate_run(str(run_dir))["task_review"]
+            before = pipeline_auto_state.validate_run(run_dir)["task_review"]
             result = pipeline_auto_state.ratchet_phase(
                 str(run_dir), phase="P07", trigger="accumulated-surface",
                 evidence_ref="scratch/p07-lines.txt")
-            tracker = pipeline_auto_state.validate_run(str(run_dir))
+            tracker = pipeline_auto_state.validate_run(run_dir)
             self.assertEqual(tracker["task_review"], before)
             self.assertEqual(result["gated_tasks"], ["P07-T02"])
 
@@ -1810,7 +1991,7 @@ class RatchetPhaseTests(unittest.TestCase):
             pipeline_auto_state.ratchet_phase(
                 str(run_dir), phase="P07", trigger="repeated-suite-failure",
                 evidence_ref="scratch/p07-suite.txt")
-            tracker = pipeline_auto_state.validate_run(str(run_dir))
+            tracker = pipeline_auto_state.validate_run(run_dir)
             gate = next(r for r in tracker["gates"] if r["id"] == "gate-p07-ratchet")
             self.assertEqual((gate["type"], gate["phase"]), ("phase", "P07"))
 
@@ -1831,7 +2012,7 @@ class RatchetPhaseTests(unittest.TestCase):
                 str(run_dir), phase="P01", trigger="adversarial-finding",
                 evidence_ref="scratch/x.md")
             self.assertEqual(result["status"], "already-required")
-            phase = next(r for r in pipeline_auto_state.validate_run(str(run_dir))
+            phase = next(r for r in pipeline_auto_state.validate_run(run_dir)
                          ["phases"] if r["id"] == "P01")
             self.assertEqual(phase["class_source"], "plan")
 
@@ -1844,7 +2025,7 @@ class RatchetPhaseTests(unittest.TestCase):
             pipeline_auto_state.ratchet_phase(
                 str(run_dir), phase="P07", trigger="accumulated-surface",
                 evidence_ref="scratch/p07-lines.txt")
-            tracker = pipeline_auto_state.validate_run(str(run_dir))
+            tracker = pipeline_auto_state.validate_run(run_dir)
             text = pipeline_auto_state.render_tracker(tracker).replace(
                 "| P07-T02 | P07 | source | [ ] | - | - | - | - |",
                 "| P07-T02 | P07 | source | [~] | impl-2 | attempt-001 | - | red |")
@@ -2234,7 +2415,14 @@ class InheritedRungCapTests(unittest.TestCase):
         tracker = pipeline_auto_state.parse_tracker(final_only_text())
         tracker["tasks"][1].update({
             "state": "[?]", "owner": "impl-2", "attempt": "attempt-001",
-            "checkpoints": "blocked:attempt-001",
+            # `blocked:<attempt>@<question>`, which is what P04's
+            # `import_worker_result` writes: the `Question` cell holds ONE
+            # value and the next block overwrites it, so the append-only
+            # `Checkpoints` history is where the audit pointer survives a
+            # resume. A bare `blocked:attempt-001` is NOT what P04 produces.
+            "checkpoints":
+                f"blocked:attempt-001@quorum:{'d' * 12}"
+                f"@scratch/p07-t02-question.md#sha256={'e' * 64}",
             # The full quorum arm — see the note in `_tainted` above.
             "question":
                 f"quorum:{'d' * 12}@scratch/p07-t02-question.md#sha256={'e' * 64}",
@@ -2409,7 +2597,7 @@ class DialWiringTests(unittest.TestCase):
                          "evidence": "scratch/p07-t02-verify.txt"})
 
             # (a) fires: an adversarial pass returned anything but safe.
-            tracker = pipeline_auto_state.validate_run(str(run_dir))
+            tracker = pipeline_auto_state.validate_run(run_dir)
             self.assertEqual(
                 pipeline_auto_state.ratchet_triggers_fired(tracker, phase="P07"),
                 ("adversarial-finding",))
@@ -2420,7 +2608,7 @@ class DialWiringTests(unittest.TestCase):
             self.assertEqual(result["gated_tasks"], ["P07-T02"])
 
             # The remaining task is now gated at full intensity.
-            tracker = pipeline_auto_state.validate_run(str(run_dir))
+            tracker = pipeline_auto_state.validate_run(run_dir)
             self.assertEqual(
                 pipeline_auto_state.task_intensity(tracker, "P07-T02"), "full")
 
@@ -2449,7 +2637,7 @@ class DialWiringTests(unittest.TestCase):
 
             pipeline_auto_state.locked_tracker_update(
                 str(run_dir), transition_id="complete-P07-T02", mutate=complete)
-            tracker = pipeline_auto_state.validate_run(str(run_dir))
+            tracker = pipeline_auto_state.validate_run(run_dir)
             self.assertEqual(
                 next(r for r in tracker["tasks"] if r["id"] == "P07-T02")["state"],
                 "[x]")

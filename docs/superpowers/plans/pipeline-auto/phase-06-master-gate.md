@@ -156,9 +156,10 @@ class TrackerValidationError(TrackerError): ...
 
 def parse_tracker(text: str) -> dict: ...
 def render_tracker(tracker: dict) -> str: ...
-def validate_run(run_dir: str) -> dict: ...
-def locked_tracker_update(run_dir: str, *, transition_id: str, mutate) -> dict: ...
-def publish_immutable(path: str, content: str) -> str: ...
+def validate_run(run_dir: Path) -> dict: ...
+def locked_tracker_update(run_dir: Path, *, transition_id: str, mutate,
+                          timeout_s: float = 10.0) -> dict: ...
+def publish_immutable(path: Path, content: str) -> str: ...
 def derive_next_action(tracker: dict) -> str: ...
 def append_row(tracker: dict, section: str, row: dict) -> dict: ...
 def repo_root(tracker: dict) -> str: ...
@@ -169,12 +170,37 @@ _REVIEW_CLASSES = ("final-only", "required")
 _GATE_STATES = ("pending", "in_progress", "blocked", "accepted")
 ```
 
+**`Path` IS THE TYPE, AND THESE THREE DELIBERATELY DO NOT COERCE.** Measured by
+calling each with a `str`: `validate_run` and `locked_tracker_update` raise
+`TypeError: unsupported operand type(s) for /: 'str' and 'str'`, and
+`publish_immutable` raises `AttributeError: 'str' object has no attribute
+'parent'`. Both are **outside** the `TrackerError` family, so no
+`except TrackerError` in this phase catches either. It is deliberate:
+`RUN_DIR_CONTRACT_FUNCTIONS = ("validate_run", "locked_tracker_update")` and
+`test_the_two_contract_functions_deliberately_do_not` assert they never call
+`_run_path`, and the roster test
+`test_no_entry_point_hands_a_raw_run_directory_to_a_path_typed_callee` states the
+rule: *a function whose FIRST parameter is annotated `Path` has declared that it
+will not coerce.* **Never wrap the argument in `str(...)`** — this plan carried
+twelve such wrappers (seven on `locked_tracker_update`, five on
+`publish_immutable`) and every one of them raised. Pass the `Path`
+(`locked_tracker_update(directory, …)`,
+`publish_immutable(_phase_set_path(directory), …)`).
+
+The P04 entry points this phase also calls — `reconcile_run`, `integrate_task`,
+`import_phase_plan` — *do* normalise through `_run_path` and take a `str`
+happily. Only the `Path`-typed set above refuses it.
+
 **Two sections P05 reshapes, which this phase's fixtures and code follow.**
 `## Task Review` is **fourteen** columns — `Task`, `Round`, `Intensity`, `State`,
 `Reviewer`, `Package`, `Report`, `Critical`, `Important`, `Minor`, `Adversarial`,
-`Adversarial Verdict`, `Open`, `Evidence` — not P02's nine-column placeholder, which could
-express neither N rounds per task nor a live `Open` count and so could carry none of the
-never-off rules. `## Tasks` carries a `Decisions` column listing the decision ids that
+`Adversarial Verdict`, `Open`, `Evidence`. **This is already committed, not work P05
+must do:** measured, `SECTIONS["task_review"]` and `_TASK_REVIEW_HEADER` are these
+fourteen in this order, and `tests/fixtures/valid-progress.md` and
+`templates/progress.md` both carry the fourteen-column header. P05 *populates* the
+section and does not reshape it. (The nine-column placeholder it replaced could
+express neither N rounds per task nor a live `Open` count and so could carry none of
+the never-off rules.) `## Tasks` carries a `Decisions` column listing the decision ids that
 task's plan cites, **and that column is what lets taint cross a phase boundary**: without
 it the provisional closure stops at the phase that raised the decision, so a decision
 adopted during P01 that governs a P02 task goes silently unmarked — exactly the cascade the
@@ -221,6 +247,8 @@ reaches P06 as `record["grounding_rung"]` and `- **Scope:** P02-T01` as `record[
 ### Consumes from P04 and P05
 
 ```python
+def integrate_task(run_dir, *, task_id: str, merge_commit: str,
+                   run_command) -> dict: ...
 def reconcile_run(run_dir: str, *, run_command) -> dict: ...
 #   `run_command` on `reconcile_run` and on `integrate_task` above is
 #   REQUIRED, not defaulted, for `import_worker_result`'s reason: the module
@@ -236,8 +264,34 @@ def verify_source_range(repo: str, *, baseline: str, head: str, head_ref: str,
 def open_fix_round(run_dir: str, *, scope: str, findings: list) -> dict: ...
 ```
 
-P06 calls none of these inside a transition. They are named because the controller prose in
-P07 sequences them around this phase's functions, and because Task 7's test asserts that a
+### Consumes from P04 — the verification-evidence codec
+
+`## Gates` carries a `Verification` cell and `record_final_verification` writes one.
+Both hold **verification-evidence references**, and the codec is P04's and public —
+the master plan: *"P05 and P06 both consume evidence records and neither can reach a
+private codec."* P05's plan carries the full contract under *"Consumes from P04 — the
+verification-evidence codec"*; the three rules that bind P06 specifically:
+
+```python
+def render_verification_evidence(record: dict) -> str: ...   # THE only writer
+def parse_verification_evidence(text: str) -> dict: ...
+def resolve_evidence(run_dir, repo_dir, reference: str) -> dict: ...  # three positional
+```
+
+- A record is **rendered and only then `publish_immutable`d**, never assembled by hand:
+  `parse_verification_evidence`'s last screen is a byte comparison against the
+  renderer's output. `EVIDENCE_FIELDS` is `("purpose", "run_id", "subject", "attempt",
+  "code_state", "outcome", "commands", "environment", "inputs")`.
+- Every `inputs` member is `<repository-relative-path>#sha256=<64 lowercase hex>`;
+  measured, a bare path is refused.
+- P06's purposes — `branch-review`, `completeness`, `final` — are **not registered**.
+  `EVIDENCE_PURPOSES` is a plain tuple and the only legal extension form is
+  `EVIDENCE_PURPOSES += (...)`: a second module-level assignment is a duplicate
+  binding and `test_no_module_level_name_is_bound_twice` fails in four sub-suites at
+  once. See P05's block for the measurement.
+
+P06 calls none of the P04/P05 transitions above inside a transition. They are named
+because the controller prose in P07 sequences them around this phase's functions, and because Task 7's test asserts that a
 reconciliation leaves P05's fix-round rows untouched. In particular, **P06 does not call
 `open_fix_round`**: Task 10 owns the gate-scope loop end-to-end, because P05's function is
 shaped for a task scope and a per-task review row. The `## Fix Rounds` grammar is shared and
@@ -739,7 +793,7 @@ tracker with stage 06 **active**, an empty phase set, and nothing downstream:
 | --- | --- | --- | --- | --- | --- |
 
 ## Tasks
-| ID | Phase | Kind | State | Owner | Attempt | Result | Checkpoints | Source Ref | Commits | Artifacts | Integration | Verification | Question | Provisional | Decisions |
+| ID | Phase | Kind | State | Owner | Attempt | Result | Checkpoints | Source Ref | Commits | Artifacts | Integration | Verification | Question | Decisions | Provisional |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 
 ## Task Review
@@ -825,10 +879,10 @@ phase verified, the `required` phase's gate accepted, stage 11 active, and one p
 | --- | --- | --- | --- | --- | --- |
 
 ## Tasks
-| ID | Phase | Kind | State | Owner | Attempt | Result | Checkpoints | Source Ref | Commits | Artifacts | Integration | Verification | Question | Provisional | Decisions |
+| ID | Phase | Kind | State | Owner | Attempt | Result | Checkpoints | Source Ref | Commits | Artifacts | Integration | Verification | Question | Decisions | Provisional |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| P01-T01 | P01 | source | [x] | impl-1 | attempt-001 | results/p01-t01-attempt-001.md | red,green | refs/heads/feat/pipeline-auto | 1111111111111111111111111111111111111111 | - | 3333333333333333333333333333333333333333 | scratch/p01-t01-tests.txt | - | no | Q-3f2a1b0c9d8e |
-| P02-T01 | P02 | source | [x] | impl-2 | attempt-002 | results/p02-t01-attempt-002.md | red,green | refs/heads/feat/pipeline-auto | 2222222222222222222222222222222222222222 | - | 4444444444444444444444444444444444444444 | scratch/p02-t01-tests.txt | - | yes | Q-7c6b5a4938d2 |
+| P01-T01 | P01 | source | [x] | impl-1 | attempt-001 | agent-output/P01-T01/attempt-001.md | red,green | refs/heads/feat/pipeline-auto | 1111111111111111111111111111111111111111 | - | 3333333333333333333333333333333333333333 | scratch/p01-t01-tests.txt | - | Q-3f2a1b0c9d8e | no |
+| P02-T01 | P02 | source | [x] | impl-2 | attempt-002 | agent-output/P02-T01/attempt-002.md | red,green | refs/heads/feat/pipeline-auto | 2222222222222222222222222222222222222222 | - | 4444444444444444444444444444444444444444 | scratch/p02-t01-tests.txt | - | Q-7c6b5a4938d2 | yes |
 
 ## Task Review
 | Task | Round | Intensity | State | Reviewer | Package | Report | Critical | Important | Minor | Adversarial | Adversarial Verdict | Open | Evidence |
@@ -1137,10 +1191,10 @@ def close_phase_set(run_dir: str) -> dict:
         following["next_action"] = "fan-out-phase-plans"
         return tracker
 
-    tracker = locked_tracker_update(str(directory), transition_id="close-phase-set",
+    tracker = locked_tracker_update(directory, transition_id="close-phase-set",
                                     mutate=mutate)
     ids = [row["id"] for row in tracker["phases"]]
-    publish_immutable(str(_phase_set_path(directory)),
+    publish_immutable(_phase_set_path(directory),
                       _dumps({"phases": ids, "digest": _digest(",".join(ids))}))
     return {"phases": ids, "frozen": True}
 ```
@@ -1403,7 +1457,7 @@ def open_master_gate(run_dir: str, *, reviewers: dict) -> dict:
         eleven["next_action"] = "await-master-reports"
         return tracker
 
-    tracker = locked_tracker_update(str(directory), transition_id="open-master-gate",
+    tracker = locked_tracker_update(directory, transition_id="open-master-gate",
                                     mutate=mutate)
     master = next(row for row in tracker["gates"] if row["id"] == MASTER_GATE_ID)
     sealed = {
@@ -1418,7 +1472,7 @@ def open_master_gate(run_dir: str, *, reviewers: dict) -> dict:
     }
     gate_dir = directory / "gate-master"
     (gate_dir / "reports").mkdir(parents=True, exist_ok=True)
-    publish_immutable(str(gate_dir / "assignments.json"), _dumps(sealed))
+    publish_immutable(gate_dir / "assignments.json", _dumps(sealed))
     return sealed
 ```
 
@@ -2067,7 +2121,7 @@ def record_master_report(run_dir: str, *, assignment: str, report_path: str) -> 
             f"{gate['base']}..{gate['head']}")
 
     relative = f"gate-master/reports/{assignment}@{gate['head'][:12]}.md"
-    digest = publish_immutable(str(directory / relative), text)
+    digest = publish_immutable(directory / relative, text)
     bindings_path = directory / "gate-master" / "report-bindings.json"
     bindings = _load_json(bindings_path) if bindings_path.exists() else {}
     bindings[assignment] = {"base": gate["base"], "head": gate["head"],
@@ -2669,7 +2723,7 @@ def record_challenge(run_dir: str, *, challenge: dict) -> dict:
     qid = derive_qid(record["question"], record["axis"])
     target = directory / "quorum" / qid
     target.mkdir(parents=True, exist_ok=True)
-    publish_immutable(str(target / "reopen.json"), _dumps(reopen))
+    publish_immutable(target / "reopen.json", _dumps(reopen))
     return dict(routed, escalated=False, reopened=reopen)
 ```
 
@@ -2867,20 +2921,42 @@ def open_reconciliation(run_dir: str, *, finding_id: str, decision_id: str,
             #: task this function blocks could never be resumed at all --
             #: which is the whole purpose of blocking it.
             #:
-            #: THIS LINE IS THEREFORE BLOCKED ON A P04 INTERFACE, and that is
-            #: stated rather than worked around. The arm is
-            #: `quorum:<qid>@<path>#sha256=<digest>` and the only function that
-            #: builds it today is `_resolve_question_record`, which is
-            #: PRIVATE. P06 must not hand-spell it: a second typing of this
-            #: cell is a second answer to "what is this task blocked on" in
-            #: the one cell that says so, and the one that goes stale is
-            #: silent. So P04 owes a PUBLIC spelling before this task is
-            #: implemented -- the same debt `_RANGE_CHECKPOINT` carries for
-            #: P07 -- and until it exists this assignment is a placeholder.
-            task["question"] = question_cell_for(relative)   # P04, public, owed
+            #: THE ARM IS `halt:`, AND THAT IS A MEASUREMENT, NOT A FALLBACK.
+            #: `_validate_decision` names the difference between the two arms:
+            #: "`quorum:<qid>@...` is DERIVED -- `settle_quorum` mints a quorum
+            #: decision id as `"Q-" + qid`"; "`halt:<reason>` is ASSERTED. No
+            #: quorum was opened, so no qid exists and there is no question
+            #: record to hash." THIS FUNCTION OPENS NO QUORUM. It writes a
+            #: reconciliation document and `record_reconciliation` settles it
+            #: with a named unbiased adjudicator, so there is no qid for a
+            #: quorum arm to carry and the resume grant is a human's.
+            #:
+            #: Measured, `_resolve_question_record` CANNOT serve this call site
+            #: even if it were promoted: handed this document it raises
+            #: "the question record at 'gate-master/reconciliations/F-101.md'
+            #: is not one this run can read back (QuorumSchemaInvalid: a
+            #: question record holds exactly one ## section, not 0)". It
+            #: resolves a record `open_quorum` filed at
+            #: `<run>/quorum/<qid>/question.md` and nothing else. A public
+            #: spelling of it would have left this line still broken.
+            #:
+            #: Measured, `halt:<relative>` round-trips through
+            #: `render_tracker` -> `parse_tracker` ->
+            #: `_validate_tracker_semantics` clean, and the resume grant that
+            #: clears it repeats this exact string in a `Blocker` field with
+            #: `Provenance: human` -- which is what an adjudicated
+            #: reconciliation is.
+            #:
+            #: WHY THE OLD BARE PATH WAS INVISIBLE: measured,
+            #: `_validate_tracker_semantics` ACCEPTS a bare relative path in
+            #: this cell. The tracker validates clean and only
+            #: `_validate_decision` refuses it later, at resume time -- so the
+            #: run parks a task that can never be resumed and looks healthy,
+            #: and no fixture test catches it.
+            task["question"] = f"{_QUESTION_HALT_ARM}{relative}"
         return tracker
 
-    locked_tracker_update(str(directory),
+    locked_tracker_update(directory,
                           transition_id=f"reconcile-open-{finding_id}", mutate=mutate)
     return {"finding": finding_id, "decision": decision_id, "scope": scope,
             "question": relative, "fix_round_consumed": False}
@@ -3468,7 +3544,7 @@ def evaluate_master_gate(run_dir: str) -> dict:
         twelve["next_action"] = "record-final-verification"
         return updated
 
-    locked_tracker_update(str(directory), transition_id="accept-master-gate", mutate=mutate)
+    locked_tracker_update(directory, transition_id="accept-master-gate", mutate=mutate)
     return {"accepted": True, "blockers": []}
 ```
 
@@ -3789,7 +3865,7 @@ def open_gate_fix_round(run_dir: str, *, fixer: str, findings: list) -> dict:
         return append_row(tracker, "fix_rounds",
                           {"scope": MASTER_GATE_ID, "round": str(number), **values})
 
-    locked_tracker_update(str(directory), transition_id=f"gate-fix-open-{number}",
+    locked_tracker_update(directory, transition_id=f"gate-fix-open-{number}",
                           mutate=mutate)
     return {"round": number, "halted": False, "reason": "-", "dispatch": True}
 
@@ -3845,7 +3921,7 @@ def record_gate_fix_round(run_dir: str, *, round_number: int, fixer: str, commit
                 "verification": "-", "re_review": "-", "remaining": "-"})
         return tracker
 
-    locked_tracker_update(str(directory), transition_id=f"gate-fix-close-{round_number}",
+    locked_tracker_update(directory, transition_id=f"gate-fix-close-{round_number}",
                           mutate=mutate)
     if stalled:
         return _halt(str(directory), "no-progress", round_number)
@@ -4049,7 +4125,7 @@ def record_final_verification(run_dir: str, *, results: list) -> dict:
         twelve["next_action"] = "-"
         return updated
 
-    locked_tracker_update(str(directory), transition_id="record-final-verification",
+    locked_tracker_update(directory, transition_id="record-final-verification",
                           mutate=mutate)
     return {"digest": digest, "head": gate["head"], "outcome": "PASS"}
 
@@ -4266,7 +4342,7 @@ def render_terminal_report(run_dir: str) -> str:
 
 def publish_terminal_report(run_dir: str) -> str:
     """Publish the report once. A byte-identical republish is inert."""
-    return publish_immutable(str(Path(run_dir) / "terminal-report.md"),
+    return publish_immutable(Path(run_dir) / "terminal-report.md",
                              render_terminal_report(run_dir))
 ```
 
@@ -4413,10 +4489,13 @@ deleted, so a reader can see what was asked and what was answered.**
    to fix, and nothing in this phase depends on it.
 
 2. **Column placement of `Decisions` in `## Tasks`, and the fourteen `## Task Review`
-   columns.** *Open.* The coordinator supplied both column sets but not `Decisions`'
-   position; this plan's fixtures place it last, after `Provisional`. Every function here
-   reads cells by name, so only the two fixture files depend on order. P05 owns the final
-   order and these fixtures follow it.
+   columns.** **RESOLVED — measured, not chosen.** `Decisions` comes **before**
+   `Provisional`: `parse_tracker` refuses any other header outright, and the committed
+   fixture parses to `… verification, question, decisions, provisional`. This plan's two
+   fixtures placed it last and were therefore unparseable; both headers and both data
+   rows have been corrected. Every function here reads cells by name, so only the
+   fixtures depended on order. `## Task Review`'s fourteen columns are likewise already
+   committed — see the preamble.
 
 3. **`Adversarial Verdict` vocabulary.** *Derived* from the spec's adjudication verdicts
    (`CONFIRMED`, `REFUTED`, `PLAUSIBLE`); the master-gate fixture uses `REFUTED`, chosen

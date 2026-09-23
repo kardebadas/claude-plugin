@@ -13268,7 +13268,7 @@ class PublishedRunDirectorySpellingTests(TempDirTestCase):
 RUN_DIR_ENTRY_POINTS = (
     "initialize_run", "import_phase_plan", "reserve_task", "resume_task",
     "publish_worker_result", "import_worker_result", "integrate_task",
-    "reconcile_run", "freeze_dispatch_ceiling",
+    "reconcile_run", "freeze_dispatch_ceiling", "close_phase_set",
 )
 RUN_DIR_CONTRACT_FUNCTIONS = ("validate_run", "locked_tracker_update")
 
@@ -13412,6 +13412,8 @@ class RunDirectoryCoercionSweepTests(TempDirTestCase):
             "reconcile_run": lambda value: state.reconcile_run(
                 value, run_command=controller_git),
             "freeze_dispatch_ceiling": state.freeze_dispatch_ceiling,
+            "close_phase_set": lambda value: state.close_phase_set(
+                value, phase_ids=["P04"]),
         }
         self.assertEqual(sorted(calls), sorted(RUN_DIR_ENTRY_POINTS))
         shapes = (None, 5, b"/runs/r", ["/runs/r"], str(self.run_dir))
@@ -19482,6 +19484,7 @@ class DispatchCeilingFieldTests(TempDirTestCase):
         """Four tasks: 7 x 4 + 3 x 10 + 5 = 63; ceil(1.25 x 63) = ceil(78.75)
         = 79, which a floor would make 78; 2 x 63 = 126."""
         _repo, run_dir, _plan = make_run(self.tmp, n_disjoint_tasks(4))
+        seal_phase_set(run_dir)
         run = state.freeze_dispatch_ceiling(run_dir)["run"]
         self.assertEqual([run[key] for key in DISPATCH_FIELDS],
                          ["63", "79", "126"])
@@ -19498,18 +19501,21 @@ class DispatchCeilingFieldTests(TempDirTestCase):
             run_dir, run_id="run-1", base_commit=git(repo, "rev-parse", "HEAD"),
             target_branch="target", worker_limit=6, repo_root=str(repo))
         state.import_phase_plan(run_dir, phase_plan=plan)
+        seal_phase_set(run_dir)
         run = state.freeze_dispatch_ceiling(run_dir)["run"]
         self.assertEqual(run["dispatch_projection"], "63")
 
     def test_a_run_with_no_tasks_has_nothing_to_project(self):
         _repo, run_dir, _plan = make_run(self.tmp, three_disjoint_tasks(),
                                          import_plan=False)
+        seal_phase_set(run_dir)
         with self.assertRaises(state.TrackerValidationError) as caught:
             state.freeze_dispatch_ceiling(run_dir)
         self.assertIn("no tasks", str(caught.exception))
 
     def test_a_frozen_ceiling_never_moves(self):
         _repo, run_dir, _plan = make_run(self.tmp, n_disjoint_tasks(4))
+        seal_phase_set(run_dir)
         state.freeze_dispatch_ceiling(run_dir)
         before = (run_dir / "progress.md").read_bytes()
         for fields in ({"dispatch_projection": "70",
@@ -19528,6 +19534,7 @@ class DispatchCeilingFieldTests(TempDirTestCase):
         must be 7 x total_tasks + 3 x BUDGET_PER_RUN + 5 over the tracker it
         lands in, or a raw transition picks its own budget and freezes it."""
         _repo, run_dir, _plan = make_run(self.tmp, n_disjoint_tasks(4))
+        seal_phase_set(run_dir)
         for name, fields in {
                 "forged": {"dispatch_projection": "100000",
                            "dispatch_soft_ceiling": "125000",
@@ -19547,6 +19554,7 @@ class DispatchCeilingFieldTests(TempDirTestCase):
 
     def test_freezing_twice_is_inert(self):
         _repo, run_dir, _plan = make_run(self.tmp, n_disjoint_tasks(4))
+        seal_phase_set(run_dir)
         state.freeze_dispatch_ceiling(run_dir)
         bump(run_dir)
         before = (run_dir / "progress.md").read_bytes()
@@ -19555,6 +19563,7 @@ class DispatchCeilingFieldTests(TempDirTestCase):
 
     def test_the_three_fields_are_frozen_together_and_consistent(self):
         _repo, run_dir, _plan = make_run(self.tmp, n_disjoint_tasks(4))
+        seal_phase_set(run_dir)
         cases = {
             "one of three": {"dispatch_projection": "63"},
             "soft floored": {"dispatch_projection": "63",
@@ -19579,6 +19588,213 @@ class DispatchCeilingFieldTests(TempDirTestCase):
                       dispatch_projection="63", dispatch_soft_ceiling="79",
                       dispatch_hard_ceiling="126")["run"]
         self.assertEqual(run["dispatch_soft_ceiling"], "79")
+
+
+
+# --------------------------------------------------------------------------
+# P06 -- the phase-set seal.
+#
+# Spec invariant 6: "The phase set is immutable after stage 06. The run cannot
+# create work for itself." Stage 06 closes by sealing the master plan's phase
+# ids into `## Run`'s `phase_set`; stage 07 imports a plan for each of them and
+# for nothing else.
+# --------------------------------------------------------------------------
+
+def open_stage_06(run_dir) -> dict:
+    """Stages 01-05 complete and 06 active, by one raw transition."""
+    def mutate(tracker: dict) -> dict:
+        for row in tracker["stages"]:
+            if row["stage"] < "06":
+                row.update(stage_state="complete", next_action="-")
+            elif row["stage"] == "06":
+                row.update(stage_state="active",
+                           next_action="write-master-plan")
+            else:
+                row.update(stage_state="pending", next_action="-")
+        return tracker
+
+    return state.locked_tracker_update(
+        run_dir, transition_id="test-open-stage-06", mutate=mutate)
+
+
+def seal_phase_set(run_dir, phase_ids=("P04",)) -> dict:
+    open_stage_06(run_dir)
+    return state.close_phase_set(run_dir, phase_ids=list(phase_ids))
+
+
+def phase_05_plan(run_dir) -> Path:
+    return write_phase_plan(
+        run_dir, task_block("U1", write_scope="file:src/u.py"),
+        header=phase_header(phase_id="P05", deps="P04",
+                            review_class="final-only"),
+        name="phase-05.md")
+
+
+class PhaseSetSealTests(TempDirTestCase):
+
+    def refuse(self, run_dir, call, expected: str,
+               error=state.TrackerValidationError) -> None:
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(error) as caught:
+            call()
+        self.assertIn(expected, str(caught.exception))
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def raw(self, run_dir, mutate) -> dict:
+        return state.locked_tracker_update(
+            run_dir, transition_id="test-phase-set", mutate=mutate)
+
+    def test_a_new_run_has_no_seal(self):
+        _repo, run_dir, _plan = make_run(self.tmp, three_disjoint_tasks(),
+                                         import_plan=False)
+        self.assertEqual(state.validate_run(run_dir)["run"]["phase_set"], "-")
+
+    def test_closing_stage_06_seals_the_set_and_opens_stage_07(self):
+        _repo, run_dir, _plan = make_run(self.tmp, three_disjoint_tasks(),
+                                         import_plan=False)
+        tracker = seal_phase_set(run_dir, ("P04", "P05"))
+        self.assertEqual(tracker["run"]["phase_set"], "P04,P05")
+        stages = {row["stage"]: row for row in tracker["stages"]}
+        self.assertEqual(stages["06"]["stage_state"], "complete")
+        self.assertEqual(
+            (stages["07"]["stage_state"], stages["07"]["next_action"]),
+            ("active", "fan-out-phase-plans"))
+
+    def test_a_phase_outside_the_seal_is_never_born(self):
+        """THE SCOPE-EXPANSION SEED. A controller holding a persuasive
+        MISSING-FROM-SPEC proposal has one way to act on it: create a phase.
+        After the seal, the one writer of a phase row refuses, and so does a
+        raw transition, because the guard is in `locked_tracker_update`."""
+        _repo, run_dir, plan = make_run(self.tmp, three_disjoint_tasks(),
+                                        import_plan=False)
+        seal_phase_set(run_dir, ("P04",))
+        state.import_phase_plan(run_dir, phase_plan=plan)
+        extra = phase_05_plan(run_dir)
+        self.refuse(run_dir,
+                    lambda: state.import_phase_plan(run_dir, phase_plan=extra),
+                    "sealed")
+
+    def test_the_seal_never_changes(self):
+        _repo, run_dir, _plan = make_run(self.tmp, three_disjoint_tasks(),
+                                         import_plan=False)
+        seal_phase_set(run_dir, ("P04",))
+        for value in ("P04,P05", "-", "P05"):
+            with self.subTest(value=value):
+                def mutate(tracker, value=value):
+                    tracker["run"]["phase_set"] = value
+                    return tracker
+
+                self.refuse(run_dir, lambda: self.raw(run_dir, mutate),
+                            "sealed")
+
+    def test_stage_06_closes_only_by_sealing(self):
+        """A raw close of stage 06 that writes no seal would leave the set
+        open for the rest of the run."""
+        _repo, run_dir, _plan = make_run(self.tmp, three_disjoint_tasks(),
+                                         import_plan=False)
+        open_stage_06(run_dir)
+
+        def close(tracker):
+            stages = {row["stage"]: row for row in tracker["stages"]}
+            stages["06"].update(stage_state="complete", next_action="-")
+            stages["07"].update(stage_state="active",
+                                next_action="fan-out-phase-plans")
+            return tracker
+
+        self.refuse(run_dir, lambda: self.raw(run_dir, close), "seal")
+
+    def test_a_raw_seal_names_each_phase_once(self):
+        """The cell's grammar, for a seal written without `close_phase_set`."""
+        _repo, run_dir, _plan = make_run(self.tmp, three_disjoint_tasks(),
+                                         import_plan=False)
+        for value in ("P04,P04", "P04,,P05"):
+            with self.subTest(value=value):
+                def seal(tracker, value=value):
+                    tracker["run"]["phase_set"] = value
+                    return tracker
+
+                self.refuse(run_dir, lambda: self.raw(run_dir, seal),
+                            "distinct phase ids")
+
+    def test_a_seal_that_omits_an_imported_phase_is_refused(self):
+        _repo, run_dir, _plan = make_run(self.tmp, three_disjoint_tasks())
+        open_stage_06(run_dir)
+        self.refuse(run_dir,
+                    lambda: state.close_phase_set(run_dir, phase_ids=["P05"]),
+                    "P04")
+
+    def test_a_plan_path_after_the_seal_still_needs_its_row(self):
+        """Pinned upstream, not re-checked: `_guard_phase_rows` already
+        refuses a `phase_plans` entry written without its phase row, so the
+        seal adds no second rule for paths."""
+        _repo, run_dir, plan = make_run(self.tmp, three_disjoint_tasks(),
+                                        import_plan=False)
+        seal_phase_set(run_dir, ("P04",))
+
+        def record_path(tracker):
+            tracker["run"]["phase_plans"] = str(
+                Path(plan).resolve().relative_to(state.repo_root(tracker)))
+            return tracker
+
+        self.refuse(run_dir, lambda: self.raw(run_dir, record_path),
+                    "written together")
+
+    def test_closing_again_is_inert_for_the_same_set_and_refused_otherwise(self):
+        _repo, run_dir, _plan = make_run(self.tmp, three_disjoint_tasks(),
+                                         import_plan=False)
+        seal_phase_set(run_dir, ("P04",))
+        bump(run_dir)
+        before = (run_dir / "progress.md").read_bytes()
+        state.close_phase_set(run_dir, phase_ids=["P04"])
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+        self.refuse(run_dir,
+                    lambda: state.close_phase_set(run_dir,
+                                                  phase_ids=["P04", "P05"]),
+                    "sealed")
+
+    def test_the_seal_is_written_only_at_the_close_of_stage_06(self):
+        _repo, run_dir, _plan = make_run(self.tmp, three_disjoint_tasks(),
+                                         import_plan=False)
+        self.refuse(run_dir,
+                    lambda: state.close_phase_set(run_dir, phase_ids=["P04"]),
+                    "stage 06")
+
+    def test_the_phase_ids_are_a_nonempty_list_of_distinct_ids(self):
+        _repo, run_dir, _plan = make_run(self.tmp, three_disjoint_tasks(),
+                                         import_plan=False)
+        open_stage_06(run_dir)
+        for ids in ([], ["P04", "P04"], ["P04,P05"], ["two words"], "P04",
+                    [4]):
+            with self.subTest(ids=ids):
+                self.refuse(run_dir,
+                            lambda ids=ids: state.close_phase_set(
+                                run_dir, phase_ids=ids),
+                            "phase")
+
+
+class DispatchCeilingNeedsTheSealTests(TempDirTestCase):
+    """The P05 M4 note: "once the phase plans are imported" had no predicate,
+    because the tracker did not record the master plan's phase list. The seal
+    is that list, so stage 07 is closed exactly when every sealed phase has
+    its row -- and the first write of the ceiling now requires it."""
+
+    def test_an_unsealed_run_cannot_freeze_its_ceiling(self):
+        _repo, run_dir, _plan = make_run(self.tmp, n_disjoint_tasks(4))
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.freeze_dispatch_ceiling(run_dir)
+        self.assertIn("sealed", str(caught.exception))
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_a_sealed_phase_not_yet_imported_holds_the_freeze(self):
+        _repo, run_dir, _plan = make_run(self.tmp, n_disjoint_tasks(4))
+        seal_phase_set(run_dir, ("P04", "P05"))
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.freeze_dispatch_ceiling(run_dir)
+        self.assertIn("P05", str(caught.exception))
+        state.import_phase_plan(run_dir, phase_plan=phase_05_plan(run_dir))
+        self.assertEqual(state.freeze_dispatch_ceiling(run_dir)["run"][
+            "dispatch_projection"], str(7 * 5 + 3 * 10 + 5))
 
 
 if __name__ == "__main__":

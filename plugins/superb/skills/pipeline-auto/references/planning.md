@@ -3,11 +3,10 @@
 Load during the intent read, question synthesis, the human gate, design, spec,
 master plan and phase fan-out. After stage 06 closes the phase set is immutable.
 
-**Not yet enforced by code:** stage transitions 01–07 have no dedicated
-functions (write them through `locked_tracker_update`; the `## Stage`,
-`## Intent` and `## Questions` grammars are validated); phase-set immutability
-after stage 06 (P06). Until then, not creating phases after stage 06 is your
-restraint.
+**Not yet enforced by code:** stage transitions 01–05 and the close of stage 07
+have no dedicated functions (write them through `locked_tracker_update`; the
+`## Stage`, `## Intent` and `## Questions` grammars are validated). Stage 06
+closes only through `close_phase_set`, below.
 
 ## Stage 01 — Intent read
 
@@ -82,6 +81,13 @@ and reason.
 - **The phase set is immutable once stage 06 closes.** The run cannot create
   work for itself afterwards. This is what makes the completeness freeze in
   `review.md` a guarantee.
+- **Close stage 06 with `close_phase_set(run_dir, phase_ids=[...])`**, passing
+  every phase id the master plan lists, in its order. It writes them into
+  `## Run`'s `phase_set`, completes stage 06 and opens stage 07
+  (`fan-out-phase-plans`) in one transition. The tracker enforces the seal:
+  it never changes, stage 06 cannot complete without it, and after it no
+  phase row outside it can be written, by `import_phase_plan` or by any raw
+  transition. A second call with the same ids is inert; other ids raise.
 - **Discover the target repository's test runner** from its CI config, manifest
   and existing tests, and record it. Never assume one. Record the lint, format
   and coverage commands the same way. Never invent a coverage percentage: no
@@ -99,9 +105,11 @@ One `superpowers:writing-plans` worker per phase, capped by `worker_limit`.
 - Each approved plan is imported with `import_phase_plan(run_dir,
   phase_plan=...)`, which appends the phase row, task rows and path in one
   transition. A second import of the same phase raises.
-- **Close stage 07 by freezing the dispatch budget**, only after every phase
-  plan the master plan lists is imported (the tracker cannot check this: it
-  does not record the master plan's phase list):
+- Import one plan per sealed phase id and no other: a plan for a phase outside
+  `phase_set` is refused.
+- **Close stage 07 by freezing the dispatch budget**, once every sealed phase
+  is imported. The tracker refuses the freeze before the seal exists or while
+  a sealed phase has no row:
   `freeze_dispatch_ceiling(run_dir)` writes `## Run`'s `dispatch_projection`
   (`7 × tasks + 3 × BUDGET_PER_RUN + 5`, every phase priced at 7 whatever its
   class), `dispatch_soft_ceiling` (`ceil(1.25 ×` projection`)`) and

@@ -6,12 +6,11 @@ integrating, verifying a phase, or debugging.
 **Not enforced by code:** the adversarial trigger check, writers for
 `## Task Review` and `## Fix Rounds` (their grammar is validated; write rows
 through `locked_tracker_update`), phase verification and phase advance, and
-counting and refusing dispatches against the agent-dispatch ceiling, and
-whether stage 07 has imported every phase plan the master plan lists before
-the ceiling is frozen. The ratchet triggers `repeated-suite-failure`,
-`debug-locality` and `accumulated-surface` are not verified against state: the
-tracker records no suite-failure count or root cause, and the module never runs
-git to count changed lines. These rules are yours to follow exactly.
+counting and refusing dispatches against the agent-dispatch ceiling. The
+ratchet triggers `repeated-suite-failure`, `debug-locality` and
+`accumulated-surface` are not verified against state: the tracker records no
+suite-failure count or root cause, and the module never runs git to count
+changed lines. These rules are yours to follow exactly.
 
 **The module never executes git.** It emits argv and validates a transcript you
 supply. Functions that need git take `run_command`: a callable that runs one

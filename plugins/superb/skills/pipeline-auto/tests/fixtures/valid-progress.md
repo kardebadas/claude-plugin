@@ -16,6 +16,7 @@
 | dispatch_hard_ceiling | 126 |
 | spec | docs/superpowers/specs/2026-09-14-pipeline-auto-design.md |
 | master_plan | docs/superpowers/plans/2026-09-14-pipeline-auto-master-plan.md |
+| phase_set | P01,P02 |
 | phase_plans | docs/superpowers/plans/pipeline-auto/phase-01-pressure-baselines.md,docs/superpowers/plans/pipeline-auto/phase-02-schema-core.md |
 | decisions | docs/superpowers/runs/2026-09-14-pipeline-auto/decisions.md |
 | findings | docs/superpowers/runs/2026-09-14-pipeline-auto/findings.md |

@@ -16,6 +16,7 @@
 | dispatch_hard_ceiling | - |
 | spec | - |
 | master_plan | - |
+| phase_set | - |
 | phase_plans | - |
 | decisions | docs/superpowers/runs/<run_id>/decisions.md |
 | findings | docs/superpowers/runs/<run_id>/findings.md |

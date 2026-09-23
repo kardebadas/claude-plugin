@@ -168,7 +168,7 @@ _RUN_KEYS = (
     "worker_limit",
     "agent_dispatch_count",
     "dispatch_projection", "dispatch_soft_ceiling", "dispatch_hard_ceiling",
-    "spec", "master_plan", "phase_plans", "decisions",
+    "spec", "master_plan", "phase_set", "phase_plans", "decisions",
     "findings", "completeness_proposals", "revision", "last_transition",
 )
 
@@ -573,6 +573,23 @@ def _validate_run(tracker: dict) -> None:
                 f"{key} {run[key]!r} is not a non-negative integer in ASCII "
                 "digits; every record that cites it reads it as one")
     _validate_dispatch_ceiling(run)
+    _validate_phase_set(run)
+
+
+def _validate_phase_set(run: dict) -> None:
+    """``phase_set`` is ``-`` until stage 06 closes, then the sealed phase ids.
+
+    Distinct ids, at least one: a sealed set with a duplicate is two answers to
+    "is this phase in scope", and an empty one seals a run with nothing to do.
+    """
+    ids = _csv(run["phase_set"])
+    if run["phase_set"] == _ABSENT_CELL:
+        return
+    if (not all(_TOKEN.fullmatch(value) for value in ids)
+            or len(set(ids)) != len(ids)):
+        raise TrackerValidationError(
+            f"phase_set {run['phase_set']!r} is not a list of distinct phase "
+            "ids; the set stage 06 seals names each phase of the run once")
 
 
 #: The three ``## Run`` cells the spec says stage 07 FREEZES. Unfrozen they are
@@ -2551,7 +2568,22 @@ def _guard_frozen_dispatch_ceiling(current: dict, proposed: dict) -> None:
         #: its own would freeze whatever budget it chose. Read on the reparse:
         #: the validator has already held the three cells to all-or-none
         #: positive counts, so the projection is an integer here.
-        if after != before and int(after[0]) != _dispatch_projection(proposed):
+        if after == before:
+            return
+        #: AND IT IS WRITTEN AT THE CLOSE OF STAGE 07: every phase the seal
+        #: names has its imported row. Until the seal existed no state said
+        #: which plans the master plan lists, so a premature freeze priced a
+        #: partial run; now it is refused.
+        sealed = _csv(proposed["run"]["phase_set"])
+        imported = {row["id"] for row in proposed["phases"]}
+        missing = [phase for phase in sealed if phase not in imported]
+        if not sealed or missing:
+            raise TrackerValidationError(
+                "the dispatch ceiling freezes at the close of stage 07, once "
+                "every phase of the set sealed at stage 06 is imported; "
+                + (f"phase {missing[0]!r} has no imported row yet" if sealed
+                   else "this run's phase set is not sealed yet"))
+        if int(after[0]) != _dispatch_projection(proposed):
             raise TrackerValidationError(
                 f"the dispatch projection {after[0]} is not 7 x total_tasks + "
                 "3 x BUDGET_PER_RUN + 5 = "
@@ -2570,6 +2602,47 @@ def _dispatch_projection(tracker: dict) -> int:
     """``7 x total_tasks + 3 x BUDGET_PER_RUN + 5`` over ``tracker``."""
     return (_DISPATCHES_PER_TASK * len(tracker["tasks"])
             + _DISPATCHES_PER_ADOPTION * BUDGET_PER_RUN + _DISPATCH_MARGIN)
+
+
+def _guard_frozen_phase_set(current: dict, proposed: dict) -> None:
+    """After stage 06 no phase is born that the sealed set does not name.
+
+    Spec invariant 6: "The phase set is immutable after stage 06. The run
+    cannot create work for itself. Scope expansion is structurally impossible,
+    not merely forbidden." Stage 06 closes by writing the master plan's phase
+    ids into ``phase_set`` (``close_phase_set``); stage 07 then imports one
+    plan per sealed id. Three rules, all here because a raw transition does not
+    go through any writer:
+
+    - a seal never changes, and is never withdrawn;
+    - the transition that closes stage 06 writes the seal, so no run leaves
+      stage 06 with its set open;
+    - once sealed, every phase row names a sealed id. With rows append-only
+      (``_guard_phase_rows``), that refuses any phase born after the seal
+      outside it. A ``phase_plans`` entry needs no rule of its own: that guard
+      already admits one only beside a new row.
+    """
+    sealed = current["run"]["phase_set"]
+    after = proposed["run"]["phase_set"]
+    if sealed != _ABSENT_CELL and after != sealed:
+        raise TrackerValidationError(
+            f"the phase set {sealed!r} was sealed at the close of stage 06 and "
+            f"cannot become {after!r}: the run cannot create work for itself")
+    if after == _ABSENT_CELL:
+        if (_stage_state(current, "06") != "complete"
+                and _stage_state(proposed, "06") == "complete"):
+            raise TrackerValidationError(
+                "stage 06 closes only by writing the phase-set seal "
+                "(close_phase_set): a run that leaves stage 06 with its phase "
+                "set open can create work for itself at any later stage")
+        return
+    ids = _csv(after)
+    outside = [row["id"] for row in proposed["phases"] if row["id"] not in ids]
+    if outside:
+        raise TrackerValidationError(
+            f"phase {outside[0]!r} is not in the phase set {after!r} sealed at "
+            "the close of stage 06; scope expansion is structurally "
+            "impossible, and no later stage may create a phase")
 
 
 def _guard_frozen_intent(current: dict, proposed: dict) -> None:
@@ -2809,6 +2882,7 @@ def locked_tracker_update(run_dir: Path, *, transition_id: str, mutate,
         #: already held to their grammar rather than whatever ``mutate`` built.
         _guard_frozen_dispatch_ceiling(current, reparsed)
         _guard_phase_rows(current, reparsed)
+        _guard_frozen_phase_set(current, reparsed)
         _guard_review_class(current, reparsed)
         _replace_tracker(run_dir, canonical, transition_id)
         return reparsed
@@ -3263,6 +3337,9 @@ def initialize_run(run_dir: Path, *, run_id: str, base_commit: str,
             #: product — it would skip the stage that was to produce it.
             "spec": "-",
             "master_plan": "-",
+            #: Sealed at the close of stage 06 by ``close_phase_set``: the
+            #: master plan's phase ids, after which no other phase is born.
+            "phase_set": "-",
             "phase_plans": "-",
             "decisions": f"{artifacts}/decisions.md",
             "findings": f"{artifacts}/findings.md",
@@ -14564,10 +14641,10 @@ def freeze_dispatch_ceiling(run_dir) -> dict:
     it was not granted. A second call on a frozen run changes nothing; counting
     dispatches against the ceilings, and refusing one, is the controller's.
 
-    "Once the phase plans are imported" is NOT CHECKED: the tracker records the
-    master plan's path and not its phase list, so no predicate over this state
-    says every listed plan is in. A premature freeze under-prices the run and
-    stops it early, at the soft ceiling first, which is the safe direction.
+    "Once the phase plans are imported" IS CHECKED, by
+    ``_guard_frozen_dispatch_ceiling`` on every first write: the phase set
+    sealed at the close of stage 06 is the master plan's phase list, and the
+    freeze is refused until every sealed phase has its imported row.
     """
     run_dir = _run_path(run_dir)
     tracker = validate_run(run_dir)
@@ -14589,6 +14666,56 @@ def freeze_dispatch_ceiling(run_dir) -> dict:
 
     return locked_tracker_update(
         run_dir, transition_id="freeze-dispatch-ceiling", mutate=mutate)
+
+
+#: What stage 07 is doing once stage 06 has sealed the phase set.
+_PHASE_FAN_OUT_ACTION = "fan-out-phase-plans"
+
+
+def close_phase_set(run_dir, *, phase_ids) -> dict:
+    """Close stage 06 by sealing the master plan's phase ids into ``phase_set``.
+
+    Spec invariant 6: "The phase set is immutable after stage 06." In the same
+    transition stage 06 completes and stage 07 opens, so no revision holds a
+    closed stage 06 beside an open set. ``_guard_frozen_phase_set`` then refuses
+    any phase row outside the seal and any change to it, for this writer and
+    for a raw ``locked_tracker_update`` alike; ``import_phase_plan`` stays the
+    one writer of a phase row, and stage 07 imports one plan per sealed id.
+
+    Closing again with the same ids is inert; with any other ids it raises.
+    """
+    run_dir = _run_path(run_dir)
+    if (not isinstance(phase_ids, (list, tuple)) or not phase_ids
+            or not all(isinstance(value, str) and _TOKEN.fullmatch(value)
+                       and "," not in value for value in phase_ids)
+            or len(set(phase_ids)) != len(phase_ids)):
+        raise TrackerValidationError(
+            f"phase_ids {phase_ids!r} must be a nonempty list of distinct "
+            "phase ids: the master plan's phase list, each id once")
+    seal = ",".join(phase_ids)
+    tracker = validate_run(run_dir)
+    if tracker["run"]["phase_set"] != _ABSENT_CELL:
+        if tracker["run"]["phase_set"] == seal:
+            return tracker
+        raise TrackerValidationError(
+            f"the phase set is already sealed as "
+            f"{tracker['run']['phase_set']!r}; {seal!r} would be the run "
+            "creating work for itself after stage 06")
+
+    def mutate(tracker: dict) -> dict:
+        if _stage_state(tracker, "06") != "active":
+            raise TrackerValidationError(
+                "the phase set is sealed at the close of stage 06, and stage "
+                f"06 is {_stage_state(tracker, '06')!r}, not active")
+        tracker["run"]["phase_set"] = seal
+        tracker["stages"][STAGES.index("06")].update(
+            stage_state="complete", next_action=_ABSENT_CELL)
+        tracker["stages"][STAGES.index("07")].update(
+            stage_state="active", next_action=_PHASE_FAN_OUT_ACTION)
+        return tracker
+
+    return locked_tracker_update(
+        run_dir, transition_id="close-phase-set", mutate=mutate)
 
 
 def import_phase_plan(run_dir, *, phase_plan) -> dict:

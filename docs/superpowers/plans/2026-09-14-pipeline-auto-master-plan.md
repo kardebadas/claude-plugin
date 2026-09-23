@@ -536,6 +536,80 @@ forbids any of them.** A worker could satisfy any of the above with
 exists to state. The screen must refuse the whole family **by name**, enumerated
 from `dir(os)` rather than from a remembered list.
 
+## P05 and P06 scoped to spec-required enforcement — 21 planned tasks, 5 built
+
+Scoped 2026-09-23 under the rule below: build only what the approved spec
+requires the state machine to enforce. Two independent read-only scoping passes,
+one per phase. This section is the durable record of what was dropped and why;
+the phase plans are NOT rewritten, and a later reader should treat any phase-plan
+task listed as DROPPED here as superseded.
+
+### First, before either phase: a P04 defect
+
+**A task blocked on a quorum whose question escalates and gets a human answer
+has no path to resume.** On the quorum arm `resume_task` requires the decision id
+to equal `Q-<qid>`; a human answer is `H-<n>`, which never can. It depends on
+nothing in P05 or P06 and strands any real run at its first escalated question,
+so it is fixed first, as P04 code. The two scopers disagreed on which phase owned
+it; they agreed on every fact, which is why it belongs to neither. **Likely
+sibling in the same check:** a re-asked question (budget extension or challenge
+re-open) is minted a new qid by `derive_reopen_qid`, while the blocked task's
+`Question` cell still names the old one, so the resulting adoption fails the same
+comparison and no writer re-points the task.
+
+### P05 — 9 planned, 3 built
+
+| Task | Verdict | Reason |
+| --- | --- | --- |
+| 1 | DROP | Renames vocabulary only. |
+| 2 | DROP | No spec line requires code; it runs only when called, so a controller that skips it passes anyway. |
+| 3 | DROP | Already enforced by P02's `_validate_task_review`. Its "live Open" would **weaken** the bar, making `Minor 3 / Open 0` legal. |
+| 4 | DROP | Already enforced by P02's `_validate_fix_rounds`, including gate scopes. |
+| 5 | DROP | Reconciliation; no spec line requires code. **Carried by prose** — see below. |
+| 6 | BUILD-SMALLER | The ratchet: spec says "mechanically triggered, never downward" and "legal only with a matching ratchet record". |
+| 7 | MERGED into 6 (ratchet half); rest DROP | The provisional label and reviewer-constraints block are prose. |
+| 8 | BUILD, reshaped | The rung cap. Spec allows "no controller override", so it must live **inside `finalize_quorum`**; the plan's version was a read helper that ran after adoption and changed no outcome. |
+| 9 | DROP | Each built task carries its own wiring test. |
+
+Also built, covered by no planned task: **the plan-metadata cross-check** (P02
+handed it to P05; today a later write can move a phase from `required` to
+`final-only` while still claiming the plan as its source), folded into the
+ratchet; and **the dispatch ceiling's `## Run` fields** — the spec says to
+"freeze" three values into `## Run`, which currently has no fields for them, so
+the freeze cannot be recorded at all. Counting and refusing dispatches stay prose.
+
+### P06 — 12 planned, 2 built
+
+| Task | Verdict | Reason |
+| --- | --- | --- |
+| 1 | BUILD, **redesigned** | The phase-set freeze: "The state machine enforces it rather than the controller's restraint." The plan's `create_phase` would have been a **second** phase-row writer while the real one, `import_phase_plan`, stayed unguarded, and a writer-level guard is bypassed by raw `locked_tracker_update`. Built instead as a transition guard **inside `locked_tracker_update`**, beside `_guard_frozen_intent`. |
+| 2 | BUILD-SMALLER | Spec: "two reviewers with non-implementer enforcement". Implementers and fixers only; the extension to brains, readers and task reviewers is not in the spec. |
+| 3 | DROP | Reviewer packet; a content requirement on a prompt, not enforcement. |
+| 4 | DROP | Findings ledger; its only consumers are dropped tasks. |
+| 5 | DROP | A pure routing function the controller can ignore moves no enforcement into code; the harmful routes are already structural in P03. |
+| 6 | DROP | Already built in P03: human re-open refused, one re-open per lineage, second challenge escalates, raised bar applied at adoption. |
+| 7 | DROP | Reconciliation. **Carried by prose** — see below. |
+| 8 | DROP | The freeze becomes structural through Task 1; one assertion folded in. Classes and CP numbering are prose. |
+| 9 | DROP | The gate validator already refuses an evaluated gate without reports and verification. |
+| 10 | DROP | `_validate_fix_rounds` already enforces cap, one fixer and both halts for gate scopes. |
+| 11 | BUILD-SMALLER, merged into 2 | Register the `branch-review` and `final` evidence purposes with `+=`. Drop `final_suite_commands`: it hard-codes **this repository's** build suite as the product's stage-12 suite. |
+| 12 | DROP | The report's content is prose; its ordering is checked by a P08 GREEN scenario. |
+
+### Fell between the phases — carried by prose, and must be written
+
+Each scoper dropped these on the assumption the other phase kept them. No spec
+line requires code for either, so the prose alone carries them and that prose
+must exist: **reconciliation's no-stall and counter rules** (the task moves to
+`[?]`, the owner slot releases, the round counter does not move), and **the
+verbatim taint block** in the reviewer packet.
+
+### The terminal action
+
+`derive_next_action` returns `complete` once every stage is complete, while the
+spec and the GREEN-tested skill name `complete-with-proposals` as the terminal
+action when proposals exist. A small change lets the state machine derive the
+spec's named value, rather than rewriting the spec and the skill to match code.
+
 ## Execution policy from 2026-09-22 — the skill is the product (SUPERSEDES the policy below)
 
 Set by the user after ~45 of 92 tasks, having found the build inverted relative

@@ -9171,22 +9171,32 @@ class ParseDecisionsTests(DecisionContractCase):
                          "file-exists:db/session.sql is asserted 'present' and "
                          "'absent'")
 
-    def test_a_second_adopted_record_on_one_axis_is_refused_even_when_it_agrees(self):
-        """``templates/decisions.md`` line 63: "an axis holds at most one
-        ``Adopted`` decision". This test previously asserted the OPPOSITE — that
-        two adopted records agreeing on one axis are accepted — and that reading
-        is overruled by the same authority that settled the three field-grammar
-        defects this contract was built from.
+    def test_two_adopted_records_agreeing_on_one_axis_are_accepted(self):
+        """The spec's rule, and no stricter one (design spec, "Contradicting an
+        earlier quorum answer"): "One adopted answer per qid ... a file holding
+        two adopted CONTRADICTING answers on one axis fails validation". Two
+        that agree are two answers to two questions tagged to one axis.
 
-        Agreement today is not the point. The axis index has one ``Decision``
-        column and can name only one of two records; every later reader picks by
-        accident of iteration order; and the pair becomes a real contradiction
-        the first time either is amended. The mutation that IS legal is
-        supersession, which is pinned below.
+        THE STRICTER RULE THIS REPLACES -- one ``Adopted`` decision per axis --
+        is what forced a quorum adoption agreeing with a human answer onto a
+        minted axis of its own, and from there no two quorum answers were ever
+        compared with each other.
         """
-        message = str(self.refused(DECISION_HUMAN + DECISION_QUORUM,
-                                   because="at most one"))
-        self.assertIn("storage-engine", message)
+        parsed = pas.parse_decisions(DECISION_HUMAN + DECISION_QUORUM)
+        self.assertEqual(parsed["axis_index"]["storage-engine"],
+                         ["H-001", "Q-abc123def456"])
+        self.assertEqual({record["status"]
+                          for record in parsed["decisions"].values()},
+                         {"Adopted"})
+
+    def test_two_adopted_records_contradicting_on_one_axis_are_a_read_only_stop(self):
+        """The half of the rule that binds: validated on every read, so on
+        every write, because every writer parses what it is about to write."""
+        contradicting = DECISION_QUORUM.replace(
+            "file-exists:db/session.sql=present",
+            "file-exists:db/session.sql=absent")
+        message = str(self.refused(DECISION_HUMAN + contradicting,
+                                   because="contradicting"))
         self.assertIn("H-001", message)
         self.assertIn("Q-abc123def456", message)
 
@@ -10927,18 +10937,15 @@ class CheckContradictionTests(DecisionContractCase):
     def test_human_decisions_are_reported_ahead_of_quorum_ones(self):
         """Which D-ID comes back decides the rejection status.
 
-        ASSEMBLED RATHER THAN PARSED, and the second assertion says why: an
-        axis holds at most one Adopted decision, so no legal `decisions.md` can
-        state a human and a quorum decision both binding on one axis — a later
-        adoption supersedes the record standing there. The ordering is
-        therefore a backstop for a caller that assembles a mapping, and every
-        record in this one is still genuine parser output.
+        A LIVE DISCRIMINATOR. An axis may hold several Adopted decisions that
+        agree, so a legal `decisions.md` states a human and a quorum decision
+        both binding on one axis -- a quorum adoption agreeing with the user's
+        answer is recorded beside it. The index order is assembled by hand so
+        that both orders can be asserted; every record is genuine parser output.
 
         Both index orders are asserted. One alone would pass on a function that
         simply returned the first id it was handed.
         """
-        self.refused(DECISION_HUMAN + DECISION_QUORUM,
-                     because="Adopted decisions")
         records = parsed_records(DECISION_HUMAN + DECISION_QUORUM_SECOND_AXIS)
         for record in records.values():
             record["axis"] = "storage-engine"
@@ -17777,17 +17784,31 @@ class AdoptionChargesTheDriftBudgetTests(unittest.TestCase):
             "adopted")
 
 
+#: One more consequence, about a file no fixture decision mentions, so two
+#: answers can agree with H-001 and still disagree with each other.
+CACHE_PRESENT = {"kind": "file-exists", "subject": "cache/redis.conf",
+                 "value": "present"}
+CACHE_ABSENT = dict(CACHE_PRESENT, value="absent")
+
+
+def with_consequence(payload, extra):
+    """`payload` asserting `extra` as well, or unchanged when `extra` is None."""
+    if extra is None:
+        return payload
+    return dict(payload, consequences=list(payload["consequences"]) + [dict(extra)])
+
+
 class AdoptedDecisionRecordTests(unittest.TestCase):
     """What an adoption writes into the append-only audit trail.
 
-    ADOPTION SUPERSEDES; IT NEVER APPENDS BESIDE. `parse_decisions` enforces at
-    most one `Adopted` decision per axis, so a later adoption on an occupied
-    axis flips the standing record to `Superseded` AND appends the successor
-    carrying `Supersedes` — both halves, in one write. Half a write is
-    unrecoverable: the file is append-only, so a second `Adopted` record cannot
-    be withdrawn and a `Superseded` record with no successor cannot be
-    completed, and either way the file stops parsing and every later read of
-    the run is a read-only stop.
+    AN ADOPTION IS RECORDED ON THE AXIS ITS QUESTION WAS ASKED ON, beside
+    whatever agrees with it there: the spec forbids two adopted CONTRADICTING
+    answers on one axis, not two answers. ONLY A RE-OPEN SUPERSEDES, and it
+    supersedes exactly the decision it names -- flipping it to `Superseded` AND
+    appending the successor carrying `Supersedes`, both halves in one write.
+    Half a write is unrecoverable: the file is append-only, so a `Superseded`
+    record with no successor cannot be completed, and every later read of the
+    run is a read-only stop.
     """
 
     def setUp(self):
@@ -17858,45 +17879,44 @@ class AdoptedDecisionRecordTests(unittest.TestCase):
         self.assertEqual(self.parsed()["decisions"][f"Q-{qid}"]["consistent_with"],
                          [])
 
-    def test_a_later_adoption_on_an_occupied_axis_supersedes_the_standing_record(self):
-        """BOTH HALVES, IN ONE WRITE. Writing only the append half leaves two
-        Adopted records on one axis; writing only the retirement half leaves a
-        `Superseded` record nothing supersedes. Neither is recoverable by a
-        later write, because the file is append-only and already unparseable."""
+    def test_a_later_agreeing_adoption_on_an_occupied_axis_appends_beside_it(self):
+        """NO SUPERSESSION WITHOUT A RE-OPEN. Two questions tagged to one axis
+        that reach one answer are two answers per qid, and both stand; only a
+        re-open names the one decision it is licensed to replace."""
         first, _ = self.adopt()
         second, result = self.adopt(
             question="Which engine stores the session table for good?")
         self.assertEqual(result["status"], "adopted")
         decisions = self.parsed()
-        self.assertEqual(decisions["decisions"][f"Q-{first}"]["status"],
-                         "Superseded")
-        self.assertEqual(decisions["decisions"][f"Q-{second}"]["status"],
-                         "Adopted")
+        for qid in (first, second):
+            self.assertEqual(decisions["decisions"][f"Q-{qid}"]["status"],
+                             "Adopted")
         self.assertEqual(
-            decisions["decisions"][f"Q-{second}"]["supersedes"].strip(),
-            f"Q-{first}")
+            decisions["decisions"][f"Q-{second}"].get("supersedes", "").strip(),
+            "")
         self.assertEqual(decisions["axis_index"]["storage-engine"],
                          [f"Q-{first}", f"Q-{second}"])
 
     # --- a human decision on the asked axis ----------------------------------
     #
     # A QUORUM WRITE NEVER SUPERSEDES A `Provenance: human` DECISION, UNDER ANY
-    # OUTCOME (spec §2, invariant 2: "may never overrule a recorded one").
-    # Retiring H-001 on an AGREEING answer is still overruling it: the axis
-    # then holds a quorum decision, a later contradicting answer is judged
-    # against that one -- `rejected-contradicts-quorum`, which a re-open at a
-    # raised bar can undo -- and the user's answer has left the contradiction
-    # screen for good. So the agreeing adoption is recorded on an axis of its
-    # own, and the human decision keeps standing on the asked one.
+    # OUTCOME (spec §2, invariant 2: "may never overrule a recorded one"). An
+    # agreeing adoption is recorded BESIDE the human decision, on the same
+    # axis, so every later answer on that axis is screened against BOTH -- the
+    # user's answer and the quorum's -- and quorum answers are compared with
+    # each other ("Contradicting an earlier quorum answer").
 
-    def agree_with_the_human(self):
+    def agree_with_the_human(self, extra=None):
         """One adoption on `storage-engine`, where H-001 stands, that agrees
-        with H-001 in its key and in its consequence."""
+        with H-001 in its key and in its consequence -- and, with `extra`,
+        asserts one more consequence H-001 says nothing about."""
         (self.run_dir / "decisions.md").write_text(DECISION_HUMAN,
                                                    encoding="utf-8")
-        return self.adopt([graded("postgres", "specified", value="present"),
-                           graded("postgres", "speculation", value="present"),
-                           graded("sqlite", "speculation", value="present")])
+        return self.adopt([with_consequence(graded(key, rung, value="present"),
+                                            extra)
+                           for key, rung in (("postgres", "specified"),
+                                             ("postgres", "speculation"),
+                                             ("sqlite", "speculation"))])
 
     def test_an_agreeing_adoption_leaves_the_human_decision_adopted(self):
         qid, result = self.agree_with_the_human()
@@ -17907,13 +17927,17 @@ class AdoptedDecisionRecordTests(unittest.TestCase):
         self.assertEqual(record["status"], "Adopted")
         self.assertEqual(record.get("supersedes", "").strip(), "")
         self.assertNotIn("Superseded", self.trail())
-        #: ASKED ON THE HUMAN'S AXIS, RECORDED ON ITS OWN. The row keeps what
-        #: was asked; the record carries the question's own qid, exactly as a
-        #: `new`-axis adoption does, so the human axis still indexes H-001 alone.
+        #: RECORDED ON THE AXIS IT WAS ASKED ON, beside the human decision.
         self.assertEqual(result["axis"], "storage-engine")
-        self.assertEqual(result["decision_axis"], qid)
-        self.assertEqual(record["axis"], qid)
-        self.assertEqual(decisions["axis_index"]["storage-engine"], ["H-001"])
+        self.assertEqual(result["decision_axis"], "storage-engine")
+        self.assertEqual(record["axis"], "storage-engine")
+        self.assertEqual(decisions["axis_index"]["storage-engine"],
+                         ["H-001", f"Q-{qid}"])
+        #: BOTH GOVERN: each binds, and each reaches the brains' projection.
+        projection = pas.project_decisions(decisions)
+        for did in ("H-001", f"Q-{qid}"):
+            self.assertTrue(pas._decision_binds(decisions["decisions"][did], did))
+            self.assertIn(f"## {did}", projection)
 
     def test_a_later_contradiction_on_that_axis_is_judged_against_the_human(self):
         self.agree_with_the_human()
@@ -17927,24 +17951,86 @@ class AdoptedDecisionRecordTests(unittest.TestCase):
         self.assertEqual(self.parsed()["decisions"]["H-001"]["status"],
                          "Adopted")
 
+    def test_a_quorum_answer_contradicting_an_agreeing_quorum_answer_is_rejected(self):
+        """THE REVIEW'S SEQUENCE. H-001 on the axis; Q1 agrees with it and also
+        says the cache exists; Q2 agrees with H-001 and says it does not. Q2
+        contradicts Q1 -- and must be judged against it, which it never was
+        while every agreeing adoption was moved to an axis of its own."""
+        first, _ = self.agree_with_the_human(extra=CACHE_PRESENT)
+        second, result = self.adopt(
+            [with_consequence(graded(key, rung, value="present"), CACHE_ABSENT)
+             for key, rung in (("postgres", "specified"),
+                               ("postgres", "speculation"),
+                               ("sqlite", "speculation"))],
+            question="Which engine backs the session table, and is there a cache?")
+        self.assertEqual(result["status"], "rejected-contradicts-quorum")
+        self.assertEqual(result["contradicted_decision"], f"Q-{first}")
+        decisions = self.parsed()
+        self.assertNotIn(f"Q-{second}", decisions["decisions"])
+        self.assertEqual(decisions["decisions"][f"Q-{first}"]["status"],
+                         "Adopted")
+        self.assertEqual(decisions["decisions"]["H-001"]["status"], "Adopted")
+
+    def outcome(self, **overrides):
+        """An adopted outcome as the finaliser hands it to the writer."""
+        result = {"decision_id": "Q-" + "e" * 12,
+                  "decision_axis": "storage-engine",
+                  "question": "Which engine?", "depth": 1,
+                  "runner_up_rung": None, "context_digest": "0" * 64,
+                  "blocks": ["T04"], "reopen_of": None,
+                  "winner": {"answer_key": "postgres", "answer": "Postgres.",
+                             "rung": "specified",
+                             "consequences": [{"kind": "file-exists",
+                                               "subject": SESSION_SUBJECT,
+                                               "value": "present"}],
+                             "consistent_with": [], "forecloses": ["x"]}}
+        result.update(overrides)
+        return result
+
     def test_the_writer_refuses_to_retire_a_human_decision(self):
-        """THE BACKSTOP AT THE WRITE. Whatever axis a caller hands the writer,
-        the record it renders never flips a human decision to `Superseded`."""
+        """THE BACKSTOP AT THE WRITE. A record naming a human decision as the
+        one it re-opens is refused rather than written: the only record it
+        could write retires the user's answer. And a record naming none
+        retires nothing -- it is appended beside."""
         text = DECISION_HUMAN
-        outcome = {"decision_id": "Q-" + "e" * 12,
-                   "decision_axis": "storage-engine",
-                   "question": "Which engine?", "depth": 1,
-                   "runner_up_rung": None, "context_digest": "0" * 64,
-                   "blocks": ["T04"],
-                   "winner": {"answer_key": "postgres", "answer": "Postgres.",
-                              "rung": "specified",
-                              "consequences": [{"kind": "file-exists",
-                                                "subject": SESSION_SUBJECT,
-                                                "value": "present"}],
-                              "consistent_with": [], "forecloses": ["x"]}}
         with self.assertRaises(pas.TrackerValidationError) as raised:
-            pas._rendered_decisions(outcome, text, pas.parse_decisions(text))
+            pas._rendered_decisions(self.outcome(reopen_of="H-001"), text,
+                                    pas.parse_decisions(text))
         self.assertIn("H-001", str(raised.exception))
+        written = pas.parse_decisions(pas._rendered_decisions(
+            self.outcome(), text, pas.parse_decisions(text)))
+        self.assertEqual(written["decisions"]["H-001"]["status"], "Adopted")
+
+    def test_the_writer_refuses_a_reopen_of_a_decision_not_standing_on_its_axis(self):
+        """A re-open supersedes EXACTLY the decision it challenged. Named but
+        retired, or standing on another axis, it is refused rather than
+        appended beside: the record would say a challenge happened and retire
+        nothing."""
+        text = DECISION_HUMAN + DECISION_QUORUM
+        for named, axis in (("Q-abc123def456", "cache-layer"),
+                            ("Q-" + "d" * 12, "storage-engine")):
+            with self.subTest(named=named, axis=axis):
+                with self.assertRaises(pas.TrackerValidationError) as raised:
+                    pas._rendered_decisions(
+                        self.outcome(reopen_of=named, decision_axis=axis),
+                        text, pas.parse_decisions(text))
+                self.assertIn(named, str(raised.exception))
+        written = pas.parse_decisions(pas._rendered_decisions(
+            self.outcome(reopen_of="Q-abc123def456"), text,
+            pas.parse_decisions(text)))
+        self.assertEqual(written["decisions"]["Q-abc123def456"]["status"],
+                         "Superseded")
+
+    def test_the_writer_refuses_a_record_contradicting_one_on_its_axis(self):
+        """VALIDATED ON EVERY WRITE: the writer parses what it is about to
+        write, and two adopted contradicting answers on one axis do not parse.
+        """
+        text = DECISION_HUMAN
+        clash = self.outcome()
+        clash["winner"] = dict(clash["winner"], answer_key="sqlite")
+        with self.assertRaises(pas.TrackerValidationError) as raised:
+            pas._rendered_decisions(clash, text, pas.parse_decisions(text))
+        self.assertIn("contradicting", str(raised.exception))
 
     # --- open/finalise axis parity -------------------------------------------
     #
@@ -17990,8 +18076,14 @@ class AdoptedDecisionRecordTests(unittest.TestCase):
         THE SECOND ADOPTION IS ON ANOTHER AXIS AND SITS BETWEEN THE TWO, which
         is what makes the scoping observable: without a live record following
         the one being retired, "this section" and "the rest of the file" are
-        the same range and no input tells them apart."""
-        first, _ = self.adopt()
+        the same range and no input tells them apart.
+
+        THE RETIREMENT IS A RE-OPEN'S, the only write that supersedes: the
+        first adoption is at `code-evidenced` so a `specified` re-open clears
+        its raised bar."""
+        first, _ = self.adopt([graded("postgres", "code-evidenced"),
+                               graded("postgres", "code-evidenced"),
+                               graded("sqlite", "speculation")])
         #: Registered because the mirrored row's `Axis` cell is closed to the
         #: stage-03 question ids: a second axis the tracker never heard of
         #: stops the finalisation before this case reaches its own claim.
@@ -17999,8 +18091,12 @@ class AdoptedDecisionRecordTests(unittest.TestCase):
         other, _ = self.adopt(
             axis="cache-layer",
             question="Which cache layer fronts the session table?")
-        second, result = self.adopt(
-            question="Which engine stores the session table for good?")
+        second = open_question(
+            self, self.run_dir,
+            extra=(f"- **Reopen of:** Q-{first}",
+                   f"- **Challenge:** {CHALLENGE_EVIDENCE}"))
+        answer_quorum(self.run_dir, second, [graded("sqlite", "specified")] * 3)
+        result = pas.finalize_quorum(str(self.run_dir), qid=second)
         self.assertEqual(result["status"], "adopted")
         decisions = self.parsed()
         self.assertEqual(decisions["decisions"]["H-001"]["status"], "Adopted")
@@ -19766,6 +19862,30 @@ class ReopenRaisedBar(unittest.TestCase):
         self.assertIsNone(result["raised_bar_rung"])
         self.assertEqual(result["reopen_of"], grant)
 
+    def test_one_grant_re_raises_two_unrelated_questions(self):
+        """THE D-ID HALT IS A CHALLENGE'S, NEVER A RE-RAISE'S. A second
+        challenge naming one decision halts however it is worded; a grant is
+        not a decision anything challenged, and one grant restoring headroom
+        for two questions the budget refused authorizes both re-raises --
+        keyed on the grant, the second would halt as an oscillation it had no
+        part in."""
+        seeded = seed_adoptions(self.run_dir, REOPEN_PHASE, pas.BUDGET_PER_PHASE,
+                                prefix="e")
+        other = "Which log format do the session events use?"
+        for question in (QUESTION["question"], other):
+            refused = self.raise_question(axis=CONTROL_AXIS, phase=REOPEN_PHASE,
+                                          question=question,
+                                          owners=", ".join(ORIGINAL_OWNERS))
+            self.assertEqual(refused["reason"], "phase-budget-exhausted")
+        grant = self.grant_extension(seeded)
+        first = self.open_reopen(grant, challenge=None, axis=CONTROL_AXIS)
+        self.assertEqual(first["status"], "in_flight", first)
+        second = self.raise_question(
+            axis=CONTROL_AXIS, phase=REOPEN_PHASE, question=other,
+            owners=", ".join(REOPEN_OWNERS),
+            extra=(f"- **Reopen of:** {grant}",))
+        self.assertEqual(second["status"], "in_flight", second)
+
     def test_a_re_raise_may_not_smuggle_the_budget_in_through_the_challenge(self):
         """Nothing was measured, so there is nothing to challenge — and the
         only thing a raiser has to write there is why the budget moved, which
@@ -20119,6 +20239,187 @@ WEAK_PREMISE = """
 STRONG_PREMISE = (WEAK_PREMISE.replace("Q-cccccccccccc", "Q-dddddddddddd")
                   .replace("cache-axis", "cache-axis-2")
                   .replace("code-evidenced", "specified"))
+
+
+#: A human decision standing on the question's own axis, beside the unrelated
+#: one every adoption anchors on. Its id differs from `UNRELATED_HUMAN`'s so the
+#: two can share a file.
+AXIS_HUMAN = DECISION_HUMAN.replace("<!-- pipeline-auto-decisions/v1 -->\n",
+                                    "").replace("H-001", "H-002")
+
+
+class ReopenOnEveryRecordedAxis(unittest.TestCase):
+    """A quorum decision is re-openable wherever it is recorded.
+
+    THE AXIS A RE-OPEN IS ASKED ON IS THE AXIS ITS DECISION'S QUESTION WAS ASKED
+    ON -- a stage-03 id, or ``new`` -- and the record it writes lands on the
+    challenged decision's recorded axis. So a decision recorded on a minted
+    axis (every ``new``-axis adoption) is re-opened on ``new`` and superseded on
+    its minted axis, and ``open_quorum`` and ``finalize_quorum`` still share one
+    predicate. AND ONCE PER D-ID: a second challenge naming the same decision
+    halts however it is worded (design spec, "at most once per D-ID per run; a
+    second challenge halts").
+    """
+
+    def setUp(self):
+        self.root, self.run_dir = adoption_repo(
+            self, decisions=UNRELATED_HUMAN + DERIVED_DEPTH_ONE)
+        register_phases(self.run_dir, REOPEN_PHASE)
+
+    def raise_question(self, **fields):
+        index = len(list(Path(self.run_dir).glob("question-*.md")))
+        path = Path(self.run_dir) / f"question-{index}.md"
+        path.write_text(question_text(**fields), encoding="utf-8")
+        return pas.open_quorum(str(self.run_dir), question_record=str(path))
+
+    def answer(self, opened, owners, payloads):
+        answer_quorum(self.run_dir, opened["qid"], payloads, owners=owners)
+        return pas.finalize_quorum(str(self.run_dir), qid=opened["qid"])
+
+    def settle(self, *, axis, extra=None, value=None,
+               question=QUESTION["question"]):
+        opened = self.raise_question(axis=axis, question=question,
+                                     owners=", ".join(ORIGINAL_OWNERS))
+        result = self.answer(opened, ORIGINAL_OWNERS, [
+            with_consequence(graded("postgres", "code-evidenced", value=value),
+                             extra),
+            with_consequence(graded("postgres", "code-evidenced", value=value),
+                             extra),
+            graded("duckdb", "speculation", value=value)])
+        self.assertEqual(result["status"], "adopted", result)
+        return result
+
+    def reopen(self, challenged, payloads, *, axis,
+               question=QUESTION["question"]):
+        opened = self.raise_question(
+            axis=axis, question=question, phase=REOPEN_PHASE,
+            owners=", ".join(REOPEN_OWNERS),
+            extra=(f"- **Reopen of:** {challenged}",
+                   f"- **Challenge:** {CHALLENGE_EVIDENCE}"))
+        if opened["status"] != "in_flight":
+            return opened
+        return self.answer(opened, REOPEN_OWNERS, payloads)
+
+    def parsed(self):
+        return pas.parse_decisions(
+            (self.run_dir / "decisions.md").read_text(encoding="utf-8"))
+
+    def deeper(self, key, rung, *, value=None, extra=None):
+        return with_consequence(
+            graded(key, rung, value=value,
+                   consistent_with=[dict(anchor) for anchor in DEEPER_ANCHOR]),
+            extra)
+
+    def beside_the_human(self):
+        """Q1 on `storage-engine`, agreeing with H-002 standing there."""
+        path = self.run_dir / "decisions.md"
+        path.write_text(path.read_text(encoding="utf-8") + AXIS_HUMAN,
+                        encoding="utf-8")
+        original = self.settle(axis="storage-engine", value="present",
+                               extra=CACHE_PRESENT)
+        self.assertEqual(original["decision_axis"], "storage-engine")
+        return original
+
+    def test_a_decision_beside_a_human_one_is_reopened_at_the_raised_bar(self):
+        original = self.beside_the_human()
+        result = self.reopen(original["decision_id"], [
+            self.deeper("postgres", "specified", value="present",
+                        extra=CACHE_ABSENT)] * 3, axis="storage-engine")
+        self.assertEqual(result["status"], "adopted", result)
+        self.assertEqual(result["raised_bar_rung"], "code-evidenced")
+        records = self.parsed()["decisions"]
+        self.assertEqual(records[original["decision_id"]]["status"],
+                         "Superseded")
+        self.assertEqual(records[result["decision_id"]]["supersedes"].strip(),
+                         original["decision_id"])
+        #: The user's answer is untouched: still Adopted, still on the axis.
+        self.assertEqual(records["H-002"]["status"], "Adopted")
+        self.assertEqual(self.parsed()["axis_index"]["storage-engine"],
+                         ["H-002", original["decision_id"],
+                          result["decision_id"]])
+
+    def test_a_reopen_contradicting_the_human_is_still_rejected(self):
+        """The re-open's licence names ONE quorum decision; it never reaches
+        the user's answer standing beside it."""
+        original = self.beside_the_human()
+        result = self.reopen(original["decision_id"], [
+            self.deeper("sqlite", "specified")] * 3, axis="storage-engine")
+        self.assertEqual(result["status"], "rejected-contradicts-human")
+        self.assertEqual(result["contradicted_decision"], "H-002")
+        self.assertEqual(
+            self.parsed()["decisions"][original["decision_id"]]["status"],
+            "Adopted")
+
+    def test_a_second_challenge_to_one_decision_halts_however_it_is_worded(self):
+        original = self.beside_the_human()
+        first = self.reopen(original["decision_id"], [
+            self.deeper("postgres", "code-evidenced", value="present",
+                        extra=CACHE_ABSENT)] * 3, axis="storage-engine")
+        self.assertEqual(first["reason"], "raised-bar-not-cleared", first)
+        second = self.reopen(
+            original["decision_id"], [], axis="storage-engine",
+            question="Is the session cache really needed beside postgres?")
+        self.assertEqual((second["status"], second["reason"]),
+                         ("escalated", "second-challenge"), second)
+        self.assertFalse(second["dispatched"])
+        self.assertEqual(
+            self.parsed()["decisions"][original["decision_id"]]["status"],
+            "Adopted")
+
+    def test_a_new_axis_decision_is_reopened_and_finalised(self):
+        """`bdbe6b5`'s shared predicate made this impossible: the decision's
+        axis is its own minted qid, which no question may be asked on. The
+        re-open is asked on `new`, as its decision's question was, and lands
+        on the minted axis it supersedes."""
+        original = self.settle(axis="new",
+                               question="Do we keep a session table at all?")
+        self.assertEqual(original["decision_axis"], original["qid"])
+        result = self.reopen(original["decision_id"],
+                             [self.deeper("sqlite", "specified")] * 3,
+                             axis="new",
+                             question="Do we keep a session table at all?")
+        self.assertEqual(result["status"], "adopted", result)
+        self.assertEqual(result["axis"], "new")
+        self.assertEqual(result["decision_axis"], original["qid"])
+        records = self.parsed()["decisions"]
+        self.assertEqual(records[original["decision_id"]]["status"],
+                         "Superseded")
+        self.assertEqual(records[result["decision_id"]]["axis"],
+                         original["qid"])
+        self.assertEqual(records[result["decision_id"]]["supersedes"].strip(),
+                         original["decision_id"])
+
+    def test_a_reopen_whose_challenged_record_vanished_escalates(self):
+        """The successor's axis is read off the trail. A trail that has lost
+        the challenged record has no axis to give it: the finalisation stops
+        adopting -- an escalation a human reads -- rather than raising a
+        TypeError out of every finalisation for ever."""
+        original = self.settle(axis="new",
+                               question="Do we keep a session table at all?")
+        opened = self.raise_question(
+            axis="new", question="Do we keep a session table at all?",
+            phase=REOPEN_PHASE, owners=", ".join(REOPEN_OWNERS),
+            extra=(f"- **Reopen of:** {original['decision_id']}",
+                   f"- **Challenge:** {CHALLENGE_EVIDENCE}"))
+        answer_quorum(self.run_dir, opened["qid"],
+                      [self.deeper("sqlite", "specified")] * 3,
+                      owners=REOPEN_OWNERS)
+        (self.run_dir / "decisions.md").write_text(
+            UNRELATED_HUMAN + DERIVED_DEPTH_ONE, encoding="utf-8")
+        result = pas.finalize_quorum(str(self.run_dir), qid=opened["qid"])
+        self.assertEqual(result["status"], "escalated", result)
+        self.assertIsNone(result["decision_id"])
+
+    def test_a_reopen_asked_on_another_axis_is_refused(self):
+        """The binding the axis check exists for, on the new rule: the re-open
+        is asked on the axis its decision's question was asked on, or not at
+        all."""
+        original = self.settle(axis="new",
+                               question="Do we keep a session table at all?")
+        with self.assertRaises(pas.QuorumError) as raised:
+            self.reopen(original["decision_id"], [], axis="storage-engine",
+                        question="Do we keep a session table at all?")
+        self.assertIn("asked on", str(raised.exception))
 
 
 class InheritedRungCapTests(unittest.TestCase):

@@ -229,14 +229,22 @@ third outcome and no controller override.
   `finalize_quorum` queues the escalation row itself. No `Q-<qid>` is written,
   so every task blocked on it stays blocked until a human answers. No rung and
   no unanimity outranks a human.
-- Agrees with a `Provenance: human` decision on its axis → adopted, but the
-  record's `Axis` is the question's own qid, never the human's axis. A quorum
-  write never supersedes a human decision: both stay `Adopted`, and later
-  answers on that axis are still judged against the human one.
-- Contradicts a `Provenance: quorum` decision → `rejected-contradicts-quorum`.
-  No escalation row is queued for it. A challenge becomes **one** re-open at a
-  raised bar per D-ID per run; a second challenge escalates as
-  `second-challenge`.
+- Agrees with every decision on its axis → adopted, and recorded on the axis
+  its question was asked on (a `new` question's record carries its own qid).
+  It supersedes nothing: a human decision on that axis stays `Adopted` beside
+  it, and every later answer on the axis is judged against both. Several
+  `Adopted` decisions may share an axis while they agree.
+- Contradicts a `Provenance: quorum` decision → `rejected-contradicts-quorum`,
+  naming it, even when it agrees with a human decision on the same axis. No
+  escalation row is queued for it. A challenge becomes **one** re-open at a
+  raised bar per D-ID per run; a second challenge naming that D-ID escalates
+  as `second-challenge`, however it is worded.
+- Only a re-open supersedes, and only the quorum decision it names. Ask it on
+  the axis that decision's question was asked on (its `## Quorum` row's
+  `Axis`: a stage-03 id or `new`); `finalize_quorum` records the successor on
+  the decision's own recorded axis, so a `new`-axis decision is re-openable
+  too. `open_quorum` refuses a re-open naming a human decision, and the
+  decision writer refuses to retire one.
 - Rejections are recorded, never discarded; their count goes in the terminal
   report.
 - Two adopted contradicting answers on one axis in `decisions.md` fail validation:

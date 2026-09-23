@@ -96,12 +96,14 @@ decision is depth 0; an answer citing only depth-0 decisions is depth 1. Depth
 
 ## Axis Index
 
-One row per axis, and an axis holds at most one `Adopted` decision. A file
-holding two adopted contradicting answers on one axis fails validation and is a
-read-only stop — the same severity as a foreign schema. A superseded decision
-keeps its row; the superseding one is appended beneath it. A quorum adoption
-never supersedes a `Provenance: human` decision: one asked on a human's axis is
-recorded with the question's own qid as its `Axis`.
+One row per decision. One adopted answer per qid; several `Adopted` decisions
+may share an axis while they agree. A file holding two adopted contradicting
+answers on one axis fails validation and is a read-only stop — the same
+severity as a foreign schema. A superseded decision keeps its row; the
+superseding one is appended beneath it. Only a re-open supersedes, and only
+the quorum decision it names: a quorum adoption never supersedes a
+`Provenance: human` decision, and one agreeing with a human answer is recorded
+beside it on the same axis.
 
 | Axis | Decision | Provenance | Status |
 | --- | --- | --- | --- |

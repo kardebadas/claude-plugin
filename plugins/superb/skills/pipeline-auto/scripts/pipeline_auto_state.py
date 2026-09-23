@@ -1187,8 +1187,9 @@ def _require_quorum_axis(tracker: dict, axis) -> None:
             f"quorum axis {axis!r} is neither a stage-03 question id nor the "
             f"literal {_RESERVED_AXIS!r}, so finalize_quorum could never record "
             "this quorum's row and it would wait at ready-to-finalise for ever. "
-            "A question takes a stage-03 id or 'new' -- a reconciliation takes "
-            "the disputed decision's recorded axis, never the decision's qid")
+            "A question takes a stage-03 id or 'new' -- a re-open, and so a "
+            "reconciliation, takes the axis the challenged decision's question "
+            "was asked on, never the decision's qid")
 
 
 def _validate_quorum(tracker: dict) -> None:
@@ -5331,12 +5332,18 @@ def parse_decisions(text: str) -> dict:
     for axis, ids in sorted(axis_index.items()):
         adopted = [decisions[did] for did in ids
                    if decisions[did]["status"] == "Adopted"]
-        #: The contradiction check runs FIRST even though the count rule below
-        #: subsumes it. Both stop the same files; only one of them says what
-        #: actually disagreed, and "these two assert opposite things about
-        #: db/session.sql" is the message that tells a human which record to
-        #: retire. Ordered the other way, the specific diagnosis would be
-        #: unreachable and ``_contradiction`` would be dead code.
+        #: THE SPEC'S RULE, AND NO STRICTER ONE: "one adopted answer per qid",
+        #: and "a file holding two adopted CONTRADICTING answers on one axis
+        #: fails validation and is a read-only stop" (design spec,
+        #: "Contradicting an earlier quorum answer"). Several Adopted decisions
+        #: may share an axis while they agree -- a quorum answer agreeing with
+        #: the user's is recorded beside it -- and every pair of them is
+        #: compared here, on every read and therefore on every write, because
+        #: every writer of this file parses what it is about to write.
+        #:
+        #: A STRICTER RULE STOOD HERE -- one Adopted decision per axis -- and it
+        #: forced every agreeing adoption onto a minted axis of its own, where
+        #: no two quorum answers were ever compared with each other.
         for index, left in enumerate(adopted):
             for right in adopted[index + 1:]:
                 clash = _contradiction(left, right)
@@ -5346,25 +5353,6 @@ def parse_decisions(text: str) -> dict:
                         f"{left['id']} and {right['id']} ({clash}); this run is "
                         "a read-only stop -- the audit trail holds both answers "
                         "and no reader can tell which one the run is bound by")
-        if len(adopted) > 1:
-            #: ONE ADOPTED DECISION PER AXIS, which is what
-            #: ``templates/decisions.md`` states and the template is the
-            #: authority this contract was built against. Two that merely AGREE
-            #: today are still two records standing on one axis: the axis index
-            #: has one ``Decision`` column and can name only one of them, every
-            #: later reader picks by accident of iteration order, and the pair
-            #: becomes a contradiction the first time either is amended.
-            #:
-            #: THIS BINDS THE ADOPTION PATH. A later adoption on an axis that
-            #: already carries an Adopted record SUPERSEDES that record -- flips
-            #: it to ``Superseded`` and appends the new one with a ``Supersedes``
-            #: line -- and never appends a second Adopted one.
-            raise TrackerValidationError(
-                f"axis {axis} holds {len(adopted)} Adopted decisions "
-                f"({[record['id'] for record in adopted]}); an axis holds at "
-                "most one, and a later adoption supersedes the record standing "
-                "there rather than appending beside it -- the axis index names "
-                "one decision per axis and cannot say which of two is binding")
 
     #: ``Supersedes`` is the other half of the one legal in-place mutation.
     #: ``templates/decisions.md`` states that ``Adopted -> Superseded`` is
@@ -5835,7 +5823,8 @@ def _candidate_consequences(consequences) -> dict:
     return mapping
 
 
-def check_contradiction(decisions: dict, candidate: dict) -> str | None:
+def check_contradiction(decisions: dict, candidate: dict, *,
+                        excluding=None) -> str | None:
     """The D-ID this candidate contradicts on its axis, or ``None``.
 
     STRUCTURAL, NEVER SEMANTIC. Every stage-03 question has a stable axis id
@@ -5872,15 +5861,25 @@ def check_contradiction(decisions: dict, candidate: dict) -> str | None:
     ``rejected-contradicts-quorum``) and the terminal report both key off which
     one it is.
 
-    That ordering is now a BACKSTOP rather than a live discriminator, and
-    saying so is the point: ``parse_decisions`` enforces at most one Adopted
-    decision per axis, so a file cannot present a human and a quorum decision
-    both binding on one axis -- a later adoption supersedes the record standing
-    there. The ordering is kept because this function does not take a file, it
-    takes a mapping, and a caller that assembles one (a projection, a merge of
-    two runs, a test) can hand it the pair the file grammar refuses. Deleted,
-    the D-ID would then come back by dict iteration order and the rejection
-    status would be right by luck.
+    That ordering is a LIVE DISCRIMINATOR. An axis may hold several Adopted
+    decisions while they agree (``parse_decisions``), so a human decision and
+    a quorum decision agreeing with it both bind on one axis -- the quorum
+    adoption is recorded BESIDE the user's answer, never over it -- and a
+    candidate contradicting both must be reported against the human one.
+    Deleted, the D-ID would come back in file order and the rejection status
+    would be right by luck.
+
+    EVERY BINDING RECORD ON THE AXIS IS COMPARED, not only one: an answer that
+    agrees with the user and contradicts an earlier quorum answer is
+    ``rejected-contradicts-quorum``, which is what makes a quorum answer
+    re-openable only through the re-open door at a raised bar.
+
+    ``excluding`` NAMES THE ONE DECISION A RE-OPEN IS LICENSED TO REPLACE, and
+    it is skipped rather than exempted after the fact: the first contradiction
+    found might be that record while a SECOND standing record also
+    contradicts, and an exemption applied to the returned id would let the
+    second through. ``_reopen_authority`` has already refused every
+    ``excluding`` that is not a quorum adoption on this axis.
     """
     records = _decision_records(decisions)
     index = decisions.get("axis_index")
@@ -5943,7 +5942,7 @@ def check_contradiction(decisions: dict, candidate: dict) -> str | None:
                 "decided, and the candidate would be compared against the "
                 "records that happen to survive the disagreement")
         record = records[did]
-        if not _decision_binds(record, did):
+        if did == excluding or not _decision_binds(record, did):
             continue
         ranked.append((0 if record["provenance"] == "human" else 1,
                        position, did))
@@ -8050,6 +8049,24 @@ _REOPEN_CHALLENGE = "challenge"
 _REOPEN_RERAISE = "re-raise"
 
 
+def _challenged_quorum_decision(reopen_of):
+    """The QUORUM decision a re-open names, or ``None``.
+
+    A re-open names one of two authorities (``_reopen_authority``): a quorum
+    adoption it challenges, or a human budget grant it re-raises against. Only
+    the first is a decision the re-open may replace -- skip in the
+    contradiction check, supersede in the record, and inherit the recorded
+    axis of -- and the id's own prefix is what says which it is, because
+    ``parse_decisions`` holds provenance and prefix to each other.
+    """
+    if not isinstance(reopen_of, str):
+        return None
+    challenged = reopen_of.strip()
+    if _id_provenance(challenged) != "quorum":
+        return None
+    return challenged
+
+
 def _reopen_refusal(run_dir: Path, original_qid: str, decision_id: str) -> dict:
     """The terminal BUDGET refusal a re-raise is answering, or a stop.
 
@@ -8144,8 +8161,9 @@ def _reopen_authority(run_dir: Path, decision_id, record: dict) -> tuple:
       another. Supersession is axis-derived, so the "challenged" decision was
       never touched, the re-open spent the real lineage's single allowance on
       borrowed authority, and ``final.json`` and ``decisions.md`` both carried
-      a ``Reopen Of`` naming a decision nobody had challenged. The axes must
-      be equal: a re-ask of a different question is a different question.
+      a ``Reopen Of`` naming a decision nobody had challenged. The re-open is
+      asked on the axis the challenged decision's question was asked on, and
+      recorded on the axis that decision was recorded on.
     * the RE-RAISE door let a grant re-open a question it had nothing to do
       with -- see ``_reopen_refusal``, which is the binding, and the ordering
       rule below, which is the other half of it.
@@ -8179,21 +8197,6 @@ def _reopen_authority(run_dir: Path, decision_id, record: dict) -> tuple:
             "so neither states a bar and neither is a fact that has changed")
     if (authority["provenance"] == "quorum"
             and authority["action"] == _QUORUM_ADOPT_ACTION):
-        #: THE AXES MUST BE THE SAME QUESTION'S. Supersession is derived from
-        #: the axis, so a cross-axis challenge leaves the record it claims to
-        #: challenge Adopted and untouched -- the re-open adopts BESIDE it, on
-        #: a third axis, while both records say a challenge happened. It also
-        #: spends the challenged lineage's one allowance on a lineage that has
-        #: nothing to do with it.
-        if authority["axis"] != record["axis"]:
-            raise QuorumError(
-                f"cannot re-open {challenged} on axis {record['axis']!r}: that "
-                f"decision stands on axis {authority['axis']!r}. A re-open "
-                "challenges ONE decision and supersedes it, and supersession "
-                "is derived from the axis -- so a challenge aimed across axes "
-                "adopts beside the record it names instead of replacing it, "
-                "and leaves an audit trail where both say a challenge happened "
-                "and neither was challenged")
         rung = authority.get("grounding_rung")
         rung = rung.strip() if isinstance(rung, str) else rung
         #: HELD TO ``ADOPTABLE``, NOT MERELY TO THE LADDER. Only those two
@@ -8210,6 +8213,29 @@ def _reopen_authority(run_dir: Path, decision_id, record: dict) -> tuple:
                 "disagrees with itself is a bar below the floor -- every "
                 "answer clears it and the decision is re-taken at the same "
                 "quality of evidence, which is the dice rolled again")
+        #: THE AXES MUST BE THE SAME QUESTION'S: the re-open is asked on the
+        #: axis the challenged decision's question was ASKED on -- read off
+        #: that quorum's own ``open.json`` -- which is a stage-03 id or ``new``
+        #: and so legal at both ends of ``_quorum_axis_legal``. The record's
+        #: axis cannot be the comparison: a decision asked on ``new`` is
+        #: recorded on its own minted qid, which no question may be asked on,
+        #: and comparing against it made every such decision unre-openable.
+        #: ``_finalisation_base`` then records the successor on the challenged
+        #: decision's RECORDED axis, so the supersession lands on the record it
+        #: names. A cross-axis challenge stays refused: it spends the
+        #: challenged lineage's one allowance on a question that is not it.
+        opened = _opened_record(
+            run_dir / _QUORUM_DIRNAME / challenged[len(_QUORUM_PREFIX):]
+            / _OPEN_FILE, challenged[len(_QUORUM_PREFIX):])
+        asked = opened.get("axis")
+        if asked != record["axis"]:
+            raise QuorumError(
+                f"cannot re-open {challenged} on axis {record['axis']!r}: that "
+                f"decision's question was asked on axis {asked!r}. A re-open "
+                "challenges ONE decision and supersedes it, so it is asked on "
+                "the axis that decision's question was asked on -- a challenge "
+                "aimed across axes spends the challenged lineage's one "
+                "allowance on a different question")
         return _REOPEN_CHALLENGE, rung
     if (authority["provenance"] == "human"
             and authority["action"] == _DRIFT_EXTENSION_ACTION):
@@ -8307,8 +8333,19 @@ def _screen_challenge(run_dir: Path, challenged: str, stated: list) -> None:
                     "not whose answer missed it")
 
 
-def _prior_reopens(run_dir: Path, lineage_root: str) -> list:
-    """Every re-ask already OPENED on this lineage, by qid.
+def _prior_reopens(run_dir: Path, lineage_root: str,
+                   challenged=None) -> list:
+    """Every re-ask already OPENED on this lineage -- or against this D-ID -- by qid.
+
+    AT MOST ONCE PER D-ID PER RUN, which is the spec's own unit ("a re-open at
+    a raised bar, at most once per D-ID per run; a second challenge halts").
+    The lineage is keyed on the QUESTION, so a second challenge to one
+    decision reworded -- a reconciliation raised from a second finding, say --
+    has a lineage of its own and would pass a lineage test alone. So a
+    CHALLENGE also matches every record whose ``reopen_of`` names the same
+    decision. A re-raise passes ``None``: one budget grant may authorize
+    re-raises of several unrelated questions, and keying those on the grant
+    would halt the second as an oscillation it had no part in.
 
     AT MOST ONE RE-OPEN PER LINEAGE PER RUN. Without the cap a run spends its
     whole drift budget arguing with itself: each answer is challenged by the
@@ -8335,8 +8372,10 @@ def _prior_reopens(run_dir: Path, lineage_root: str) -> list:
             if not os.path.lexists(path):
                 continue
             record = _read_json(path, f"the {name} of {directory.name}")
-            if (isinstance(record, dict)
-                    and record.get("lineage_root") == lineage_root):
+            if isinstance(record, dict) and (
+                    record.get("lineage_root") == lineage_root
+                    or (challenged is not None
+                        and record.get("reopen_of") == challenged)):
                 found.append(directory.name)
                 break
     return found
@@ -8449,7 +8488,9 @@ def _open_under_lock(run_dir: Path, qid: str, record: dict, text: str) -> dict:
             #: above is: only a challenge has brains to name, and only a
             #: challenge cites a ``Q-`` id whose quorum record can be read.
             _screen_challenge(run_dir, challenged.strip(), stated)
-        prior = _prior_reopens(run_dir, lineage_root)
+        prior = _prior_reopens(
+            run_dir, lineage_root,
+            challenged.strip() if kind == _REOPEN_CHALLENGE else None)
         if prior:
             #: ASSIGNED TO A LOCAL rather than written inline, and that is not
             #: a style choice: the suite derives the phase's reason vocabulary
@@ -10139,6 +10180,28 @@ def _finalisation_base(run_dir: Path, qid: str, tracker: dict) -> tuple:
         "lineage_root": _opened_lineage(opened, qid, "lineage_root"),
         "raised_bar_rung": _opened_bar(opened, qid),
     }
+    challenged = _challenged_quorum_decision(base["reopen_of"])
+    if challenged is not None:
+        #: A RE-OPEN IS RECORDED ON THE AXIS OF THE DECISION IT CHALLENGES,
+        #: never on a mint of its own. It is asked on the axis that decision's
+        #: question was asked on -- a stage-03 id, or ``new``, which is all
+        #: ``_quorum_axis_legal`` admits at either end -- so for a decision on
+        #: a MINTED axis the asked axis is ``new``, and minting from it would
+        #: put the successor on the re-open's own qid: beside the record it
+        #: challenges, compared with nothing, superseding nothing. The recorded
+        #: axis is read off the trail, which ``_stale_moves`` holds to the
+        #: digest bound at dispatch.
+        record = parse_decisions(_decisions_text(run_dir))["decisions"].get(
+            challenged)
+        if record is None:
+            base["decision_axis"] = None
+            mint_refusal = (
+                f"the re-open {qid} challenges {challenged}, which the audit "
+                "trail no longer holds, so there is no axis to record its "
+                "successor on")
+        else:
+            base["decision_axis"] = record["axis"]
+            mint_refusal = None
     return base, opened, mint_refusal
 
 
@@ -10453,16 +10516,15 @@ def _compute_quorum_result(run_dir: Path, qid: str, tracker: dict) -> dict:
     if raised is not None and not RUNG_ORDER.index(winner_rung) < RUNG_ORDER.index(raised):
         return dict(base, status=_ESCALATED, reason="raised-bar-not-cleared")
 
+    #: THE RECORD TAKES THE AXIS ITS QUESTION WAS ASKED ON (or, for a
+    #: re-open, the axis of the decision it challenges -- see
+    #: ``_finalisation_base``), beside whatever agrees with it there. An
+    #: agreeing adoption on an axis a human decided is recorded beside the
+    #: human decision and supersedes nothing: only a re-open supersedes, and
+    #: only the quorum decision it names (``_rendered_decisions``).
     outcome = _apply_adoption_gates(base, winner, winner_rung, decisions)
     if outcome["status"] != _CHARGED_STATUS:
         return outcome
-    try:
-        outcome["decision_axis"] = _record_axis(outcome, decisions, tracker)
-    except QuorumSchemaInvalid as exc:
-        #: The mint collided with a stage-03 question id: the same refusal,
-        #: and the same escalation, as a ``new``-axis mint that collides.
-        return dict(base, status=_ESCALATED, reason="unmintable-axis",
-                    refusal=str(exc))
 
     #: THE DRIFT CAP IS ENFORCED WHERE THE CHARGE HAPPENS, AND THAT IS HERE.
     #: ``open_quorum`` charges NOTHING -- it is an admission check -- so two
@@ -10499,42 +10561,6 @@ def _compute_quorum_result(run_dir: Path, qid: str, tracker: dict) -> dict:
         return dict(base, status=_ESCALATED, reason="unrecordable-decision",
                     refusal=str(exc))
     return outcome
-
-
-def _human_standing(decisions: dict, axis) -> list:
-    """The ``Provenance: human`` decisions standing ``Adopted`` on ``axis``."""
-    return [did for did in decisions["axis_index"].get(axis, ())
-            if decisions["decisions"][did]["status"] == "Adopted"
-            and decisions["decisions"][did]["provenance"] == "human"]
-
-
-def _record_axis(outcome: dict, decisions: dict, tracker: dict) -> str:
-    """The axis an adoption's RECORD carries, once every gate has cleared it.
-
-    A QUORUM WRITE NEVER SUPERSEDES A ``Provenance: human`` DECISION, UNDER ANY
-    OUTCOME (spec invariant 2: a quorum "may never overrule a recorded one").
-    An answer that reached this line AGREES with the human decision on the
-    asked axis -- the contradiction screen has already rejected every one that
-    does not -- and recording it on that axis would retire the human record,
-    because an axis holds one ``Adopted`` decision and adoption supersedes.
-    Retiring it on agreement is still overruling it: the axis then holds a
-    quorum decision, a later contradicting answer is judged against THAT one
-    -- ``rejected-contradicts-quorum``, which a re-open at a raised bar can
-    undo -- and the user's answer has left the contradiction screen for good.
-
-    SO THE RECORD TAKES AN AXIS OF ITS OWN, minted exactly as a ``new``-axis
-    question's is: the question's own bare qid, with ``_minted_axis``'s
-    collision refusal. Both decisions stay ``Adopted``, the human axis still
-    indexes the human decision alone, and every later answer on that axis is
-    screened against it. The ``## Quorum`` row keeps the axis AS ASKED.
-
-    A QUORUM decision standing on the axis is superseded as before: this
-    changes nothing but the human case.
-    """
-    axis = outcome["decision_axis"]
-    if not _human_standing(decisions, axis):
-        return axis
-    return _minted_axis(_RESERVED_AXIS, outcome["qid"], tracker)
 
 
 def _apply_adoption_gates(base: dict, winner: list, winner_rung: str,
@@ -10579,7 +10605,7 @@ def _apply_adoption_gates(base: dict, winner: list, winner_rung: str,
             "axis": base["decision_axis"],
             "answer_key": payload["answer_key"],
             "consequences": payload["consequences"],
-        })
+        }, excluding=_challenged_quorum_decision(base.get("reopen_of")))
     except QuorumSchemaInvalid as exc:
         #: THE CANDIDATE, never the records: every ``QuorumSchemaInvalid``
         #: ``check_contradiction`` raises is about the answer handed to it -- a
@@ -10590,21 +10616,20 @@ def _apply_adoption_gates(base: dict, winner: list, winner_rung: str,
         #: adopts; a brain typing ``yes`` must reach a human, not halt the run.
         return dict(base, status=_ESCALATED, reason="uncomparable-answer",
                     refusal=str(exc))
-    if contradicted is not None and contradicted == base.get("reopen_of"):
-        #: THE ONE DECISION THIS QUORUM IS LICENSED TO REPLACE, and it is not a
-        #: hole in the contradiction check -- it is what a re-open IS. The
-        #: challenged decision is Adopted on this axis, so it contradicts every
-        #: answer that differs from it; without this exemption a re-open could
-        #: only ever re-affirm what it was raised to question, and the raised
-        #: bar above would gate a path nothing could reach.
-        #:
-        #: BOUNDED BY THE ADMISSION, NOT BY THIS LINE. ``_reopen_authority``
-        #: has already refused any ``reopen_of`` that is not a quorum adoption
-        #: or a human budget grant, so this can never exempt a HUMAN answer on
-        #: the axis; and it names exactly one D-ID, so a second standing
-        #: decision still rejects. The price of the exemption is the strictly
-        #: higher rung, which was paid two gates up.
-        contradicted = None
+    #: THE ONE DECISION THIS QUORUM IS LICENSED TO REPLACE is skipped by the
+    #: comparison above, and it is not a hole in the contradiction check -- it
+    #: is what a re-open IS. The challenged decision is Adopted on this axis,
+    #: so it contradicts every answer that differs from it; without the skip a
+    #: re-open could only ever re-affirm what it was raised to question, and
+    #: the raised bar above would gate a path nothing could reach.
+    #:
+    #: BOUNDED BY THE ADMISSION, NOT BY THIS LINE. ``_reopen_authority`` has
+    #: already refused any ``reopen_of`` that is not a quorum adoption or a
+    #: human budget grant, and ``_challenged_quorum_decision`` passes on only
+    #: the first -- so this can never skip a HUMAN answer on the axis; and it
+    #: names exactly one D-ID, so every OTHER standing decision is still
+    #: compared. The price of the skip is the strictly higher rung, paid two
+    #: gates up.
     if contradicted is not None:
         provenance = decisions["decisions"][contradicted]["provenance"]
         return dict(
@@ -11259,19 +11284,20 @@ def finalize_quorum(run_dir: str, *, qid: str) -> dict:
 
 # --- the decision record ---------------------------------------------------
 #
-# ADOPTION SUPERSEDES; IT NEVER APPENDS BESIDE. ``templates/decisions.md`` says
-# an axis holds at most one ``Adopted`` decision and ``parse_decisions``
-# ENFORCES it, so a later adoption on an occupied axis flips the standing
-# record to ``Status: Superseded`` AND appends the successor carrying
-# ``Supersedes: <id>`` -- both halves, in one write.
+# AN ADOPTION IS APPENDED ON THE AXIS ITS QUESTION WAS ASKED ON, beside every
+# record that agrees with it there; ``parse_decisions`` refuses two adopted
+# CONTRADICTING answers on one axis, which is the spec's rule, and the writer
+# parses what it is about to write -- so a contradicting record is refused at
+# the write. ONLY A RE-OPEN SUPERSEDES, and only the quorum decision it names:
+# that record is flipped to ``Status: Superseded`` AND the successor is
+# appended carrying ``Supersedes: <id>`` -- both halves, in one write.
 #
-# EXCEPT OVER A HUMAN. A quorum write never supersedes a ``Provenance: human``
-# decision: an adoption asked on an axis a human decided is recorded on the
-# question's own qid instead (``_record_axis``), and the writer refuses the
-# retirement outright if it is ever handed one.
+# NEVER OVER A HUMAN. A quorum write never supersedes a ``Provenance: human``
+# decision: ``_reopen_authority`` refuses a re-open naming one, and the writer
+# refuses the retirement outright if it is ever handed one.
 #
-# HALF A WRITE IS UNRECOVERABLE. The file is append-only: a second ``Adopted``
-# record on one axis cannot be withdrawn, and a ``Superseded`` record with no
+# HALF A WRITE IS UNRECOVERABLE. The file is append-only: a contradicting
+# ``Adopted`` record cannot be withdrawn, and a ``Superseded`` record with no
 # successor cannot be completed. Either way the file stops parsing and every
 # later read of the run is a read-only stop. So the whole new text is rendered,
 # PARSED, and checked against what it was meant to say before one byte of it
@@ -11418,26 +11444,34 @@ def _rendered_decisions(result: dict, text: str, decisions: dict):
         #: ``_decision_sections`` refuses outright.
         return None
     axis = result["decision_axis"]
-    standing = [other for other in decisions["axis_index"].get(axis, ())
-                if decisions["decisions"][other]["status"] == "Adopted"]
-    human = _human_standing(decisions, axis)
-    if human:
-        #: THE BACKSTOP AT THE WRITE. ``_record_axis`` already moves an
-        #: adoption off an axis a human decided; a caller that hands this
-        #: writer such an axis anyway is refused rather than obeyed, because
-        #: the only record it could write retires the user's answer.
-        raise TrackerValidationError(
-            f"{did} would supersede {human[0]}, a Provenance: human decision "
-            f"standing on axis {axis}; a quorum write never supersedes a human "
-            "decision, under any outcome -- the adoption is recorded on the "
-            "question's own qid instead")
     supersedes = None
-    if standing:
-        #: ``parse_decisions`` has already refused a file holding two, so this
-        #: list is one long. SUPERSEDE, NEVER APPEND BESIDE: a second Adopted
-        #: record on one axis is a file that stops parsing, and the axis index
-        #: has one Decision column and cannot say which of the two binds.
-        supersedes = standing[0]
+    named = result.get("reopen_of")
+    if isinstance(named, str) and named.strip():
+        named = named.strip()
+        record = decisions["decisions"].get(named)
+        if record is not None and record["provenance"] == "human":
+            if record["action"] != _DRIFT_EXTENSION_ACTION:
+                #: THE BACKSTOP AT THE WRITE. ``_reopen_authority`` refuses a
+                #: re-open naming a human decision before a brain is
+                #: dispatched; a caller that hands this writer one anyway is
+                #: refused rather than obeyed, because the only record it could
+                #: write retires the user's answer.
+                raise TrackerValidationError(
+                    f"{did} names {named}, a Provenance: human decision, as the "
+                    "decision it re-opens; a quorum write never supersedes a "
+                    "human decision, under any outcome")
+            #: A RE-RAISE against a human budget grant supersedes nothing: the
+            #: grant restored headroom, it decided nothing on this axis.
+        else:
+            if (record is None or record["status"] != "Adopted"
+                    or record["axis"] != axis):
+                raise TrackerValidationError(
+                    f"{did} re-opens {named}, which is not an Adopted decision "
+                    f"standing on axis {axis}; a re-open supersedes exactly the "
+                    "decision it challenged, and a record naming one that is "
+                    "missing, retired or elsewhere retires nothing and leaves "
+                    "the audit trail saying a challenge happened")
+            supersedes = named
     updated = text
     if supersedes is not None:
         updated = _retired(updated, supersedes)

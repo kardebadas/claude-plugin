@@ -1221,21 +1221,22 @@ def human_axis_supersession(ctl: Controller) -> None:
     final = ctl.pas.finalize_quorum(str(ctl.run_dir), qid=qid)
     check(final["status"] == "adopted", f"P2-T3 quorum: {final}")
     #: A quorum write never supersedes a human decision: the agreeing
-    #: adoption is recorded on its own qid and H-1 keeps standing on the axis.
+    #: adoption is recorded BESIDE H-1 on the axis it was asked on, and both
+    #: stand -- every later answer on greeting-style is screened against both.
     parsed = pas.parse_decisions(ctl.read_decisions())
     records = parsed["decisions"]
     check(records["H-1"]["status"] == "Adopted",
           f"the agreeing adoption Q-{qid} retired H-1: "
           f"{records['H-1']['status']}")
     check(not records[f"Q-{qid}"].get("supersedes", "").strip()
-          and records[f"Q-{qid}"]["axis"] == qid
-          and parsed["axis_index"]["greeting-style"] == ["H-1"],
-          f"Q-{qid} was not recorded beside H-1 on its own axis")
+          and records[f"Q-{qid}"]["axis"] == "greeting-style"
+          and parsed["axis_index"]["greeting-style"] == ["H-1", f"Q-{qid}"],
+          f"Q-{qid} was not recorded beside H-1 on greeting-style")
     ctl.resume("P2-T3", 1, "impl-7b", f"Q-{qid}")
     ctl.complete("P2-T3", FILES["P2-T3"])
     say(f"P2-T3: question on stage-03 axis greeting-style adopted Q-{qid} in "
-        "agreement with H-1, recorded on its own axis with H-1 still Adopted; "
-        "resumed, completed, integrated")
+        "agreement with H-1, recorded beside H-1 on greeting-style with H-1 "
+        "still Adopted; resumed, completed, integrated")
 
 
 def main() -> int:

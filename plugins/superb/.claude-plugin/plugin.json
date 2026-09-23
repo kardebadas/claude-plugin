@@ -1,7 +1,7 @@
 {
   "name": "superb",
   "version": "0.14.0",
-  "description": "Personal skill collection for Claude Code and Codex, invoked as superb:<skill>. setup installs what the others need; craft turns a vague product idea into a decision-rich brief; pipeline v2 drives a settled idea through approved file-backed plans and durable execution state to a finished branch; bug-investigate finds out why something is broken and stops there; bug-fix carries it on to a regression-tested fix.",
+  "description": "Personal skill collection for Claude Code and Codex, invoked as superb:<skill>. setup installs what the others need; craft turns a vague product idea into a decision-rich brief; pipeline v2 drives a settled idea through approved file-backed plans and durable execution state to a finished branch; pipeline-auto does the same with one human gate, resolving later decisions by a three-agent quorum that may never overrule a recorded human answer; bug-investigate finds out why something is broken and stops there; bug-fix carries it on to a regression-tested fix.",
   "author": {
     "name": "kardebadas"
   },
@@ -19,6 +19,8 @@
     "subagents",
     "parallel",
     "autonomous",
+    "pipeline-auto",
+    "quorum",
     "bug-investigate",
     "diagnosis",
     "bug-fix",

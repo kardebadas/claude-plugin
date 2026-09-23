@@ -8,6 +8,7 @@ invoked as `superb:<skill>`.
 | [`setup`](skills/setup) | `superb:setup` | Installs and verifies what the other skills depend on. Reports what it cannot do rather than working around it. |
 | [`craft`](skills/craft) | `superb:craft` | Turns a vague product idea into a decision-rich `CRAFT.md` brief. Technical questions branch on what you are building; the round loop drives itself; `VISION CLEAR` is earned by a script plus a reader who never saw the conversation. Deliberately stops before planning. |
 | [`pipeline`](skills/pipeline) | `superb:pipeline` | Takes a settled idea to a clean, committed local feature branch using approved file-backed plans, a strict `pipeline-run/v2` tracker, compatible batches, mechanical phase verification, selective high-risk review, and a mandatory master review. |
+| [`pipeline-auto`](skills/pipeline-auto) | `superb:pipeline-auto` | The autonomous variant of `pipeline`: one guaranteed human gate, then every open decision goes to a three-agent confidence quorum. A quorum may decide an open question but never overrule a recorded human answer; anything it may not decide is escalated. |
 | [`bug-investigate`](skills/bug-investigate) | `superb:bug-investigate` | Finds out why something is broken and stops there. Same investigation as `bug-fix`, different stopping point. |
 | [`bug-fix`](skills/bug-fix) | `superb:bug-fix` | Carries a reported bug to a regression-tested fix. Refuses to plan until the root cause is proven with `file:line` evidence. |
 

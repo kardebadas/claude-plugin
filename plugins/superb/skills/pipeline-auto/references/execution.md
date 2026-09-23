@@ -25,8 +25,10 @@ leading NUL separator and trailing newline are part of the grammar.
 
 ## The review dial
 
-`review_class` is fixed at stage 04 in plan metadata and mirrored to
-`## Phases`. You never write it.
+You set each phase's `review_class` **once, at stage 04** — the classification
+the plan then carries in its phase metadata, mirrored to `## Phases`. After that
+it moves only through a ratchet whose trigger has already fired (below), and
+until P05 enforces the ratchet, writing that record is yours.
 
 | Class | Buys |
 | --- | --- |
@@ -84,7 +86,7 @@ substitute a runner.
 | Transition | Function | Requires |
 | --- | --- | --- |
 | `[ ] → [~]` | `reserve_task(run_dir, task_id=, owner=, attempt=)` | deps done, no overlapping active scope, slot under `implementation_slot_cap`. Records `baseline:<attempt>@<target-sha>` for a `source` task |
-| `[?] → [~]` | `resume_task(run_dir, task_id=, prior_attempt=, new_owner=, new_attempt=, decision_ref=)` | a `task.resume` decision bound to the block; a new unused attempt; a fresh baseline (the old one is kept) |
+| `[?] → [~]` | `resume_task(run_dir, task_id=, prior_attempt=, new_owner=, new_attempt=, decision_ref=)` | the grant for the block: on `quorum:<qid>`, the `quorum.adopt` decision `Q-<qid>` that answers it, not already used to resume this task; on `halt:<reason>`, a human `task.resume` repeating the blocker and naming the attempt. A new unused attempt; a fresh baseline (the old one is kept) |
 
 Persist before dispatch. Several individually ready tasks are not jointly
 authorised: check pairwise `scopes_overlap` across the whole batch. Context
@@ -104,9 +106,28 @@ identity.
 | `NEEDS_CONTEXT`, `PLAN_CONFLICT` | `[?]` with a question record → `quorum.md`. `Question` cell: `quorum:<qid>@<path>#sha256=<digest>`. |
 | `BLOCKED` | Halt. `Question` cell: `halt:<reason>`. Never sent to a quorum. |
 
-A worker's only state call is `publish_worker_result(run_dir, result=...)`,
-which returns the result's repository-relative path. A worker never dispatches
-anyone, edits `progress.md`, integrates, or accepts a phase.
+**You publish every worker result, not the worker.** The worker commits,
+writes its report and ends with the values in its final message; it makes no
+state call and never dispatches anyone, edits `progress.md`, integrates, or
+accepts a phase. Then, in this order:
+
+1. For `DONE` / `DONE_WITH_CONCERNS`, **re-run the task's exact ordered suite
+   yourself** against the worker's head commit (an `artifact` task: the target
+   tip) and record the result: a `task-test` PASS record from
+   `render_verification_evidence` (run, subject `task/<id>`, attempt, that
+   commit as `code_state`, the suite), written with
+   `publish_immutable` under the run directory. The worker's "tests pass" is a
+   claim; this record is the evidence. A failing suite leaves no record — the
+   task is unfinished work, not a completion.
+2. For `NEEDS_CONTEXT` / `PLAN_CONFLICT`, open the quorum on your completed
+   copy of the question record (`quorum.md`) so `quorum/<qid>/question.md`
+   exists.
+3. `publish_worker_result(run_dir, result=...)` — rendered by
+   `render_worker_result`, fields as in `templates/worker-result.md`, the
+   four-part identity copied from the reservation — citing the evidence record
+   from step 1 or the published question record from step 2. It returns the
+   result's repository-relative path. A completion must cite its evidence when
+   it is published, which is why the evidence comes first.
 
 ### Import, completion, integration — three separate facts
 

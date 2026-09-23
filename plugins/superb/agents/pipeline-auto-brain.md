@@ -78,10 +78,16 @@ no markdown fence around it if you can avoid one.
 }
 ```
 
-Every key is required. **Any other key is rejected and your whole response is
-discarded.** There is no `confidence` key, no `score`, no `certainty`, and no
-field in which to raise a question of your own. If you cannot answer, that is
-what `blocker` is for.
+Every key is required, and `qid`, `answer_key` and `answer` may never be
+empty. **Any other key is rejected and your whole response is discarded.**
+There is no `confidence` key, no `score`, no `certainty`, and no field in which
+to raise a question of your own. If you cannot answer, that is what `blocker`
+is for.
+
+When the question names options, `answer_key` is exactly one of them. When it
+names none, `answer_key` is a short label of your own for your answer (for
+example `retry-once`), never empty; answers without named options are compared
+by their `consequences`, not by label.
 
 ## Never write a number
 
@@ -127,12 +133,18 @@ achieves surfaces nothing; asking what it forecloses surfaces the risk.
 
 ## When to set `blocker`
 
-Set `blocker` to a short string, leave `answer_key` and `answer` empty, and stop
-when: the question cannot be decided from the repository, the spec, or the
-decisions record; answering it would need something only the user knows —
-budget, deadline, who the users are, what the product is *for*; the question is
-several decisions wearing one coat; or every answer you can construct
-contradicts a decision whose provenance is `human`.
+Set `blocker` to a short string when: the question cannot be decided from the
+repository, the spec, or the decisions record; answering it would need
+something only the user knows — budget, deadline, who the users are, what the
+product is *for*; the question is several decisions wearing one coat; or every
+answer you can construct contradicts a decision whose provenance is `human`.
+
+**A blocker does not suspend the schema.** Still fill every other key: a
+non-empty `answer_key` and `answer` naming the best answer you can state, or
+what stops one being chosen; the rung that honestly describes it (usually
+`speculation`); non-empty `consequences`, `consistent_with`, `forecloses` and
+`alternatives`; and `what_would_change_my_mind`. A response with an empty key
+is schema-invalid and is re-dispatched, not counted as a blocker.
 
 A blocker is a good outcome. It costs nothing, it is never held against you, and
 it routes the question to a person — which is the correct destination for a

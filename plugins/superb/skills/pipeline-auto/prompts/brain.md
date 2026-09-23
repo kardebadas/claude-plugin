@@ -1,6 +1,6 @@
 # Quorum Brain Dispatch Template
 
-Use once per brain index when a quorum opens (and at stage 02). Dispatch exactly
+Use once per brain index when a quorum opens, and only then. Dispatch exactly
 three, one per index, each rendered from
 `build_payload(qid, brain_index, run_dir=<run>)` **and from nothing else**.
 
@@ -37,8 +37,18 @@ Subagent (pipeline-auto-brain):
     [OPTIONS — one `key` per line, nothing else]
 
     [If OPTIONS is empty:]
-    No options were named. Answer in prose, leave `answer_key` empty, and make
-    your `consequences` precise — they are how answers are compared.
+    No options were named. Set `answer_key` to a short label of your own for
+    your answer (for example `retry-once`) — it must not be empty — and give
+    the answer itself in `answer`. Labels are not compared across readers; your
+    `consequences` are, so make them precise.
+
+    [If CHALLENGE is non-empty:]
+    ## Evidence that reopened this question
+
+    [CHALLENGE — one entry per line, verbatim]
+
+    Weigh it like any other evidence. It is why the question is being asked
+    again, not a hint about which answer is expected.
 
     ## Your reading assignment
 
@@ -49,7 +59,9 @@ Subagent (pipeline-auto-brain):
     Other readers start from different material. That biases each of you toward
     a source, never toward an answer. Read outside your assignment when the
     question demands it and say so in your evidence; an answer that never
-    touched your assignment is weak.
+    touched your assignment is weak. Every source's root, yours included:
+
+    [READING_ROOTS — one line per entry: "<source>: <root>"]
 
     Write every cited path relative to the repository root, inside it.
 
@@ -74,11 +86,16 @@ Subagent (pipeline-auto-brain):
 
     [RESPONSE_SCHEMA]
 
-    Every key is required; no other key is allowed. `alternatives` must name a
-    real rejected option with a reason. There is no field for raising a question
-    of your own: if something else must be decided first, or the question needs
-    what only the user knows, or it is several decisions in one, set `blocker`
-    and stop. A blocker is never held against you.
+    Every key is required and none may be empty; no other key is allowed.
+    `alternatives` must name a real rejected option with a reason. There is no
+    field for raising a question of your own: if something else must be decided
+    first, or the question needs what only the user knows, or it is several
+    decisions in one, set `blocker` to a short reason. A blocker does not
+    suspend the schema: still fill every other key — `answer_key` and `answer`
+    naming the best answer you can state (or why none can be chosen), your
+    honest rung (usually `speculation`), `consequences`, `consistent_with`,
+    `forecloses` and `alternatives`. A response with an empty key is invalid,
+    not a blocker. A blocker is never held against you.
 
     You are one of several readers. You will not see their answers and they will
     not see yours. Nothing is won by agreeing or lost by standing alone.
@@ -95,6 +112,8 @@ Subagent (pipeline-auto-brain):
 | `[AXIS]` | `axis` |
 | `[OPTIONS]` | `options` — `key` values only |
 | `[READING_ASSIGNMENT.label]`, `[READING_ASSIGNMENT.read]` | `reading_assignment` |
+| `[READING_ROOTS]` | `reading_roots` — every source's root, including `decisions-effective` |
+| `[CHALLENGE]` | `challenge` — a re-open's challenging evidence, verbatim; the block is rendered only when the list is non-empty |
 | `[DECISIONS_EFFECTIVE]` | `decisions_effective` |
 | `[RUNGS]` | `rungs` — names only; the payload carries no values |
 | `[RESPONSE_SCHEMA]` | `response_schema` |

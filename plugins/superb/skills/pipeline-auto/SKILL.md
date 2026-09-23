@@ -77,7 +77,7 @@ every stage and win over any summary elsewhere.
 | Dispatch | Template / agent | When |
 | --- | --- | --- |
 | Intent readers | `pipeline-auto-intent-reader` ×3 | stage 01 |
-| Brains | `pipeline-auto-brain` ×3 with `prompts/brain.md` | stage 02 and every quorum |
+| Brains | `pipeline-auto-brain` ×3 with `prompts/brain.md` | every quorum (stage 02: see `planning.md`) |
 | Implementer | `prompts/implementer.md`, brief from `scripts/task-brief RUN_DIR PLAN_FILE TASK_NUMBER` | stage 09, one fresh per task |
 | Task reviewer | `prompts/task-reviewer.md`, package from `scripts/review-package RUN_DIR BASE HEAD` | the per-task gate |
 | Adversarial reviewer | `prompts/adversarial-reviewer.md` | any fired trigger, any `review_class` |
@@ -127,9 +127,12 @@ by the adoption rules below — never retroactively un-ask it.
    Ceilings are `BUDGET_PER_PHASE` (3) and `BUDGET_PER_RUN` (10). Only a human
    answering an escalation raises one, to a stated finite value; at most two
    extensions per run, then the budget is terminal. If a ceiling is reached:
-   open no quorum of any size, lower no bar, escalate with the adopted decisions
-   listed, then dispatch nothing new and integrate nothing. You never grant
-   yourself an extension.
+   open no quorum of any size — no worker anywhere opens one — lower no bar,
+   and escalate with the adopted decisions listed. Hold dispatch and
+   integration within the question's blast radius (in-flight work there
+   finishes, publishes and is imported); independent work continues. A
+   terminal budget stops the run resumably: nothing new is dispatched. You
+   never grant yourself an extension.
 3. **Admissible** (`check_admissible`), all of:
    - it blocks named work — a question blocking nothing is an opinion; discard it;
    - it is decidable from the repository, the spec and `decisions.md` — if it
@@ -161,7 +164,9 @@ two responses.
   "the other responses imply it" — do not re-dispatch with the premise supplied.
   Escalate the original question, naming the premise.
 
-**Adoption.** Cluster by `answer_key`, then compare rungs. Adopt only when the
+**Adoption.** Cluster by `answer_key` when options were named; without named
+options, answers share a cluster only if their consequences do not contradict
+(when in doubt they are different answers). Then compare rungs. Adopt only when the
 winning cluster is **strictly stronger** than the runner-up, at or above the
 current floor, fewer than two responses carry a blocker, nothing forecloses an irreversible
 axis, depth is within the cap, budget remains, and `check_contradiction` returns
@@ -174,8 +179,9 @@ nothing.
 - **Different answers alone are no reason to escalate.** One cluster strictly
   stronger than the rest adopts, however many clusters there are.
 - An adoption records the answer, the winning rung and the rung it beat, and
-  `Provenance: quorum`; it consumes one phase and one run adoption; the blocked
-  task resumes.
+  `Provenance: quorum`; it consumes one phase and one run adoption. The
+  adoption `Q-<qid>` is itself the grant: resume the blocked task with
+  `resume_task(..., decision_ref="Q-<qid>")`.
 
 ## Recorded human decisions
 
@@ -183,7 +189,7 @@ If the winning answer — consequences included — requires a different option 
 an axis where an adopted decision has `Provenance: human`, reject it. No rung and
 no unanimity outranks a human's recorded answer. Record
 `rejected-contradicts-human` naming that decision's ID; it stays `Adopted`; no
-budget is spent; escalate. Every task blocked on that axis stays blocked — "the
+budget is spent; escalate (`finalize_quorum` queues the row). Every task blocked on that axis stays blocked — "the
 human decision is still in force, so work against it" is dispatch on a contested
 axis.
 
@@ -196,10 +202,12 @@ phase's `review_class`. `final-only` decides whether routine review runs; it
 never switches the trigger check off. A fired trigger dispatches the adversarial
 reviewer before the task completes.
 
-You never set `review_class`. It moves up only by a ratchet whose trigger already
-exists — for the adversarial route, a CONFIRMED or unrefuted PLAUSIBLE finding
-returned by that reviewer. A ratchet record you write from your own reading of
-the diff is not a trigger.
+You set each phase's `review_class` **once, at stage 04, from the plan's
+classification**, and never move it afterwards except through a ratchet whose
+trigger already exists — for the adversarial route, a CONFIRMED or unrefuted
+PLAUSIBLE finding returned by that reviewer. Writing that ratchet record is
+yours until code enforces it; a ratchet record you write from your own reading
+of the diff is not a trigger. Never downward.
 
 ## Completeness critic items
 
@@ -242,7 +250,8 @@ are all reclassifications. The proposal is the user's to decide.
 - Dispatching anything on an escalated or contradicted axis.
 - Writing `unresolved`, `deferred` or "carry to handover" instead of `escalated`.
 - Opening a quorum without comparing the budget counters to the ceilings.
-- Writing `review_class`, a ratchet record, or a label over a critic's classification.
+- Changing `review_class` after stage 04, a ratchet record with no fired
+  trigger, or a label over a critic's classification.
 - Pushing, publishing, opening a pull request, or merging into `main`/`master`.
   Success is a clean committed feature branch and a report that leads with every
   decision the run made without asking.

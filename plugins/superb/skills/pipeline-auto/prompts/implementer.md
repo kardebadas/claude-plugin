@@ -6,7 +6,9 @@ plan text pasted through the controller's context.
 
 Provenance: adapted from `superpowers:subagent-driven-development`
 (`implementer-prompt.md`), inlined rather than invoked. Changed here: the five
-terminal statuses, no ask-a-human step, and the question-record route.
+terminal statuses, no ask-a-human step, the question-record route, and the
+controller — not the worker — re-running the task suite and publishing the
+result.
 
 ```
 Subagent (general-purpose):
@@ -55,7 +57,7 @@ Subagent (general-purpose):
        Use the runner it names. If that runner is not installed, stop:
        `PLAN_CONFLICT`. Never substitute a runner.
     4. Commit on [BRANCH].
-    5. Self-review, then publish.
+    5. Self-review, then report.
 
     Run focused tests while iterating; the full task suite once before
     committing.
@@ -66,8 +68,8 @@ Subagent (general-purpose):
     answer** — waiting holds a worker slot nothing will free.
 
     If the brief, constraints and decisions do not settle something, write a
-    question record to [QUESTION_FILE] and publish with status `NEEDS_CONTEXT`
-    or `PLAN_CONFLICT`. One `## ` section, fields as `- **Name:** value`:
+    question record to [QUESTION_FILE] and report status `NEEDS_CONTEXT` or
+    `PLAN_CONFLICT`. One `## ` section, fields as `- **Name:** value`:
 
       - **Question:** one decision; blank the title, keep the options, and it
         is still clear what is being decided
@@ -82,7 +84,10 @@ Subagent (general-purpose):
       - **Candidate answers:** / **Recommendation:** optional; recorded for
         audit and never shown to the deciders
 
-    Leave reading roots and owners to the controller. Then stop.
+    Leave reading roots, owners and blast radius to the controller: owners are
+    brain ids it assigns before dispatch, which you cannot know. It writes a
+    completed copy of your record and opens the quorum on that copy; your file
+    is never edited. Then stop.
 
     **You never dispatch anyone** — no helper, no reviewer, no brain. The
     controller decides whether your question goes to a quorum or a person.
@@ -99,7 +104,7 @@ Subagent (general-purpose):
     task needs an architectural choice with several valid answers, when you are
     reading file after file without progress, or when you doubt the approach.
 
-    ## Self-review before publishing
+    ## Self-review before reporting
 
     - Completeness: every acceptance criterion and edge case in the brief?
     - Scope: anything outside the write scope, or unrequested?
@@ -110,30 +115,29 @@ Subagent (general-purpose):
 
     Fix what you find first.
 
-    ## Publish
+    ## Report
 
-    1. Write the long-form report to [REPORT_FILE] in the shape of
-       `templates/worker-report.md`.
-    2. Publish your immutable result with
-       `publish_worker_result(run_dir, result=...)` from
-       `scripts/pipeline_auto_state.py`, fields as in
-       `templates/worker-result.md`. Copy your assignment exactly: run_id
-       [RUN_ID], task_id [TASK_ID], attempt [ATTEMPT], owner [OWNER]. All four
-       are validated together; never reconstruct one. A `source` result must
-       cite a `task-test` PASS evidence record for your head commit and exact
-       task suite, or import refuses it.
+    Write the long-form report to [REPORT_FILE] in the shape of
+    `templates/worker-report.md`.
 
-    **You never edit progress.md.** Publishing your own result is your only
-    state call.
+    **You make no state call.** You never edit progress.md, never call
+    `publish_worker_result`, and never write or cite a verification evidence
+    record. Report that your task suite passed; the controller re-runs it
+    itself, records the evidence, and publishes your immutable result from the
+    values below.
 
     Final message, under 15 lines:
 
     - **Status:** DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | PLAN_CONFLICT | BLOCKED
-    - Commits (short SHA + subject)
-    - One-line test summary
-    - Concerns, if any
+    - Identity, copied exactly: run [RUN_ID], task [TASK_ID], attempt
+      [ATTEMPT], owner [OWNER]
+    - Head commit (full SHA), and every commit in order (full SHA + subject)
+    - Task suite: the exact commands you ran, in order, and that they passed
+    - Artifacts, for an artifact task: the exact approved outputs
+    - Concerns, if any (required for DONE_WITH_CONCERNS)
     - Report file path
     - Question record path, for NEEDS_CONTEXT or PLAN_CONFLICT
+    - Blocking reason, for BLOCKED
 
     | Status | Means | Route |
     | --- | --- | --- |
@@ -155,3 +159,8 @@ Subagent (general-purpose):
 (both under the run's `scratch/`, from `scripts/sdd-workspace`), `[RUN_ID]`,
 `[ATTEMPT]`, `[OWNER]`. Take the last four from the persisted reservation. Never
 dispatch before `reserve_task` has persisted the assignment.
+
+After the worker finishes, the controller — not the worker — re-runs the task
+suite, records the `task-test` evidence, completes any question record, and
+publishes the result: `references/execution.md`, "You publish every worker
+result".

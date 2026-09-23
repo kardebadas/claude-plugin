@@ -28,8 +28,14 @@ Tracker: `## Intent` rows `reader-1`, `reader-2`, `reader-3`, `brief`; states
 
 ## Stage 02 — Question synthesis
 
-- Dispatch **exactly three** `pipeline-auto-brain` agents to propose open
+- The spec dispatches **exactly three** brain agents to propose open
   decisions (same reading assignments and payload rules as `quorum.md`).
+- **No dispatch template for this exists yet.** `prompts/brain.md` and
+  `build_payload` are quorum-only: they need a qid and an admissible question
+  record, and the `pipeline-auto-brain` response schema has no field for a
+  proposal. Do not render `prompts/brain.md` for stage 02, and do not
+  substitute another agent — not `architecture-discovery` (it runs with every
+  tool and is briefed for `superb:craft`), not `brainstorm-architect`.
 - Rank by blast radius, dedupe, cut to **four**. Ranking and cutting are
   routing: answer none, add none of your own.
 - Drop any question failing admissibility (`quorum.md`). Do not spend a slot on
@@ -59,8 +65,9 @@ escalation.
 Fix each phase's `review_class` (`final-only` or `required`) **here, before any
 plan exists**, with a specific risk reason. See `execution.md` for what each
 class buys. A phase is never reclassified downward — not on reflection, not by
-quorum, not to fit capacity or budget. You never write `review_class` after this
-stage; only the ratchet raises it.
+quorum, not to fit capacity or budget. You set it once, here, and the plan
+carries that classification in its phase metadata; after this stage only a
+ratchet whose trigger has already fired raises it (`execution.md`).
 
 ## Stage 05 — Spec
 

@@ -52,12 +52,27 @@ Read it from `current_floor(run_dir)["floor_rung"]`; never assume it.
 `check_admissible` returns a list of problem codes; `[]` admits. It also requires
 three distinct owners.
 
-4. `open_quorum(run_dir, question_record=...)` persists `open.json` (owners,
-   payload digest, context digest) **before** dispatch. It returns `in_flight`,
+4. **Complete the record, then open.** The worker's question record has no
+   reading roots, owners or blast radius: owners are the brain ids you assign
+   before dispatch, so the worker cannot know them. Write a **completed copy**
+   (for example beside it under the run's `scratch/`) that adds
+   `- **Reading roots:** spec=…, intent-brief=…, repo=…, tests=…, phase-plan=…`
+   (all five, repository-root-relative; `parse_question` refuses a record
+   missing one), `- **Owners:**` with three distinct brain ids, and
+   `- **Blast radius:**` from `task | phase | run | contract` (the code does not
+   read this line; it records the value you checked for criterion 3). **Never
+   edit the worker's file** — its digest is what the worker's report cites.
+   This is safe because the qid depends only on question and axis, which you
+   copy unchanged.
+5. `open_quorum(run_dir, question_record=<the completed copy>)` publishes that
+   text as `quorum/<qid>/question.md` and persists `open.json` (owners,
+   payload digest, context digest) **before** dispatch. The worker result you
+   publish cites that published record, `quorum/<qid>/question.md#sha256=…`,
+   because import binds the task's `Question` cell to it. It returns `in_flight`,
    or `escalated` when the budget tripped — then nothing is dispatched. With
    `replay` true it returns the settled outcome of an earlier raise of the same
    qid; act on that, dispatch nothing.
-5. Dispatch **exactly three** `pipeline-auto-brain` agents, one per index. Never
+6. Dispatch **exactly three** `pipeline-auto-brain` agents, one per index. Never
    fewer to fit capacity (run them sequentially), never a fourth.
 
 `qid = derive_qid(question, axis)`. The decisions digest is not part of it, so
@@ -67,9 +82,12 @@ the same question keeps its identity; a re-open gets
 ## The payload
 
 `build_payload(qid, index, run_dir=...)` is a whitelist constructor: it emits
-`qid`, `question`, `axis`, `options`, `reading_assignment`,
-`decisions_effective`, `rungs`, `response_schema`, `you_are_one_of_several`, and
-nothing else. Never add to it by hand.
+`qid`, `question`, `axis`, `options`, `reading_roots`, `challenge`,
+`reading_assignment`, `decisions_effective`, `rungs`, `response_schema`,
+`you_are_one_of_several`, and nothing else. Never add to it by hand.
+`challenge` is empty except on a re-open, where it carries the challenging
+evidence; `prompts/brain.md` renders it as `[CHALLENGE]`, so a re-open's brains
+see why the question was asked again.
 
 | Index | Assignment | Reads |
 | --- | --- | --- |
@@ -158,31 +176,49 @@ the tracker lock. Never call it from inside a held lock. Adopt only if all hold:
 | Winner adopted at `specified` | An ordinary adoption: `Provenance: quorum`, one phase and one run adoption charged. Never retroactively re-resolved by citation. |
 
 **Blockers:** two or more responses carrying a blocker escalate automatically
-(`finalize_quorum` returns `blocked`) — two brains unable to proceed means the
-question is the problem. **One** blocker does not by itself stop an adoption:
+(`finalize_quorum` returns `status: escalated` with `reason: blocked`) — two
+brains unable to proceed means the question is the problem. **One** blocker does not by itself stop an adoption:
 one brain unable to proceed is a brain, not the question. The spec states this
 threshold (adoption requires "fewer than two carrying a blocker"), and the code
 enforces it. A `finalize_quorum` adoption with one blocker present is legitimate
 — do not override it.
 
 An adoption records the answer, winning rung, runner-up rung, depth, and
-`Provenance: quorum` as `Q-<qid>`; the blocked task resumes via `task.resume`.
+`Provenance: quorum` as `Q-<qid>` with `Decision action: quorum.adopt`. **That
+adoption is the grant**: resume each blocked task named in its `Scope` with
+`resume_task(run_dir, task_id=..., prior_attempt=..., new_owner=...,
+new_attempt=..., decision_ref="Q-<qid>")`. No `task.resume` record is written
+for a quorum block. `resume_task` refuses an adoption answering a different
+qid, and refuses one this task has already resumed on. A resumed attempt that
+re-raises the same question is caught at "Already answered?" above, before any
+result is published; if it reaches `[?]` anyway, the old adoption cannot
+release it — escalate. A `halt:` block is different: only a human `task.resume`
+naming the blocker and the attempt releases it.
 
-Every other outcome is an escalation, with a reason token in `final.json`:
+Every outcome other than an adoption or a rejection (below) is an escalation.
+`finalize_quorum` returns `status: escalated` with one of these reason tokens in
+`final.json` — the complete list, as the code emits them:
 `incomplete-quorum`, `blocked`, `below-floor`, `equal-or-inverted-rung`,
 `raised-bar-not-cleared`, `irreversible-axis`, `depth-exceeded`,
 `phase-budget-exhausted`, `run-budget-exhausted`, `stale-context`,
-`uncomparable-answer`, `unresolvable-anchor`, `unrecordable-decision`. There is
-no third outcome and no controller override.
+`uncomparable-answer`, `unresolvable-anchor`, `unrecordable-decision`,
+`unmintable-axis`, and — from `open_quorum`, on a second challenge to one
+decision — `second-challenge`. Answers that describe different things return
+the separate status `question-not-decidable` (reason
+`answers-describe-different-things`), which is also escalated. There is no
+third outcome and no controller override.
 
 ## Recorded decisions
 
 - Contradicts a `Provenance: human` decision → `rejected-contradicts-human`,
-  naming it. That decision stays `Adopted`. No budget spent. Escalate. Every task
-  on that axis stays blocked. No rung and no unanimity outranks a human.
+  naming it. That decision stays `Adopted`. No budget spent. It is escalated:
+  `finalize_quorum` queues the escalation row itself. No `Q-<qid>` is written,
+  so every task blocked on it stays blocked until a human answers. No rung and
+  no unanimity outranks a human.
 - Contradicts a `Provenance: quorum` decision → `rejected-contradicts-quorum`.
-  A challenge becomes **one** re-open at a raised bar per D-ID per run; a second
-  challenge halts.
+  No escalation row is queued for it. A challenge becomes **one** re-open at a
+  raised bar per D-ID per run; a second challenge escalates as
+  `second-challenge`.
 - Rejections are recorded, never discarded; their count goes in the terminal
   report.
 - Two adopted contradicting answers on one axis in `decisions.md` fail validation:
@@ -201,11 +237,17 @@ rung. Reviewer A at stage 11 names every provisional task.
 
 - Ceilings: `BUDGET_PER_PHASE` 3, `BUDGET_PER_RUN` 10. Only adoptions count;
   escalations and rejections never do.
-- Checked **before dispatch**. Exhausted → no quorum of any size, escalate with
-  the adopted list; dispatch nothing new and integrate nothing. In-flight work
-  finishes, publishes and is imported; only integration is held.
-- Once exhausted, no worker anywhere opens a quorum; later questions attach to
-  the same escalation.
+- Checked **before dispatch**. Exhausted → the triggering question goes to no
+  quorum of any size; escalate it with the adopted list attached.
+- **The freeze on raising is run-wide.** Once exhausted, no worker anywhere
+  opens a quorum; later questions attach to the same escalation.
+- **The hold on work is by blast radius.** Work within the triggering
+  question's blast radius follows the freeze of an open quorum there: dispatch
+  nothing new on it; work already in flight finishes, publishes and is imported
+  to `[x]`, and only its integration is held. Independent work continues.
+- **Terminal** (the second extension already spent): no extension remains to
+  grant, and the run stops resumably — in-flight work finishes, publishes and
+  is imported, integration is held, and nothing new is dispatched.
 - A grant is `Decision action: quorum.extend-budget`, `Provenance: human` only,
   with `Authorized run`, `Source revision`, a finite `Authorized through`, and
   `Granted against` (the verbatim adopted list the human saw). It raises **only
@@ -218,7 +260,10 @@ rung. Reviewer A at stage 11 names every provisional task.
 
 Finalise as `escalated`, queue for the next stage boundary (even mid-phase),
 `next_action: await-escalation-batch`. `finalize_quorum` writes a `queued` row to
-`## Escalations` for quorum outcomes; any other escalation you record yourself.
+`## Escalations` for every `escalated`, `question-not-decidable` and
+`rejected-contradicts-human` outcome; it writes none for an adoption or a
+`rejected-contradicts-quorum`. Any other escalation — including a question
+refused before `open_quorum` — you record yourself.
 Batches: up to four per `AskUserQuestion`, ranked by blast radius. Escalating
 costs no budget and is never the discouraged path. `unresolved`, `deferred` or
 "carry to handover" is not escalating.

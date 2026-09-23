@@ -19919,5 +19919,135 @@ class ReopenRaisedBar(unittest.TestCase):
         self.assertEqual(result["reason"], "raised-bar-not-cleared")
 
 
+
+# --------------------------------------------------------------------------
+# P05 -- rungs inherit downward, inside `finalize_quorum`.
+#
+# The spec: "A quorum raised by a tainted task inherits the taint, and its
+# adopted rung is capped at the minimum of its own and the tainting
+# decision's." And of the outcome: "no controller override". So the cap is
+# applied where the outcome is computed, before the floor, and is recorded in
+# final.json, the ## Quorum row and decisions.md -- never a read helper run
+# after an adoption it could not change.
+# --------------------------------------------------------------------------
+
+#: A quorum decision adopted at `code-evidenced`, on an axis of its own.
+WEAK_PREMISE = """
+## Q-cccccccccccc — Cache layer, settled by quorum
+
+- **Question:** Which cache layer fronts the session table?
+- **Axis:** cache-axis
+- **Answer:** redis — a separate Redis process.
+- **Decision action:** quorum.adopt
+- **Provenance:** quorum
+- **Depth:** 1
+- **Grounding rung:** code-evidenced
+- **Consistent with:** H-001
+- **Consequences:** file-exists:cache/redis.conf=present
+- **Scope:** T01
+- **Status:** Adopted
+"""
+
+#: The same decision, adopted at `specified`, under another id and axis.
+STRONG_PREMISE = (WEAK_PREMISE.replace("Q-cccccccccccc", "Q-dddddddddddd")
+                  .replace("cache-axis", "cache-axis-2")
+                  .replace("code-evidenced", "specified"))
+
+
+class InheritedRungCapTests(unittest.TestCase):
+    """The task that raised the question is `T04` (`QUESTION["blocks"]`)."""
+
+    def setUp(self):
+        self.root, self.run_dir = adoption_repo(
+            self, decisions=UNRELATED_HUMAN + WEAK_PREMISE + STRONG_PREMISE)
+
+    def raiser(self, *, provisional="no", decisions="-",
+               task_id=QUESTION["blocks"][0]):
+        path = self.run_dir / "progress.md"
+        tracker = pas.parse_tracker(path.read_text(encoding="utf-8"))
+        row = {key: "-" for key in pas.section_columns("tasks")}
+        row.update(id=task_id, phase=QUESTION["phase"],
+                   kind="source", state="[ ]", provisional=provisional,
+                   decisions=decisions)
+        pas.append_row(tracker, "tasks", row)
+        path.write_text(pas.render_tracker(tracker), encoding="utf-8")
+
+    def finalize(self, payloads=None):
+        qid = open_question(self, self.run_dir)
+        answer_quorum(self.run_dir, qid, payloads or [
+            graded("postgres", "specified"), graded("postgres", "specified"),
+            graded("postgres", "specified")])
+        return qid, pas.finalize_quorum(str(self.run_dir), qid=qid)
+
+    def assert_adopted_at(self, qid, result, rung):
+        self.assertEqual(result["status"], "adopted")
+        self.assertEqual(result["winner"]["rung"], rung)
+        self.assertEqual(result["winner_rung"], rung)
+        row = next(item for item in pas.validate_run(self.run_dir)["quorum"]
+                   if item["qid"] == qid)
+        self.assertEqual(row["rung"], rung)
+        record = pas.parse_decisions(
+            (self.run_dir / "decisions.md").read_text(encoding="utf-8"))[
+                "decisions"][f"Q-{qid}"]
+        self.assertEqual(record["grounding_rung"].strip(), rung)
+
+    def test_an_untainted_raiser_adopts_at_its_own_rung(self):
+        """A tainted task that did NOT raise the question lends it nothing."""
+        self.raiser(decisions="H-001,Q-dddddddddddd")
+        self.raiser(task_id="T05", provisional="yes",
+                    decisions="Q-cccccccccccc")
+        qid, result = self.finalize()
+        self.assert_adopted_at(qid, result, "specified")
+        self.assertEqual(result["rung_cap"], "specified")
+
+    def test_a_provisional_raiser_caps_a_specified_answer(self):
+        """A `specified` answer resting on a `code-evidenced` premise is not a
+        `specified` answer. The label alone says the closure holds one."""
+        self.raiser(provisional="yes")
+        qid, result = self.finalize()
+        self.assert_adopted_at(qid, result, "code-evidenced")
+        self.assertEqual(result["own_rung"], "specified")
+
+    def test_a_raiser_citing_a_weak_decision_is_capped_without_the_label(self):
+        """The label is the controller's; the cited decision's recorded rung is
+        a fact. Leaving `Provisional` at `no` does not lift the cap."""
+        self.raiser(decisions="H-001,Q-dddddddddddd,Q-cccccccccccc")
+        qid, result = self.finalize()
+        self.assert_adopted_at(qid, result, "code-evidenced")
+
+    def test_a_cited_decision_the_trail_does_not_hold_caps_fail_closed(self):
+        """A premise whose rung cannot be read is priced at the weakest rung a
+        premise can have been adopted at, never at `specified`."""
+        self.raiser(decisions="Q-eeeeeeeeeeee")
+        qid, result = self.finalize()
+        self.assert_adopted_at(qid, result, "code-evidenced")
+
+    def test_under_a_raised_floor_the_capped_answer_escalates(self):
+        """Where the cap changes WHETHER the run adopts: once inflation has
+        raised the floor to `specified`, a capped answer is below it."""
+        floor = self.run_dir / "quorum" / "floor.json"
+        floor.parent.mkdir(parents=True, exist_ok=True)
+        floor.write_text(json.dumps({"floor_rung": "specified"}),
+                         encoding="utf-8")
+        self.raiser(provisional="yes")
+        _qid, result = self.finalize()
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "below-floor")
+        self.assertEqual(
+            (self.run_dir / "decisions.md").read_text(encoding="utf-8"),
+            UNRELATED_HUMAN + WEAK_PREMISE + STRONG_PREMISE)
+
+    def test_the_spread_is_measured_between_the_answers_own_rungs(self):
+        """The cap is on what is ADOPTED. Every answer in the quorum rests on
+        the same premise, so separating them is still by their own evidence:
+        a strict gap adopts, recorded at the capped rung."""
+        self.raiser(provisional="yes")
+        qid, result = self.finalize([graded("postgres", "specified"),
+                                     graded("sqlite", "code-evidenced"),
+                                     graded("sqlite", "speculation")])
+        self.assert_adopted_at(qid, result, "code-evidenced")
+        self.assertEqual(result["runner_up_rung"], "code-evidenced")
+
+
 if __name__ == "__main__":
     unittest.main()

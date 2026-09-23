@@ -232,10 +232,21 @@ third outcome and no controller override.
 - Two adopted contradicting answers on one axis in `decisions.md` fail validation:
   read-only stop.
 
-**Provisional taint (prose only):** a task whose dependency closure holds a
-decision adopted below `specified` is `provisional` (tracker `Provisional`
-column). A quorum raised by a tainted task is capped at the tainting decision's
-rung. Reviewer A at stage 11 names every provisional task.
+**Provisional taint:** a task whose dependency closure holds a decision
+adopted below `specified` is `provisional`. Marking it — the tracker
+`Provisional` column, and the decision ids in its `Decisions` column — is yours.
+Reviewer A at stage 11 names every provisional task.
+
+**Rungs inherit downward — enforced by `finalize_quorum`.** A quorum raised by
+a tainted task (a task in the question's `blocks`) adopts at no stronger than
+its weakest premise. The premises are `Provisional: yes`, which counts as
+`code-evidenced`, and every `Q-<qid>` in the task's `Decisions` cell, at the
+`Grounding rung` `decisions.md` records for it; a cited quorum decision whose
+rung cannot be read counts as `code-evidenced`. The capped rung is what the
+floor and the raised bar judge, and what `final.json` (`winner_rung`, with
+`own_rung` and `rung_cap` beside it), the `## Quorum` row and `decisions.md`
+record. The spread between answers is still judged on their own rungs. Leaving
+`Provisional` at `no` does not lift a cap a cited decision imposes.
 
 ## The drift budget
 

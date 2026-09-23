@@ -9654,6 +9654,60 @@ def _latest_answers(run_dir: Path, qid: str, owners: list) -> tuple:
     return latest, invalid
 
 
+#: The rung a tainting premise stands at when the tracker says the task is
+#: tainted but no recorded rung can be read: the WEAKEST rung anything can have
+#: been adopted at. The spec defines the taint as "adopted at code-evidenced
+#: rather than specified", and this is that rung, derived from the floor rather
+#: than typed, and a NAME rather than a number.
+_TAINTED_PREMISE = max(ADOPTABLE, key=RUNG_ORDER.index)
+
+
+def _inherited_rung_cap(tracker: dict, decisions: dict, blocks: list):
+    """The weakest premise under the tasks that raised this question, or None.
+
+    "A quorum raised BY a tainted task inherits the taint, and its adopted rung
+    is capped at the minimum of its own and the tainting decision's." The
+    raising tasks are the question's ``blocks``. A task's premises are:
+
+    - ``Provisional: yes`` -- the controller's reading of the task's
+      dependency closure, which by definition holds a decision adopted below
+      ``specified``: ``_TAINTED_PREMISE``;
+    - every ``Q-<qid>`` in its ``Decisions`` cell, at the ``Grounding rung``
+      ``decisions.md`` records for it. Either route alone is enough, so
+      leaving the label at ``no`` does not lift a cap the cited record
+      imposes. A cited quorum decision whose rung cannot be read -- absent
+      from the trail, or recording no rung on the ladder -- is priced at
+      ``_TAINTED_PREMISE``, never at ``specified``.
+
+    Human decisions are depth 0 and carry no rung, so they are no premise. A
+    block naming no task row contributes nothing: there is no row to be
+    tainted. Compared by ladder POSITION, never by value.
+    """
+    premises = []
+    for task in tracker["tasks"]:
+        if task["id"] not in blocks:
+            continue
+        if task["provisional"] == "yes":
+            premises.append(_TAINTED_PREMISE)
+        for did in _csv(task["decisions"]):
+            if not did.startswith(_QUORUM_PREFIX):
+                continue
+            record = decisions["decisions"].get(did)
+            rung = None
+            if record is not None and isinstance(record.get("grounding_rung"),
+                                                 str):
+                rung = record["grounding_rung"].strip()
+            if rung not in RUNG_ORDER:
+                #: NOT A DEFAULT TO A LEGAL VOTE, which is what the module's
+                #: rung-defaulting rule forbids: this prices a PREMISE, and in
+                #: the one direction that can only lower what is adopted.
+                rung = _TAINTED_PREMISE
+            premises.append(rung)
+    if not premises:
+        return None
+    return max(premises, key=RUNG_ORDER.index)
+
+
 def _compute_quorum_result(run_dir: Path, qid: str, tracker: dict) -> dict:
     """The outcome of one quorum, computed from the files and from nothing else.
 
@@ -9770,10 +9824,32 @@ def _compute_quorum_result(run_dir: Path, qid: str, tracker: dict) -> dict:
     ranked = sorted(graded,
                     key=lambda cluster: RUNG_ORDER.index(cluster_rung(cluster)))
     winner = ranked[0]
-    winner_rung = cluster_rung(winner)
+    own_rung = cluster_rung(winner)
     runner_up_rung = None
     if len(ranked) > 1:
         runner_up_rung = cluster_rung(ranked[1])
+
+    decisions_text = _decisions_text(run_dir)
+    #: THE AUDIT TRAIL IS PARSED BEFORE ANY GATE READS IT, and a trail that
+    #: does not parse is a read-only stop here exactly as it is everywhere
+    #: else. Parsed once and handed down, so the rung cap, the contradiction
+    #: check, the depth walk and the record writer cannot read four different
+    #: files.
+    decisions = parse_decisions(decisions_text)
+    #: RUNGS INHERIT DOWNWARD, and the cap is applied HERE, before the floor,
+    #: so it changes the outcome and not only the label: every gate below that
+    #: judges the adopted rung -- the floor, the raised bar -- and every record
+    #: that carries it -- final.json, the ## Quorum row, decisions.md, and so
+    #: the inflation check and every descendant's premise -- sees the capped
+    #: rung. The SPREAD is the one comparison left on the answers' own rungs:
+    #: every answer in this quorum rests on the same premise, so what separates
+    #: them is still their own evidence.
+    cap = _inherited_rung_cap(tracker, decisions, base["blocks"])
+    winner_rung = own_rung
+    if cap is not None:
+        winner_rung = max((own_rung, cap), key=RUNG_ORDER.index)
+    base["own_rung"] = own_rung
+    base["rung_cap"] = cap
     base["winner_rung"] = winner_rung
     base["runner_up_rung"] = runner_up_rung
     base["clusters"] = [[member["owner"] for member in cluster]
@@ -9794,7 +9870,7 @@ def _compute_quorum_result(run_dir: Path, qid: str, tracker: dict) -> dict:
         #: ``index(winner) < index(runner_up)`` -- so that relaxing it in
         #: either direction fails the suite. Unanimity has no runner-up, so the
         #: test is vacuous there and the floor alone governs.
-        if not RUNG_ORDER.index(winner_rung) < RUNG_ORDER.index(runner_up_rung):
+        if not RUNG_ORDER.index(own_rung) < RUNG_ORDER.index(runner_up_rung):
             return dict(base, status=_ESCALATED,
                         reason="equal-or-inverted-rung")
 
@@ -9821,12 +9897,6 @@ def _compute_quorum_result(run_dir: Path, qid: str, tracker: dict) -> dict:
     if raised is not None and not RUNG_ORDER.index(winner_rung) < RUNG_ORDER.index(raised):
         return dict(base, status=_ESCALATED, reason="raised-bar-not-cleared")
 
-    decisions_text = _decisions_text(run_dir)
-    #: THE AUDIT TRAIL IS PARSED BEFORE ANY GATE READS IT, and a trail that
-    #: does not parse is a read-only stop here exactly as it is everywhere
-    #: else. Parsed once and handed down, so the contradiction check, the depth
-    #: walk and the record writer cannot read three different files.
-    decisions = parse_decisions(decisions_text)
     outcome = _apply_adoption_gates(base, winner, winner_rung, decisions)
     if outcome["status"] != _CHARGED_STATUS:
         return outcome

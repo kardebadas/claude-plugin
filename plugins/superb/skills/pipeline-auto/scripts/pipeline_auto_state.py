@@ -10422,6 +10422,13 @@ def _compute_quorum_result(run_dir: Path, qid: str, tracker: dict) -> dict:
     outcome = _apply_adoption_gates(base, winner, winner_rung, decisions)
     if outcome["status"] != _CHARGED_STATUS:
         return outcome
+    try:
+        outcome["decision_axis"] = _record_axis(outcome, decisions, tracker)
+    except QuorumSchemaInvalid as exc:
+        #: The mint collided with a stage-03 question id: the same refusal,
+        #: and the same escalation, as a ``new``-axis mint that collides.
+        return dict(base, status=_ESCALATED, reason="unmintable-axis",
+                    refusal=str(exc))
 
     #: THE DRIFT CAP IS ENFORCED WHERE THE CHARGE HAPPENS, AND THAT IS HERE.
     #: ``open_quorum`` charges NOTHING -- it is an admission check -- so two
@@ -10458,6 +10465,42 @@ def _compute_quorum_result(run_dir: Path, qid: str, tracker: dict) -> dict:
         return dict(base, status=_ESCALATED, reason="unrecordable-decision",
                     refusal=str(exc))
     return outcome
+
+
+def _human_standing(decisions: dict, axis) -> list:
+    """The ``Provenance: human`` decisions standing ``Adopted`` on ``axis``."""
+    return [did for did in decisions["axis_index"].get(axis, ())
+            if decisions["decisions"][did]["status"] == "Adopted"
+            and decisions["decisions"][did]["provenance"] == "human"]
+
+
+def _record_axis(outcome: dict, decisions: dict, tracker: dict) -> str:
+    """The axis an adoption's RECORD carries, once every gate has cleared it.
+
+    A QUORUM WRITE NEVER SUPERSEDES A ``Provenance: human`` DECISION, UNDER ANY
+    OUTCOME (spec invariant 2: a quorum "may never overrule a recorded one").
+    An answer that reached this line AGREES with the human decision on the
+    asked axis -- the contradiction screen has already rejected every one that
+    does not -- and recording it on that axis would retire the human record,
+    because an axis holds one ``Adopted`` decision and adoption supersedes.
+    Retiring it on agreement is still overruling it: the axis then holds a
+    quorum decision, a later contradicting answer is judged against THAT one
+    -- ``rejected-contradicts-quorum``, which a re-open at a raised bar can
+    undo -- and the user's answer has left the contradiction screen for good.
+
+    SO THE RECORD TAKES AN AXIS OF ITS OWN, minted exactly as a ``new``-axis
+    question's is: the question's own bare qid, with ``_minted_axis``'s
+    collision refusal. Both decisions stay ``Adopted``, the human axis still
+    indexes the human decision alone, and every later answer on that axis is
+    screened against it. The ``## Quorum`` row keeps the axis AS ASKED.
+
+    A QUORUM decision standing on the axis is superseded as before: this
+    changes nothing but the human case.
+    """
+    axis = outcome["decision_axis"]
+    if not _human_standing(decisions, axis):
+        return axis
+    return _minted_axis(_RESERVED_AXIS, outcome["qid"], tracker)
 
 
 def _apply_adoption_gates(base: dict, winner: list, winner_rung: str,
@@ -11188,6 +11231,11 @@ def finalize_quorum(run_dir: str, *, qid: str) -> dict:
 # record to ``Status: Superseded`` AND appends the successor carrying
 # ``Supersedes: <id>`` -- both halves, in one write.
 #
+# EXCEPT OVER A HUMAN. A quorum write never supersedes a ``Provenance: human``
+# decision: an adoption asked on an axis a human decided is recorded on the
+# question's own qid instead (``_record_axis``), and the writer refuses the
+# retirement outright if it is ever handed one.
+#
 # HALF A WRITE IS UNRECOVERABLE. The file is append-only: a second ``Adopted``
 # record on one axis cannot be withdrawn, and a ``Superseded`` record with no
 # successor cannot be completed. Either way the file stops parsing and every
@@ -11338,6 +11386,17 @@ def _rendered_decisions(result: dict, text: str, decisions: dict):
     axis = result["decision_axis"]
     standing = [other for other in decisions["axis_index"].get(axis, ())
                 if decisions["decisions"][other]["status"] == "Adopted"]
+    human = _human_standing(decisions, axis)
+    if human:
+        #: THE BACKSTOP AT THE WRITE. ``_record_axis`` already moves an
+        #: adoption off an axis a human decided; a caller that hands this
+        #: writer such an axis anyway is refused rather than obeyed, because
+        #: the only record it could write retires the user's answer.
+        raise TrackerValidationError(
+            f"{did} would supersede {human[0]}, a Provenance: human decision "
+            f"standing on axis {axis}; a quorum write never supersedes a human "
+            "decision, under any outcome -- the adoption is recorded on the "
+            "question's own qid instead")
     supersedes = None
     if standing:
         #: ``parse_decisions`` has already refused a file holding two, so this

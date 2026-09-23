@@ -17858,6 +17858,74 @@ class AdoptedDecisionRecordTests(unittest.TestCase):
         self.assertEqual(decisions["axis_index"]["storage-engine"],
                          [f"Q-{first}", f"Q-{second}"])
 
+    # --- a human decision on the asked axis ----------------------------------
+    #
+    # A QUORUM WRITE NEVER SUPERSEDES A `Provenance: human` DECISION, UNDER ANY
+    # OUTCOME (spec §2, invariant 2: "may never overrule a recorded one").
+    # Retiring H-001 on an AGREEING answer is still overruling it: the axis
+    # then holds a quorum decision, a later contradicting answer is judged
+    # against that one -- `rejected-contradicts-quorum`, which a re-open at a
+    # raised bar can undo -- and the user's answer has left the contradiction
+    # screen for good. So the agreeing adoption is recorded on an axis of its
+    # own, and the human decision keeps standing on the asked one.
+
+    def agree_with_the_human(self):
+        """One adoption on `storage-engine`, where H-001 stands, that agrees
+        with H-001 in its key and in its consequence."""
+        (self.run_dir / "decisions.md").write_text(DECISION_HUMAN,
+                                                   encoding="utf-8")
+        return self.adopt([graded("postgres", "specified", value="present"),
+                           graded("postgres", "speculation", value="present"),
+                           graded("sqlite", "speculation", value="present")])
+
+    def test_an_agreeing_adoption_leaves_the_human_decision_adopted(self):
+        qid, result = self.agree_with_the_human()
+        self.assertEqual(result["status"], "adopted")
+        decisions = self.parsed()
+        self.assertEqual(decisions["decisions"]["H-001"]["status"], "Adopted")
+        record = decisions["decisions"][f"Q-{qid}"]
+        self.assertEqual(record["status"], "Adopted")
+        self.assertEqual(record.get("supersedes", "").strip(), "")
+        self.assertNotIn("Superseded", self.trail())
+        #: ASKED ON THE HUMAN'S AXIS, RECORDED ON ITS OWN. The row keeps what
+        #: was asked; the record carries the question's own qid, exactly as a
+        #: `new`-axis adoption does, so the human axis still indexes H-001 alone.
+        self.assertEqual(result["axis"], "storage-engine")
+        self.assertEqual(result["decision_axis"], qid)
+        self.assertEqual(record["axis"], qid)
+        self.assertEqual(decisions["axis_index"]["storage-engine"], ["H-001"])
+
+    def test_a_later_contradiction_on_that_axis_is_judged_against_the_human(self):
+        self.agree_with_the_human()
+        _later, result = self.adopt(
+            payloads=[graded("sqlite", "specified"),
+                      graded("sqlite", "speculation"),
+                      graded("duckdb", "speculation")],
+            question="Which engine stores the session table for good?")
+        self.assertEqual(result["status"], "rejected-contradicts-human")
+        self.assertEqual(result["contradicted_decision"], "H-001")
+        self.assertEqual(self.parsed()["decisions"]["H-001"]["status"],
+                         "Adopted")
+
+    def test_the_writer_refuses_to_retire_a_human_decision(self):
+        """THE BACKSTOP AT THE WRITE. Whatever axis a caller hands the writer,
+        the record it renders never flips a human decision to `Superseded`."""
+        text = DECISION_HUMAN
+        outcome = {"decision_id": "Q-" + "e" * 12,
+                   "decision_axis": "storage-engine",
+                   "question": "Which engine?", "depth": 1,
+                   "runner_up_rung": None, "context_digest": "0" * 64,
+                   "blocks": ["T04"],
+                   "winner": {"answer_key": "postgres", "answer": "Postgres.",
+                              "rung": "specified",
+                              "consequences": [{"kind": "file-exists",
+                                                "subject": SESSION_SUBJECT,
+                                                "value": "present"}],
+                              "consistent_with": [], "forecloses": ["x"]}}
+        with self.assertRaises(pas.TrackerValidationError) as raised:
+            pas._rendered_decisions(outcome, text, pas.parse_decisions(text))
+        self.assertIn("H-001", str(raised.exception))
+
     def test_the_retirement_touches_only_the_record_it_retires(self):
         """Scoped to the target's OWN section. A status line searched for
         across the document retires whichever record happens to be read first —

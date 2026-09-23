@@ -223,6 +223,10 @@ third outcome and no controller override.
   `finalize_quorum` queues the escalation row itself. No `Q-<qid>` is written,
   so every task blocked on it stays blocked until a human answers. No rung and
   no unanimity outranks a human.
+- Agrees with a `Provenance: human` decision on its axis → adopted, but the
+  record's `Axis` is the question's own qid, never the human's axis. A quorum
+  write never supersedes a human decision: both stay `Adopted`, and later
+  answers on that axis are still judged against the human one.
 - Contradicts a `Provenance: quorum` decision → `rejected-contradicts-quorum`.
   No escalation row is queued for it. A challenge becomes **one** re-open at a
   raised bar per D-ID per run; a second challenge escalates as

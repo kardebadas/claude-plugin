@@ -1321,26 +1321,22 @@ def human_axis_supersession(ctl: Controller) -> None:
                            other="plain")] * 3)
     final = ctl.pas.finalize_quorum(str(ctl.run_dir), qid=qid)
     check(final["status"] == "adopted", f"P2-T3 quorum: {final}")
-    records = pas.parse_decisions(ctl.read_decisions())["decisions"]
-    if records["H-1"]["status"] != "Adopted":
-        finding("high", "a quorum adoption that AGREES with a human decision "
-                "retires it",
-                f"Q-{qid}, asked on stage-03 axis 'greeting-style' and agreeing "
-                f"with H-1, was written with 'Supersedes: H-1' and H-1 is now "
-                f"{records['H-1']['status']}. finalize_quorum's writer "
-                "supersedes whatever stands on the axis (\"ADOPTION SUPERSEDES; "
-                "IT NEVER APPENDS BESIDE\"), and check_contradiction clears an "
-                "agreeing candidate. The axis then holds a quorum decision, so "
-                "a later contradicting answer is rejected-contradicts-quorum "
-                "(re-openable at a raised bar) instead of "
-                "rejected-contradicts-human. Spec §2 ('It may never overrule a "
-                "recorded one'); SKILL.md ('No rung and no unanimity outranks a "
-                "human's recorded answer ... it stays Adopted'); quorum.md lets "
-                "a question carry a stage-03 axis.")
+    #: A quorum write never supersedes a human decision: the agreeing
+    #: adoption is recorded on its own qid and H-1 keeps standing on the axis.
+    parsed = pas.parse_decisions(ctl.read_decisions())
+    records = parsed["decisions"]
+    check(records["H-1"]["status"] == "Adopted",
+          f"the agreeing adoption Q-{qid} retired H-1: "
+          f"{records['H-1']['status']}")
+    check(not records[f"Q-{qid}"].get("supersedes", "").strip()
+          and records[f"Q-{qid}"]["axis"] == qid
+          and parsed["axis_index"]["greeting-style"] == ["H-1"],
+          f"Q-{qid} was not recorded beside H-1 on its own axis")
     ctl.resume("P2-T3", 1, "impl-7b", f"Q-{qid}")
     ctl.complete("P2-T3", FILES["P2-T3"])
     say(f"P2-T3: question on stage-03 axis greeting-style adopted Q-{qid} in "
-        "agreement with H-1; resumed, completed, integrated")
+        "agreement with H-1, recorded on its own axis with H-1 still Adopted; "
+        "resumed, completed, integrated")
 
 
 def main() -> int:

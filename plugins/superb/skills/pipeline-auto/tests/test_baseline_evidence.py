@@ -269,5 +269,21 @@ class BaselineEvidence(unittest.TestCase):
         self.assertEqual(result.stdout, "")
 
 
+class GreenRecord(unittest.TestCase):
+    """The committed P08 GREEN record is checkable, not merely readable."""
+
+    def test_committed_green_record_validates(self):
+        """Catches a GREEN record that drops a scenario, scores one outside
+        PASS/PARTIAL/FAIL, counts S05 despite RED's exclusion, or stops
+        claiming real-agent evidence -- any of which would let a pass rate be
+        read off a record that does not support it."""
+        record = TESTS_DIR / "pressure" / "GREEN-baseline.md"
+        result = subprocess.run(
+            [sys.executable, str(VALIDATOR), "--green", str(record)],
+            capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("OK: GREEN record scores 10 scenarios", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

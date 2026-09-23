@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate a P01 baseline-evidence tree.
+"""Validate a P01 baseline-evidence tree, and the P08 GREEN record (`--green`).
 
 Real-agent evidence and simulated evidence live in two sibling directories and
 carry two mutually exclusive class labels. This script is the mechanical step
@@ -159,9 +159,80 @@ def check_tree(root: Path) -> list[str]:
     return errors
 
 
+#: The P08 GREEN record is a curated summary, not a raw record: it is checked
+#: for shape -- every scenario scored, S05 excluded, real-agent evidence -- and
+#: for the two things it must never carry: an oracle line pasted in beside the
+#: agent's words, and a machine-specific home path.
+GREEN_VERDICTS = ("PASS", "PARTIAL", "FAIL")
+GREEN_EXCLUDED = "S05"
+GREEN_FORBIDDEN = ("Fail predicate:", "Correct behaviour:", "/home/")
+GREEN_ROW = re.compile(r"^\| (S(?:0[1-9]|10)) \|(.*)$", re.MULTILINE)
+
+
+def _cells(row: str) -> list[str]:
+    return [cell.strip() for cell in row.strip().strip("|").split("|")]
+
+
+def check_green_record(path: Path) -> list[str]:
+    """Validate ``GREEN-baseline.md``: ten verdicts, S05 excluded, ACTUAL_AGENT."""
+    errors: list[str] = []
+    text = path.read_text(encoding="utf-8")
+
+    declared = _field(text, "Evidence class")
+    if declared != ACTUAL_CLASS:
+        errors.append(
+            f"{path}: Evidence class is {declared!r}, a GREEN record requires "
+            f"{ACTUAL_CLASS!r}")
+    for token in GREEN_FORBIDDEN:
+        if token in text:
+            errors.append(f"{path}: forbidden text {token!r} present")
+
+    if "## Table 1" not in text:
+        return errors + [f"{path}: missing the '## Table 1' outcomes section"]
+    table = text.split("## Table 1", 1)[1].split("\n## ", 1)[0]
+    header = next(
+        (line for line in table.splitlines() if line.startswith("| ID |")), None)
+    if header is None:
+        return errors + [f"{path}: Table 1 has no '| ID |' header row"]
+    columns = _cells(header)
+    missing = [name for name in ("Verdict", "Counted") if name not in columns]
+    if missing:
+        return errors + [
+            f"{path}: Table 1 has no {name!r} column" for name in missing]
+
+    rows = {match.group(1): _cells(match.group(0))
+            for match in GREEN_ROW.finditer(table)}
+    for sid in STIMULUS_IDS:
+        cells = rows.get(sid)
+        if cells is None or len(cells) != len(columns):
+            errors.append(f"{path}: Table 1 has no well-formed row for {sid}")
+            continue
+        verdict = cells[columns.index("Verdict")].strip("*")
+        if verdict not in GREEN_VERDICTS:
+            errors.append(
+                f"{path}: {sid} verdict {verdict!r} is not one of {GREEN_VERDICTS}")
+        excluded = "EXCLUDED" in cells[columns.index("Counted")]
+        if sid == GREEN_EXCLUDED and not excluded:
+            errors.append(f"{path}: {sid} must be marked EXCLUDED from the pass rate")
+        if sid != GREEN_EXCLUDED and excluded:
+            errors.append(f"{path}: only {GREEN_EXCLUDED} may be marked EXCLUDED")
+    return errors
+
+
 def main(argv: list[str]) -> int:
+    if len(argv) == 3 and argv[1] == "--green":
+        errors = check_green_record(Path(argv[2]))
+        for error in errors:
+            print(error, file=sys.stderr)
+        if errors:
+            return 1
+        print(f"OK: GREEN record scores {len(STIMULUS_IDS)} scenarios, "
+              f"{GREEN_EXCLUDED} excluded, {ACTUAL_CLASS}")
+        return 0
     if len(argv) != 2:
-        print("usage: check_baseline_evidence.py <records-root>", file=sys.stderr)
+        print("usage: check_baseline_evidence.py <records-root>\n"
+              "       check_baseline_evidence.py --green <GREEN-baseline.md>",
+              file=sys.stderr)
         return 2
     errors = check_tree(Path(argv[1]))
     for error in errors:

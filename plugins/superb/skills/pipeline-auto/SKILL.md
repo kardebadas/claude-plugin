@@ -182,7 +182,10 @@ nothing.
 - An adoption records the answer, the winning rung and the rung it beat, and
   `Provenance: quorum`; it consumes one phase and one run adoption. The
   adoption `Q-<qid>` is itself the grant: resume the blocked task with
-  `resume_task(..., decision_ref="Q-<qid>")`.
+  `resume_task(..., decision_ref="Q-<qid>")`. A re-asked question's adoption
+  resumes the task too, under its new qid. After an escalation, the human's
+  `task.resume` `H-<n>` resumes it once the escalation row is `answered` with
+  that `Resolution`.
 
 ## Recorded human decisions
 

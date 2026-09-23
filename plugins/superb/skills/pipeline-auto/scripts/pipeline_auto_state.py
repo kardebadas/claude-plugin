@@ -14688,7 +14688,52 @@ def _require_fresh_attempt(row: dict, token: str) -> None:
             "one identity")
 
 
-def _validate_decision(run_dir, row: dict, decision_ref: str) -> dict:
+def _answers_blocked_qid(run_dir, answered: str, blocked: str) -> bool:
+    """Whether a settlement of qid ``answered`` settles the question ``blocked``.
+
+    EQUAL, OR A RE-ASK WHOSE LINEAGE IS THE BLOCKED QUESTION. A re-ask -- a
+    re-raise after a human budget grant, or a challenge re-open -- is minted a
+    NEW qid by ``derive_reopen_qid``, while the blocked task's ``Question`` cell
+    keeps the qid the worker raised: the only writer of that cell is
+    ``import_worker_result``, which accepts a ``[~]`` row, so nothing re-points
+    a ``[?]`` row to the re-ask. Equality alone therefore stranded every task
+    whose question was re-asked -- its only answer names the new qid.
+
+    DERIVED, NEVER READ OFF A STORED FIELD. ``_question_record`` re-derives the
+    re-ask's own identity from its question, axis and ``Reopen of`` and refuses
+    a record filed under any other qid; ``_reopen_lineage_root`` then recomputes
+    the ORIGINAL qid from the same question and axis. So the link from the
+    re-ask to the blocked question is two hashes over one record, and a
+    ``lineage_root`` cell in ``open.json`` -- which is only a copy -- is not
+    consulted.
+
+    NO ``reopen_of`` TEST IS NEEDED, and one would be a dominated screen: a
+    record with no ``Reopen of`` derives ``derive_qid(question, axis)``, which
+    ``_question_record`` has just proved equals ``answered`` -- so its lineage
+    root IS ``answered``, which the equality above already failed.
+
+    THE PROTECTION THE OLD RULE WAS WRITTEN FOR SURVIVES. A lineage root is
+    always an ORIGINAL qid, never a re-ask's, so when the cell itself names a
+    re-ask (a worker that raised the re-ask record), no settlement of the
+    original question has that re-ask as its lineage and a stale answer still
+    cannot resume it. When the cell names the original, the stale answer is
+    the superseded ``Q-<original>`` record, and the Status screen refuses it.
+
+    FAIL-CLOSED. A record that is missing, unreadable, inadmissible or filed
+    under another identity establishes no lineage, and "cannot tell" is "does
+    not answer", never "might".
+    """
+    if answered == blocked:
+        return True
+    try:
+        record = _question_record(run_dir, answered)
+    except TrackerError:
+        return False
+    return _reopen_lineage_root(record) == blocked
+
+
+def _validate_decision(run_dir, tracker: dict, row: dict,
+                       decision_ref: str) -> dict:
     """The adopted grant for THIS BLOCK, or a stop.
 
     THE ROW IS TAKEN, NOT THE TASK ID, and that REOPENS THIS TASK'S OWN RULING
@@ -14699,10 +14744,13 @@ def _validate_decision(run_dir, row: dict, decision_ref: str) -> dict:
     lines earlier inside `mutate`, so taking it costs nothing, and re-reading
     the tracker here would add a second reader of a table the caller holds.
 
-    The `tracker` argument itself is still NOT taken, and for the reason the
-    brief's version failed rather than the reason once written down: the brief
-    resolved the file itself and reported an unresolvable one as "decisions
-    file is missing". `_decisions_text` is the ONE door onto `decisions.md` --
+    The TRACKER IS TAKEN TOO, now that a screen reads a second section: a
+    human answer to an escalated quorum question is bound to its block by the
+    `## Escalations` row, and `mutate` already holds the validated tracker.
+    What is still NOT done is resolving `decisions.md` from it, and for the
+    reason the brief's version failed rather than the reason once written
+    down: the brief resolved the file itself and reported an unresolvable one
+    as "decisions file is missing". `_decisions_text` is the ONE door onto `decisions.md` --
     the budget, the projection and `open_quorum` all read the trail through it
     -- and it is what separates a missing file from a name that exists and
     cannot be read. Folding a directory, a dangling link or a FIFO back into
@@ -14714,9 +14762,9 @@ def _validate_decision(run_dir, row: dict, decision_ref: str) -> dict:
     with the id, an Open record carrying an authority, and a `Superseded`
     record nothing supersedes. What is specific to this grant is: it resolves,
     it is the live record, it carries THE ACTION ITS ARM REQUIRES
-    (`quorum.adopt` for `quorum:`, `task.resume` for `halt:`), it names this
-    task, it is not the absence marker, IT IS NOT ALREADY SPENT, and IT NAMES
-    THE BLOCK.
+    (`quorum.adopt` for a quorum's answer to `quorum:`, `task.resume` for a
+    human's answer to `quorum:` and for `halt:`), it names this task, it is
+    not the absence marker, IT IS NOT ALREADY SPENT, and IT NAMES THE BLOCK.
 
     The absence marker is one `parse_decisions` does NOT refuse: `-` is a
     non-empty string and is not a rubber stamp, so it passes every upstream
@@ -14732,7 +14780,8 @@ def _validate_decision(run_dir, row: dict, decision_ref: str) -> dict:
     construction, since `mutate` refuses the row unless they agree. On the
     quorum arm the adoption carries no `Attempt` (`finalize_quorum` writes
     none), so `_resumed_by` reads the append-only `Checkpoints` history and
-    refuses an adoption this task has already resumed on.
+    refuses a decision this task has already resumed on -- an adoption and a
+    human's escalation answer alike.
 
     THE BLOCK, THROUGH THE QUESTION CELL, AND THE TWO ARMS ARE NOT THE SAME
     KIND OF THING.
@@ -14741,8 +14790,15 @@ def _validate_decision(run_dir, row: dict, decision_ref: str) -> dict:
       as `"Q-" + qid` and `_final_event` already refuses an adoption naming any
       other id, for exactly this reason -- so a quorum decision id contains the
       identity of the question it answers and the comparison is arithmetic, not
-      trust. Re-opens close for free: `derive_reopen_qid` mints a DIFFERENT
-      qid, so a stale answer cannot resume a re-asked block.
+      trust. The answer is `Q-<qid>` itself, or the adoption of a RE-ASK of it
+      (a budget re-raise or a challenge re-open), whose own question record
+      re-derives the blocked qid as its lineage root -- see
+      `_answers_blocked_qid`, which also keeps a stale answer from resuming a
+      block that NAMES a re-ask. A question that ESCALATED is answered by a
+      human instead: an `H-<n>` can never name a qid, so it releases the block
+      only as the `Resolution` of an `## Escalations` row whose `QID` is the
+      blocked question (or a re-ask of it), and only as a `task.resume`. The
+      binding is tracker row to block cell, never asserted by the decision.
     * `halt:<reason>` is ASSERTED. No quorum was opened, so no qid exists and
       there is no question record to hash. The grant repeats the reason in a
       `Blocker` field and must carry `Provenance: human`. NOTHING HERE CAN TELL
@@ -14787,10 +14843,12 @@ def _validate_decision(run_dir, row: dict, decision_ref: str) -> dict:
 
     AND NONE OF THIS IS TAMPER-PROOF. `decisions.md` is unsigned and
     hand-editable and no code in this module ever writes a `task.resume`
-    record, so every halt grant is hand-authored. What the screens buy is that a
-    grant clearing a block BY ACCIDENT -- a stale answer, another question's
-    answer, a spent grant read a second time -- is caught; a writer who means
-    to author a record that satisfies all seven can.
+    record, so every halt grant and every human answer to an escalation is
+    hand-authored -- and no function writes an `answered` escalation row
+    either, so that binding is the controller's record too. What the screens
+    buy is that a grant clearing a block BY ACCIDENT -- a stale answer, another
+    question's answer, a spent grant read a second time -- is caught; a writer
+    who means to author records that satisfy all of them can.
     """
     task_id = row["id"]
     records = parse_decisions(_decisions_text(Path(run_dir)))["decisions"]
@@ -14807,7 +14865,13 @@ def _validate_decision(run_dir, row: dict, decision_ref: str) -> dict:
             "acting on a retired record applies a grant the run withdrew")
     cell = row["question"]
     if cell.startswith(_QUESTION_QUORUM_ARM):
-        expected_action = _QUORUM_ADOPT_ACTION
+        #: TWO ROUTES OUT OF A QUORUM BLOCK, chosen by WHO answered. The id
+        #: prefix and `Provenance` are one fact here -- `parse_decisions`
+        #: refuses a record where they disagree -- so an `H-<n>` is a human's
+        #: answer to an ESCALATED question and owes a `task.resume`, and a
+        #: `Q-<qid>` is a quorum's adoption and owes `quorum.adopt`.
+        human_route = record["provenance"] == "human"
+        expected_action = RESUME_ACTION if human_route else _QUORUM_ADOPT_ACTION
     elif cell.startswith(_QUESTION_HALT_ARM):
         expected_action = RESUME_ACTION
     else:
@@ -14820,8 +14884,9 @@ def _validate_decision(run_dir, row: dict, decision_ref: str) -> dict:
         raise TrackerValidationError(
             f"decision {decision_ref} carries decision action "
             f"{record['action']!r} rather than {expected_action!r}; a block "
-            "on a quorum is released by the adoption that answers it and a "
-            "halt by a human's resume grant, and authority to restart a task "
+            "on a quorum is released by the adoption that answers it or by a "
+            "human's resume grant answering its escalation, and a halt by a "
+            "human's resume grant, and authority to restart a task "
             "is an explicit recorded action, never something read out of the "
             "prose of a decision that settled something else")
     scope = _csv(record.get("scope", _ABSENT_CELL))
@@ -14836,7 +14901,7 @@ def _validate_decision(run_dir, row: dict, decision_ref: str) -> dict:
             "belongs; that is this schema's empty cell, so an adopted record "
             "carrying it has written down that a question was asked and "
             "nothing at all that settles it")
-    if expected_action == _QUORUM_ADOPT_ACTION:
+    if cell.startswith(_QUESTION_QUORUM_ARM):
         qid = cell[len(_QUESTION_QUORUM_ARM):].split("@", 1)[0].strip()
         if not qid or qid == _ABSENT_CELL:
             raise TrackerValidationError(
@@ -14844,14 +14909,40 @@ def _validate_decision(run_dir, row: dict, decision_ref: str) -> dict:
                 "the derived arm binds a grant to the identity of the question "
                 "it answers, and a cell naming no question identifies nothing "
                 "for a grant to be bound to")
-        if decision_ref != f"Q-{qid}":
+        if human_route:
+            #: THE BINDING IS THE TRACKER'S, NEVER THE RECORD'S. An `H-<n>`
+            #: can never name a qid, so the record cannot say which question
+            #: it answers; the `## Escalations` row can -- `QID` is the
+            #: question that was put to the human and `Resolution` is the
+            #: decision that answered it. `_validate_escalations` admits a
+            #: resolution other than `-` only on an `answered` row, and the
+            #: tracker is validated before `mutate` runs, so a State test
+            #: beside the Resolution one would be a second refusal of an
+            #: input the first already refuses.
+            escalated = [entry["qid"] for entry in tracker["escalations"]
+                         if entry["resolution"] == decision_ref]
+            if not any(_answers_blocked_qid(run_dir, asked, qid)
+                       for asked in escalated):
+                raise TrackerValidationError(
+                    f"decision {decision_ref} resolves no escalation of what "
+                    f"task {task_id} is blocked on: that block names qid "
+                    f"{qid!r}, and the answered escalations this decision "
+                    f"resolves name {escalated}. A human answer releases a "
+                    "quorum block only as the recorded resolution of an "
+                    "escalation of that question (or of a re-ask of it) -- a "
+                    "human decision carries no qid, so the tracker row is the "
+                    "whole of the binding, and one answering another question "
+                    "is authority nobody gave for this one")
+        elif not _answers_blocked_qid(
+                run_dir, decision_ref[len(_QUORUM_PREFIX):], qid):
             raise TrackerValidationError(
                 f"decision {decision_ref} does not answer what task {task_id} "
                 f"is blocked on: that block names qid {qid!r}, whose answer is "
-                f"'Q-{qid}'. A quorum decision id is 'Q-' followed by the qid "
-                "it settles, so a grant naming any other id settled another "
-                "question -- and a re-open derives a new qid, so a stale "
-                "answer cannot resume a re-asked block")
+                f"'Q-{qid}' or the adoption of a re-ask of it. A quorum "
+                "decision id is 'Q-' followed by the qid it settles, so a "
+                "grant naming any other id settled another question -- and a "
+                "re-ask is recognised only by re-deriving its lineage from its "
+                "own question record, never by what the adoption says")
         if _member(decision_ref, _resumed_by(row)):
             raise TrackerValidationError(
                 f"decision {decision_ref} has already resumed task {task_id} "
@@ -14987,7 +15078,7 @@ def resume_task(run_dir, *, task_id: str, prior_attempt: int, new_owner: str,
                 "not a blocked-task retry and mints no attempt")
         _require_fresh_attempt(row, token)
         _require_decisions_pointer(tracker, run_dir)
-        _validate_decision(run_dir, row, decision_ref)
+        _validate_decision(run_dir, tracker, row, decision_ref)
         definition = _approved_definition(tracker, task_id)
         _require_dependencies_complete(tracker, definition)
         _require_no_scope_conflict(tracker, definition)

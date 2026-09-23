@@ -9480,7 +9480,7 @@ class ResumeDecisionValidationTests(TempDirTestCase):
                        "does not answer what task", "states Blocker",
                        "halted rather than in quorum", "which is neither",
                        "which states no blocker", "which names no qid",
-                       "has already resumed task")
+                       "has already resumed task", "resolves no escalation of")
 
     def resume(self, decisions=None, *, decision_ref: str = QUORUM_GRANT,
                write: bool = True, question: str = QUESTION_REF):
@@ -9745,28 +9745,34 @@ class ResumeDecisionValidationTests(TempDirTestCase):
             question=f"quorum:{reopened}@{QUESTION_RECORD_PATH}#sha256={'0a' * 32}")
         self.assertIn(reopened, message)
 
-    def test_a_human_grant_cannot_resume_a_quorum_arm_block(self):
+    def test_a_human_grant_with_no_escalation_cannot_resume_a_quorum_arm_block(self):
         """The sharp end stated from the other side: a hand-authored `H-<n>`
-        record can never name a qid, so it can never clear a block that a
-        quorum was opened for. That is the escalation route being preserved
-        rather than a spelling rule.
+        record can never name a qid, so on its own it can never clear a block
+        that a quorum was opened for. It releases one ONLY as the recorded
+        resolution of an escalation of that question -- and this run has
+        escalated nothing, so the tracker binds this grant to no question.
 
-        TWO SCREENS NOW STAND BETWEEN THEM. A human's grant is a
-        `task.resume`, and the quorum arm takes only the adoption -- so the
-        realistic record is refused by the action screen. An `H-<n>` record
-        spelling `quorum.adopt` passes that screen and is still refused by the
-        qid binding, because no `H-<n>` id is `Q-<qid>`."""
-        message = self.refuse("carries decision action",
+        This case once expected the ACTION screen, because the quorum arm took
+        only the adoption; that closed the escalation route altogether and
+        stranded every task whose question a human answered. The realistic
+        human record -- a `task.resume` -- now passes the action screen and is
+        refused by the escalation binding instead."""
+        message = self.refuse("resolves no escalation of",
                               decisions=decisions_file(halt_decision_record(
                                   "H-001", drop=("Blocker",))),
                               decision_ref="H-001")
-        self.assertIn("rather than 'quorum.adopt'", message)
+        self.assertIn(BLOCK_QID, message)
 
-    def test_a_human_record_spelling_the_adoption_is_still_not_the_answer(self):
-        """The second screen of the pair above, on its own run."""
-        self.refuse("does not answer what task", decisions=decisions_file(
-            decision_record("H-001", {"Provenance": "human", "Depth": "0"})),
-            decision_ref="H-001")
+    def test_a_human_record_spelling_the_adoption_is_not_a_resume_grant(self):
+        """A human's answer to a quorum block owes `task.resume`: an `H-<n>`
+        spelling `quorum.adopt` is a machine's action under a human's id, and
+        it is refused before any binding is read."""
+        message = self.refuse("carries decision action",
+                              decisions=decisions_file(decision_record(
+                                  "H-001", {"Provenance": "human",
+                                            "Depth": "0"})),
+                              decision_ref="H-001")
+        self.assertIn("rather than 'task.resume'", message)
 
     def test_a_halt_arm_grant_must_repeat_the_blocker_verbatim(self):
         """The asserted arm. No quorum was opened, so no qid exists and there
@@ -9900,6 +9906,327 @@ class ResumeDecisionValidationTests(TempDirTestCase):
         with self.assertRaises(state.TrackerValidationError) as caught:
             call()
         self.assertIn("not a regular file", str(caught.exception))
+
+
+# --------------------------------------------------------------------------
+# The two routes out of a quorum block the adoption alone could not reach.
+#
+# ESCALATION. A quorum that escalates is answered by a human, as `H-<n>`, and
+# the old rule demanded `Q-<qid>` -- so a task blocked on an escalated question
+# stayed `[?]` for ever, and `resume_task` is the only way back from `[?]`.
+#
+# RE-ASK. A question re-asked after a human budget grant, or re-opened by a
+# challenge, is minted a NEW qid by `derive_reopen_qid`, while the blocked
+# task's `Question` cell keeps the qid the worker raised: the only writer of
+# that cell is `import_worker_result`, which takes a `[~]` row. So the
+# re-ask's adoption `Q-<new>` failed the same comparison and stranded the task
+# the same way. `test_a_budget_re_raise_adoption_resumes_the_task` is the
+# sequence, and it was red at `0395645`.
+# --------------------------------------------------------------------------
+
+#: A human budget grant a re-raise names. Only its id enters the re-ask's
+#: identity; `_question_record` does not resolve it, so no record is needed.
+RERAISE_GRANT = "H-900"
+#: The unrelated question a mis-bound answer settles, on its own axis.
+OTHER_QUESTION = "Does T1 retry on a transport timeout?"
+OTHER_AXIS = "transport-retry"
+OTHER_QID = state.derive_qid(OTHER_QUESTION, OTHER_AXIS)
+
+
+def reask_record(question: str = BLOCK_QUESTION, axis: str = BLOCK_AXIS,
+                 reopen_of: str = RERAISE_GRANT):
+    """``(qid, text)`` of a re-ask record, its qid DERIVED by the module's
+    own ``derive_reopen_qid`` -- the identity ``_question_record`` checks."""
+    qid = state.derive_reopen_qid(question, axis, reopen_of)
+    text = question_record_text(qid, question, axis) + (
+        f"- **Reopen of:** {reopen_of}\n")
+    return qid, text
+
+
+#: The human's answer to an escalated quorum question: `task.resume`, scoped
+#: to T1. It names no qid, because an `H-<n>` cannot -- the escalation row is
+#: what binds it to a question.
+ESCALATION_ANSWER_FIELDS = dict(
+    RESUME_DECISION_FIELDS,
+    **{"Provenance": "human", "Decision action": "task.resume",
+       "Depth": "0"})
+ESCALATION_ANSWER = "H-001"
+
+
+def escalation_answer(did: str = ESCALATION_ANSWER, overrides=None) -> str:
+    return decision_record(did, overrides, fields=ESCALATION_ANSWER_FIELDS)
+
+
+def add_escalation(run_dir, *, qid: str, resolution: str = ESCALATION_ANSWER,
+                   escalation_state: str = "answered", number: int = 1,
+                   with_quorum_row: bool = True) -> None:
+    """One `## Escalations` row, and the `## Quorum` row its QID must name.
+
+    `_validate_escalations` refuses a QID `## Quorum` does not hold, so the
+    quorum row is written first -- finalised as `escalated`, which is what
+    queued the escalation in the first place.
+    """
+    if with_quorum_row:
+        open_quorum_row(run_dir, qid=qid, quorum_state="finalized",
+                        transition=f"test-quorum-{qid}")
+
+    def mutate(tracker: dict) -> dict:
+        row = blank_row("escalations")
+        row.update(id=f"E-{number}", qid=qid, blast=BLOCK_AXIS,
+                   state=escalation_state,
+                   #: A queued row names no batch -- that is its own refusal,
+                   #: and it would mask the resolution rule being pinned.
+                   batch="-" if escalation_state == "queued" else "B-1",
+                   resolution=resolution)
+        return state.append_row(tracker, "escalations", row)
+
+    state.locked_tracker_update(
+        run_dir, transition_id=f"test-escalate-{number}", mutate=mutate)
+
+
+class EscalatedAndReaskedQuorumResumeTests(TempDirTestCase):
+    """A quorum block is released by `Q-<qid>`, by the adoption of a re-ask of
+    that question, or by a human `task.resume` that an answered `##
+    Escalations` row names as the resolution of that question -- and by
+    nothing else.
+
+    Each refusal asserts its own diagnosis and the ABSENCE of every other
+    screen's, as `ResumeDecisionValidationTests` does, and that the tracker
+    bytes did not move.
+    """
+
+    OTHER_DIAGNOSES = ResumeDecisionValidationTests.OTHER_DIAGNOSES
+
+    def run_with(self, decisions: str, *, question: str = QUESTION_REF):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(),
+                                    worker_limit=6)
+        publish_question_record(run_dir)
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        set_task_state(run_dir, "T1", "test-block-T1", state="[?]",
+                       question=question)
+        write_decisions(run_dir, decisions)
+        return run_dir
+
+    def resume(self, run_dir, decision_ref: str, *, prior: int = 1):
+        return state.resume_task(
+            run_dir, task_id="T1", prior_attempt=prior,
+            new_owner=f"impl-{prior + 1}", new_attempt=prior + 1,
+            decision_ref=decision_ref)
+
+    def refuse(self, run_dir, decision_ref: str, expected: str,
+               *, prior: int = 1) -> str:
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            self.resume(run_dir, decision_ref, prior=prior)
+        message = str(caught.exception)
+        self.assertIn(expected, message)
+        for other in self.OTHER_DIAGNOSES:
+            if other != expected:
+                with self.subTest(absent=other):
+                    self.assertNotIn(other, message)
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+        return message
+
+    # --- the escalation route ---------------------------------------------
+
+    def test_a_human_answer_to_the_escalated_question_resumes_the_task(self):
+        """THE DEFECT. The question escalated, a human answered it, the
+        escalation row records that answer -- and the task was stranded."""
+        run_dir = self.run_with(decisions_file(escalation_answer()))
+        add_escalation(run_dir, qid=BLOCK_QID)
+        row = task_row(self.resume(run_dir, ESCALATION_ANSWER), "T1")
+        self.assertEqual(row["state"], "[~]")
+        self.assertIn(
+            f"resumed:attempt-001->attempt-002@{ESCALATION_ANSWER}",
+            row["checkpoints"])
+        self.assertEqual(row["question"], QUESTION_REF)
+
+    def test_an_escalation_of_another_question_binds_nothing_here(self):
+        """The answered row names a DIFFERENT qid. The human answered a
+        question -- not this one -- and the binding is arithmetic on the row,
+        not the record's word."""
+        run_dir = self.run_with(decisions_file(escalation_answer()))
+        add_escalation(run_dir, qid=OTHER_QID)
+        message = self.refuse(run_dir, ESCALATION_ANSWER,
+                              "resolves no escalation of")
+        self.assertIn(BLOCK_QID, message)
+        self.assertIn(OTHER_QID, message)
+
+    def test_an_escalation_resolved_by_another_decision_binds_nothing_here(self):
+        """The row names THIS question but a different resolution: the human
+        answered it with `H-002`, and `H-001` is not that answer."""
+        run_dir = self.run_with(decisions_file(escalation_answer()))
+        add_escalation(run_dir, qid=BLOCK_QID, resolution="H-002")
+        self.refuse(run_dir, ESCALATION_ANSWER, "resolves no escalation of")
+
+    def test_only_an_answered_row_can_carry_the_resolution(self):
+        """Why the screen reads `Resolution` and not also `State`: the tracker
+        refuses a resolution on any row that is not `answered`, before
+        `mutate` ever runs. Pinned here so that loosening it upstream turns
+        this red rather than silently widening the route."""
+        run_dir = self.run_with(decisions_file(escalation_answer()))
+        for pending in ("queued", "asked", "halted"):
+            with self.subTest(state=pending):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    add_escalation(run_dir, qid=BLOCK_QID,
+                                   escalation_state=pending,
+                                   with_quorum_row=pending == "queued")
+                self.assertIn("carries a resolution", str(caught.exception))
+
+    def test_a_quorum_provenance_human_id_is_refused_upstream(self):
+        """`Provenance` and the id prefix are one fact: `parse_decisions`
+        refuses an `H-<n>` claiming a quorum, so the route keyed on provenance
+        cannot be entered by a machine answer wearing a human id."""
+        run_dir = self.run_with(decisions_file(escalation_answer(
+            overrides={"Provenance": "quorum", "Depth": "1"})))
+        add_escalation(run_dir, qid=BLOCK_QID)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            self.resume(run_dir, ESCALATION_ANSWER)
+        self.assertIn("id prefix says human", str(caught.exception))
+
+    def test_a_human_answer_that_is_not_a_resume_grant_is_refused(self):
+        """The escalation row binds the answer to the question; it does not
+        make every answer a grant to restart a task. `none` records the answer
+        and authorises nothing."""
+        run_dir = self.run_with(decisions_file(escalation_answer(
+            overrides={"Decision action": "none"})))
+        add_escalation(run_dir, qid=BLOCK_QID)
+        message = self.refuse(run_dir, ESCALATION_ANSWER,
+                              "carries decision action")
+        self.assertIn("rather than 'task.resume'", message)
+
+    def test_a_human_answer_scoped_to_another_task_is_refused(self):
+        run_dir = self.run_with(decisions_file(escalation_answer(
+            overrides={"Scope": "T3"})))
+        add_escalation(run_dir, qid=BLOCK_QID)
+        self.refuse(run_dir, ESCALATION_ANSWER, "not scoped to task")
+
+    def test_one_human_answer_cannot_resume_the_same_task_twice(self):
+        """`_resumed_by` covers this route too: a resumed attempt that
+        re-blocks on the same question is a new block, and the answer already
+        spent on the first does not release it."""
+        run_dir = self.run_with(decisions_file(escalation_answer()))
+        add_escalation(run_dir, qid=BLOCK_QID)
+        self.assertEqual(
+            task_row(self.resume(run_dir, ESCALATION_ANSWER), "T1")["state"],
+            "[~]")
+        set_task_state(run_dir, "T1", "test-reblock-T1", state="[?]",
+                       question=QUESTION_REF)
+        self.refuse(run_dir, ESCALATION_ANSWER, "has already resumed task",
+                    prior=2)
+
+    def test_an_escalation_row_does_not_open_the_halt_arm(self):
+        """The halt arm is unchanged: an answered escalation naming the
+        decision buys a halt grant nothing, and the attempt it names is still
+        compared."""
+        run_dir = self.run_with(
+            decisions_file(halt_decision_record(
+                overrides={"Attempt": "attempt-007"})),
+            question=HALT_REF)
+        add_escalation(run_dir, qid=BLOCK_QID, resolution=HALT_GRANT)
+        self.refuse(run_dir, HALT_GRANT, "grants the resume of")
+
+    # --- the re-ask route --------------------------------------------------
+
+    def test_a_budget_re_raise_adoption_resumes_the_task(self):
+        """THE SIBLING, AS A SEQUENCE. The question was refused on budget, a
+        human granted headroom as `H-900`, the question was re-raised under
+        `derive_reopen_qid(..., "H-900")`, and that quorum adopted `Q-<new>`
+        scoped to T1. The task's cell still names the original qid, nothing
+        re-points a `[?]` row, and `Q-<original>` does not exist -- the budget
+        refused it before any brain answered. Red at `0395645`."""
+        reask, text = reask_record()
+        self.assertNotEqual(reask, BLOCK_QID)
+        run_dir = self.run_with(decisions_file(decision_record(f"Q-{reask}")))
+        publish_question_record(run_dir, text=text, qid=reask)
+        row = task_row(self.resume(run_dir, f"Q-{reask}"), "T1")
+        self.assertEqual(row["state"], "[~]")
+        self.assertIn(f"resumed:attempt-001->attempt-002@Q-{reask}",
+                      row["checkpoints"])
+
+    def test_a_re_ask_whose_record_is_missing_answers_nothing(self):
+        """The lineage is DERIVED from the re-ask's own question record, so
+        an adoption whose record is gone establishes none: fail-closed."""
+        reask, _text = reask_record()
+        run_dir = self.run_with(decisions_file(decision_record(f"Q-{reask}")))
+        self.refuse(run_dir, f"Q-{reask}", "does not answer what task")
+
+    def test_a_record_filed_under_another_qid_answers_nothing(self):
+        """`_question_record` re-derives the identity and refuses a record
+        filed under a qid it does not hash to: a copied directory cannot lend
+        a re-ask the blocked question's lineage."""
+        reask, text = reask_record()
+        _other, other_text = reask_record(reopen_of="H-901")
+        run_dir = self.run_with(decisions_file(decision_record(f"Q-{reask}")))
+        publish_question_record(run_dir, text=other_text, qid=reask)
+        self.refuse(run_dir, f"Q-{reask}", "does not answer what task")
+
+    def test_a_re_ask_of_another_question_is_refused(self):
+        """A re-ask of a DIFFERENT question has a different lineage root."""
+        reask, text = reask_record(OTHER_QUESTION, OTHER_AXIS)
+        run_dir = self.run_with(decisions_file(decision_record(
+            f"Q-{reask}", {"Question": OTHER_QUESTION, "Axis": OTHER_AXIS})))
+        publish_question_record(run_dir, text=text, qid=reask)
+        message = self.refuse(run_dir, f"Q-{reask}",
+                              "does not answer what task")
+        self.assertIn(BLOCK_QID, message)
+
+    def test_the_superseded_original_cannot_resume_once_re_asked(self):
+        """THE PROTECTION THE OLD DOCSTRING DESCRIBED, where the cell names
+        the ORIGINAL. A challenge re-open adopted and superseded `Q-<qid>`:
+        the stale answer is refused by Status and the successor resumes."""
+        reask, text = reask_record(reopen_of=QUORUM_GRANT)
+        trail = decisions_file(
+            decision_record(QUORUM_GRANT, {"Status": "Superseded"}),
+            decision_record(f"Q-{reask}", {"Supersedes": QUORUM_GRANT,
+                                           "Depth": "2"}))
+        run_dir = self.run_with(trail)
+        publish_question_record(run_dir, text=text, qid=reask)
+        self.refuse(run_dir, QUORUM_GRANT, "and not Adopted")
+        self.assertEqual(
+            task_row(self.resume(run_dir, f"Q-{reask}"), "T1")["state"], "[~]")
+
+    def test_a_stale_answer_cannot_resume_a_block_that_names_the_re_ask(self):
+        """And where the cell names the RE-ASK: a lineage root is always an
+        original qid, so the original's adoption -- whose record IS on disk
+        and IS read -- is not an answer to the re-ask."""
+        reask, text = reask_record()
+        run_dir = self.run_with(
+            decisions_file(),
+            question=f"quorum:{reask}@{QUESTION_RECORD_PATH}"
+                     f"#sha256={'0a' * 32}")
+        publish_question_record(run_dir, text=text, qid=reask)
+        message = self.refuse(run_dir, QUORUM_GRANT,
+                              "does not answer what task")
+        self.assertIn(reask, message)
+
+    def test_a_re_ask_adoption_cannot_resume_the_same_task_twice(self):
+        reask, text = reask_record()
+        run_dir = self.run_with(decisions_file(decision_record(f"Q-{reask}")))
+        publish_question_record(run_dir, text=text, qid=reask)
+        self.resume(run_dir, f"Q-{reask}")
+        set_task_state(run_dir, "T1", "test-reblock-T1", state="[?]",
+                       question=QUESTION_REF)
+        self.refuse(run_dir, f"Q-{reask}", "has already resumed task", prior=2)
+
+    def test_a_human_answer_to_an_escalated_re_ask_resumes_the_task(self):
+        """The two routes composed: the re-raise itself escalated, and the
+        human's answer resolves an escalation whose QID is the RE-ASK. Its
+        lineage is the blocked question, so it answers the block."""
+        reask, text = reask_record()
+        run_dir = self.run_with(decisions_file(escalation_answer()))
+        publish_question_record(run_dir, text=text, qid=reask)
+        add_escalation(run_dir, qid=reask)
+        self.assertEqual(
+            task_row(self.resume(run_dir, ESCALATION_ANSWER), "T1")["state"],
+            "[~]")
+
+    def test_a_human_answer_to_an_escalated_unrelated_re_ask_is_refused(self):
+        reask, text = reask_record(OTHER_QUESTION, OTHER_AXIS)
+        run_dir = self.run_with(decisions_file(escalation_answer()))
+        publish_question_record(run_dir, text=text, qid=reask)
+        add_escalation(run_dir, qid=reask)
+        self.refuse(run_dir, ESCALATION_ANSWER, "resolves no escalation of")
 
 
 # THE RUNNER GOES LAST, and it has to. `unittest.main()` calls `sys.exit()`, so

@@ -37,10 +37,18 @@ WHICH RECORD RELEASES A BLOCKED TASK depends on which arm the task's
   `quorum.adopt` record `finalize_quorum` writes: its id is `Q-` followed by
   the qid of the question it settles, so it binds to the block by construction
   — the id must be `Q-` followed by the very qid in that cell — and its `Scope`
-  names the blocked tasks. No `task.resume` is written for this arm. A re-open
-  derives a different qid, so a stale answer cannot resume a re-asked block;
-  and an adoption that has already resumed a task (a `resumed:` checkpoint
-  citing it is in the task's history) cannot resume it again.
+  names the blocked tasks. No `task.resume` is written for an adopted quorum.
+  A re-ask (a budget re-raise or a challenge re-open) derives a different qid
+  and the task's cell keeps the original: the re-ask's adoption (`Q-`
+  followed by the re-ask's own qid) releases the block because its own
+  question record re-derives the original qid as its lineage root, and the
+  original adoption, once superseded, releases nothing. A question that
+  ESCALATED is answered by a human: that `H` record is a `task.resume` scoped
+  to the task with `Provenance: human`, and it releases the block only when an `answered` `## Escalations` row whose `QID` is that
+  qid (or a re-ask of it) names it as the `Resolution` -- a human id names no
+  qid, so the tracker row is the binding. A decision that has already resumed
+  a task (a `resumed:` checkpoint citing it is in the task's history) cannot
+  resume it again.
 - `halt:<reason>` — the ASSERTED arm. Nothing opened a quorum, so no qid exists
   and there is no question record to derive one from. The grant is a
   `task.resume` that names the exact blocked task in `Scope`, names the attempt

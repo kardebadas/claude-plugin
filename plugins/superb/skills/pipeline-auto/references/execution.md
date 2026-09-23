@@ -86,7 +86,7 @@ substitute a runner.
 | Transition | Function | Requires |
 | --- | --- | --- |
 | `[ ] → [~]` | `reserve_task(run_dir, task_id=, owner=, attempt=)` | deps done, no overlapping active scope, slot under `implementation_slot_cap`. Records `baseline:<attempt>@<target-sha>` for a `source` task |
-| `[?] → [~]` | `resume_task(run_dir, task_id=, prior_attempt=, new_owner=, new_attempt=, decision_ref=)` | the grant for the block: on `quorum:<qid>`, the `quorum.adopt` decision `Q-<qid>` that answers it, not already used to resume this task; on `halt:<reason>`, a human `task.resume` repeating the blocker and naming the attempt. A new unused attempt; a fresh baseline (the old one is kept) |
+| `[?] → [~]` | `resume_task(run_dir, task_id=, prior_attempt=, new_owner=, new_attempt=, decision_ref=)` | the grant for the block: on `quorum:<qid>`, the `quorum.adopt` decision `Q-<qid>` that answers it (or the adoption of a re-ask of that qid), or a human `task.resume` `H-<n>` that an `answered` `## Escalations` row for that qid names as its `Resolution`, either not already used to resume this task; on `halt:<reason>`, a human `task.resume` repeating the blocker and naming the attempt. A new unused attempt; a fresh baseline (the old one is kept) |
 
 Persist before dispatch. Several individually ready tasks are not jointly
 authorised: check pairwise `scopes_overlap` across the whole batch. Context

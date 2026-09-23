@@ -124,8 +124,8 @@ Each entry has exactly one `Decision action`:
 
 | Action | Grants |
 | --- | --- |
-| `task.resume` | One halted task's `[?] → [~]` for a named attempt, on a `halt:<reason>` block: human only, with the reason repeated in `Blocker` |
-| `quorum.adopt` | One quorum-adopted answer for one qid. It is also the grant that resumes a task blocked on `quorum:<qid>@<path>#sha256=<digest>`: the decision must be `Q-<that qid>`, scoped to the task, and not already used to resume it |
+| `task.resume` | A blocked task's `[?] → [~]`, human only. On a `halt:<reason>` block: for a named attempt, with the reason repeated in `Blocker`. On a `quorum:<qid>` block: only as the `Resolution` of an `answered` `## Escalations` row whose `QID` is that qid or a re-ask of it; scoped to the task, not already used to resume it |
+| `quorum.adopt` | One quorum-adopted answer for one qid. It is also the grant that resumes a task blocked on `quorum:<qid>@<path>#sha256=<digest>`: the decision must be `Q-<that qid>`, or `Q-<re-ask qid>` for a re-ask whose question record re-derives that qid as its lineage root; scoped to the task, and not already used to resume it |
 | `quorum.extend-budget` | A finite drift-budget raise for one named phase. `human` only, at most two per run |
 | `dispatch.extend-budget` | A finite raise of the `agent_dispatch_count` ceiling. `human` only. It does not stand in for the drift grant, and the drift grant does not stand in for it |
 | `none` | Nothing. The entry is a record |

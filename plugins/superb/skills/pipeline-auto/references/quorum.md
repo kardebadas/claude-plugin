@@ -188,12 +188,20 @@ An adoption records the answer, winning rung, runner-up rung, depth, and
 adoption is the grant**: resume each blocked task named in its `Scope` with
 `resume_task(run_dir, task_id=..., prior_attempt=..., new_owner=...,
 new_attempt=..., decision_ref="Q-<qid>")`. No `task.resume` record is written
-for a quorum block. `resume_task` refuses an adoption answering a different
+for an adopted quorum. `resume_task` refuses an adoption answering a different
 qid, and refuses one this task has already resumed on. A resumed attempt that
 re-raises the same question is caught at "Already answered?" above, before any
 result is published; if it reaches `[?]` anyway, the old adoption cannot
 release it — escalate. A `halt:` block is different: only a human `task.resume`
 naming the blocker and the attempt releases it.
+
+**A re-asked question keeps its task's block.** A re-raise after a budget grant
+or a challenge re-open gets a new qid, but the blocked task's `Question` cell
+still names the original one and nothing rewrites it. Pass the re-ask's
+adoption `Q-<new qid>` to `resume_task` anyway. It is accepted because the
+re-ask's own question record, re-derived, has the blocked qid as its lineage
+root. Once a re-open adopts, the original adoption is `Superseded` and resumes
+nothing.
 
 Every outcome other than an adoption or a rejection (below) is an escalation.
 `finalize_quorum` returns `status: escalated` with one of these reason tokens in
@@ -270,6 +278,18 @@ costs no budget and is never the discouraged path. `unresolved`, `deferred` or
 
 While escalated, nothing is dispatched on that axis — no trace, fact-finding,
 fresh quorum, or "safe" subset — until a human answers.
+
+**Resuming on a human answer.** Record the answer as `H-<n>` with
+`Provenance: human`, `Decision action: task.resume` and every blocked task in
+`Scope`. Mark the `## Escalations` row `answered` with `Resolution: H-<n>`. Then
+call `resume_task(..., decision_ref="H-<n>")`. It resumes a `quorum:<qid>` block
+only if an answered row's `QID` is that qid (or a re-ask of it) and its
+`Resolution` is this `H-<n>`. The binding is the tracker row, because an
+`H-<n>` names no qid. One `H-<n>` resumes each task once. An answer that grants
+only budget (`quorum.extend-budget`) resumes nothing: re-raise the question and
+resume on its adoption. A budget refusal is never mirrored into `## Quorum`, so
+its escalation row cannot name the qid. A human answer to a budget-refused
+question therefore goes through a re-raise too.
 
 ## Resume
 

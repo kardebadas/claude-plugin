@@ -8806,6 +8806,17 @@ DECISION_QUORUM = """
 - **Status:** Adopted
 """
 
+#: A quorum-provenance record standing ALONE on the axis and answering
+#: `sqlite`, so the default `postgres` winner contradicts a quorum decision and
+#: no human one.
+QUORUM_ONLY_SQLITE = "<!-- pipeline-auto-decisions/v1 -->\n" + (
+    DECISION_QUORUM
+    .replace("- **Consistent with:** H-001\n", "")
+    .replace("postgres — Use the existing PostgreSQL instance.",
+             "sqlite — Use an embedded SQLite file.")
+    .replace("file-exists:db/session.sql=present",
+             "file-exists:db/session.sqlite=present"))
+
 #: The same quorum record with its own `Supersedes` line, which is what
 #: `templates/decisions.md` requires of the record performing the one legal
 #: in-place mutation: `H-001` flips to `Superseded` and the record that replaces
@@ -18722,15 +18733,18 @@ class QuorumMirrorTests(unittest.TestCase):
         self.assertEqual(escalation["blast"], "new")
         self.assertNotEqual(escalation["blast"], minted)
 
-    def test_a_rejection_is_recorded_as_an_outcome_and_never_batched_to_a_human(self):
-        """A quorum may decide an open question and may never overrule a
-        recorded one — but the user has already spoken on this axis, so asking
-        them again is the re-litigation the replay guard refuses from the other
-        direction. The rejection is the `Outcome` cell, which is where the
-        run's earliest drift warning is counted from.
+    def test_contradicting_a_human_decision_is_recorded_and_escalated(self):
+        """Spec invariant 2: "Any candidate answer contradicting a
+        `Provenance: human` decision is rejected AND ESCALATED, at any
+        confidence." This case once asserted the opposite -- `escalations ==
+        []` -- under a ruling that the blocked task "can proceed on the
+        standing record". It cannot: a rejection writes no `Q-<qid>`, so no
+        grant exists to resume it, and without a queued row nothing puts that
+        block in front of the one party who can clear it.
 
-        THE POSITIVE CONTROL IS IN THE SAME RUN. Without the escalation below,
-        a mirror that appended no escalation row for ANY outcome would pass.
+        THE STATUS IS KEPT. The row is queued and the `Outcome` cell still says
+        `rejected-contradicts-human`, not `escalated`, because the terminal
+        report counts drift from what the user asked for off that cell.
         """
         (self.run_dir / "decisions.md").write_text(DECISION_HUMAN,
                                                    encoding="utf-8")
@@ -18741,19 +18755,27 @@ class QuorumMirrorTests(unittest.TestCase):
         self.assertEqual(tracker["quorum"][0]["outcome"],
                          "rejected-contradicts-human")
         self.assertEqual(tracker["quorum"][0]["decision"], "-")
-        self.assertEqual(tracker["escalations"], [])
-
-        loud = dict(graded("postgres", "specified"), blast=["external-service"])
-        escalated, second = self.finalize(
-            [loud, graded("postgres", "speculation"),
-             graded("sqlite", "speculation")],
-            question="Which engine stores the session table for good?")
-        self.assertEqual(second["status"], "escalated")
-        tracker = self.tracker()
-        self.assertEqual([row["qid"] for row in tracker["quorum"]],
-                         [rejected, escalated])
         self.assertEqual([row["qid"] for row in tracker["escalations"]],
-                         [escalated])
+                         [rejected])
+        self.assertEqual(tracker["escalations"][0]["blast"], "storage-engine")
+        self.assertEqual(tracker["escalations"][0]["state"], "queued")
+        self.assertNotIn(f"## Q-{rejected}", self.trail())
+
+    def test_contradicting_a_quorum_decision_is_recorded_and_not_batched(self):
+        """THE OTHER REJECTION STAYS UNESCALATED HERE, and it is the negative
+        control for the case above: a mirror that queued a row for every
+        rejection would pass that case. A standing quorum decision is
+        challenged by one re-open at a raised bar, and a second challenge
+        escalates from `open_quorum` as `second-challenge` -- that route, not
+        this one, is how it reaches a human."""
+        (self.run_dir / "decisions.md").write_text(
+            QUORUM_ONLY_SQLITE, encoding="utf-8")
+        rejected, result = self.finalize()
+        self.assertEqual(result["status"], "rejected-contradicts-quorum")
+        tracker = self.tracker()
+        self.assertEqual(tracker["quorum"][0]["outcome"],
+                         "rejected-contradicts-quorum")
+        self.assertEqual(tracker["escalations"], [])
 
     def test_a_question_the_quorum_could_not_decide_is_written_as_itself(self):
         """THE STATUS THAT HAD NOWHERE TO BE WRITTEN. Coercing it to
@@ -18893,16 +18915,32 @@ class EscalationReasonMappingTests(unittest.TestCase):
                                                   "axis": "storage-engine",
                                                   "reason": reason})
 
-    def test_the_statuses_that_batch_a_human_are_the_two_that_settle_nothing(self):
+    def test_the_statuses_that_batch_a_human(self):
+        """The two that settle nothing, and the one the spec escalates by name:
+        a candidate contradicting a human decision."""
         self.assertEqual(pas._ESCALATING_STATUSES,
-                         frozenset({"escalated", "question-not-decidable"}))
-        for settled in ("adopted", "rejected-contradicts-human",
-                        "rejected-contradicts-quorum"):
+                         frozenset({"escalated", "question-not-decidable",
+                                    "rejected-contradicts-human"}))
+        for settled in ("adopted", "rejected-contradicts-quorum"):
             self.assertNotIn(settled, pas._ESCALATING_STATUSES)
         self.assertEqual(pas._ESCALATING_STATUSES | {"adopted",
-                                                     "rejected-contradicts-human",
                                                      "rejected-contradicts-quorum"},
                          set(pas._FINAL_STATUSES))
+
+    def test_a_rejection_row_reads_its_blast_from_the_axis(self):
+        """A rejection's `reason` is a sentence naming the contradicted
+        decision, not a token -- so it is keyed by status, and a lookup by
+        reason would refuse the row and stop the finalisation."""
+        row = pas._escalation_row({"escalations": []}, {
+            "qid": "a" * 12, "status": "rejected-contradicts-human",
+            "axis": "storage-engine",
+            "reason": "the winning answer contradicts H-001, which this run "
+                      "has already decided with provenance human"})
+        self.assertEqual(row["blast"], "storage-engine")
+        with self.assertRaises(pas.QuorumError):
+            pas._escalation_row({"escalations": []}, {
+                "qid": "a" * 12, "status": "rejected-contradicts-quorum",
+                "axis": "storage-engine", "reason": "a sentence"})
 
 
 class QuorumTrackerRowsTests(unittest.TestCase):

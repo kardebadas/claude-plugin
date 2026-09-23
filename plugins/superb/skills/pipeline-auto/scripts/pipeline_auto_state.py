@@ -7975,9 +7975,8 @@ def open_quorum(run_dir: str, *, question_record: str,
 
     PROJECTING A REPLAY DOWN TO THE FIRST THREE WAS CONSIDERED AND REFUSED.
     It would answer "rejected because a human has already decided otherwise"
-    with ``escalated``, which sends the controller to ask a human who has
-    spoken -- the re-litigation the replay guard exists to stop, arriving by
-    the guard's own return value. A replay hands back what ``finalize_quorum``
+    with ``escalated``, erasing which decision the brains pulled against --
+    the fact the queued escalation row exists to show the human. A replay hands back what ``finalize_quorum``
     wrote, unchanged, and ``replay`` tells a caller which contract it is
     reading.
 
@@ -9950,21 +9949,30 @@ _CELL_SEPARATORS = "|,"
 
 #: The statuses that put a question in front of a human, and the whole of them.
 #:
-#: A REJECTION IS RECORDED AND IS NOT ESCALATED, which is a ruling rather than
-#: an omission. ``rejected-contradicts-human`` means the winning answer pulls
-#: against a decision THE USER ALREADY MADE, and ``rejected-contradicts-quorum``
-#: against one this run already adopted: in both the axis is settled and the
-#: blocked task can proceed on the standing record. Queueing an escalation
-#: there would batch the user a question they have already answered, which is
-#: the re-litigation ``open_quorum``'s replay guard refuses to produce from the
-#: other direction. The rejection is not lost -- it is the ``Outcome`` cell of
-#: the ``## Quorum`` row, which is where the run's count of "brains pulling
-#: away from what the user asked for" is read from.
+#: ``rejected-contradicts-human`` IS ESCALATED, because the spec says so in a
+#: governing invariant: "Any candidate answer contradicting a `Provenance:
+#: human` decision is rejected AND ESCALATED, at any confidence." This set once
+#: left it out, under a comment claiming the blocked task "can proceed on the
+#: standing record". It cannot: a rejection writes no ``Q-<qid>`` adoption, so
+#: ``resume_task`` has no grant to read and the task stays ``[?]`` -- and
+#: without a queued row nothing would ever put that block in front of the one
+#: party who can clear it. The human is not being asked to re-decide; they are
+#: shown that the run's own evidence pulls against their answer, and every task
+#: blocked on that axis stays blocked until they respond.
+#:
+#: ``rejected-contradicts-quorum`` IS NOT ESCALATED HERE. A standing quorum
+#: decision is challenged by ONE re-open at a raised bar per decision per run
+#: (``derive_reopen_qid``), and a second challenge escalates as
+#: ``second-challenge`` from ``open_quorum`` -- that route, not this set, is
+#: how a quorum-on-quorum contradiction reaches a human. Both rejections stay
+#: the ``Outcome`` cell of the ``## Quorum`` row, which is where the run's
+#: count of "brains pulling away from what was decided" is read from.
 #:
 #: ``_UNDECIDABLE`` IS ESCALATED, because nothing was settled by it: three
 #: answers about three different things leave the question exactly as open as
 #: it was raised, and a human is the only remaining way to close it.
-_ESCALATING_STATUSES = frozenset({_ESCALATED, _UNDECIDABLE})
+_REJECTED_HUMAN = _REJECTED_PREFIX + "human"
+_ESCALATING_STATUSES = frozenset({_ESCALATED, _UNDECIDABLE, _REJECTED_HUMAN})
 
 #: Where one escalation's ``Blast`` cell comes from, PER REASON TOKEN, and a
 #: reason absent from this mapping is refused rather than defaulted.
@@ -10268,7 +10276,14 @@ def _escalation_row(tracker: dict, record: dict) -> dict:
     this task's report rather than taken locally.
     """
     reason = record.get("reason")
-    source = _ESCALATION_BLAST.get(reason) if _text(reason) else None
+    #: A REJECTION'S ``reason`` IS A SENTENCE, NOT A TOKEN -- it names the
+    #: contradicted decision -- so it is keyed by its status instead. It touches
+    #: exactly the axis the question was raised on, like every reason but the
+    #: trespass.
+    if record.get("status") == _REJECTED_HUMAN:
+        source = _BLAST_FROM_AXIS
+    else:
+        source = _ESCALATION_BLAST.get(reason) if _text(reason) else None
     if source is None:
         raise QuorumError(
             f"{record['qid']} escalated for reason {reason!r}, which no "
@@ -14482,11 +14497,19 @@ def reserve_task(run_dir, *, task_id: str, owner: str, attempt: int) -> dict:
 # P04 Task 7: resuming an answered block.
 #
 # TRANSITION AUTHORITY COMES FROM AN EXPLICIT ADOPTED DECISION, never from the
-# wording of an answer, and the grant is bound to THE BLOCK AND THE ATTEMPT and
-# not merely to the task. `templates/decisions.md`: "`task.resume` names the
-# exact blocked task in `Scope`, names the attempt it releases in `Attempt`, and
-# its `Status` must be `Adopted` ... A grant must also name THE BLOCK, and how
-# it does that depends on which arm the task's `Question` cell takes."
+# wording of an answer, and the grant is bound to THE BLOCK and not merely to
+# the task. WHICH DECISION IS THE GRANT DEPENDS ON THE ARM. A block on a quorum
+# is released by the `quorum.adopt` record `Q-<qid>` that answers it -- the
+# spec lists `quorum.adopt` and `task.resume` as distinct actions and says
+# "quorum exists to unblock", so the adoption answering the blocked question IS
+# the grant. A halt is released by a human `task.resume` that "names the exact
+# blocked task in `Scope`, names the attempt it releases in `Attempt`, and its
+# `Status` must be `Adopted`" (`templates/decisions.md`).
+#
+# THIS ONCE DEMANDED `task.resume` ON BOTH ARMS, and the quorum arm was then
+# closed for good: `finalize_quorum` writes `Q-<qid>` as `quorum.adopt`,
+# decision ids are unique, so no `task.resume` grant could ever carry the id
+# the qid binding requires. Every adopted quorum left its task at `[?]`.
 #
 # WHAT THE TASK ROW ALREADY SAYS IS THE BINDING, and it was free. `settle_quorum`
 # mints a quorum decision id as `"Q-" + qid` and `_final_event` already refuses
@@ -14608,6 +14631,32 @@ def _recorded_attempts(row: dict) -> set:
     return {value for value in candidates if _ATTEMPT_TOKEN.fullmatch(value)}
 
 
+#: The checkpoint prefix a resume writes: `resumed:<prior>-><new>@<decision>`.
+#: Named because `_resumed_by` reads back exactly what `resume_task` writes,
+#: and two spellings would let a spent adoption read as unspent.
+_RESUMED_CHECKPOINT = "resumed:"
+
+
+def _resumed_by(row: dict) -> set:
+    """Every decision id this task row has already resumed on, from its history.
+
+    THE QUORUM ARM'S ANSWER TO THE ATTEMPT BINDING. A `quorum.adopt` record is
+    written by `finalize_quorum` and carries no `Attempt`, so the halt arm's
+    rule -- the grant names the attempt it releases -- has nothing to read. The
+    qid already ties the adoption to ONE question, but not to one block: a
+    resumed attempt that raises the very same question derives the very same
+    qid, re-blocks on the same `quorum:<qid>@...` cell, and would otherwise be
+    released again by the adoption that released the first block. The
+    append-only `Checkpoints` cell already records every resume with the
+    decision it cited, so a spent adoption is read from there.
+    """
+    spent = set()
+    for entry in _csv(row["checkpoints"]):
+        if entry.startswith(_RESUMED_CHECKPOINT):
+            spent.add(entry.rsplit(_CHECKPOINT_DELIMITERS[1], 1)[-1])
+    return spent
+
+
 def _require_fresh_attempt(row: dict, token: str) -> None:
     """The new attempt is one this task has never had.
 
@@ -14640,7 +14689,7 @@ def _require_fresh_attempt(row: dict, token: str) -> None:
 
 
 def _validate_decision(run_dir, row: dict, decision_ref: str) -> dict:
-    """The adopted `task.resume` grant for THIS BLOCK, or a stop.
+    """The adopted grant for THIS BLOCK, or a stop.
 
     THE ROW IS TAKEN, NOT THE TASK ID, and that REOPENS THIS TASK'S OWN RULING
     that the brief's `tracker` argument should be dropped because nothing here
@@ -14660,27 +14709,30 @@ def _validate_decision(run_dir, row: dict, decision_ref: str) -> dict:
     "no decisions yet" would make an unreadable audit trail read as an
     unrestricted grant.
 
-    SEVEN SCREENS, AND NOT ONE OF THEM IS A DUPLICATE OF `parse_decisions`.
-    That parser already refuses an unknown action, a generic approval, a
-    provenance that disagrees with the id, an Open record carrying an
-    authority, and a `Superseded` record nothing supersedes. What is specific
-    to this grant is: it resolves, it is the live record, it carries the resume
-    action, it names this task, it is not the absence marker, IT NAMES THE
-    ATTEMPT IT RELEASES, and IT NAMES THE BLOCK.
+    NOT ONE SCREEN IS A DUPLICATE OF `parse_decisions`. That parser already
+    refuses an unknown action, a generic approval, a provenance that disagrees
+    with the id, an Open record carrying an authority, and a `Superseded`
+    record nothing supersedes. What is specific to this grant is: it resolves,
+    it is the live record, it carries THE ACTION ITS ARM REQUIRES
+    (`quorum.adopt` for `quorum:`, `task.resume` for `halt:`), it names this
+    task, it is not the absence marker, IT IS NOT ALREADY SPENT, and IT NAMES
+    THE BLOCK.
 
     The absence marker is one `parse_decisions` does NOT refuse: `-` is a
     non-empty string and is not a rubber stamp, so it passes every upstream
     screen while recording that a question was asked and nothing that settles
     it.
 
-    THE ATTEMPT, BECAUSE A GRANT IS SPENT AND NOT STANDING. Without it a single
-    adopted `task.resume` authorises unlimited resumes of its task for ever:
-    `_require_fresh_attempt` bounds the ATTEMPTS a task may mint, not the
-    GRANTS one record may be read as. The row's `Attempt` cell is compared
-    rather than the caller's `prior_attempt`, and the two are the same string
-    by construction -- `mutate` refuses the row three lines earlier unless
-    `row["attempt"] == prior_token` -- so this reads the fact from the tracker
-    instead of from the caller, and there is no second value to keep in step.
+    A GRANT IS SPENT AND NOT STANDING, and each arm spends it differently.
+    Without that a single adopted record authorises unlimited resumes of its
+    task for ever: `_require_fresh_attempt` bounds the ATTEMPTS a task may
+    mint, not the GRANTS one record may be read as. On the halt arm the human
+    `task.resume` names the attempt it releases, and the row's `Attempt` cell is
+    compared -- the same string as the caller's `prior_attempt` by
+    construction, since `mutate` refuses the row unless they agree. On the
+    quorum arm the adoption carries no `Attempt` (`finalize_quorum` writes
+    none), so `_resumed_by` reads the append-only `Checkpoints` history and
+    refuses an adoption this task has already resumed on.
 
     THE BLOCK, THROUGH THE QUESTION CELL, AND THE TWO ARMS ARE NOT THE SAME
     KIND OF THING.
@@ -14735,7 +14787,7 @@ def _validate_decision(run_dir, row: dict, decision_ref: str) -> dict:
 
     AND NONE OF THIS IS TAMPER-PROOF. `decisions.md` is unsigned and
     hand-editable and no code in this module ever writes a `task.resume`
-    record, so every grant is hand-authored. What the screens buy is that a
+    record, so every halt grant is hand-authored. What the screens buy is that a
     grant clearing a block BY ACCIDENT -- a stale answer, another question's
     answer, a spent grant read a second time -- is caught; a writer who means
     to author a record that satisfies all seven can.
@@ -14753,12 +14805,25 @@ def _validate_decision(run_dir, row: dict, decision_ref: str) -> dict:
             f"decision {decision_ref} is {record['status']} and not "
             f"{_DECISION_STATUSES[0]}; the trail has already replaced it, and "
             "acting on a retired record applies a grant the run withdrew")
-    if record["action"] != RESUME_ACTION:
+    cell = row["question"]
+    if cell.startswith(_QUESTION_QUORUM_ARM):
+        expected_action = _QUORUM_ADOPT_ACTION
+    elif cell.startswith(_QUESTION_HALT_ARM):
+        expected_action = RESUME_ACTION
+    else:
+        raise TrackerValidationError(
+            f"task {task_id} is blocked on {cell!r}, which is neither "
+            f"{_QUESTION_QUORUM_ARM!r} nor {_QUESTION_HALT_ARM!r}; a grant can "
+            "be bound to a question record or to an asserted halt, and a cell "
+            "in neither form binds it to nothing")
+    if record["action"] != expected_action:
         raise TrackerValidationError(
             f"decision {decision_ref} carries decision action "
-            f"{record['action']!r} rather than {RESUME_ACTION!r}; authority to "
-            "restart a task is an explicit recorded action, never something "
-            "read out of the prose of a decision that settled something else")
+            f"{record['action']!r} rather than {expected_action!r}; a block "
+            "on a quorum is released by the adoption that answers it and a "
+            "halt by a human's resume grant, and authority to restart a task "
+            "is an explicit recorded action, never something read out of the "
+            "prose of a decision that settled something else")
     scope = _csv(record.get("scope", _ABSENT_CELL))
     if not _member(task_id, scope):
         raise TrackerValidationError(
@@ -14771,16 +14836,7 @@ def _validate_decision(run_dir, row: dict, decision_ref: str) -> dict:
             "belongs; that is this schema's empty cell, so an adopted record "
             "carrying it has written down that a question was asked and "
             "nothing at all that settles it")
-    granted_attempt = record.get("attempt", _ABSENT_CELL).strip()
-    if granted_attempt != row["attempt"]:
-        raise TrackerValidationError(
-            f"decision {decision_ref} grants the resume of attempt "
-            f"{granted_attempt!r} and task {task_id} is blocked at "
-            f"{row['attempt']!r}; a grant is spent on the attempt it names, and "
-            "one naming only the task would authorise every resume of that "
-            "task for ever")
-    cell = row["question"]
-    if cell.startswith(_QUESTION_QUORUM_ARM):
+    if expected_action == _QUORUM_ADOPT_ACTION:
         qid = cell[len(_QUESTION_QUORUM_ARM):].split("@", 1)[0].strip()
         if not qid or qid == _ABSENT_CELL:
             raise TrackerValidationError(
@@ -14796,7 +14852,13 @@ def _validate_decision(run_dir, row: dict, decision_ref: str) -> dict:
                 "it settles, so a grant naming any other id settled another "
                 "question -- and a re-open derives a new qid, so a stale "
                 "answer cannot resume a re-asked block")
-    elif cell.startswith(_QUESTION_HALT_ARM):
+        if _member(decision_ref, _resumed_by(row)):
+            raise TrackerValidationError(
+                f"decision {decision_ref} has already resumed task {task_id} "
+                "once; an adoption is spent on the block it answered, and a "
+                "task that re-raised the same question after resuming on it is "
+                "a new block the adoption was never counted against")
+    else:
         blocker = cell[len(_QUESTION_HALT_ARM):].strip()
         if not blocker or blocker == _ABSENT_CELL:
             raise TrackerValidationError(
@@ -14809,6 +14871,14 @@ def _validate_decision(run_dir, row: dict, decision_ref: str) -> dict:
                 f"and task {task_id} is halted rather than in quorum; a halt "
                 "opened no question, so there is no qid to bind a machine "
                 "answer to it and the arm is a human assertion or nothing")
+        granted_attempt = record.get("attempt", _ABSENT_CELL).strip()
+        if granted_attempt != row["attempt"]:
+            raise TrackerValidationError(
+                f"decision {decision_ref} grants the resume of attempt "
+                f"{granted_attempt!r} and task {task_id} is blocked at "
+                f"{row['attempt']!r}; a grant is spent on the attempt it "
+                "names, and one naming only the task would authorise every "
+                "resume of that task for ever")
         asserted = record.get("blocker", _ABSENT_CELL).strip()
         if asserted != blocker:
             raise TrackerValidationError(
@@ -14817,12 +14887,6 @@ def _validate_decision(run_dir, row: dict, decision_ref: str) -> dict:
                 "by whoever wrote the record and not a derivation -- no qid "
                 "exists to derive from -- so the two strings agreeing is the "
                 "whole of the binding there is")
-    else:
-        raise TrackerValidationError(
-            f"task {task_id} is blocked on {cell!r}, which is neither "
-            f"{_QUESTION_QUORUM_ARM!r} nor {_QUESTION_HALT_ARM!r}; a grant can "
-            "be bound to a question record or to an asserted halt, and a cell "
-            "in neither form binds it to nothing")
     return record
 
 
@@ -14911,7 +14975,7 @@ def resume_task(run_dir, *, task_id: str, prior_attempt: int, new_owner: str,
             "'H-<n>' or 'Q-<qid>' decision, because the id is what says whether "
             "a human or a quorum granted it and it is written into both the "
             "task's Question cell and this transition's replay key")
-    marker = f"resumed:{prior_token}->{token}@{decision_ref}"
+    marker = f"{_RESUMED_CHECKPOINT}{prior_token}->{token}@{decision_ref}"
 
     def mutate(tracker: dict) -> dict:
         row = _task_row(tracker, task_id)

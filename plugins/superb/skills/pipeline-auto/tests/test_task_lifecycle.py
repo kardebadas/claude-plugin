@@ -8764,7 +8764,8 @@ class Task6ModuleBoundaryTests(unittest.TestCase):
 
 DECISION_FILE_HEADER = "# Pipeline Auto — Decisions\n"
 
-#: One adopted `task.resume` record, field by field, so a case can change
+#: One adopted quorum answer, field by field, exactly as `finalize_quorum`
+#: writes it -- `quorum.adopt` and NO `Attempt` -- so a case can change
 #: exactly ONE thing and leave everything else valid. A fixture that broke two
 #: screens at once would be refused for either reason and would distinguish
 #: neither.
@@ -8777,13 +8778,14 @@ RESUME_DECISION_FIELDS = {
     "Axis": BLOCK_AXIS,
     "Answer": "the standard-library json module — nothing new is imported.",
     "Provenance": "quorum",
-    "Decision action": "task.resume",
+    #: THE ADOPTION IS THE GRANT on the quorum arm. This fixture once carried
+    #: `task.resume` and an `Attempt` -- a record `finalize_quorum` never
+    #: writes and, ids being unique, no one else could add -- so every case
+    #: here passed over a grant that could not exist and the real quorum ->
+    #: resume path was closed without a red test.
+    "Decision action": "quorum.adopt",
     "Depth": "1",
     "Scope": "T1",
-    #: THE ATTEMPT THE GRANT RELEASES. Without it one adopted record authorises
-    #: unlimited resumes of its task for ever: `_require_fresh_attempt` bounds
-    #: the attempts a task may mint, not the grants one record may be read as.
-    "Attempt": "attempt-001",
     "Status": "Adopted",
 }
 
@@ -8799,7 +8801,13 @@ HALT_DECISION_FIELDS = dict(
         "Axis": "release-host",
         "Answer": "wait for the host — the target is not negotiable here.",
         "Provenance": "human",
+        "Decision action": "task.resume",
         "Depth": "0",
+        #: THE ATTEMPT THE GRANT RELEASES. Without it one human grant
+        #: authorises unlimited resumes of its task for ever:
+        #: `_require_fresh_attempt` bounds the attempts a task may mint, not
+        #: the grants one record may be read as.
+        "Attempt": "attempt-001",
         "Blocker": HALT_BLOCKER,
     })
 
@@ -8928,7 +8936,7 @@ class ResumeProducesBlockTests(unittest.TestCase):
         self.assertEqual([heading for heading, _ in sections], [QUORUM_GRANT])
         headings, fields = sections[0]
         self.assertEqual(headings, QUORUM_GRANT)
-        self.assertEqual(fields["decision_action"], "task.resume")
+        self.assertEqual(fields["decision_action"], "quorum.adopt")
         #: And the caller that would break still works over the same bytes.
         self.assertEqual(
             sorted(state.parse_decisions(RESUME_DECISION)["decisions"]),
@@ -8975,7 +8983,7 @@ class ResumeProducesBlockTests(unittest.TestCase):
             "Decision action:", "Action:")
         self.assertEqual(
             state._decision_sections(plain)[0][1]["decision_action"],
-            "task.resume")
+            "quorum.adopt")
 
     def test_the_table_spelling_is_not_a_decision_record(self):
         """The rejection half of the rule above, over the brief's own fixture:
@@ -9451,8 +9459,10 @@ class ResumeTaskTests(TempDirTestCase):
 
 
 class ResumeDecisionValidationTests(TempDirTestCase):
-    """Transition authority comes from an explicit adopted `task.resume`
-    decision scoped to this task, never from the wording of an answer.
+    """Transition authority comes from an explicit adopted decision scoped to
+    this task, never from the wording of an answer: on the quorum arm the
+    `quorum.adopt` record `Q-<qid>` that answers the block, on the halt arm a
+    human `task.resume`.
 
     Every case below changes exactly ONE field of the same record, so a
     rejection names the screen it came from; and each asserts the other
@@ -9465,11 +9475,12 @@ class ResumeDecisionValidationTests(TempDirTestCase):
     #: diagnoses, and an absence assertion that trips on incidental wording
     #: tests the sentences rather than the screens.
     OTHER_DIAGNOSES = ("does not resolve", "and not Adopted",
-                       "rather than 'task.resume'", "not scoped to task",
+                       "carries decision action", "not scoped to task",
                        "where its answer belongs", "grants the resume of",
                        "does not answer what task", "states Blocker",
                        "halted rather than in quorum", "which is neither",
-                       "which states no blocker", "which names no qid")
+                       "which states no blocker", "which names no qid",
+                       "has already resumed task")
 
     def resume(self, decisions=None, *, decision_ref: str = QUORUM_GRANT,
                write: bool = True, question: str = QUESTION_REF):
@@ -9520,17 +9531,76 @@ class ResumeDecisionValidationTests(TempDirTestCase):
         parses and the Status screen is the only thing left to refuse it."""
         self.refuse("and not Adopted", decisions=retired_resume_decision())
 
-    def test_rejects_a_decision_without_the_task_resume_action(self):
-        self.refuse("rather than 'task.resume'",
-                    decisions=decisions_file(
-                        decision_record(QUORUM_GRANT, {"Decision action": "none"})))
+    def test_rejects_a_quorum_arm_decision_without_the_adopt_action(self):
+        message = self.refuse("carries decision action",
+                              decisions=decisions_file(decision_record(
+                                  QUORUM_GRANT, {"Decision action": "none"})))
+        self.assertIn("rather than 'quorum.adopt'", message)
 
-    def test_rejects_a_quorum_adopt_action_as_a_resume_grant(self):
-        """`quorum.adopt` is an adopted decision with a real answer in it, and
-        it still authorises no task transition. The action is the authority."""
-        self.refuse("rather than 'task.resume'",
-                    decisions=decisions_file(decision_record(
-                        QUORUM_GRANT, {"Decision action": "quorum.adopt"})))
+    def test_rejects_a_halt_arm_decision_without_the_resume_action(self):
+        message = self.refuse("carries decision action", question=HALT_REF,
+                              decisions=decisions_file(halt_decision_record(
+                                  overrides={"Decision action": "none"})),
+                              decision_ref=HALT_GRANT)
+        self.assertIn("rather than 'task.resume'", message)
+
+    def test_the_adoption_answering_the_block_is_the_grant(self):
+        """C2. `finalize_quorum` writes `Q-<qid>` as `quorum.adopt` with no
+        `Attempt`, and decision ids are unique -- so a rule demanding a
+        `task.resume` under that id could never be satisfied, and every
+        adopted quorum left its task at `[?]` for good. The spec lists the two
+        actions as distinct and says "quorum exists to unblock": the adoption
+        answering the blocked question IS the authority to resume."""
+        run_dir, call = self.resume(decisions=decisions_file(decision_record(
+            QUORUM_GRANT, drop=("Attempt",))))
+        record = state.parse_decisions(
+            (Path(run_dir) / "decisions.md").read_text(encoding="utf-8")
+        )["decisions"][QUORUM_GRANT]
+        self.assertEqual(record["action"], "quorum.adopt")
+        self.assertNotIn("attempt", record)
+        self.assertEqual(task_row(call(), "T1")["state"], "[~]")
+
+    def test_a_task_resume_cannot_release_a_quorum_arm_block(self):
+        """The arm decides the action, so a hand-authored machine-labelled
+        `task.resume` cannot stand in for the adoption a quorum never made."""
+        message = self.refuse("carries decision action",
+                              decisions=decisions_file(decision_record(
+                                  QUORUM_GRANT,
+                                  {"Decision action": "task.resume",
+                                   "Attempt": "attempt-001"})))
+        self.assertIn("rather than 'quorum.adopt'", message)
+
+    def test_a_quorum_adopt_cannot_release_a_halt(self):
+        """A halt opened no quorum; an adoption is not the human grant it
+        waits for, whatever its provenance field says."""
+        message = self.refuse("carries decision action", question=HALT_REF,
+                              decisions=decisions_file(halt_decision_record(
+                                  overrides={"Decision action": "quorum.adopt"})),
+                              decision_ref=HALT_GRANT)
+        self.assertIn("rather than 'task.resume'", message)
+
+    def test_one_adoption_cannot_resume_the_same_task_twice(self):
+        """The quorum arm's replacement for the attempt binding. A resumed
+        attempt that raises the very same question derives the very same qid
+        and re-blocks on the very same cell; without `_resumed_by` the adoption
+        that released the first block releases the second, and one adoption
+        authorises unlimited resumes."""
+        run_dir, call = self.resume()
+        self.assertEqual(task_row(call(), "T1")["state"], "[~]")
+        set_task_state(run_dir, "T1", "test-reblock-T1", state="[?]",
+                       question=QUESTION_REF)
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.resume_task(run_dir, task_id="T1", prior_attempt=2,
+                              new_owner="impl-3", new_attempt=3,
+                              decision_ref=QUORUM_GRANT)
+        message = str(caught.exception)
+        self.assertIn("has already resumed task", message)
+        for other in self.OTHER_DIAGNOSES:
+            if other != "has already resumed task":
+                with self.subTest(absent=other):
+                    self.assertNotIn(other, message)
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
 
     def test_rejects_a_decision_scoped_to_another_task(self):
         self.refuse("not scoped to task",
@@ -9591,8 +9661,10 @@ class ResumeDecisionValidationTests(TempDirTestCase):
         attempts a task may mint, not the number of times one adopted record
         may be read as authority -- so without this screen a single grant
         resumes its task for ever."""
-        message = self.refuse("grants the resume of", decisions=decisions_file(
-            decision_record(QUORUM_GRANT, {"Attempt": "attempt-007"})))
+        message = self.refuse("grants the resume of", question=HALT_REF,
+                              decisions=decisions_file(halt_decision_record(
+                                  overrides={"Attempt": "attempt-007"})),
+                              decision_ref=HALT_GRANT)
         self.assertIn("attempt-007", message)
         self.assertIn("attempt-001", message)
 
@@ -9608,21 +9680,25 @@ class ResumeDecisionValidationTests(TempDirTestCase):
         `row["attempt"]` would silently accept -- and the comparison below it
         would still read as correct, so no mutant aimed at the `if` finds
         it."""
-        message = self.refuse("grants the resume of", decisions=decisions_file(
-            decision_record(QUORUM_GRANT, drop=("Attempt",))))
+        message = self.refuse("grants the resume of", question=HALT_REF,
+                              decisions=decisions_file(
+                                  halt_decision_record(drop=("Attempt",))),
+                              decision_ref=HALT_GRANT)
         self.assertIn(repr(state._ABSENT_CELL), message)
 
     def test_a_grant_whose_attempt_is_the_absence_marker_is_refused(self):
         """Input two: the field is PRESENT and holds `-`, this schema's empty
         cell. A record that wrote the field down and left it empty has
         recorded that a grant names an attempt and named none."""
-        self.refuse("grants the resume of", decisions=decisions_file(
-            decision_record(QUORUM_GRANT, {"Attempt": state._ABSENT_CELL})))
+        self.refuse("grants the resume of", question=HALT_REF,
+                    decisions=decisions_file(halt_decision_record(
+                        overrides={"Attempt": state._ABSENT_CELL})),
+                    decision_ref=HALT_GRANT)
 
     def test_a_grant_answering_another_question_is_refused(self):
         """THE CRITICAL CASE. The record resolves, is Adopted, carries
-        `task.resume`, is scoped to T1 and names the blocked attempt -- and it
-        settles a DIFFERENT question. `settle_quorum` mints a quorum decision
+        `quorum.adopt`, and is scoped to T1 -- and it settles a DIFFERENT
+        question. Accepting the adoption as the grant must not loosen this. `settle_quorum` mints a quorum decision
         id as `"Q-" + qid`, so the id carries the identity of the question it
         answers and the comparison is arithmetic rather than trust."""
         other = state.derive_qid("Does T1 retry on a transport timeout?",
@@ -9673,7 +9749,21 @@ class ResumeDecisionValidationTests(TempDirTestCase):
         """The sharp end stated from the other side: a hand-authored `H-<n>`
         record can never name a qid, so it can never clear a block that a
         quorum was opened for. That is the escalation route being preserved
-        rather than a spelling rule."""
+        rather than a spelling rule.
+
+        TWO SCREENS NOW STAND BETWEEN THEM. A human's grant is a
+        `task.resume`, and the quorum arm takes only the adoption -- so the
+        realistic record is refused by the action screen. An `H-<n>` record
+        spelling `quorum.adopt` passes that screen and is still refused by the
+        qid binding, because no `H-<n>` id is `Q-<qid>`."""
+        message = self.refuse("carries decision action",
+                              decisions=decisions_file(halt_decision_record(
+                                  "H-001", drop=("Blocker",))),
+                              decision_ref="H-001")
+        self.assertIn("rather than 'quorum.adopt'", message)
+
+    def test_a_human_record_spelling_the_adoption_is_still_not_the_answer(self):
+        """The second screen of the pair above, on its own run."""
         self.refuse("does not answer what task", decisions=decisions_file(
             decision_record("H-001", {"Provenance": "human", "Depth": "0"})),
             decision_ref="H-001")
@@ -9746,7 +9836,9 @@ class ResumeDecisionValidationTests(TempDirTestCase):
         self.refuse("halted rather than in quorum", question=HALT_REF,
                     decisions=decisions_file(
                         decision_record(QUORUM_GRANT,
-                                        {"Blocker": HALT_BLOCKER})))
+                                        {"Decision action": "task.resume",
+                                         "Attempt": "attempt-001",
+                                         "Blocker": HALT_BLOCKER})))
 
     def test_a_question_cell_in_neither_arm_binds_nothing(self):
         """One arm or the other, never neither. The cell below is exactly what

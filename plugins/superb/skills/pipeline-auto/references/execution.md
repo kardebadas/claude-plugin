@@ -85,6 +85,20 @@ record (`Class Source: ratchet`).
 Never degrade a quorum, review or class to fit capacity or budget. Escalate or
 halt.
 
+### The dispatch budget
+
+Before every dispatch, compare `agent_dispatch_count` with the frozen
+`dispatch_soft_ceiling` and `dispatch_hard_ceiling` in `## Run` (frozen at the
+close of stage 07). At soft: dispatch anyway, enqueue exactly one non-blocking
+`dispatch-overrun` escalation, and lead `status` and the terminal report with
+the overrun. At hard: refuse the dispatch, let in-flight workers finish,
+publish and import to `[x]` while holding only integration, set
+`next_action = await-dispatch-budget`, and stop resumably until a
+`dispatch.extend-budget` decision with `Provenance: human` raises it — at most
+twice, then terminal. The one exemption over hard, recorded `over-hard`:
+re-dispatching the missing brains of an already `in_flight` quorum. The
+ceilings themselves never change; counting and refusing is yours.
+
 ## Stage 08 — RED
 
 The failing test is written and committed before the change. The report records

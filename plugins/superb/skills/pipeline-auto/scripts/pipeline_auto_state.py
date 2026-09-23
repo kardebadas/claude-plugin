@@ -166,7 +166,9 @@ class FilesystemSuitabilityError(TrackerError):
 _RUN_KEYS = (
     "run_id", "schema", "base_commit", "target_branch", "repo_root",
     "worker_limit",
-    "agent_dispatch_count", "spec", "master_plan", "phase_plans", "decisions",
+    "agent_dispatch_count",
+    "dispatch_projection", "dispatch_soft_ceiling", "dispatch_hard_ceiling",
+    "spec", "master_plan", "phase_plans", "decisions",
     "findings", "completeness_proposals", "revision", "last_transition",
 )
 
@@ -570,6 +572,40 @@ def _validate_run(tracker: dict) -> None:
             raise TrackerValidationError(
                 f"{key} {run[key]!r} is not a non-negative integer in ASCII "
                 "digits; every record that cites it reads it as one")
+    _validate_dispatch_ceiling(run)
+
+
+#: The three ``## Run`` cells the spec says stage 07 FREEZES. Unfrozen they are
+#: all ``-``; frozen they are all counts, the two ceilings derived from the
+#: projection, and no transition changes them afterwards.
+_DISPATCH_CEILING_KEYS = ("dispatch_projection", "dispatch_soft_ceiling",
+                          "dispatch_hard_ceiling")
+
+
+def _dispatch_ceilings(projection: int) -> tuple:
+    """``(soft, hard)``: ``ceil(1.25 x p)`` and ``2 x p``, in integers.
+
+    ``ceil(5p / 4)`` is ``(5p + 3) // 4``; the float spelling is exact for any
+    projection a run can reach, and the integer one does not need to be argued.
+    """
+    return (5 * projection + 3) // 4, 2 * projection
+
+
+def _validate_dispatch_ceiling(run: dict) -> None:
+    values = [run[key] for key in _DISPATCH_CEILING_KEYS]
+    if values == ["-"] * len(values):
+        return
+    if not all(_is_count(value) for value in values) or int(values[0]) < 1:
+        raise TrackerValidationError(
+            f"the dispatch ceiling {values!r} is frozen all together or not at "
+            "all, as positive integers in ASCII digits; a half-frozen budget "
+            "is one a dispatch check reads whichever half it finds")
+    projection, soft, hard = (int(value) for value in values)
+    if (soft, hard) != _dispatch_ceilings(projection):
+        raise TrackerValidationError(
+            f"dispatch ceilings soft {soft} and hard {hard} are not "
+            f"ceil(1.25 x {projection}) and 2 x {projection}; the ceilings are "
+            "derived from the projection, never set beside it")
 
 
 def _validate_stages(tracker: dict) -> None:
@@ -2499,6 +2535,25 @@ _IDENTITY_KEYS = ("run_id", "schema", "base_commit", "target_branch",
 _TRACKER_KEYS = frozenset(key for _, key, _ in _SECTIONS)
 
 
+def _guard_frozen_dispatch_ceiling(current: dict, proposed: dict) -> None:
+    """Once stage 07 freezes the dispatch ceiling, no transition moves it.
+
+    "That is what makes the projection frozen rather than recomputed: an
+    upward ratchet can never consume budget it was not granted." A human
+    extension raises the ceiling through a ``dispatch.extend-budget`` record in
+    ``decisions.md``, never by rewriting these cells.
+    """
+    before = [current["run"][key] for key in _DISPATCH_CEILING_KEYS]
+    if before == ["-"] * len(before):
+        return
+    if [proposed["run"].get(key) for key in _DISPATCH_CEILING_KEYS] != before:
+        raise TrackerValidationError(
+            f"the dispatch ceiling {before!r} is frozen at the close of stage "
+            "07; a finite human extension is a dispatch.extend-budget "
+            "decision, and a transition rewriting these cells is the run "
+            "raising its own budget")
+
+
 def _guard_frozen_intent(current: dict, proposed: dict) -> None:
     """The reconciled intent brief is immutable once stage 03 closes.
 
@@ -2682,6 +2737,7 @@ def locked_tracker_update(run_dir: Path, *, transition_id: str, mutate,
             if proposed["run"].get(key) != current["run"][key]:
                 raise TrackerValidationError(f"a transition cannot change {key}")
         _guard_frozen_intent(current, proposed)
+        _guard_frozen_dispatch_ceiling(current, proposed)
         proposed["run"]["revision"] = str(int(current["run"]["revision"]) + 1)
         proposed["run"]["last_transition"] = transition_id
         canonical = render_tracker(proposed)
@@ -3130,6 +3186,12 @@ def initialize_run(run_dir: Path, *, run_id: str, base_commit: str,
             "repo_root": repo_root,
             "worker_limit": str(worker_limit),
             "agent_dispatch_count": "0",
+            #: Absent until the close of stage 07, which freezes all three
+            #: through ``freeze_dispatch_ceiling``: before the phase plans
+            #: exist there is no task count to project from.
+            "dispatch_projection": "-",
+            "dispatch_soft_ceiling": "-",
+            "dispatch_hard_ceiling": "-",
             #: Absent, never predicted. Stages 05, 06 and 07 write these three.
             #: A path filled in now names a file that does not exist, and a
             #: resuming controller reading a cell cannot tell a promise from a
@@ -14395,6 +14457,48 @@ def _approved_definition(tracker: dict, task_id: str) -> dict:
 # discovers a phase plan. Appending the rows is P04's, because the row set is a
 # projection of the phase-plan metadata grammar and of nothing else.
 # ---------------------------------------------------------------------------
+
+#: What one task is priced at: the ``required``-plus-adversarial ceiling, for
+#: every phase whatever its recorded class, and the three brains one adoption
+#: dispatches, per unit of run drift budget. Both from the spec's formula.
+_DISPATCHES_PER_TASK = 7
+_DISPATCHES_PER_ADOPTION = 3
+_DISPATCH_MARGIN = 5
+
+
+def freeze_dispatch_ceiling(run_dir) -> dict:
+    """Freeze ``## Run``'s dispatch projection and its two ceilings.
+
+    At the close of stage 07, once the phase plans are imported and the task
+    count is real: ``7 x total_tasks + 3 x BUDGET_PER_RUN + 5``, soft at
+    ``ceil(1.25 x`` that ``)``, hard at twice it. Every task is priced at 7
+    WHATEVER ITS PHASE'S CLASS, so a later upward ratchet cannot consume budget
+    it was not granted. A second call on a frozen run changes nothing; counting
+    dispatches against the ceilings, and refusing one, is the controller's.
+    """
+    run_dir = _run_path(run_dir)
+    tracker = validate_run(run_dir)
+    if tracker["run"]["dispatch_projection"] != _ABSENT_CELL:
+        return tracker
+
+    def mutate(tracker: dict) -> dict:
+        if not tracker["tasks"]:
+            raise TrackerValidationError(
+                "the dispatch ceiling cannot be frozen on a run with no tasks: "
+                "it is projected from the task count the imported phase plans "
+                "fix, and stage 07 has not produced one")
+        projection = (_DISPATCHES_PER_TASK * len(tracker["tasks"])
+                      + _DISPATCHES_PER_ADOPTION * BUDGET_PER_RUN
+                      + _DISPATCH_MARGIN)
+        soft, hard = _dispatch_ceilings(projection)
+        tracker["run"].update(dispatch_projection=str(projection),
+                              dispatch_soft_ceiling=str(soft),
+                              dispatch_hard_ceiling=str(hard))
+        return tracker
+
+    return locked_tracker_update(
+        run_dir, transition_id="freeze-dispatch-ceiling", mutate=mutate)
+
 
 def import_phase_plan(run_dir, *, phase_plan) -> dict:
     """Append one approved phase plan's phase row, task rows and path.

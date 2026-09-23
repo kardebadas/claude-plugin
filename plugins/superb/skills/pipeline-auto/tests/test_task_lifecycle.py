@@ -13267,7 +13267,7 @@ class PublishedRunDirectorySpellingTests(TempDirTestCase):
 RUN_DIR_ENTRY_POINTS = (
     "initialize_run", "import_phase_plan", "reserve_task", "resume_task",
     "publish_worker_result", "import_worker_result", "integrate_task",
-    "reconcile_run",
+    "reconcile_run", "freeze_dispatch_ceiling",
 )
 RUN_DIR_CONTRACT_FUNCTIONS = ("validate_run", "locked_tracker_update")
 
@@ -13410,6 +13410,7 @@ class RunDirectoryCoercionSweepTests(TempDirTestCase):
                 run_command=controller_git),
             "reconcile_run": lambda value: state.reconcile_run(
                 value, run_command=controller_git),
+            "freeze_dispatch_ceiling": state.freeze_dispatch_ceiling,
         }
         self.assertEqual(sorted(calls), sorted(RUN_DIR_ENTRY_POINTS))
         shapes = (None, 5, b"/runs/r", ["/runs/r"], str(self.run_dir))
@@ -19266,6 +19267,123 @@ class ReviewClassRatchetTests(TempDirTestCase):
             self.append_phase(run_dir, plan, class_source="ratchet",
                               ratchet="accumulated-surface@scratch/x.md")
         self.assertIn("differs from its plan metadata", str(caught.exception))
+
+
+
+# --------------------------------------------------------------------------
+# P05 -- the dispatch ceiling's `## Run` fields.
+#
+# The spec: at the close of stage 07, "compute and freeze into ## Run:
+# dispatch_projection = 7 x total_tasks + 3 x drift_budget_run + 5,
+# dispatch_soft_ceiling = ceil(1.25 x dispatch_projection),
+# dispatch_hard_ceiling = 2 x dispatch_projection". Counting and refusing
+# dispatches stays prose; these fields are what makes the freeze recordable.
+# --------------------------------------------------------------------------
+
+DISPATCH_FIELDS = ("dispatch_projection", "dispatch_soft_ceiling",
+                   "dispatch_hard_ceiling")
+
+
+def set_run(run_dir, transition: str, **fields):
+    def mutate(tracker: dict) -> dict:
+        tracker["run"].update(fields)
+        return tracker
+
+    return state.locked_tracker_update(run_dir, transition_id=transition,
+                                       mutate=mutate)
+
+
+class DispatchCeilingFieldTests(TempDirTestCase):
+
+    def test_a_new_run_has_not_frozen_the_ceiling(self):
+        _repo, run_dir, _plan = make_run(self.tmp, three_disjoint_tasks(),
+                                         import_plan=False)
+        run = state.validate_run(run_dir)["run"]
+        self.assertEqual([run[key] for key in DISPATCH_FIELDS],
+                         ["-", "-", "-"])
+        self.assertEqual(
+            list(state._RUN_KEYS).index("dispatch_projection"),
+            list(state._RUN_KEYS).index("agent_dispatch_count") + 1)
+
+    def test_the_freeze_computes_the_spec_formula_from_the_task_count(self):
+        """Four tasks: 7 x 4 + 3 x 10 + 5 = 63; ceil(1.25 x 63) = ceil(78.75)
+        = 79, which a floor would make 78; 2 x 63 = 126."""
+        _repo, run_dir, _plan = make_run(self.tmp, n_disjoint_tasks(4))
+        run = state.freeze_dispatch_ceiling(run_dir)["run"]
+        self.assertEqual([run[key] for key in DISPATCH_FIELDS],
+                         ["63", "79", "126"])
+        self.assertEqual(state.BUDGET_PER_RUN, 10)
+
+    def test_every_phase_is_priced_at_seven_whatever_its_class(self):
+        """So an upward ratchet can never consume budget it was not granted."""
+        repo = make_repo(self.tmp)
+        run_dir = repo / "docs" / "superpowers" / "runs" / "run-1"
+        run_dir.mkdir(parents=True)
+        plan = write_phase_plan(run_dir, n_disjoint_tasks(4),
+                                header=phase_header(review_class="final-only"))
+        state.initialize_run(
+            run_dir, run_id="run-1", base_commit=git(repo, "rev-parse", "HEAD"),
+            target_branch="target", worker_limit=6, repo_root=str(repo))
+        state.import_phase_plan(run_dir, phase_plan=plan)
+        run = state.freeze_dispatch_ceiling(run_dir)["run"]
+        self.assertEqual(run["dispatch_projection"], "63")
+
+    def test_a_run_with_no_tasks_has_nothing_to_project(self):
+        _repo, run_dir, _plan = make_run(self.tmp, three_disjoint_tasks(),
+                                         import_plan=False)
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.freeze_dispatch_ceiling(run_dir)
+        self.assertIn("no tasks", str(caught.exception))
+
+    def test_a_frozen_ceiling_never_moves(self):
+        _repo, run_dir, _plan = make_run(self.tmp, n_disjoint_tasks(4))
+        state.freeze_dispatch_ceiling(run_dir)
+        before = (run_dir / "progress.md").read_bytes()
+        for fields in ({"dispatch_projection": "70",
+                        "dispatch_soft_ceiling": "88",
+                        "dispatch_hard_ceiling": "140"},
+                       {key: "-" for key in DISPATCH_FIELDS}):
+            with self.subTest(fields=fields):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    set_run(run_dir, "test-move-ceiling", **fields)
+                self.assertIn("frozen", str(caught.exception))
+                self.assertEqual((run_dir / "progress.md").read_bytes(),
+                                 before)
+
+    def test_freezing_twice_is_inert(self):
+        _repo, run_dir, _plan = make_run(self.tmp, n_disjoint_tasks(4))
+        state.freeze_dispatch_ceiling(run_dir)
+        bump(run_dir)
+        before = (run_dir / "progress.md").read_bytes()
+        state.freeze_dispatch_ceiling(run_dir)
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_the_three_fields_are_frozen_together_and_consistent(self):
+        _repo, run_dir, _plan = make_run(self.tmp, n_disjoint_tasks(4))
+        cases = {
+            "one of three": {"dispatch_projection": "63"},
+            "soft floored": {"dispatch_projection": "63",
+                             "dispatch_soft_ceiling": "78",
+                             "dispatch_hard_ceiling": "126"},
+            "hard off": {"dispatch_projection": "63",
+                         "dispatch_soft_ceiling": "79",
+                         "dispatch_hard_ceiling": "127"},
+            "not digits": {"dispatch_projection": "sixty-three",
+                           "dispatch_soft_ceiling": "79",
+                           "dispatch_hard_ceiling": "126"},
+            "zero": {"dispatch_projection": "0",
+                     "dispatch_soft_ceiling": "0",
+                     "dispatch_hard_ceiling": "0"},
+        }
+        for name, fields in cases.items():
+            with self.subTest(case=name):
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    set_run(run_dir, "test-bad-ceiling", **fields)
+                self.assertIn("dispatch", str(caught.exception))
+        run = set_run(run_dir, "test-good-ceiling",
+                      dispatch_projection="63", dispatch_soft_ceiling="79",
+                      dispatch_hard_ceiling="126")["run"]
+        self.assertEqual(run["dispatch_soft_ceiling"], "79")
 
 
 if __name__ == "__main__":

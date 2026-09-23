@@ -11,6 +11,9 @@
 | repo_root | <repo_root> |
 | worker_limit | <worker_limit> |
 | agent_dispatch_count | 0 |
+| dispatch_projection | - |
+| dispatch_soft_ceiling | - |
+| dispatch_hard_ceiling | - |
 | spec | - |
 | master_plan | - |
 | phase_plans | - |

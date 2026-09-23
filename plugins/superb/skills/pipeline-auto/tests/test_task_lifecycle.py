@@ -10349,6 +10349,46 @@ class EscalatedAndReaskedQuorumResumeTests(TempDirTestCase):
 # --------------------------------------------------------------------------
 
 
+def open_reconciliation_quorum(run_dir, *, blocks: str = "T1") -> dict:
+    """Open the block quorum through P03's own `open_quorum`.
+
+    The axis is registered as a stage-03 question first, because `open_quorum`
+    refuses an axis finalisation could never record.
+    """
+    def register(tracker: dict) -> dict:
+        row = blank_row("questions")
+        row.update(id=BLOCK_AXIS, origin="synthesis", slot="1", state="asked",
+                   decision="-")
+        return state.append_row(tracker, "questions", row)
+
+    state.locked_tracker_update(run_dir, transition_id="test-register-axis",
+                                mutate=register)
+    path = Path(run_dir) / "scratch" / "reconciliation-question.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(question_record_text(BLOCK_QID, BLOCK_QUESTION, BLOCK_AXIS,
+                                         blocks=blocks), encoding="utf-8")
+    return state.open_quorum(str(run_dir), question_record=str(path))
+
+
+def record_review_round(run_dir, task_id: str, number: int, review: str) -> None:
+    """One `## Task Review` round for `task_id`, in state `review`."""
+    def mutate(tracker: dict) -> dict:
+        row = blank_row("task_review")
+        row.update(task=task_id, round=str(number), intensity="standard",
+                   state=review, reviewer="reviewer-1")
+        if review == "reviewing":
+            row.update(package="scratch/p.md")
+        elif review in ("blocked", "accepted"):
+            found = "1" if review == "blocked" else "0"
+            row.update(package="scratch/p.md", report="scratch/r.md",
+                       critical="0", important="0", minor=found, open=found,
+                       evidence="scratch/e.txt")
+        return state.append_row(tracker, "task_review", row)
+
+    state.locked_tracker_update(
+        run_dir, transition_id=f"test-review-{task_id}-{number}", mutate=mutate)
+
+
 class ReconciliationParkingTests(TempDirTestCase):
     """`park_task_on_quorum`: a task under review waits on a reconciliation.
 
@@ -10359,13 +10399,89 @@ class ReconciliationParkingTests(TempDirTestCase):
     continues. The fix-round counter does not increment."
     """
 
-    def parked_run(self, *, worker_limit=6, blocks="T1"):
+    def parked_run(self, *, worker_limit=6, blocks="T1", review="blocked",
+                   opened=True):
+        """T1 under review: reserved, its round 1 `review`, and -- with
+        `opened` -- the reconciliation quorum opened FOR REAL through
+        `open_quorum`, never a hand-written record: the park is bound to a
+        quorum the run dispatched and has not yet finalised."""
         repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(),
                                     worker_limit=worker_limit)
-        publish_question_record(run_dir, text=question_record_text(
-            BLOCK_QID, BLOCK_QUESTION, BLOCK_AXIS, blocks=blocks))
+        if opened:
+            open_reconciliation_quorum(run_dir, blocks=blocks)
+        else:
+            publish_question_record(run_dir, text=question_record_text(
+                BLOCK_QID, BLOCK_QUESTION, BLOCK_AXIS, blocks=blocks))
         state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        if review is not None:
+            record_review_round(run_dir, "T1", 1, review)
         return repo, run_dir
+
+    def test_refuses_a_question_no_quorum_was_opened_on(self):
+        """THE REVIEW'S PROBE: a hand-written record under `quorum/<qid>/`,
+        no `open_quorum`, and three tasks parked against a slot cap of one.
+        A park releases a slot, so it is bound to a quorum the run actually
+        dispatched."""
+        _repo, run_dir = self.parked_run(opened=False)
+        with self.assertRaises(state.TrackerValidationError) as raised:
+            self.park(run_dir)
+        self.assertIn("open_quorum", str(raised.exception))
+        self.assertEqual(task_row(state.validate_run(run_dir), "T1")["state"],
+                         "[~]")
+
+    def test_refuses_a_quorum_already_finalised(self):
+        """A settled quorum decides nothing more, so a task parked on it would
+        wait on an answer that has already been given -- and hold no slot
+        while it did."""
+        base = self.tmp
+        for how in ("final.json", "row"):
+            with self.subTest(how=how):
+                self.tmp = Path(tempfile.mkdtemp(dir=base))
+                _repo, run_dir = self.parked_run()
+                if how == "final.json":
+                    (run_dir / "quorum" / BLOCK_QID / "final.json").write_text(
+                        "{}", encoding="utf-8")
+                else:
+                    open_quorum_row(run_dir, qid=BLOCK_QID,
+                                    quorum_state="finalized")
+                with self.assertRaises(state.TrackerValidationError) as raised:
+                    self.park(run_dir)
+                self.assertIn("finalised", str(raised.exception))
+
+    def test_refuses_an_open_record_that_is_not_this_quorum_in_flight(self):
+        """`open.json` is read back as P03 reads it: a record that is not
+        this qid in flight is not an open quorum, however it got there."""
+        _repo, run_dir = self.parked_run()
+        (run_dir / "quorum" / BLOCK_QID / "open.json").write_text(
+            "{}", encoding="utf-8")
+        with self.assertRaises(state.TrackerValidationError) as raised:
+            self.park(run_dir)
+        self.assertIn("in flight", str(raised.exception))
+
+    def test_refuses_a_task_whose_latest_round_is_not_blocked(self):
+        """The spec parks a task on a reviewer's finding (design spec, "A
+        reviewer finding may not reverse a decision"): no blocked round, no
+        finding, nothing for the reconciliation to settle."""
+        base = self.tmp
+        for review in (None, "reviewing"):
+            with self.subTest(review=review):
+                self.tmp = Path(tempfile.mkdtemp(dir=base))
+                _repo, run_dir = self.parked_run(review=review)
+                with self.assertRaises(state.TrackerValidationError) as raised:
+                    self.park(run_dir)
+                self.assertIn("blocked", str(raised.exception))
+
+    def test_a_parked_owner_id_is_not_reused(self):
+        """A parked task keeps its owner: `resume_task` releases the same
+        attempt. Its id is excluded from SLOT counting only, never from
+        identity -- reused, two tasks would answer to one worker."""
+        _repo, run_dir = self.parked_run()
+        self.park(run_dir)
+        with self.assertRaises(state.TrackerValidationError) as raised:
+            state.reserve_task(run_dir, task_id="T2", owner="impl-1",
+                               attempt=1)
+        self.assertIn("impl-1", str(raised.exception))
+        state.reserve_task(run_dir, task_id="T2", owner="impl-2", attempt=1)
 
     def park(self, run_dir, task_id="T1"):
         return state.park_task_on_quorum(run_dir, task_id=task_id,

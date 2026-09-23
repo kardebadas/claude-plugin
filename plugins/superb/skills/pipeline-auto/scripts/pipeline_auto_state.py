@@ -15299,7 +15299,7 @@ def _require_no_scope_conflict(tracker: dict, definition: dict) -> None:
                 f"{other['id']} {list(other['write_scope'])}")
 
 
-def _require_capacity(tracker: dict, owner: str) -> None:
+def _require_capacity(tracker: dict, owner: str, task_id: str) -> None:
     """F2: three slots stay free for the quorum that unblocks a blocked task.
 
     TWO BOUNDS, AND THE SECOND IS NOT THE FIRST RESTATED. The cap bounds
@@ -15342,6 +15342,17 @@ def _require_capacity(tracker: dict, owner: str) -> None:
     cannot have. It is temporary by construction, which is exactly what
     separates it from the permanent deadlock reserving past the cap creates.
     """
+    parked = {row["owner"] for row in tracker.get("tasks", ()) or ()
+              if row["id"] != task_id and _parked_for_reconciliation(row)}
+    if owner in parked:
+        #: A RECONCILIATION PARK FREES THE SLOT, NEVER THE IDENTITY. The parked
+        #: row keeps its owner and ``resume_task`` releases that same attempt,
+        #: so the id is excluded from slot counting only; handed to another
+        #: task, two rows would answer to one worker.
+        raise TrackerValidationError(
+            f"owner {owner!r} holds a task parked on a reconciliation; a park "
+            "releases the slot, not the worker's identity, so the id cannot "
+            "be assigned to another task")
     limit = int(_run_field(tracker, "worker_limit"))
     cap = implementation_slot_cap(limit)
     owners = _implementation_owners(tracker)
@@ -15437,7 +15448,7 @@ def reserve_task(run_dir, *, task_id: str, owner: str, attempt: int) -> dict:
         definition = _approved_definition(tracker, task_id)
         _require_dependencies_complete(tracker, definition)
         _require_no_scope_conflict(tracker, definition)
-        _require_capacity(tracker, owner)
+        _require_capacity(tracker, owner, task_id)
         checkpoint = f"started:{token}"
         if definition["kind"] == TASK_KINDS[0]:
             baseline = _resolved_commit(
@@ -16050,7 +16061,7 @@ def resume_task(run_dir, *, task_id: str, prior_attempt: int, new_owner: str,
         definition = _approved_definition(tracker, task_id)
         _require_dependencies_complete(tracker, definition)
         _require_no_scope_conflict(tracker, definition)
-        _require_capacity(tracker, new_owner)
+        _require_capacity(tracker, new_owner, task_id)
         checkpoint = marker
         if definition["kind"] == TASK_KINDS[0]:
             baseline = _resolved_commit(
@@ -16073,6 +16084,64 @@ def resume_task(run_dir, *, task_id: str, prior_attempt: int, new_owner: str,
         mutate=mutate)
 
 
+def _require_blocked_review(tracker: dict, task_id: str) -> None:
+    """The task's latest ``## Task Review`` round is ``blocked``, or a stop.
+
+    THE SPEC PARKS A TASK ON A REVIEWER'S FINDING: "A Minor, or any
+    quality-part finding, that would require reversal goes to an unbiased
+    reconciliation ... The task moves to ``[?]`` with a reconciliation question
+    reference, its owner slot releases" (design spec, "A reviewer finding may
+    not reverse a decision"). A task with no blocked round has no finding for
+    the reconciliation to settle, and parking it would release a slot on a
+    dispute nobody raised. Round numbers are ASCII digits
+    (``_validate_task_review``), so the ``int`` is total.
+    """
+    rounds = [review for review in tracker.get("task_review", ()) or ()
+              if review["task"] == task_id]
+    if not rounds or max(rounds, key=lambda review: int(review["round"]))[
+            "state"] != "blocked":
+        raise TrackerValidationError(
+            f"task {task_id} has no blocked review round standing as its "
+            "latest; a reconciliation parks a task on the reviewer's finding "
+            "that would reverse a decision, so record that round blocked "
+            "first -- without it there is no dispute to wait on")
+
+
+def _require_reconciliation_in_flight(run_dir: Path, tracker: dict,
+                                      qid: str) -> None:
+    """The quorum ``qid`` was opened and is not finalised, or a stop.
+
+    A PARK RELEASES A SLOT, so what it waits on must be real. Checking only
+    the question record under ``quorum/<qid>/`` let a hand-written record, no
+    ``open_quorum`` call at all, park every task in the phase past the slot
+    cap. The durable in-flight record is ``open.json`` -- ``open_quorum``
+    publishes it before any brain is dispatched, and nothing mirrors an
+    ``in_flight`` row into ``## Quorum``: ``_mirror_quorum`` writes a row only
+    on finalisation. So the quorum must have an ``open.json`` that reads back
+    as this qid in flight, no ``final.json``, and no ``finalized`` row; a
+    settled quorum has already given the answer the task would wait on.
+    """
+    directory = run_dir / _QUORUM_DIRNAME / qid
+    if os.path.lexists(directory / _FINAL_FILE) or any(
+            row["qid"] == qid and row["state"] == _FINALIZED
+            for row in tracker.get("quorum", ()) or ()):
+        raise TrackerValidationError(
+            f"quorum {qid} is already finalised; a task parks on a "
+            "reconciliation still in flight, and a settled one has already "
+            "answered -- resume or re-review instead")
+    if not os.path.lexists(directory / _OPEN_FILE):
+        raise TrackerValidationError(
+            f"quorum {qid} was never opened; a park releases the task's slot "
+            "while a quorum runs, so the quorum must have been dispatched "
+            "through open_quorum -- a question record alone is not one")
+    try:
+        _opened_record(directory / _OPEN_FILE, qid)
+    except QuorumError as exc:
+        raise TrackerValidationError(
+            f"the open record for quorum {qid} does not read back as this "
+            f"quorum in flight ({exc})") from exc
+
+
 def park_task_on_quorum(run_dir, *, task_id: str, qid: str) -> dict:
     """Park a task under review on its reconciliation quorum: ``[~] -> [?]``.
 
@@ -16086,7 +16155,13 @@ def park_task_on_quorum(run_dir, *, task_id: str, qid: str) -> dict:
     ONE ``locked_tracker_update``, and it does three things:
 
     * requires the task ``[~]`` -- a task already parked, finished or never
-      started is not under review;
+      started is not under review -- with its latest ``## Task Review`` round
+      ``blocked`` (``_require_blocked_review``: the park answers a finding);
+    * requires the quorum opened through ``open_quorum`` and not finalised
+      (``_require_reconciliation_in_flight``), because the park releases a
+      slot and a hand-written record is no quorum. It is the re-open of the
+      disputed decision (``references/quorum.md``), and its qid is what the
+      task is parked on;
     * renders the ``Question`` cell with the renderer ``import_worker_result``
       uses, ``_resolve_question_record``, over the record ``open_quorum``
       published at ``<run>/quorum/<qid>/question.md`` -- so the qid is
@@ -16116,6 +16191,8 @@ def park_task_on_quorum(run_dir, *, task_id: str, qid: str) -> dict:
                 "reconciliation parks a task UNDER REVIEW -- the gate runs "
                 "before import, so a task already parked, finished or never "
                 "started has no review for the dispute to block")
+        _require_blocked_review(tracker, task_id)
+        _require_reconciliation_in_flight(run_dir, tracker, qid)
         repo = _repo_dir(tracker)
         record = run_dir / _QUORUM_DIRNAME / qid / _QUESTION_FILE
         try:

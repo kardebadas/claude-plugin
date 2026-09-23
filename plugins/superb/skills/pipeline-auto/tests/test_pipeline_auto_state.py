@@ -16786,7 +16786,28 @@ def adoption_repo(case, *, decisions=None):
     #: registering the old one.
     register_questions(run_dir, QUESTION["axis"])
     register_phases(run_dir, QUESTION["phase"])
+    #: AND THE TASK IT BLOCKS. A question's `blocks` must name work the run
+    #: holds, because the rung cap finds the raisers through it.
+    register_tasks(run_dir, *QUESTION["blocks"])
     return root, run_dir
+
+
+def register_tasks(run_dir, *ids, phase=QUESTION["phase"], **fields):
+    """Put untainted `[ ]` rows for `ids` in `## Tasks`, or re-cell existing
+    ones with `fields`. Written as `register_phases` is, for its reason."""
+    path = Path(run_dir) / "progress.md"
+    tracker = pas.parse_tracker(path.read_text(encoding="utf-8"))
+    for identifier in ids:
+        row = next((item for item in tracker["tasks"]
+                    if item["id"] == identifier), None)
+        if row is None:
+            row = {key: "-" for key in pas.section_columns("tasks")}
+            row.update(id=identifier, phase=phase, kind="source",
+                       state="[ ]", provisional="no")
+            pas.append_row(tracker, "tasks", row)
+        row.update(fields)
+    path.write_text(pas.render_tracker(tracker), encoding="utf-8")
+    return tracker
 
 
 def open_question(case, run_dir, **overrides):
@@ -17922,6 +17943,7 @@ class AdoptedDecisionRecordTests(unittest.TestCase):
         it, and every other fixture in this file blocks exactly ONE task — so
         `', '.join(blocks)` and `blocks[0]` are indistinguishable everywhere
         else, and the second silently unbinds every task after the first."""
+        register_tasks(self.run_dir, "T05")
         qid, result = self.adopt(blocks="T04, T05")
         self.assertEqual(result["blocks"], ["T04", "T05"])
         self.assertEqual(self.parsed()["decisions"][f"Q-{qid}"]["scope"],
@@ -19963,14 +19985,8 @@ class InheritedRungCapTests(unittest.TestCase):
 
     def raiser(self, *, provisional="no", decisions="-",
                task_id=QUESTION["blocks"][0]):
-        path = self.run_dir / "progress.md"
-        tracker = pas.parse_tracker(path.read_text(encoding="utf-8"))
-        row = {key: "-" for key in pas.section_columns("tasks")}
-        row.update(id=task_id, phase=QUESTION["phase"],
-                   kind="source", state="[ ]", provisional=provisional,
-                   decisions=decisions)
-        pas.append_row(tracker, "tasks", row)
-        path.write_text(pas.render_tracker(tracker), encoding="utf-8")
+        register_tasks(self.run_dir, task_id, provisional=provisional,
+                       decisions=decisions)
 
     def finalize(self, payloads=None):
         qid = open_question(self, self.run_dir)
@@ -20015,12 +20031,21 @@ class InheritedRungCapTests(unittest.TestCase):
         qid, result = self.finalize()
         self.assert_adopted_at(qid, result, "code-evidenced")
 
-    def test_a_cited_decision_the_trail_does_not_hold_caps_fail_closed(self):
-        """A premise whose rung cannot be read is priced at the weakest rung a
-        premise can have been adopted at, never at `specified`."""
+    def test_a_cited_decision_the_trail_does_not_hold_stops_the_finalisation(self):
+        """A premise whose rung cannot be read is a trail that disagrees with
+        the tracker. Priced at a default it would still adopt; like the re-open
+        door's unadoptable bar, it raises and nothing is published."""
         self.raiser(decisions="Q-eeeeeeeeeeee")
-        qid, result = self.finalize()
-        self.assert_adopted_at(qid, result, "code-evidenced")
+        qid = open_question(self, self.run_dir)
+        answer_quorum(self.run_dir, qid, [graded("postgres", "specified")] * 3)
+        with self.assertRaises(pas.QuorumError) as caught:
+            pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertIn("Q-eeeeeeeeeeee", str(caught.exception))
+        self.assertEqual(
+            (self.run_dir / "decisions.md").read_text(encoding="utf-8"),
+            UNRELATED_HUMAN + WEAK_PREMISE + STRONG_PREMISE)
+        self.assertFalse(
+            (self.run_dir / "quorum" / qid / "final.json").exists())
 
     def test_under_a_raised_floor_the_capped_answer_escalates(self):
         """Where the cap changes WHETHER the run adopts: once inflation has
@@ -20037,17 +20062,88 @@ class InheritedRungCapTests(unittest.TestCase):
             (self.run_dir / "decisions.md").read_text(encoding="utf-8"),
             UNRELATED_HUMAN + WEAK_PREMISE + STRONG_PREMISE)
 
-    def test_the_spread_is_measured_between_the_answers_own_rungs(self):
-        """The cap is on what is ADOPTED. Every answer in the quorum rests on
-        the same premise, so separating them is still by their own evidence:
-        a strict gap adopts, recorded at the capped rung."""
+    def test_a_cap_that_ties_the_runner_up_escalates(self):
+        """A `specified` answer resting on a `code-evidenced` premise is not a
+        `specified` answer -- in the spread as everywhere. Capped, the winner
+        stands level with a `code-evidenced` runner-up, and a tie escalates."""
         self.raiser(provisional="yes")
-        qid, result = self.finalize([graded("postgres", "specified"),
-                                     graded("sqlite", "code-evidenced"),
-                                     graded("sqlite", "speculation")])
-        self.assert_adopted_at(qid, result, "code-evidenced")
+        _qid, result = self.finalize([graded("postgres", "specified"),
+                                      graded("sqlite", "code-evidenced"),
+                                      graded("sqlite", "speculation")])
+        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["reason"], "equal-or-inverted-rung")
+        self.assertEqual(result["winner_rung"], "code-evidenced")
+        self.assertEqual(result["runner_up_rung"], "code-evidenced")
+        self.assertEqual(
+            (self.run_dir / "decisions.md").read_text(encoding="utf-8"),
+            UNRELATED_HUMAN + WEAK_PREMISE + STRONG_PREMISE)
+
+    def test_the_runner_up_is_reported_at_its_capped_rung(self):
+        """The cap is on every cluster, so the rung the spread was judged on
+        is the rung reported: two `specified` clusters under a
+        `code-evidenced` premise are two `code-evidenced` clusters."""
+        self.raiser(provisional="yes")
+        _qid, result = self.finalize([graded("postgres", "specified"),
+                                      graded("sqlite", "specified"),
+                                      graded("sqlite", "specified")])
+        self.assertEqual(result["reason"], "equal-or-inverted-rung")
         self.assertEqual(result["runner_up_rung"], "code-evidenced")
 
+    def test_a_cap_that_leaves_a_strict_gap_adopts(self):
+        """The cap is applied to every cluster; one still strictly above the
+        capped runner-up adopts, at the capped rung."""
+        self.raiser(provisional="yes")
+        qid, result = self.finalize([graded("postgres", "specified"),
+                                     graded("sqlite", "convention-cited"),
+                                     graded("sqlite", "convention-cited")])
+        self.assert_adopted_at(qid, result, "code-evidenced")
+        self.assertEqual(result["runner_up_rung"], "convention-cited")
+
+    # --- `blocks` is what the cap reads, so it must name real work ---------
+
+    def test_a_block_naming_no_row_is_refused(self):
+        """The reviewer's reproduction: the one task is tainted, the question
+        claims to block `T99`, and the cap found no raiser and adopted at
+        `specified`. A block names a task, gate or recorded planning artifact
+        this run holds, or the finalisation stops."""
+        self.raiser(provisional="yes", decisions="Q-cccccccccccc")
+        qid = open_question(self, self.run_dir, blocks="T99")
+        answer_quorum(self.run_dir, qid, [graded("postgres", "specified")] * 3)
+        with self.assertRaises(pas.QuorumSchemaInvalid) as caught:
+            pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assertIn("'T99'", str(caught.exception))
+        self.assertFalse(
+            (self.run_dir / "quorum" / qid / "final.json").exists())
+
+    def test_a_block_may_name_a_planning_artifact_the_run_records(self):
+        """A planning artifact is one `## Run` records: the spec, the master
+        plan or an imported phase plan."""
+        self.raiser()
+        path = self.run_dir / "progress.md"
+        tracker = pas.parse_tracker(path.read_text(encoding="utf-8"))
+        tracker["run"]["master_plan"] = "docs/plans/master.md"
+        path.write_text(pas.render_tracker(tracker), encoding="utf-8")
+        qid = open_question(self, self.run_dir,
+                            blocks="T04, docs/plans/master.md")
+        answer_quorum(self.run_dir, qid, [graded("postgres", "specified")] * 3)
+        result = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assert_adopted_at(qid, result, "specified")
+
+    def test_a_block_may_name_a_gate_the_run_holds(self):
+        """The spec: a question blocks "a task id, gate id, or planning
+        artifact". A gate is no task, so it lends no taint."""
+        self.raiser()
+        path = self.run_dir / "progress.md"
+        tracker = pas.parse_tracker(path.read_text(encoding="utf-8"))
+        pas.append_row(tracker, "gates", {
+            "id": "gate-master", "type": "master", "phase": "-",
+            "state": "pending", "base": "-", "head": "-", "assignments": "-",
+            "reports": "-", "verification": "-", "findings": "findings.md"})
+        path.write_text(pas.render_tracker(tracker), encoding="utf-8")
+        qid = open_question(self, self.run_dir, blocks="T04, gate-master")
+        answer_quorum(self.run_dir, qid, [graded("postgres", "specified")] * 3)
+        result = pas.finalize_quorum(str(self.run_dir), qid=qid)
+        self.assert_adopted_at(qid, result, "specified")
 
 if __name__ == "__main__":
     unittest.main()

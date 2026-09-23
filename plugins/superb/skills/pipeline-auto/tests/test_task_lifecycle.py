@@ -6649,7 +6649,8 @@ class EvidenceResolutionTests(TempDirTestCase):
             #: through the directory, not through the reference, which
             #: `_digest_reference` has already screened.
             "_resolve_question_record": lambda: state._resolve_question_record(
-                nul, nul, f"quorum/q1/question.md#sha256={'a' * 64}"),
+                nul, nul, f"quorum/q1/question.md#sha256={'a' * 64}",
+                task_id="T1"),
             "_require_artifact_outputs": lambda: state._require_artifact_outputs(
                 nul, ("docs/out.md",)),
         }
@@ -15369,6 +15370,25 @@ class ImportWorkerResultTests(TempDirTestCase):
                 self.assertEqual(row["question"], QUESTION_REF)
                 self.assertTrue(row["question"].startswith(
                     f"{state.QUORUM_ROUTE}:"))
+
+    def test_a_task_parks_only_on_a_question_that_names_it_in_blocks(self):
+        """The rung cap finds the tasks that raised a question through its
+        `blocks`. A task parked on a question whose `blocks` leaves it out is
+        a raiser the cap never sees, so its taint does not reach the answer."""
+        repo, run_dir = self.reserved_run()
+        text = question_record_text(BLOCK_QID, BLOCK_QUESTION, BLOCK_AXIS,
+                                    blocks="T2")
+        publish_question_record(run_dir, text=text)
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        result = quorum_result(
+            "NEEDS_CONTEXT", tests=(),
+            question_record=f"{QUESTION_RECORD_PATH}#sha256={digest}")
+        path = self.publish(repo, run_dir, result)
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            import_result(run_dir, path)
+        self.assertIn("does not name T1 in its blocks", str(caught.exception))
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
 
     def test_the_parked_question_cell_is_what_resume_task_can_act_on(self):
         """END TO END, because the cell is a CONTRACT between this transition

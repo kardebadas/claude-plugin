@@ -9552,13 +9552,20 @@ def _opened_bar(opened: dict, qid: str) -> str | None:
     return rung
 
 
-def _opened_blocks(opened: dict, qid: str) -> list:
+def _opened_blocks(opened: dict, qid: str, tracker: dict) -> list:
     """What this question BLOCKS, read back off the open record.
 
     It becomes the decision record's ``Scope``, which is the cell a task reads
     to find out whether a decision applies to it. A scope assembled out of
     whatever the file happened to hold would name tasks that do not exist, or
     none at all, in a field nothing downstream validates.
+
+    EVERY ENTRY NAMES WORK THIS RUN HOLDS: a ``## Tasks`` row, a ``## Gates``
+    row, or a planning artifact ``## Run`` records (the spec: a question blocks
+    "a task id, gate id, or planning artifact"). ``_inherited_rung_cap`` finds
+    the raising tasks through this list, so a block naming a task that is not
+    there -- a typo, or ``T99`` beside a tainted raiser -- was a question whose
+    raiser the cap never saw.
     """
     blocks = opened.get("blocks")
     if not isinstance(blocks, list) or not blocks:
@@ -9572,6 +9579,17 @@ def _opened_blocks(opened: dict, qid: str) -> list:
                 f"the open record for {qid} states block {entry!r}, which is "
                 "not a task token; the scope cell is read to decide whether a "
                 "decision binds a task, and one that names nothing binds none")
+    known = {row["id"] for row in tracker["tasks"]}
+    known.update(row["id"] for row in tracker["gates"])
+    for key in ("spec", "master_plan", "phase_plans"):
+        known.update(_csv(tracker["run"][key]))
+    for entry in blocks:
+        if entry.strip() not in known:
+            raise QuorumSchemaInvalid(
+                f"the open record for {qid} blocks {entry.strip()!r}, which "
+                "is no task, gate or recorded planning artifact of this run; "
+                "the rung cap finds a question's raisers through its blocks, "
+                "and a block naming nothing hides the raiser from it")
     return [entry.strip() for entry in blocks]
 
 
@@ -9692,7 +9710,7 @@ def _finalisation_base(run_dir: Path, qid: str, tracker: dict) -> tuple:
         "axis": axis,
         "decision_axis": decision_axis,
         "phase": phase,
-        "blocks": _opened_blocks(opened, qid),
+        "blocks": _opened_blocks(opened, qid, tracker),
         "context_digest": _bound_digest(
             opened, qid, "context_digest",
             "the drift a resumed quorum is judged by is the distance between "
@@ -9781,8 +9799,8 @@ def _latest_answers(run_dir: Path, qid: str, owners: list) -> tuple:
     return latest, invalid
 
 
-#: The rung a tainting premise stands at when the tracker says the task is
-#: tainted but no recorded rung can be read: the WEAKEST rung anything can have
+#: The rung a tainting premise stands at when the tracker labels the task
+#: ``Provisional: yes`` and names no rung: the WEAKEST rung anything can have
 #: been adopted at. The spec defines the taint as "adopted at code-evidenced
 #: rather than specified", and this is that rung, derived from the floor rather
 #: than typed, and a NAME rather than a number.
@@ -9803,8 +9821,9 @@ def _inherited_rung_cap(tracker: dict, decisions: dict, blocks: list):
       ``decisions.md`` records for it. Either route alone is enough, so
       leaving the label at ``no`` does not lift a cap the cited record
       imposes. A cited quorum decision whose rung cannot be read -- absent
-      from the trail, or recording no rung on the ladder -- is priced at
-      ``_TAINTED_PREMISE``, never at ``specified``.
+      from the trail, or recording no rung on the ladder -- RAISES
+      ``QuorumError``, as the re-open door does for a bar it cannot read: a
+      default would still adopt, on a premise nothing records.
 
     Human decisions are depth 0 and carry no rung, so they are no premise. A
     block naming no task row contributes nothing: there is no row to be
@@ -9825,10 +9844,11 @@ def _inherited_rung_cap(tracker: dict, decisions: dict, blocks: list):
                                                  str):
                 rung = record["grounding_rung"].strip()
             if rung not in RUNG_ORDER:
-                #: NOT A DEFAULT TO A LEGAL VOTE, which is what the module's
-                #: rung-defaulting rule forbids: this prices a PREMISE, and in
-                #: the one direction that can only lower what is adopted.
-                rung = _TAINTED_PREMISE
+                raise QuorumError(
+                    f"task {task['id']} cites {did}, whose grounding rung "
+                    f"this run's audit trail does not record ({rung!r}); a "
+                    "quorum raised by it cannot be capped at a premise "
+                    "nothing states, and the tracker and the trail disagree")
             premises.append(rung)
     if not premises:
         return None
@@ -9964,17 +9984,20 @@ def _compute_quorum_result(run_dir: Path, qid: str, tracker: dict) -> dict:
     #: files.
     decisions = parse_decisions(decisions_text)
     #: RUNGS INHERIT DOWNWARD, and the cap is applied HERE, before the floor,
-    #: so it changes the outcome and not only the label: every gate below that
-    #: judges the adopted rung -- the floor, the raised bar -- and every record
-    #: that carries it -- final.json, the ## Quorum row, decisions.md, and so
-    #: the inflation check and every descendant's premise -- sees the capped
-    #: rung. The SPREAD is the one comparison left on the answers' own rungs:
-    #: every answer in this quorum rests on the same premise, so what separates
-    #: them is still their own evidence.
+    #: so it changes the outcome and not only the label. "A specified answer
+    #: resting on a code-evidenced premise is not a specified answer": the
+    #: capped rung is the winner's rung for EVERY adoption check -- the floor,
+    #: the spread, the raised bar -- and for every record that carries it --
+    #: final.json, the ## Quorum row, decisions.md, and so the inflation check
+    #: and every descendant's premise. The cap is applied to EVERY cluster
+    #: before the spread, so a cap that brings the winner level with the
+    #: runner-up escalates.
     cap = _inherited_rung_cap(tracker, decisions, base["blocks"])
     winner_rung = own_rung
     if cap is not None:
         winner_rung = max((own_rung, cap), key=RUNG_ORDER.index)
+        if runner_up_rung is not None:
+            runner_up_rung = max((runner_up_rung, cap), key=RUNG_ORDER.index)
     base["own_rung"] = own_rung
     base["rung_cap"] = cap
     base["winner_rung"] = winner_rung
@@ -9997,7 +10020,7 @@ def _compute_quorum_result(run_dir: Path, qid: str, tracker: dict) -> dict:
         #: ``index(winner) < index(runner_up)`` -- so that relaxing it in
         #: either direction fails the suite. Unanimity has no runner-up, so the
         #: test is vacuous there and the floor alone governs.
-        if not RUNG_ORDER.index(own_rung) < RUNG_ORDER.index(runner_up_rung):
+        if not RUNG_ORDER.index(winner_rung) < RUNG_ORDER.index(runner_up_rung):
             return dict(base, status=_ESCALATED,
                         reason="equal-or-inverted-rung")
 
@@ -16706,7 +16729,8 @@ def _result_identity(result_path: Path, content: bytes, repo: Path) -> tuple:
             relative)
 
 
-def _resolve_question_record(run_dir, repo_dir, reference: str) -> str:
+def _resolve_question_record(run_dir, repo_dir, reference: str, *,
+                             task_id: str) -> str:
     """The complete ``Question`` cell for the quorum arm, or a stop. Fault F5.
 
     ``quorum:<qid>@<path>#sha256=<digest>`` -- the qid for the binding, the
@@ -16733,6 +16757,10 @@ def _resolve_question_record(run_dir, repo_dir, reference: str) -> str:
     at ``<run>/quorum/<qid>/question.md``, and the comparison below is against
     that one name -- so a second root would be a place to put a copy that the
     binding then has to choose between.
+
+    THE BLOCKED TASK IS IN THE RECORD'S ``blocks``. ``_inherited_rung_cap``
+    finds a question's raisers through that list, so a task parked on a
+    question that leaves it out is a tainted raiser the cap never sees.
 
     THE DIGEST IS CHECKED BEFORE THE RECORD IS PARSED, and a mismatch stops
     here rather than reading as "not the file I meant". One reference names one
@@ -16767,7 +16795,8 @@ def _resolve_question_record(run_dir, repo_dir, reference: str) -> str:
             "unbound path names a file whose contents may have changed since, "
             "which is the whole reason the reference carries a digest")
     try:
-        qid = _record_qid(parse_question(content.decode("utf-8")))
+        question = parse_question(content.decode("utf-8"))
+        qid = _record_qid(question)
     except (UnicodeDecodeError, QuorumError) as exc:
         raise TrackerValidationError(
             f"the question record at {relative!r} is not one this run can read "
@@ -16788,6 +16817,12 @@ def _resolve_question_record(run_dir, repo_dir, reference: str) -> str:
             "-- 'Q-' followed by the qid -- is arithmetic on the wrong number, "
             "and every response and decision keyed by it would look "
             "well-formed")
+    if task_id not in question["blocks"]:
+        raise TrackerValidationError(
+            f"the question record at {relative!r} does not name {task_id} in "
+            f"its blocks {question['blocks']!r}; a task parks only on a "
+            "question that says it blocks that task, because the rung cap "
+            "finds a question's raisers through its blocks")
     return (f"{_QUESTION_QUORUM_ARM}{qid}@{relative}"
             f"{_DIGEST_DELIMITER}{digest}")
 
@@ -17109,7 +17144,7 @@ def import_worker_result(run_dir, *, result_path, run_command) -> dict:
             #: field each arm reads is present by construction.
             if _member(result["status"], QUORUM_STATUSES):
                 marker = _resolve_question_record(
-                    home, repo, result["question_record"])
+                    home, repo, result["question_record"], task_id=row["id"])
             else:
                 marker = f"{_QUESTION_HALT_ARM}{result['blocking_reason']}"
             updated["state"] = _TASK_STATES[2]

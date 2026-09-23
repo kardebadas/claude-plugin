@@ -241,12 +241,26 @@ Reviewer A at stage 11 names every provisional task.
 a tainted task (a task in the question's `blocks`) adopts at no stronger than
 its weakest premise. The premises are `Provisional: yes`, which counts as
 `code-evidenced`, and every `Q-<qid>` in the task's `Decisions` cell, at the
-`Grounding rung` `decisions.md` records for it; a cited quorum decision whose
-rung cannot be read counts as `code-evidenced`. The capped rung is what the
-floor and the raised bar judge, and what `final.json` (`winner_rung`, with
-`own_rung` and `rung_cap` beside it), the `## Quorum` row and `decisions.md`
-record. The spread between answers is still judged on their own rungs. Leaving
+`Grounding rung` `decisions.md` records for it. A cited quorum decision whose
+rung cannot be read (absent from the trail, or no rung on the ladder) stops the
+finalisation with `QuorumError`; nothing is published, and the fix is the trail
+or the `Decisions` cell. A `specified` answer resting on a `code-evidenced`
+premise is not a `specified` answer, so the capped rung is what every adoption
+check judges: the floor, the raised bar and the spread. The cap is applied to
+every cluster before the spread, so a cap that brings the winner level with the
+runner-up escalates (`equal-or-inverted-rung`). The capped rungs are what
+`final.json` (`winner_rung` and `runner_up_rung`, with `own_rung` and
+`rung_cap` beside them), the `## Quorum` row and `decisions.md` record. Leaving
 `Provisional` at `no` does not lift a cap a cited decision imposes.
+
+**`blocks` is validated**, because the cap finds the raisers through it:
+
+- `finalize_quorum` refuses (`QuorumSchemaInvalid`) a question whose `blocks`
+  names anything but a `## Tasks` row, a `## Gates` row, or a planning artifact
+  `## Run` records (`spec`, `master_plan`, a `phase_plans` entry).
+- `import_worker_result` refuses to park a task on a quorum question whose
+  `blocks` does not name that task. So when a worker raises a question, put its
+  own task in `blocks`.
 
 ## The drift budget
 

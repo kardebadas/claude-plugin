@@ -3,11 +3,11 @@
 Load while selecting work, dispatching implementers, running the per-task gate,
 integrating, verifying a phase, or debugging.
 
-**Not yet enforced by code (P05):** the adversarial trigger check, the ratchet,
-writers for `## Task Review` and `## Fix Rounds` (their grammar is validated;
-write rows through `locked_tracker_update`), phase verification and phase
-advance, and the agent-dispatch ceiling. Until then these rules are yours to
-follow exactly.
+**Not enforced by code:** the adversarial trigger check, writers for
+`## Task Review` and `## Fix Rounds` (their grammar is validated; write rows
+through `locked_tracker_update`), phase verification and phase advance, and
+counting and refusing dispatches against the agent-dispatch ceiling. These
+rules are yours to follow exactly.
 
 **The module never executes git.** It emits argv and validates a transcript you
 supply. Functions that need git take `run_command`: a callable that runs one
@@ -27,8 +27,8 @@ leading NUL separator and trailing newline are part of the grammar.
 
 You set each phase's `review_class` **once, at stage 04** — the classification
 the plan then carries in its phase metadata, mirrored to `## Phases`. After that
-it moves only through a ratchet whose trigger has already fired (below), and
-until P05 enforces the ratchet, writing that record is yours.
+it moves only through a ratchet whose trigger has already fired (below).
+Writing the ratchet record is yours; the tracker refuses every other move.
 
 | Class | Buys |
 | --- | --- |
@@ -66,6 +66,21 @@ Never downward, never by quorum. A ratchet gates every remaining task and adds a
 phase-scoped review; it does not re-review completed tasks. `## Phases`
 `Review Class` differing from the plan is legal only with a matching `Ratchet`
 record (`Class Source: ratchet`).
+
+**Enforced by `locked_tracker_update`** (write the ratchet through it, as
+`Review Class: required`, `Class Source: ratchet`,
+`Ratchet: <trigger>@<evidence>`):
+
+- The only legal change to a phase's class is `(final-only, plan, -)` →
+  `(required, ratchet, <trigger>@<evidence>)`, once. Lowering, withdrawing,
+  re-labelling as `plan`, or rewriting the record is refused.
+- `<trigger>` is one of the five names above (`RATCHET_TRIGGERS`).
+- `adversarial-finding` needs an adversarial round on one of the phase's tasks
+  with verdict `fail`. `low-confidence-dependency` needs a `## Quorum` row in
+  the phase adopted below `specified`. The other three rest on the evidence you
+  cite.
+- A phase row a transition adds must carry its plan's class as `plan`.
+  `import_phase_plan` does this for you.
 
 Never degrade a quorum, review or class to fit capacity or budget. Escalate or
 halt.

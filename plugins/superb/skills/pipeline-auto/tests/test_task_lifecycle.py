@@ -19036,5 +19036,237 @@ class ReconcilePlanRevalidationTests(ReconcileTestCase):
         self.assertIsInstance(reconcile(run_dir), dict)
 
 
+
+# --------------------------------------------------------------------------
+# P05 -- the review-class ratchet and the plan-metadata cross-check.
+#
+# The spec: "Upward ratchet only, final-only -> required, mechanically
+# triggered, never downward and never by quorum", and "A tracker review_class
+# differing from plan metadata is legal only with a matching ratchet record."
+# P02's `_validate_phases` already refuses the illegal TRIPLES; what it cannot
+# see is the MOVE between two revisions, or the plan file. Both are judged in
+# `locked_tracker_update`, so a raw transition cannot route around them.
+# --------------------------------------------------------------------------
+
+
+def set_phase(run_dir, transition: str, phase_id: str = "P04", **fields):
+    def mutate(tracker: dict) -> dict:
+        next(row for row in tracker["phases"] if row["id"] == phase_id).update(
+            fields)
+        return tracker
+
+    return state.locked_tracker_update(run_dir, transition_id=transition,
+                                       mutate=mutate)
+
+
+RATCHET_TO = dict(review_class="required", class_source="ratchet")
+
+
+class ReviewClassRatchetTests(TempDirTestCase):
+    """Who may move `Review Class`, and to what."""
+
+    def run_at(self, review_class: str):
+        repo = make_repo(self.tmp)
+        run_dir = repo / "docs" / "superpowers" / "runs" / "run-1"
+        run_dir.mkdir(parents=True)
+        plan = write_phase_plan(run_dir, three_disjoint_tasks(),
+                                header=phase_header(review_class=review_class))
+        state.initialize_run(
+            run_dir, run_id="run-1", base_commit=git(repo, "rev-parse", "HEAD"),
+            target_branch="target", worker_limit=6, repo_root=str(repo))
+        state.import_phase_plan(run_dir, phase_plan=plan)
+        return run_dir, plan
+
+    def refuse(self, run_dir, expected: str, **fields) -> None:
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            set_phase(run_dir, "test-move-class", **fields)
+        self.assertIn(expected, str(caught.exception))
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def phase(self, run_dir) -> dict:
+        return state.validate_run(run_dir)["phases"][0]
+
+    # --- the move ----------------------------------------------------------
+
+    def test_import_mirrors_the_plan_class(self):
+        """The upstream guarantee the cross-check extends: the ONE writer of a
+        phase row copies the class out of plan metadata, as `plan`."""
+        for review_class in state.REVIEW_CLASSES:
+            with self.subTest(review_class=review_class):
+                self.tmp = self.tmp / review_class
+                run_dir, _plan = self.run_at(review_class)
+                phase = self.phase(run_dir)
+                self.assertEqual(
+                    (phase["review_class"], phase["class_source"],
+                     phase["ratchet"]),
+                    (review_class, "plan", "-"))
+
+    def test_a_plan_sourced_required_phase_cannot_be_lowered(self):
+        """THE HOLE P02 HANDED ON. (final-only, plan, -) is a legal triple, so
+        the parse accepts it; the move from `required` to it is the run
+        buying its way out of its own review while still citing the plan."""
+        run_dir, _plan = self.run_at("required")
+        self.refuse(run_dir, "moves only by the upward ratchet",
+                    review_class="final-only")
+
+    def test_an_evidence_backed_trigger_ratchets_a_final_only_phase(self):
+        run_dir, _plan = self.run_at("final-only")
+        set_phase(run_dir, "test-ratchet", ratchet=
+                  "accumulated-surface@scratch/p04-lines.txt", **RATCHET_TO)
+        phase = self.phase(run_dir)
+        self.assertEqual((phase["review_class"], phase["class_source"]),
+                         ("required", "ratchet"))
+
+    def test_a_ratchet_is_never_withdrawn_or_laundered(self):
+        """Once ratcheted the triple is fixed: back to (final-only, plan) is
+        downward, and to (required, plan) hides the ratchet inside the one
+        source that is never compared with the plan again."""
+        run_dir, _plan = self.run_at("final-only")
+        set_phase(run_dir, "test-ratchet", ratchet=
+                  "accumulated-surface@scratch/p04-lines.txt", **RATCHET_TO)
+        self.refuse(run_dir, "moves only by the upward ratchet",
+                    review_class="final-only", class_source="plan",
+                    ratchet="-")
+        self.refuse(run_dir, "moves only by the upward ratchet",
+                    class_source="plan", ratchet="-")
+
+    def test_a_ratchet_record_is_never_rewritten(self):
+        run_dir, _plan = self.run_at("final-only")
+        set_phase(run_dir, "test-ratchet", ratchet=
+                  "accumulated-surface@scratch/p04-lines.txt", **RATCHET_TO)
+        self.refuse(run_dir, "moves only by the upward ratchet",
+                    ratchet="repeated-suite-failure@scratch/p04-suite.txt")
+
+    def test_an_undefined_trigger_is_no_trigger(self):
+        """A controller's own reading of the diff, spelled as a token."""
+        run_dir, _plan = self.run_at("final-only")
+        self.refuse(run_dir, "matching ratchet record",
+                    ratchet="crosses-trust-boundary@scratch/why.md",
+                    **RATCHET_TO)
+
+    # --- the two triggers the tracker can prove ----------------------------
+
+    def test_adversarial_finding_needs_a_failed_adversarial_round(self):
+        run_dir, _plan = self.run_at("final-only")
+        record = "adversarial-finding@scratch/p04-t1-review.md"
+        self.refuse(run_dir, "has not fired", ratchet=record, **RATCHET_TO)
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+
+        def review(tracker: dict) -> dict:
+            row = blank_row("task_review")
+            row.update(task="T1", round="1", intensity="adversarial",
+                       state="blocked", reviewer="reviewer-1",
+                       package="scratch/p.md", report="scratch/r.md",
+                       critical="1", important="0", minor="0",
+                       adversarial="authz", adversarial_verdict="fail",
+                       open="1", evidence="scratch/e.txt")
+            return state.append_row(tracker, "task_review", row)
+
+        state.locked_tracker_update(run_dir, transition_id="test-review",
+                                    mutate=review)
+        set_phase(run_dir, "test-ratchet", ratchet=record, **RATCHET_TO)
+        self.assertEqual(self.phase(run_dir)["class_source"], "ratchet")
+
+    def test_a_passed_adversarial_round_is_not_a_finding(self):
+        run_dir, _plan = self.run_at("final-only")
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+
+        def review(tracker: dict) -> dict:
+            row = blank_row("task_review")
+            row.update(task="T1", round="1", intensity="adversarial",
+                       state="accepted", reviewer="reviewer-1",
+                       package="scratch/p.md", report="scratch/r.md",
+                       critical="0", important="0", minor="0",
+                       adversarial="authz", adversarial_verdict="pass",
+                       open="0", evidence="scratch/e.txt")
+            return state.append_row(tracker, "task_review", row)
+
+        state.locked_tracker_update(run_dir, transition_id="test-review",
+                                    mutate=review)
+        self.refuse(run_dir, "has not fired",
+                    ratchet="adversarial-finding@scratch/r.md", **RATCHET_TO)
+
+    def adopt(self, run_dir, rung: str) -> None:
+        def mutate(tracker: dict) -> dict:
+            row = blank_row("quorum")
+            row.update(qid="3f2a1b0c9d8e", axis="new", phase="P04",
+                       state="finalized",
+                       owners="brain-1,brain-2,brain-3",
+                       payload_digest=FAKE_DIGEST, context_digest=OTHER_DIGEST,
+                       responses="scratch/q1.json,scratch/q2.json,"
+                                 "scratch/q3.json",
+                       depth="1", rung=rung,
+                       outcome="adopted", decision="Q-3f2a1b0c9d8e")
+            return state.append_row(tracker, "quorum", row)
+
+        state.locked_tracker_update(run_dir, transition_id="test-adopt",
+                                    mutate=mutate)
+
+    def test_low_confidence_dependency_needs_a_weak_adoption_in_the_phase(self):
+        run_dir, _plan = self.run_at("final-only")
+        record = "low-confidence-dependency@decisions.md"
+        self.refuse(run_dir, "has not fired", ratchet=record, **RATCHET_TO)
+        self.adopt(run_dir, "code-evidenced")
+        set_phase(run_dir, "test-ratchet", ratchet=record, **RATCHET_TO)
+        self.assertEqual(self.phase(run_dir)["class_source"], "ratchet")
+
+    def test_a_specified_adoption_is_not_a_low_confidence_dependency(self):
+        run_dir, _plan = self.run_at("final-only")
+        self.adopt(run_dir, "specified")
+        self.refuse(run_dir, "has not fired",
+                    ratchet="low-confidence-dependency@decisions.md",
+                    **RATCHET_TO)
+
+    # --- the plan-metadata cross-check -------------------------------------
+
+    def append_phase(self, run_dir, plan, **fields) -> None:
+        def mutate(tracker: dict) -> dict:
+            row = blank_row("phases")
+            row.update(id="P04", state="[ ]", review_class="required",
+                       class_source="plan")
+            row.update(fields)
+            state.append_row(tracker, "phases", row)
+            tracker["run"]["phase_plans"] = str(
+                Path(plan).resolve().relative_to(state.repo_root(tracker)))
+            return tracker
+
+        state.locked_tracker_update(run_dir, transition_id="test-raw-phase",
+                                    mutate=mutate)
+
+    def raw_run(self, review_class: str):
+        repo = make_repo(self.tmp)
+        run_dir = repo / "docs" / "superpowers" / "runs" / "run-1"
+        run_dir.mkdir(parents=True)
+        plan = write_phase_plan(run_dir, three_disjoint_tasks(),
+                                header=phase_header(review_class=review_class))
+        state.initialize_run(
+            run_dir, run_id="run-1", base_commit=git(repo, "rev-parse", "HEAD"),
+            target_branch="target", worker_limit=6, repo_root=str(repo))
+        return run_dir, plan
+
+    def test_a_phase_row_written_around_import_must_match_its_plan(self):
+        """`import_phase_plan` is a writer, and a raw `locked_tracker_update`
+        does not go through it. The row still has to say what the plan says."""
+        run_dir, plan = self.raw_run("required")
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            self.append_phase(run_dir, plan, review_class="final-only")
+        self.assertIn("differs from its plan metadata", str(caught.exception))
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+        self.append_phase(run_dir, plan)
+        self.assertEqual(self.phase(run_dir)["review_class"], "required")
+
+    def test_a_phase_is_never_born_ratcheted(self):
+        """Even at the class its plan declares: `ratchet` means "differs from
+        plan metadata", and a row born saying so records a move that never
+        happened."""
+        run_dir, plan = self.raw_run("required")
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            self.append_phase(run_dir, plan, class_source="ratchet",
+                              ratchet="accumulated-surface@scratch/x.md")
+        self.assertIn("differs from its plan metadata", str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

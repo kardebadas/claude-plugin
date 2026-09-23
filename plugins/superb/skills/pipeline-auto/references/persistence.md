@@ -67,7 +67,8 @@ It lives inside the run directory, never under `.superpowers/sdd`.
 - `## Tasks` carries `Phase`, `Decisions` and `Provisional`, so each row
   describes itself.
 - `## Phases` carries `Review Class`, `Class Source` and `Ratchet`. A class that
-  differs from the plan is legal only with a ratchet record.
+  differs from the plan is legal only with a ratchet record, and the class moves
+  only by the upward ratchet (`execution.md`).
 - `derive_next_action(tracker)` puts a pending escalation (`queued` or `asked`)
   first, giving `await-escalation-batch`. Otherwise it returns the active stage's
   next action. It returns `complete` only when every stage is complete.

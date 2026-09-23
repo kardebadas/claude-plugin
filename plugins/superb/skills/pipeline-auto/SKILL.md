@@ -209,9 +209,11 @@ reviewer before the task completes.
 You set each phase's `review_class` **once, at stage 04, from the plan's
 classification**, and never move it afterwards except through a ratchet whose
 trigger already exists — for the adversarial route, a CONFIRMED or unrefuted
-PLAUSIBLE finding returned by that reviewer. Writing that ratchet record is
-yours until code enforces it; a ratchet record you write from your own reading
-of the diff is not a trigger. Never downward.
+PLAUSIBLE finding returned by that reviewer. A ratchet record you write from
+your own reading of the diff is not a trigger. Never downward. The tracker
+enforces the move: `(final-only, plan)` → `(required, ratchet)` once, with a
+trigger from the closed list, and `adversarial-finding` or
+`low-confidence-dependency` only when the tracker already holds that fact.
 
 ## Completeness critic items
 

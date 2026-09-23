@@ -1261,6 +1261,13 @@ _REVIEW_CLASSES = ("final-only", "required")
 #: which the spec permits only with a matching ratchet record. There is no third
 #: source, and in particular none that means "lowered".
 _CLASS_SOURCES = ("plan", "ratchet")
+#: The spec's five ratchet conditions, (a) to (e) in its order, under the names
+#: ``references/execution.md`` gives them. CLOSED: a ratchet is "mechanically
+#: triggered", and a trigger outside this list is a controller's own reading of
+#: a diff, which is exactly what may not raise a class.
+RATCHET_TRIGGERS = ("adversarial-finding", "repeated-suite-failure",
+                    "debug-locality", "low-confidence-dependency",
+                    "accumulated-surface")
 _GATE_TYPES = ("phase", "master")
 _GATE_STATES = ("pending", "in_progress", "blocked", "accepted")
 #: A gate that has been judged, either way. Both outcomes rest on the same two
@@ -1303,14 +1310,15 @@ def _ratchet_record(value: str) -> bool:
 
     Both halves or neither. A bare trigger is a claim the run makes about its
     own review intensity with nothing behind it; a bare evidence path names no
-    trigger to check the evidence against. The trigger is a TOKEN rather than a
-    closed vocabulary for the reason an escalation's ``Blast`` column is: the
-    spec lists five conditions but no canonical names for them, P05 owns the
-    ratchet DECISION, and an enum invented here would halt a run on a value a
-    conforming writer emits.
+    trigger to check the evidence against. The trigger is one of
+    ``RATCHET_TRIGGERS``: P05 owns the ratchet decision and closed the
+    vocabulary, because a trigger nobody defined is no trigger. Whether a named
+    trigger actually FIRED is judged where the class changes, by
+    ``_guard_review_class``; a parse sees one revision and cannot.
     """
     parts = value.split("@")
-    return len(parts) == 2 and all(_TOKEN.fullmatch(part) for part in parts)
+    return (len(parts) == 2 and all(_TOKEN.fullmatch(part) for part in parts)
+            and parts[0] in RATCHET_TRIGGERS)
 
 
 def _decision_id(value: str) -> bool:
@@ -1462,10 +1470,11 @@ def _validate_phases(tracker: dict) -> None:
     ratchet's clothes, and a ``plan`` class carrying one, which is a ratchet
     laundered into plan metadata.
 
-    What this cannot see is the plan file itself. A phase claiming ``plan`` as
-    its source while the phase plan says otherwise is caught where the metadata
-    is read — ``PlanMetadataError`` exists for exactly that — and not here.
-    P02 records; it does not fetch.
+    What this cannot see is the plan file itself, or the revision before this
+    one. A phase claiming ``plan`` as its source while the phase plan says
+    otherwise, a legal triple reached by an illegal move, and a ratchet whose
+    trigger never fired are all judged at the transition, by
+    ``_guard_review_class``. P02 records; it does not fetch.
     """
     gates = {row["id"] for row in tracker["gates"]}
     seen: set[str] = set()
@@ -2516,6 +2525,95 @@ def _guard_frozen_intent(current: dict, proposed: dict) -> None:
         )
 
 
+#: The one legal move of a phase's class triple, before and after. Everything
+#: else that changes ``Review Class``, ``Class Source`` or ``Ratchet`` on an
+#: existing row is refused: a downward move, a withdrawn ratchet, a ratchet
+#: laundered back into ``plan``, and a ratchet record rewritten afterwards.
+_UNRATCHETED = ("final-only", "plan", "-")
+_RATCHETED_CLASS = ("required", "ratchet")
+
+
+def _class_triple(phase: dict) -> tuple:
+    return phase["review_class"], phase["class_source"], phase["ratchet"]
+
+
+def _ratchet_trigger_fired(tracker: dict, phase_id: str, trigger: str) -> bool:
+    """Has ``trigger`` fired for ``phase_id``, as far as the tracker can say?
+
+    Two of the five conditions are facts this tracker holds, and for those two
+    the record is checked against them: (a) an adversarial round on one of the
+    phase's tasks returned ``fail`` -- the verdict word for a CONFIRMED or
+    unrefuted PLAUSIBLE finding -- and (d) a quorum adopted in the phase below
+    ``specified``. The other three rest on facts the tracker does not carry
+    (the phase suite's failure count, a stage-10 root cause, changed-line
+    counts), so for them the record's evidence half is the whole proof.
+    """
+    if trigger == "adversarial-finding":
+        tasks = {row["id"] for row in tracker["tasks"]
+                 if row["phase"] == phase_id}
+        return any(row["task"] in tasks and row["adversarial_verdict"] == "fail"
+                   for row in tracker["task_review"])
+    if trigger == "low-confidence-dependency":
+        return any(row["phase"] == phase_id and row["outcome"] == "adopted"
+                   and row["rung"] != RUNG_ORDER[0]
+                   for row in tracker["quorum"])
+    return True
+
+
+def _guard_review_class(current: dict, proposed: dict) -> None:
+    """``Review Class`` moves once, upward, on a trigger that fired.
+
+    The spec: "Upward ratchet only, final-only -> required, mechanically
+    triggered, never downward and never by quorum", and "a tracker
+    review_class differing from plan metadata is legal only with a matching
+    ratchet record". ``_validate_phases`` refuses the illegal TRIPLES; the
+    legal triple reached by an illegal MOVE is only visible here, with both
+    revisions in hand -- ``required`` to ``final-only`` still claiming the plan
+    is two legal rows.
+
+    A NEW phase row is compared with its plan. ``import_phase_plan`` copies the
+    class out of plan metadata, but it is a writer, and a raw transition does
+    not go through it; so a row this transition adds must carry the class its
+    plan declares, as ``plan``. A phase is never born ratcheted.
+
+    "Never by quorum" needs no code: no quorum path writes ``## Phases``, and a
+    ratchet names one of ``RATCHET_TRIGGERS``, none of which is a decision.
+    """
+    before = {row["id"]: row for row in current["phases"]}
+    for phase in proposed["phases"]:
+        prior = before.get(phase["id"])
+        if prior is None:
+            plan = _phase_plan_path(proposed, phase["id"])
+            declared = parse_plan_metadata(plan)["phase"]
+            if (declared["id"] != phase["id"]
+                    or _class_triple(phase)
+                    != (declared["review_class"], "plan", "-")):
+                raise TrackerValidationError(
+                    f"phase {phase['id']!r} is written as "
+                    f"{_class_triple(phase)!r} and differs from its plan "
+                    f"metadata, which declares phase {declared['id']!r} at "
+                    f"{declared['review_class']!r}; a phase row mirrors the "
+                    "class stage 04 fixed, and is never born ratcheted")
+            continue
+        if _class_triple(phase) == _class_triple(prior):
+            continue
+        if (_class_triple(prior) != _UNRATCHETED
+                or _class_triple(phase)[:2] != _RATCHETED_CLASS):
+            raise TrackerValidationError(
+                f"phase {phase['id']!r} cannot move from "
+                f"{_class_triple(prior)!r} to {_class_triple(phase)!r}: its "
+                "class moves only by the upward ratchet, (final-only, plan) to "
+                "(required, ratchet), once -- never downward, never withdrawn, "
+                "and its ratchet record is never rewritten")
+        trigger = phase["ratchet"].split("@")[0]
+        if not _ratchet_trigger_fired(proposed, phase["id"], trigger):
+            raise TrackerValidationError(
+                f"phase {phase['id']!r} ratchets on {trigger!r}, which has not "
+                "fired: the tracker holds no fact that trigger names in this "
+                "phase, and a ratchet is mechanically triggered -- a record "
+                "written from a reading of the diff is no trigger")
+
+
 def locked_tracker_update(run_dir: Path, *, transition_id: str, mutate,
                           timeout_s: float = DEFAULT_LOCK_TIMEOUT_S) -> dict:
     """Apply exactly one idempotent durable transition. The only way state changes.
@@ -2588,6 +2686,9 @@ def locked_tracker_update(run_dir: Path, *, transition_id: str, mutate,
         proposed["run"]["last_transition"] = transition_id
         canonical = render_tracker(proposed)
         reparsed = parse_tracker(canonical)
+        #: On the REPARSE, so the guard reads rows the validators have
+        #: already held to their grammar rather than whatever ``mutate`` built.
+        _guard_review_class(current, reparsed)
         _replace_tracker(run_dir, canonical, transition_id)
         return reparsed
 

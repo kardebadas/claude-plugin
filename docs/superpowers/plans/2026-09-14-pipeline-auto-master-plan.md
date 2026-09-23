@@ -610,6 +610,24 @@ spec and the GREEN-tested skill name `complete-with-proposals` as the terminal
 action when proposals exist. A small change lets the state machine derive the
 spec's named value, rather than rewriting the spec and the skill to match code.
 
+### Built — 2026-09-23
+
+**P05 and P06 are built, `0395645..fe23fc8`**: the P04 resume defect and its
+re-ask sibling, the ratchet with the plan-metadata cross-check and append-only
+phase rows, the rung cap inside `finalize_quorum`, the dispatch-ceiling fields
+and their first-write formula, the phase-set seal and phase birth at stage 07,
+`open_master_gate` with non-implementer enforcement and the `implementers`
+list, the `branch-review` and `final` purposes with the `gate` subject kind, and
+the terminal action read off every item. **Prose-only by design:** the
+adversarial trigger check; the ratchet triggers `repeated-suite-failure`,
+`debug-locality` and `accumulated-surface`; counting and refusing dispatches;
+provisional marking and the reviewer's provisional block; reconciliation's
+no-stall and counter rules; escalation batching; contradiction routing and the
+adjudicator; writers for `## Task Review`, `## Fix Rounds`, `findings.md` and
+stage 12; that the seal matches the master plan; and that the master head is
+still the target-branch tip with a clean tree. The prose sync after `fe23fc8`
+writes these into the references.
+
 ## Execution policy from 2026-09-22 — the skill is the product (SUPERSEDES the policy below)
 
 Set by the user after ~45 of 92 tasks, having found the build inverted relative

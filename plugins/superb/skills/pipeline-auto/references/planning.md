@@ -28,18 +28,16 @@ Tracker: `## Intent` rows `reader-1`, `reader-2`, `reader-3`, `brief`; states
 
 ## Stage 02 — Question synthesis
 
-- The spec dispatches **exactly three** brain agents to propose open
-  decisions (same reading assignments and payload rules as `quorum.md`).
-- **No dispatch template for this exists yet.** `prompts/brain.md` and
-  `build_payload` are quorum-only: they need a qid and an admissible question
-  record, and the `pipeline-auto-brain` response schema has no field for a
-  proposal. Do not render `prompts/brain.md` for stage 02, and do not
-  substitute another agent — not `architecture-discovery` (it runs with every
-  tool and is briefed for `superb:craft`), not `brainstorm-architect`.
-- Rank by blast radius, dedupe, cut to **four**. Ranking and cutting are
-  routing: answer none, add none of your own.
-- Drop any question failing admissibility (`quorum.md`). Do not spend a slot on
-  what the repository or a quorum could decide.
+- Dispatch **exactly three** `pipeline-auto-brain` agents with
+  [../prompts/brain-proposal.md](../prompts/brain-proposal.md) — never
+  `prompts/brain.md` (no qid exists yet) and never another agent (not
+  `architecture-discovery`, not `brainstorm-architect`).
+- Merge as that template says: drop the inadmissible, dedupe, rank by blast
+  radius, cut to **four** including intent-conflict slots. Ranking and cutting
+  are routing: answer none, add none of your own.
+- Admissibility here is `quorum.md`'s criteria 1, 3 and 4 with criterion 2
+  **inverted**: a gate question needs what only the user knows. Do not spend a
+  slot on what the repository or a quorum could decide.
 
 ## Stage 03 — The one gate
 

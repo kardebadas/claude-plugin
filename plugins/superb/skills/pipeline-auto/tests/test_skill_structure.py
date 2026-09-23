@@ -45,7 +45,8 @@ FRONTMATTER_MAX = 1024
 DESCRIPTION_MAX = 500
 
 REQUIRED_REFERENCES = ("planning", "quorum", "execution", "review", "persistence")
-REQUIRED_PROMPTS = ("implementer", "task-reviewer", "adversarial-reviewer", "brain")
+REQUIRED_PROMPTS = ("implementer", "task-reviewer", "adversarial-reviewer", "brain",
+                    "brain-proposal")
 EXECUTABLE_SCRIPTS = ("task-brief", "review-package", "sdd-workspace")
 
 # The master plan's File Structure table. progress/decisions come from P02,

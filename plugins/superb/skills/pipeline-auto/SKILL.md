@@ -77,7 +77,8 @@ every stage and win over any summary elsewhere.
 | Dispatch | Template / agent | When |
 | --- | --- | --- |
 | Intent readers | `pipeline-auto-intent-reader` ×3 | stage 01 |
-| Brains | `pipeline-auto-brain` ×3 with `prompts/brain.md` | every quorum (stage 02: see `planning.md`) |
+| Brains | `pipeline-auto-brain` ×3 with `prompts/brain.md` | every quorum |
+| Proposal brains | `pipeline-auto-brain` ×3 with `prompts/brain-proposal.md` | stage 02 |
 | Implementer | `prompts/implementer.md`, brief from `scripts/task-brief RUN_DIR PLAN_FILE TASK_NUMBER` | stage 09, one fresh per task |
 | Task reviewer | `prompts/task-reviewer.md`, package from `scripts/review-package RUN_DIR BASE HEAD` | the per-task gate |
 | Adversarial reviewer | `prompts/adversarial-reviewer.md` | any fired trigger, any `review_class` |

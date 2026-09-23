@@ -15124,6 +15124,27 @@ class ImportWorkerResultTests(TempDirTestCase):
         self.assertIn("completed:attempt-001", row["checkpoints"])
         self.assertTrue(state.derive_next_action(tracker))
 
+    def test_imports_the_path_publish_returns_from_any_working_directory(self):
+        """`publish_worker_result` returns a REPOSITORY-relative path and the
+        skill hands that value to `import_worker_result`. Resolved against the
+        process's cwd it named a file in whatever checkout the controller
+        stood in (found by the P09 walkthrough); it resolves against the
+        recorded root."""
+        repo, run_dir = self.reserved_run()
+        commits = self.implement(repo)
+        relative = state.publish_worker_result(
+            run_dir, result=self.done_result(run_dir, commits))
+        self.assertFalse(Path(relative).is_absolute())
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        previous = os.getcwd()
+        os.chdir(elsewhere)
+        try:
+            row = task_row(import_result(run_dir, relative), "T1")
+        finally:
+            os.chdir(previous)
+        self.assertEqual(row["state"], "[x]")
+
     def test_a_completed_source_task_records_held_and_never_the_empty_marker(self):
         """THE BRIEF ASSERTS THE SCHEMA'S OWN REJECTION AS A FEATURE. P02's
         `_validate_tasks` refuses a completed source row whose `Integration`

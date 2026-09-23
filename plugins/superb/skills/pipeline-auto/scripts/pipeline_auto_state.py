@@ -17404,6 +17404,10 @@ def import_worker_result(run_dir, *, result_path, run_command) -> dict:
             "and never runs one, so the ability to run it is an argument -- "
             "and it is asked for before the lock, because a caller that cannot "
             "supply it has not failed a check, it has called wrongly")
+    #: ``publish_worker_result`` returns a REPOSITORY-relative path; resolved
+    #: against the recorded root, never against the process's cwd.
+    if not path.is_absolute():
+        path = _repo_dir(validate_run(home)) / path
     content, published = _imported_result_document(path)
     transition = (f"import-{published['task_id']}-"
                   f"{_attempt_token(published['attempt'])}-"

@@ -647,6 +647,13 @@ writes these into the references.
 - **The master review has no spec lines for three things:** merging duplicate
   findings across the two reviewers, rejecting a report written against another
   head, and advancing the gate head after a gate fix round.
+- **P09 result:** the walkthrough completed a run through 49 raw transitions —
+  24 dispatch counts, 13 stage moves (incl. the master-plan path), 3
+  `## Task Review` rows, 2 reconciliation parks (one refused), 2 phase
+  verifications, 4 escalation asked/answered, 1 master-gate verdict. The
+  reconciliation-parking item is resolved by `park_task_on_quorum` (gate
+  before import; the park releases the owner slot); the stale-context item is
+  resolved as stated above.
 
 ## Execution policy from 2026-09-22 — the skill is the product (SUPERSEDES the policy below)
 

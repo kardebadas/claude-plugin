@@ -6,7 +6,9 @@ completeness critic, final verification, or the terminal report.
 **Not enforced by code:** contradiction routing, the proposals writer, the
 terminal report, and writers for
 the master gate's reports, verdict, fix rounds and stage 12. `findings.md` has a
-validated grammar but no writer. These rules are yours to follow exactly. The
+validated grammar but no writer. The `branch-review` and `final` evidence
+records are recorded for audit and read by no guard: no tracker cell or check
+opens them. These rules are yours to follow exactly. The
 completeness freeze rests on the phase-set seal (`planning.md`): no phase can
 be created after stage 06.
 

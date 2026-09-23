@@ -132,6 +132,11 @@ Header, before the first section:
 <!-- pipeline-auto-phase-suite: id=<same-phase-id>; commands=["<exact-command>","<next-command>"] -->
 ```
 
+Head each task **`## Task <n>: <task id>`**: `<n>` is digits, unique in the
+plan (the task's `order` will do), and the task id is a word of its own.
+`scripts/task-brief` extracts a task only by that number, so a heading without
+one cannot be briefed.
+
 Immediately below each task heading:
 
 ```text

@@ -12,7 +12,9 @@ list: the master plan is not machine-readable, so the seal is whatever ids
 `close_phase_set` was given. The ratchet triggers `repeated-suite-failure`, `debug-locality` and
 `accumulated-surface` are not verified against state: the tracker records no
 suite-failure count or root cause, and the module never runs git to count
-changed lines. These rules are yours to follow exactly.
+changed lines. `task-integration` evidence is recorded for audit and read by
+no guard: `integrate_task` never opens it and no tracker cell cites it. These
+rules are yours to follow exactly.
 
 **The module never executes git.** It emits argv and validates a transcript you
 supply. Functions that need git take `run_command`: a callable that runs one
@@ -132,6 +134,10 @@ Persist before dispatch. Several individually ready tasks are not jointly
 authorised: check pairwise `scopes_overlap` across the whole batch. Context
 compaction is not a retry — reconcile first; a consistent `[~]` stays the same
 attempt.
+
+Create the task's branch as **`task/<task id>`** (for example `task/P1-T1`),
+from the reservation baseline. The name is load-bearing: import resolves the
+range head as `task/<task id>` and refuses any other branch.
 
 Dispatch each implementer with its task brief file —
 `scripts/task-brief RUN_DIR PLAN_FILE TASK_NUMBER [OUTFILE]`, never pasted plan

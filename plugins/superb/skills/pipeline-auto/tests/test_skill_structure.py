@@ -363,6 +363,13 @@ class ExecutionOrder(unittest.TestCase):
         self.assertIn("park_task_on_quorum(run_dir, task_id=, qid=)",
                       self.execution)
 
+    def test_the_task_branch_name_is_taught(self):
+        self.assertIn("**`task/<task id>`**", self.execution)
+
+    def test_task_headings_carry_the_number_task_brief_extracts(self):
+        self.assertIn("**`## Task <n>: <task id>`**",
+                      read(SKILL / "references" / "planning.md"))
+
 
 if __name__ == "__main__":
     unittest.main()

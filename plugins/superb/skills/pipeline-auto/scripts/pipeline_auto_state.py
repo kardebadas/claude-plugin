@@ -169,7 +169,8 @@ _RUN_KEYS = (
     "agent_dispatch_count",
     "dispatch_projection", "dispatch_soft_ceiling", "dispatch_hard_ceiling",
     "spec", "master_plan", "phase_set", "phase_plans", "decisions",
-    "findings", "completeness_proposals", "revision", "last_transition",
+    "findings", "completeness_proposals", "implementers", "revision",
+    "last_transition",
 )
 
 _STAGE_HEADER = ("Stage", "Stage State", "Next Action")
@@ -574,6 +575,12 @@ def _validate_run(tracker: dict) -> None:
                 "digits; every record that cites it reads it as one")
     _validate_dispatch_ceiling(run)
     _validate_phase_set(run)
+    implementers = _csv(run["implementers"])
+    if (not all(_TOKEN.fullmatch(value) for value in implementers)
+            or list(implementers) != sorted(set(implementers))):
+        raise TrackerValidationError(
+            f"implementers {run['implementers']!r} is not '-' or a sorted list "
+            "of distinct owner tokens")
 
 
 def _validate_phase_set(run: dict) -> None:
@@ -1627,16 +1634,38 @@ def _validate_gates(tracker: dict) -> None:
                 f"evaluated gate {gate['id']!r} needs its reports and its "
                 "verification evidence; a verdict with neither is a verdict with "
                 "no basis, in whichever direction it went")
+        if (gate["type"] == "master" and gate["state"] != "pending"
+                and gate["base"] != tracker["run"]["base_commit"]):
+            raise TrackerValidationError(
+                f"opened master gate {gate['id']!r} starts at {gate['base']!r}, "
+                "not at base_commit: the master review covers the whole run, "
+                "and a base chosen later leaves the start of the branch "
+                "unreviewed")
         if gate["type"] == "master" and gate["assignments"] != "-":
             _validate_master_reviewers(tracker, gate)
 
 
 def _implementers(tracker: dict) -> set:
-    """Every implementation owner the tracker names: a task's ``Owner`` and a
-    fix round's ``Fixer``. The owners of superseded attempts are on disk only;
+    """Every implementation owner the tracker names: a task's ``Owner``, a fix
+    round's ``Fixer``, and ``## Run``'s append-only ``implementers``, which
+    keeps an owner whose cell was overwritten and a fixer whose row is gone.
+    The owners of superseded attempts are also on disk;
     ``_guard_master_reviewers`` reads those."""
     return ({row["owner"] for row in tracker["tasks"]}
-            | {row["fixer"] for row in tracker["fix_rounds"]}) - {"-"}
+            | {row["fixer"] for row in tracker["fix_rounds"]}
+            | set(_csv(tracker["run"]["implementers"]))) - {"-"}
+
+
+def _person(value: str) -> str:
+    """An agent id as the identity it names: surrounding punctuation stripped,
+    case folded. ``IMPL-1`` and ``impl-1.`` are the implementer ``impl-1``."""
+    return value.strip(" ._/@:+-").casefold()
+
+
+def _record_implementer(tracker: dict, owner: str) -> None:
+    """Add ``owner`` to ``## Run``'s sorted, append-only ``implementers``."""
+    tracker["run"]["implementers"] = ",".join(
+        sorted({*_csv(tracker["run"]["implementers"]), owner}))
 
 
 def _validate_master_reviewers(tracker: dict, gate: dict) -> None:
@@ -1649,12 +1678,14 @@ def _validate_master_reviewers(tracker: dict, gate: dict) -> None:
     reviewer code to write that they then review.
     """
     reviewers = _csv(gate["assignments"])
-    if (len(reviewers) != 2 or len(set(reviewers)) != 2
+    if (len(reviewers) != 2 or len({_person(value) for value in reviewers}) != 2
             or not all(_TOKEN.fullmatch(value) for value in reviewers)):
         raise TrackerValidationError(
             f"master gate {gate['id']!r} assigns {gate['assignments']!r}; the "
             "master gate takes exactly two distinct reviewers")
-    conflicted = [value for value in reviewers if value in _implementers(tracker)]
+    implementers = {_person(value) for value in _implementers(tracker)}
+    conflicted = [value for value in reviewers
+                  if _person(value) in implementers]
     if conflicted:
         raise TrackerValidationError(
             f"master reviewer {conflicted[0]!r} owns a task or a fix round in "
@@ -2137,6 +2168,14 @@ def derive_next_action(tracker: dict) -> str:
         raise TrackerValidationError(
             "no stage is active and stages remain pending: the run has no next "
             "action to derive and is not complete")
+    #: The two waits the spec names, ahead of the terminal verdict: a halted
+    #: escalation is one held past a full batch ("ask four and halt on the
+    #: rest"), and a count past the hard ceiling stops resumably.
+    if any(row["state"] == "halted" for row in tracker["escalations"]):
+        return "await-escalation-batch"
+    hard = tracker["run"]["dispatch_hard_ceiling"]
+    if hard != _ABSENT_CELL and int(tracker["run"]["agent_dispatch_count"]) > int(hard):
+        return "await-dispatch-budget"
     unfinished = _unfinished_items(tracker)
     if unfinished:
         raise TrackerValidationError(
@@ -2159,6 +2198,14 @@ def _unfinished_items(tracker: dict) -> list:
               if row["state"] != "accepted"]
     items += [f"quorum {row['qid']}" for row in tracker["quorum"]
               if row["state"] != "finalized"]
+    sealed = _csv(tracker["run"]["phase_set"])
+    if not sealed:
+        items.append("the phase-set seal")
+    imported = {row["id"] for row in tracker["phases"]}
+    items += [f"sealed phase {phase} (no row)" for phase in sealed
+              if phase not in imported]
+    if not any(row["type"] == "master" for row in tracker["gates"]):
+        items.append("the master gate (no row)")
     return items
 
 
@@ -2166,6 +2213,8 @@ def _unfinished_items(tracker: dict) -> list:
 #: ``templates/completeness-proposals.md`` writes them.
 _PROPOSAL_HEADING = "## CP-"
 _FROZEN_STATUS = "- **Status:** Frozen"
+#: The one HTML comment the template carries, on a line of its own.
+_COMMENT_OPEN, _COMMENT_CLOSE = "<!--", "-->"
 
 
 def _frozen_proposals(tracker: dict) -> list:
@@ -2175,6 +2224,13 @@ def _frozen_proposals(tracker: dict) -> list:
     repository root. A file that does not exist holds none. Fenced blocks are
     skipped: the run's file starts as a copy of the template, whose example
     section is itself a fenced ``## CP-1`` reading ``Frozen``.
+
+    IT FAILS CLOSED. A skipped proposal is ``complete`` derived over a frozen
+    item, so a line that looks like a proposal heading or a status line but is
+    not the template's exact shape raises, and so does every construct that
+    could hide one: a fence that is not a column-0 backtick fence or never
+    closes, a ``~~~`` fence, an HTML comment spanning lines, a status line
+    outside a ``CP`` section, and a ``CP`` section with no status line.
     """
     path = _repo_dir(tracker) / tracker["run"]["completeness_proposals"]
     if _NUL in str(path):
@@ -2191,18 +2247,56 @@ def _frozen_proposals(tracker: dict) -> list:
         raise TrackerValidationError(
             f"completeness proposals at {str(path)!r} cannot be read: {exc}"
         ) from exc
-    frozen, current, fenced = [], None, False
-    for line in lines:
-        if line.startswith("```"):
+
+    def refuse(number: int, line: str, why: str):
+        return TrackerValidationError(
+            f"completeness proposals line {number} {line!r} {why}; a proposal "
+            "the reader cannot read exactly is refused, never skipped")
+
+    frozen, current, has_status, fenced = [], None, False, False
+    for number, line in enumerate(lines, start=1):
+        bare = line.strip()
+        if bare.startswith(("```", "~~~")):
+            if not line.startswith("```"):
+                raise refuse(number, line, "is not a column-0 ``` fence")
             fenced = not fenced
-        elif fenced:
             continue
-        elif line.startswith(_PROPOSAL_HEADING):
-            current = line[len("## "):].strip()
-        elif line.startswith("## "):
+        if fenced:
+            continue
+        if _COMMENT_OPEN in line or _COMMENT_CLOSE in line:
+            if not (bare.startswith(_COMMENT_OPEN) and bare.endswith(_COMMENT_CLOSE)
+                    and bare.count(_COMMENT_OPEN) == 1
+                    and bare.count(_COMMENT_CLOSE) == 1):
+                raise refuse(number, line, "opens or closes an HTML comment "
+                             "that does not stand on one line")
+            continue
+        heading = bare.startswith("#") and bare.lstrip("#").strip().casefold(
+        ).startswith("cp")
+        status = bare.lstrip("-*+ ").casefold().startswith("status")
+        if heading or bare.startswith("#"):
+            if current and not has_status:
+                raise refuse(number, line, f"begins a new section before "
+                             f"{current} states its status")
             current = None
-        elif line.strip() == _FROZEN_STATUS and current and current not in frozen:
-            frozen.append(current)
+        if heading:
+            digits = line[len(_PROPOSAL_HEADING):]
+            if not (line.startswith(_PROPOSAL_HEADING) and digits.isascii()
+                    and digits.isdigit() and not digits.startswith("0")):
+                raise refuse(number, line, f"is not a {_PROPOSAL_HEADING}<n> "
+                             "heading")
+            current, has_status = line[len("## "):], False
+        elif status:
+            if line != _FROZEN_STATUS or current is None:
+                raise refuse(number, line, f"is not {_FROZEN_STATUS!r} inside "
+                             "a CP section")
+            has_status = True
+            if current not in frozen:
+                frozen.append(current)
+    if fenced:
+        raise refuse(len(lines), lines[-1], "leaves a fence open at the end of "
+                     "the file")
+    if current and not has_status:
+        raise refuse(len(lines), lines[-1], f"ends {current} with no status")
     return frozen
 
 
@@ -2734,6 +2828,36 @@ def _guard_frozen_phase_set(current: dict, proposed: dict) -> None:
         raise TrackerValidationError(
             f"the phase set {sealed!r} was sealed at the close of stage 06 and "
             f"cannot become {after!r}: the run cannot create work for itself")
+    closes_06 = (_stage_state(current, "06") == "active"
+                 and _stage_state(proposed, "06") == "complete")
+    if sealed == _ABSENT_CELL and after != _ABSENT_CELL and not closes_06:
+        #: A SEAL IS WRITTEN BY THE CLOSE OF STAGE 06 AND BY NOTHING ELSE. A
+        #: raw seal at stage 01 froze a list chosen before any master plan
+        #: existed, and a late one sealed a run that had already created its
+        #: phases unsealed.
+        raise TrackerValidationError(
+            f"the phase set {after!r} can be sealed only by the transition "
+            "that closes an active stage 06 (close_phase_set)")
+    if len(proposed["phases"]) > len(current["phases"]) and (
+            _stage_state(current, "07") != "active"):
+        #: PHASE CREATION IS STAGE 07's IMPORT OF A SEALED ID. Rows are
+        #: append-only (``_guard_phase_rows``), so a longer list is a birth.
+        #: Stage 07 is active only after a transition closed stage 06, which
+        #: had to write the seal, so no second check of the seal is needed.
+        raise TrackerValidationError(
+            f"phase {proposed['phases'][-1]['id']!r} is born while stage 07 "
+            f"is {_stage_state(current, '07')!r}; a phase row is created only "
+            "by stage 07 importing a sealed phase, never at any later stage")
+    if (_stage_state(current, "07") != "complete"
+            and _stage_state(proposed, "07") == "complete"
+            and proposed["run"]["dispatch_projection"] == _ABSENT_CELL):
+        #: The freeze itself requires every sealed phase's row
+        #: (``_guard_frozen_dispatch_ceiling``), so this one rule is also
+        #: "stage 07 closes only once every sealed phase is imported".
+        raise TrackerValidationError(
+            "stage 07 closes only once the dispatch ceiling is frozen "
+            "(freeze_dispatch_ceiling), which needs every sealed phase "
+            "imported")
     if after == _ABSENT_CELL:
         if (_stage_state(current, "06") != "complete"
                 and _stage_state(proposed, "06") == "complete"):
@@ -2764,14 +2888,17 @@ def _guard_master_reviewers(run_dir: Path, current: dict,
     work cannot reintroduce one: a new result needs a task ``Owner`` cell that
     agrees with it, and the validator refuses a reviewer there.
     """
-    before = {row["id"]: row["assignments"] for row in current["gates"]}
+    #: Keyed on the type too: a phase gate turned master keeps its cell and
+    #: is still a new set of master reviewers.
+    before = {row["id"]: (row["type"], row["assignments"])
+              for row in current["gates"]}
     changed = [row for row in proposed["gates"]
                if row["type"] == "master" and row["assignments"] != "-"
-               and row["assignments"] != before.get(row["id"])]
+               and (row["type"], row["assignments"]) != before.get(row["id"])]
     if not changed:
         return
     diagnostics: list = []
-    owners = {result["owner"]
+    owners = {_person(result["owner"])
               for _path, result in _result_candidates(run_dir, diagnostics)}
     if diagnostics:
         raise TrackerValidationError(
@@ -2779,12 +2906,33 @@ def _guard_master_reviewers(run_dir: Path, current: dict,
             f"worker result: {diagnostics[0]}")
     for row in changed:
         conflicted = [value for value in _csv(row["assignments"])
-                      if value in owners]
+                      if _person(value) in owners]
         if conflicted:
             raise TrackerValidationError(
                 f"master reviewer {conflicted[0]!r} owned a published attempt "
                 "in this run; a released or superseded implementer is still "
                 "the implementer of that code")
+
+
+def _guard_implementers(current: dict, proposed: dict) -> None:
+    """``implementers`` only grows, and holds every Owner and Fixer written.
+
+    An ``Owner`` cell is overwritten by the next attempt and a fix round row
+    can be dropped, and a fixer publishes no result, so without this list an
+    implementer is forgotten by a single transition and cleared to review
+    the code they wrote. A transition that writes an owner or a fixer adds it
+    here in the same step, and no transition removes one.
+    """
+    required = (set(_csv(current["run"]["implementers"]))
+                | {row["owner"] for row in proposed["tasks"]}
+                | {row["fixer"] for row in proposed["fix_rounds"]}) - {"-"}
+    missing = sorted(required - set(_csv(proposed["run"]["implementers"])))
+    if missing:
+        raise TrackerValidationError(
+            f"implementer {missing[0]!r} is not in ## Run's implementers "
+            f"{proposed['run']['implementers']!r}; every Owner and Fixer is "
+            "recorded there by the transition that writes it, and never "
+            "removed")
 
 
 def _guard_frozen_intent(current: dict, proposed: dict) -> None:
@@ -3025,6 +3173,7 @@ def locked_tracker_update(run_dir: Path, *, transition_id: str, mutate,
         _guard_frozen_dispatch_ceiling(current, reparsed)
         _guard_phase_rows(current, reparsed)
         _guard_frozen_phase_set(current, reparsed)
+        _guard_implementers(current, reparsed)
         _guard_master_reviewers(run_dir, current, reparsed)
         _guard_review_class(current, reparsed)
         _replace_tracker(run_dir, canonical, transition_id)
@@ -3487,6 +3636,9 @@ def initialize_run(run_dir: Path, *, run_id: str, base_commit: str,
             "decisions": f"{artifacts}/decisions.md",
             "findings": f"{artifacts}/findings.md",
             "completeness_proposals": f"{artifacts}/completeness-proposals.md",
+            #: Every Owner and Fixer this run has ever named, append-only
+            #: (``_guard_implementers``).
+            "implementers": "-",
             #: Zero durable transitions so far, and the count is exact rather
             #: than decorative: ``locked_tracker_update`` derives the next
             #: revision by adding to what it reads, so a run born at 1 claims a
@@ -13509,8 +13661,10 @@ EVIDENCE_PURPOSES = ("task-test", "task-integration", "phase")
 #: P06: the master gate's whole-branch review and stage 12's final run.
 EVIDENCE_PURPOSES += ("branch-review", "final")
 
-#: The two things a suite can be run ABOUT. The template says
-#: ``<task_or_phase>/<stable-id>`` and a template that states a rule the codec
+#: The things a suite can be run ABOUT: a task, a phase, or -- for P06's
+#: ``branch-review`` and ``final`` records -- a gate, whose stable id is its
+#: ``## Gates`` id (``gate/gate-master``). The template says
+#: ``<task_phase_or_gate>/<stable-id>`` and a template that states a rule the codec
 #: does not check is a claim nobody enforces, so the kinds are written down here
 #: and screened. They are deliberately NOT cross-checked against ``purpose``:
 #: the mapping is derivable for the three purposes this phase ships
@@ -13519,7 +13673,7 @@ EVIDENCE_PURPOSES += ("branch-review", "final")
 #: ``final``, so a rule written here would be one P05 and P06 have to remember
 #: to extend in a second place -- and a rule that is silently wrong for the
 #: purposes added after it is worse than no rule.
-EVIDENCE_SUBJECT_KINDS = ("task", "phase")
+EVIDENCE_SUBJECT_KINDS = ("task", "phase", "gate")
 
 #: ``outcome`` HAS EXACTLY ONE LEGAL VALUE. A record that is not a PASS is not
 #: evidence, and is never written; the field exists so that a reader never has
@@ -14842,8 +14996,14 @@ def close_phase_set(run_dir, *, phase_ids) -> dict:
     seal = ",".join(phase_ids)
     tracker = validate_run(run_dir)
     if tracker["run"]["phase_set"] != _ABSENT_CELL:
-        if tracker["run"]["phase_set"] == seal:
+        if (tracker["run"]["phase_set"] == seal
+                and _stage_state(tracker, "06") == "complete"):
             return tracker
+        if tracker["run"]["phase_set"] == seal:
+            raise TrackerValidationError(
+                f"the phase set is sealed as {seal!r} but stage 06 is "
+                f"{_stage_state(tracker, '06')!r}, not complete; a seal beside "
+                "an open stage 06 is not a close this call can report")
         raise TrackerValidationError(
             f"the phase set is already sealed as "
             f"{tracker['run']['phase_set']!r}; {seal!r} would be the run "
@@ -15127,6 +15287,7 @@ def reserve_task(run_dir, *, task_id: str, owner: str, attempt: int) -> dict:
             _key("Attempt"): token,
             _key("Checkpoints"): _append_history(row["checkpoints"], checkpoint),
         })
+        _record_implementer(tracker, owner)
         return _replace_task(tracker, updated)
 
     return locked_tracker_update(
@@ -15739,6 +15900,7 @@ def resume_task(run_dir, *, task_id: str, prior_attempt: int, new_owner: str,
             _key("Attempt"): token,
             _key("Checkpoints"): _append_history(row["checkpoints"], checkpoint),
         })
+        _record_implementer(tracker, new_owner)
         return _replace_task(tracker, updated)
 
     return locked_tracker_update(
@@ -15759,9 +15921,7 @@ def resume_task(run_dir, *, task_id: str, prior_attempt: int, new_owner: str,
 # `ALLOWED_IMPORTS` most exists to withhold, and the master plan's quorum ruled
 # the shape that replaces them: THE MODULE EMITS THE ARGV, THE CONTROLLER RUNS
 # IT, THE MODULE VALIDATES THE TRANSCRIPT. That is not a new pattern here --
-# P06's `final_suite_commands` / `record_final_verification` already gate the
-# terminal transition that way, and `resolve_evidence` already does it for test
-# results. The skill's whole verification story rests on attested external
+# `resolve_evidence` already does it for test results. The skill's whole verification story rests on attested external
 # execution; independence is bought by a NON-CLAIMANT re-running, never by this
 # module executing.
 #

@@ -19,6 +19,10 @@ it does not belong in this file.
 - `Status` is always `Frozen`. No disposition, whether `deferred`,
   `out-of-scope`, `declined` or `closed`.
 - `Classification` copies the critic's word for word.
+- The file is read strictly. A heading or status line that is not exactly
+  the shape below, a fence other than a column-0 backtick fence, an unclosed
+  fence, a multi-line HTML comment, or a section with no status line stops
+  the run instead of being skipped.
 - Every ID appears in the terminal report. `next_action` becomes
   `complete-with-proposals` only after every other item is finished, including
   any open fix round.

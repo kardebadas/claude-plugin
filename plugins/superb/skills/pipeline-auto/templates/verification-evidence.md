@@ -11,7 +11,7 @@ Fill nothing in here; hand the controller the values.
 | --- | --- |
 | purpose | <task-test_task-integration_phase_branch-review_or_final> |
 | run_id | <run_id> |
-| subject | <task_or_phase>/<stable-id> |
+| subject | <task_phase_or_gate>/<stable-id> |
 | attempt | <attempt-NNN_or_N/A> |
 | code_state | <full_tested_commit> |
 | outcome | PASS |
@@ -34,8 +34,9 @@ needs — P04 ships `task-test`, `task-integration` and `phase`, and P06 adds
 `branch-review` and `final` for the master gate and stage 12 — because a
 purpose nobody declared is a record nobody validates.
 
-`subject` is `<kind>/<stable-id>` and the kind is `task` or `phase`. It is what
-a later phase joins this record to a task row or a phase row on, so a subject
+`subject` is `<kind>/<stable-id>` and the kind is `task`, `phase` or `gate`.
+`branch-review` and `final` records name the master gate, `gate/<gate-id>`. It
+is what a later phase joins this record to a task, phase or gate row on, so a subject
 with no kind, or with a kind nothing registers, files the record where nothing
 will look for it.
 

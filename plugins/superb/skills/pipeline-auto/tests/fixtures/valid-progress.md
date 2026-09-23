@@ -21,6 +21,7 @@
 | decisions | docs/superpowers/runs/2026-09-14-pipeline-auto/decisions.md |
 | findings | docs/superpowers/runs/2026-09-14-pipeline-auto/findings.md |
 | completeness_proposals | docs/superpowers/runs/2026-09-14-pipeline-auto/completeness-proposals.md |
+| implementers | fixer-0,fixer-1,impl-1,impl-2,impl-3,impl-4 |
 | revision | 12 |
 | last_transition | ratchet-P02-accumulated-surface |
 

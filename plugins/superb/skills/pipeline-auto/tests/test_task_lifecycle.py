@@ -5671,7 +5671,7 @@ class EvidenceRoundTripSweepTests(unittest.TestCase):
         `evidence_record`, both written here. A mutation in the module moves
         exactly one side.
         """
-        identifiers = {"task": "T1", "phase": "P04"}
+        identifiers = {"task": "T1", "phase": "P04", "gate": "gate-master"}
         for purpose, kind, attempt, commands, inputs in itertools.product(
                 state.EVIDENCE_PURPOSES, state.EVIDENCE_SUBJECT_KINDS,
                 SWEEP_ATTEMPTS, SWEEP_COMMANDS, SWEEP_INPUTS):
@@ -7214,7 +7214,8 @@ def make_repo(root) -> Path:
     return repo
 
 
-def make_run(root, tasks_body: str, *, worker_limit: int = 4, import_plan: bool = True):
+def make_run(root, tasks_body: str, *, worker_limit: int = 4, import_plan: bool = True,
+             phase_set=None):
     """Return (repo, run_dir, phase_plan).
 
     `initialize_run` is P02's and takes no artifact-reference arguments: it
@@ -7232,6 +7233,10 @@ def make_run(root, tasks_body: str, *, worker_limit: int = 4, import_plan: bool 
         target_branch="target", worker_limit=worker_limit, repo_root=str(repo),
     )
     if import_plan:
+        #: A phase row is born only while stage 07 is active, after stage 06
+        #: sealed its id, so the fixture walks there first.
+        seal_phase_set(run_dir, phase_set or (
+            state.parse_plan_metadata(plan)["phase"]["id"],))
         state.import_phase_plan(run_dir, phase_plan=plan)
     return repo, run_dir, plan
 
@@ -7288,6 +7293,9 @@ def task_row(tracker: dict, task_id: str) -> dict:
 def set_task_state(run_dir, task_id: str, transition: str, **fields) -> None:
     def mutate(tracker: dict) -> dict:
         task_row(tracker, task_id).update(fields)
+        if fields.get("owner", "-") != "-":
+            #: A transition writing an Owner records it, as the writers do.
+            state._record_implementer(tracker, fields["owner"])
         return tracker
 
     state.locked_tracker_update(
@@ -8128,6 +8136,7 @@ class ImportPhasePlanTests(TempDirTestCase):
         state.initialize_run(
             run_dir, run_id="run-1", base_commit=git(repo, "rev-parse", "HEAD"),
             target_branch="target", worker_limit=6, repo_root=str(repo))
+        seal_phase_set(run_dir)
         state.import_phase_plan(run_dir, phase_plan=plan)
         phase = state.validate_run(run_dir)["phases"][0]
         self.assertEqual(phase["review_class"], "final-only")
@@ -8144,7 +8153,8 @@ class ImportPhasePlanTests(TempDirTestCase):
                          plan.resolve())
 
     def test_a_second_phase_appends_and_stays_index_aligned(self):
-        repo, run_dir, plan = make_run(self.tmp, three_disjoint_tasks())
+        repo, run_dir, plan = make_run(self.tmp, three_disjoint_tasks(),
+                                       phase_set=("P04", "P05"))
         second = write_phase_plan(
             run_dir, task_block("U1", write_scope="file:src/u.py"),
             header=phase_header(phase_id="P05", deps="P04"), name="phase-05.md")
@@ -12773,6 +12783,7 @@ def make_run_in(repo, relative: str, *, worker_limit: int = 6,
         target_branch="target", worker_limit=worker_limit,
         repo_root=repo_root if repo_root is not None else str(repo))
     if import_plan:
+        seal_phase_set(run_dir, (state.parse_plan_metadata(plan)["phase"]["id"],))
         state.import_phase_plan(run_dir, phase_plan=plan)
     return run_dir
 
@@ -18902,6 +18913,7 @@ class ReconcileIntegrationTests(ReconcileTestCase):
                 result=f"agent-output/T2/attempt-001.md#sha256={FAKE_DIGEST}",
                 verification=f"evidence/T2.md#sha256={OTHER_DIGEST}",
                 artifacts="docs/out.md", integration=state._INTEGRATION_NA)
+            state._record_implementer(tracker, "impl-2")
             return tracker
 
         state.locked_tracker_update(
@@ -19097,15 +19109,8 @@ RATCHET_TO = dict(review_class="required", class_source="ratchet")
 class ReviewClassRatchetTests(TempDirTestCase):
     """Who may move `Review Class`, and to what."""
 
-    def run_at(self, review_class: str):
-        repo = make_repo(self.tmp)
-        run_dir = repo / "docs" / "superpowers" / "runs" / "run-1"
-        run_dir.mkdir(parents=True)
-        plan = write_phase_plan(run_dir, three_disjoint_tasks(),
-                                header=phase_header(review_class=review_class))
-        state.initialize_run(
-            run_dir, run_id="run-1", base_commit=git(repo, "rev-parse", "HEAD"),
-            target_branch="target", worker_limit=6, repo_root=str(repo))
+    def run_at(self, review_class: str, phase_set=("P04",)):
+        run_dir, plan = self.raw_run(review_class, phase_set)
         state.import_phase_plan(run_dir, phase_plan=plan)
         return run_dir, plan
 
@@ -19312,7 +19317,8 @@ class ReviewClassRatchetTests(TempDirTestCase):
         state.locked_tracker_update(run_dir, transition_id="test-raw-phase",
                                     mutate=mutate)
 
-    def raw_run(self, review_class: str):
+    def raw_run(self, review_class: str, phase_set=("P04",)):
+        """Initialised and sealed, with stage 07 active and nothing imported."""
         repo = make_repo(self.tmp)
         run_dir = repo / "docs" / "superpowers" / "runs" / "run-1"
         run_dir.mkdir(parents=True)
@@ -19321,6 +19327,7 @@ class ReviewClassRatchetTests(TempDirTestCase):
         state.initialize_run(
             run_dir, run_id="run-1", base_commit=git(repo, "rev-parse", "HEAD"),
             target_branch="target", worker_limit=6, repo_root=str(repo))
+        seal_phase_set(run_dir, phase_set)
         return run_dir, plan
 
     def test_a_phase_row_written_around_import_must_match_its_plan(self):
@@ -19410,7 +19417,7 @@ class ReviewClassRatchetTests(TempDirTestCase):
     def test_existing_phase_rows_keep_their_order(self):
         """`_phase_plan_path` resolves a phase by its INDEX. Swapping two rows
         and leaving the paths re-points each phase at the other's plan."""
-        run_dir, _plan = self.run_at("required")
+        run_dir, _plan = self.run_at("required", ("P04", "P05"))
         second = write_phase_plan(
             run_dir, task_block("U1", write_scope="file:src/u.py"),
             header=phase_header(phase_id="P05", deps="P04",
@@ -19493,7 +19500,6 @@ class DispatchCeilingFieldTests(TempDirTestCase):
         """Four tasks: 7 x 4 + 3 x 10 + 5 = 63; ceil(1.25 x 63) = ceil(78.75)
         = 79, which a floor would make 78; 2 x 63 = 126."""
         _repo, run_dir, _plan = make_run(self.tmp, n_disjoint_tasks(4))
-        seal_phase_set(run_dir)
         run = state.freeze_dispatch_ceiling(run_dir)["run"]
         self.assertEqual([run[key] for key in DISPATCH_FIELDS],
                          ["63", "79", "126"])
@@ -19509,8 +19515,8 @@ class DispatchCeilingFieldTests(TempDirTestCase):
         state.initialize_run(
             run_dir, run_id="run-1", base_commit=git(repo, "rev-parse", "HEAD"),
             target_branch="target", worker_limit=6, repo_root=str(repo))
-        state.import_phase_plan(run_dir, phase_plan=plan)
         seal_phase_set(run_dir)
+        state.import_phase_plan(run_dir, phase_plan=plan)
         run = state.freeze_dispatch_ceiling(run_dir)["run"]
         self.assertEqual(run["dispatch_projection"], "63")
 
@@ -19524,7 +19530,6 @@ class DispatchCeilingFieldTests(TempDirTestCase):
 
     def test_a_frozen_ceiling_never_moves(self):
         _repo, run_dir, _plan = make_run(self.tmp, n_disjoint_tasks(4))
-        seal_phase_set(run_dir)
         state.freeze_dispatch_ceiling(run_dir)
         before = (run_dir / "progress.md").read_bytes()
         for fields in ({"dispatch_projection": "70",
@@ -19543,7 +19548,6 @@ class DispatchCeilingFieldTests(TempDirTestCase):
         must be 7 x total_tasks + 3 x BUDGET_PER_RUN + 5 over the tracker it
         lands in, or a raw transition picks its own budget and freezes it."""
         _repo, run_dir, _plan = make_run(self.tmp, n_disjoint_tasks(4))
-        seal_phase_set(run_dir)
         for name, fields in {
                 "forged": {"dispatch_projection": "100000",
                            "dispatch_soft_ceiling": "125000",
@@ -19563,7 +19567,6 @@ class DispatchCeilingFieldTests(TempDirTestCase):
 
     def test_freezing_twice_is_inert(self):
         _repo, run_dir, _plan = make_run(self.tmp, n_disjoint_tasks(4))
-        seal_phase_set(run_dir)
         state.freeze_dispatch_ceiling(run_dir)
         bump(run_dir)
         before = (run_dir / "progress.md").read_bytes()
@@ -19572,7 +19575,6 @@ class DispatchCeilingFieldTests(TempDirTestCase):
 
     def test_the_three_fields_are_frozen_together_and_consistent(self):
         _repo, run_dir, _plan = make_run(self.tmp, n_disjoint_tasks(4))
-        seal_phase_set(run_dir)
         cases = {
             "one of three": {"dispatch_projection": "63"},
             "soft floored": {"dispatch_projection": "63",
@@ -19788,7 +19790,13 @@ class DispatchCeilingNeedsTheSealTests(TempDirTestCase):
     its row -- and the first write of the ceiling now requires it."""
 
     def test_an_unsealed_run_cannot_freeze_its_ceiling(self):
+        """No transition reaches imported rows without a seal any more, so
+        the unsealed run is written by hand."""
         _repo, run_dir, _plan = make_run(self.tmp, n_disjoint_tasks(4))
+        tracker = state.validate_run(run_dir)
+        tracker["run"]["phase_set"] = "-"
+        (run_dir / "progress.md").write_text(state.render_tracker(tracker),
+                                             encoding="utf-8")
         before = (run_dir / "progress.md").read_bytes()
         with self.assertRaises(state.TrackerValidationError) as caught:
             state.freeze_dispatch_ceiling(run_dir)
@@ -19796,8 +19804,8 @@ class DispatchCeilingNeedsTheSealTests(TempDirTestCase):
         self.assertEqual((run_dir / "progress.md").read_bytes(), before)
 
     def test_a_sealed_phase_not_yet_imported_holds_the_freeze(self):
-        _repo, run_dir, _plan = make_run(self.tmp, n_disjoint_tasks(4))
-        seal_phase_set(run_dir, ("P04", "P05"))
+        _repo, run_dir, _plan = make_run(self.tmp, n_disjoint_tasks(4),
+                                         phase_set=("P04", "P05"))
         with self.assertRaises(state.TrackerValidationError) as caught:
             state.freeze_dispatch_ceiling(run_dir)
         self.assertIn("P05", str(caught.exception))
@@ -20051,21 +20059,25 @@ FROZEN_PROPOSAL = """
 """
 
 
+def finished_tracker(root) -> dict:
+    """Every stage complete and every item finished, rooted at ``root``."""
+    tracker = gate_ready_tracker()
+    for row in tracker["stages"]:
+        row.update(stage_state="complete", next_action="-")
+    next(row for row in tracker["gates"] if row["type"] == "master").update(
+        state="accepted", base=tracker["run"]["base_commit"],
+        head=MASTER_HEAD, assignments="reviewer-a,reviewer-b",
+        reports="scratch/master-a.md,scratch/master-b.md",
+        verification="scratch/master-tests.txt")
+    tracker["run"]["repo_root"] = str(root)
+    state.parse_tracker(state.render_tracker(tracker))
+    return tracker
+
+
 class CompleteWithProposalsTests(TempDirTestCase):
 
     def finished(self) -> dict:
-        """Every stage complete and every item finished, rooted at tmp."""
-        tracker = gate_ready_tracker()
-        for row in tracker["stages"]:
-            row.update(stage_state="complete", next_action="-")
-        next(row for row in tracker["gates"] if row["type"] == "master").update(
-            state="accepted", base=tracker["run"]["base_commit"],
-            head=MASTER_HEAD, assignments="reviewer-a,reviewer-b",
-            reports="scratch/master-a.md,scratch/master-b.md",
-            verification="scratch/master-tests.txt")
-        tracker["run"]["repo_root"] = str(self.tmp)
-        state.parse_tracker(state.render_tracker(tracker))
-        return tracker
+        return finished_tracker(self.tmp)
 
     def write_proposals(self, tracker: dict, text: str) -> Path:
         path = self.tmp / tracker["run"]["completeness_proposals"]
@@ -20142,6 +20154,347 @@ class CompleteWithProposalsTests(TempDirTestCase):
         path.mkdir(parents=True)
         with self.assertRaises(state.TrackerError):
             state.derive_next_action(tracker)
+
+
+
+# --------------------------------------------------------------------------
+# P06 fix round -- the seal, the phase birth and the terminal action, held in
+# `locked_tracker_update` and in `derive_next_action` rather than in writers.
+#
+# Spec lines 622-624: "phase creation is a stage-06 transition, and after
+# stage 06 closes the phase set is immutable. The state machine enforces it."
+# --------------------------------------------------------------------------
+
+def move_stages(run_dir, active: str, action: str = "go",
+                transition: str = "test-move-stages") -> dict:
+    """One raw transition: stages before ``active`` complete, it active."""
+    def mutate(tracker: dict) -> dict:
+        for row in tracker["stages"]:
+            if row["stage"] < active:
+                row.update(stage_state="complete", next_action="-")
+            elif row["stage"] == active:
+                row.update(stage_state="active", next_action=action)
+            else:
+                row.update(stage_state="pending", next_action="-")
+        return tracker
+
+    return state.locked_tracker_update(run_dir, transition_id=transition,
+                                       mutate=mutate)
+
+
+def seal_raw(phase_set: str = "P04"):
+    def mutate(tracker: dict) -> dict:
+        tracker["run"]["phase_set"] = phase_set
+        return tracker
+
+    return mutate
+
+
+def legacy_run_at_stage_09(root):
+    """A hand-written tracker past stage 06 with no seal: no transition could
+    have produced it, but a file on disk is not a transition."""
+    _repo, run_dir, plan = make_run(root, three_disjoint_tasks(),
+                                    import_plan=False)
+    tracker = state.validate_run(run_dir)
+    for row in tracker["stages"]:
+        if row["stage"] < "09":
+            row.update(stage_state="complete", next_action="-")
+        elif row["stage"] == "09":
+            row.update(stage_state="active", next_action="green")
+    (run_dir / "progress.md").write_text(state.render_tracker(tracker),
+                                         encoding="utf-8")
+    return run_dir, plan
+
+
+class SealAndPhaseBirthTests(TempDirTestCase):
+
+    def refuse(self, run_dir, call, expected: str) -> None:
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            call()
+        self.assertIn(expected, str(caught.exception))
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def raw(self, run_dir, mutate, transition: str = "test-raw"):
+        return lambda: state.locked_tracker_update(
+            run_dir, transition_id=transition, mutate=mutate)
+
+    def test_a_raw_seal_is_written_only_by_the_close_of_stage_06(self):
+        """Probe M1: a raw seal at stage 01, before any master plan, froze
+        whatever list the transition chose -- and it then let the ceiling be
+        frozen at stage 01. Also refused: a seal beside an active stage 06
+        that stays open, and a late seal on a hand-written stage-09 run."""
+        _repo, run_dir, _plan = make_run(self.tmp, three_disjoint_tasks(),
+                                         import_plan=False)
+        self.refuse(run_dir, self.raw(run_dir, seal_raw()), "stage 06")
+        open_stage_06(run_dir)
+        self.refuse(run_dir, self.raw(run_dir, seal_raw()), "stage 06")
+        legacy, _plan = legacy_run_at_stage_09(self.tmp / "legacy")
+        self.refuse(legacy, self.raw(legacy, seal_raw()), "stage 06")
+
+    def test_closing_again_while_stage_06_is_active_is_not_inert(self):
+        """Probe p4: `close_phase_set` answered "already sealed" while stage
+        06 was still active, reporting a close it never made."""
+        _repo, run_dir, _plan = make_run(self.tmp, three_disjoint_tasks(),
+                                         import_plan=False)
+        seal_phase_set(run_dir, ("P04",))
+        move_stages(run_dir, "06", "write-master-plan")
+        self.refuse(run_dir,
+                    lambda: state.close_phase_set(run_dir, phase_ids=["P04"]),
+                    "stage 06")
+
+    def test_a_phase_is_born_only_while_stage_07_is_active(self):
+        """Probe I1: a spare sealed id was imported at stage 11, and a
+        hand-written run with no seal imported at stage 09."""
+        _repo, run_dir, plan = make_run(self.tmp, three_disjoint_tasks(),
+                                        import_plan=False)
+        seal_phase_set(run_dir, ("P04", "P05"))
+        state.import_phase_plan(run_dir, phase_plan=plan)
+        move_stages(run_dir, "06", "write-master-plan")
+        extra = phase_05_plan(run_dir)
+        self.refuse(run_dir,
+                    lambda: state.import_phase_plan(run_dir, phase_plan=extra),
+                    "stage 07")
+        legacy, plan = legacy_run_at_stage_09(self.tmp / "legacy")
+        self.refuse(legacy,
+                    lambda: state.import_phase_plan(legacy, phase_plan=plan),
+                    "stage 07")
+
+    def test_stage_07_completes_only_over_a_frozen_ceiling(self):
+        """And so only once every sealed phase has its row: the freeze itself
+        requires that (`DispatchCeilingNeedsTheSealTests.
+        test_a_sealed_phase_not_yet_imported_holds_the_freeze`), so the close
+        of stage 07 adds no second check of the rows."""
+        _repo, run_dir, plan = make_run(self.tmp, three_disjoint_tasks(),
+                                        import_plan=False)
+        seal_phase_set(run_dir, ("P04",))
+        state.import_phase_plan(run_dir, phase_plan=plan)
+        self.refuse(run_dir, lambda: move_stages(run_dir, "08"), "ceiling")
+        state.freeze_dispatch_ceiling(run_dir)
+        self.assertEqual(state._stage_state(move_stages(run_dir, "08"), "07"),
+                         "complete")
+
+
+class TerminalActionNeedsEveryItemTests(TempDirTestCase):
+    """C1: `complete` was derived over a run with work unfinished."""
+
+    def test_an_unsealed_or_partly_imported_run_or_one_without_a_master_gate_is_not_complete(self):
+        cases = {
+            "unsealed": lambda tracker: tracker["run"].update(phase_set="-"),
+            "sealed phase never imported": lambda tracker: tracker[
+                "run"].update(phase_set="P01,P02,P03"),
+            "no master gate": lambda tracker: tracker.update(gates=[
+                row for row in tracker["gates"] if row["type"] != "master"]),
+        }
+        for name, damage in cases.items():
+            with self.subTest(case=name):
+                tracker = finished_tracker(self.tmp)
+                damage(tracker)
+                state.parse_tracker(state.render_tracker(tracker))
+                with self.assertRaises(state.TrackerValidationError):
+                    state.derive_next_action(tracker)
+
+    def test_a_halted_escalation_awaits_the_escalation_batch(self):
+        tracker = finished_tracker(self.tmp)
+        tracker["escalations"][0].update(state="halted", resolution="-")
+        state.parse_tracker(state.render_tracker(tracker))
+        self.assertEqual(state.derive_next_action(tracker),
+                         "await-escalation-batch")
+
+    def test_a_count_above_the_hard_ceiling_awaits_the_dispatch_budget(self):
+        tracker = finished_tracker(self.tmp)
+        hard = int(tracker["run"]["dispatch_hard_ceiling"])
+        tracker["run"]["agent_dispatch_count"] = str(hard)
+        self.assertEqual(state.derive_next_action(tracker), "complete")
+        tracker["run"]["agent_dispatch_count"] = str(hard + 1)
+        self.assertEqual(state.derive_next_action(tracker),
+                         "await-dispatch-budget")
+
+
+
+class MasterReviewerIndependenceTests(TempDirTestCase):
+    """I2, I3, M4 and M5: the master reviewers, held for a raw write."""
+
+    def refuse(self, run_dir, call, expected: str) -> None:
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            call()
+        self.assertIn(expected, str(caught.exception))
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def raw(self, run_dir, mutate, transition: str = "test-raw"):
+        return lambda: state.locked_tracker_update(
+            run_dir, transition_id=transition, mutate=mutate)
+
+    def test_a_gate_turned_master_is_checked_against_the_results_on_disk(self):
+        """Probe I2: the scan keyed on the Assignments cell alone, so a phase
+        gate assigned to a released implementer became the master gate by a
+        change of type and was never scanned."""
+        tracker = gate_ready_tracker()
+        tracker["gates"] = [row for row in tracker["gates"]
+                            if row["type"] != "master"]
+        run_dir = gate_run(self.tmp, tracker)
+        publish_owner(run_dir, "impl-7")
+
+        def add(tracker):
+            row = blank_row("gates")
+            row.update(id="gate-x", type="phase", phase="P02",
+                       state="in_progress",
+                       base=tracker["run"]["base_commit"], head=MASTER_HEAD,
+                       assignments="impl-7,reviewer-b",
+                       findings=tracker["run"]["findings"])
+            tracker["gates"].append(row)
+            return tracker
+
+        def flip(tracker):
+            next(row for row in tracker["gates"]
+                 if row["id"] == "gate-x").update(type="master", phase="-")
+            return tracker
+
+        self.raw(run_dir, add, "test-add")()
+        self.refuse(run_dir, self.raw(run_dir, flip, "test-flip"), "impl-7")
+
+    def test_an_implementer_is_never_forgotten(self):
+        """Probes I3 (f1/f2, d1/d2): overwriting an `Owner` cell, or deleting
+        a finished fix round, cleared the old implementer to review."""
+        run_dir = gate_run(self.tmp)
+
+        def swap(record: bool):
+            def mutate(tracker):
+                tracker["tasks"][0]["owner"] = "impl-new"
+                if record:
+                    tracker["run"]["implementers"] = ",".join(sorted(
+                        {*state._csv(tracker["run"]["implementers"]),
+                         "impl-new"}))
+                return tracker
+            return mutate
+
+        def forget(tracker):
+            #: impl-2 owns no row of this tracker any more; only the list
+            #: remembers it.
+            tracker["run"]["implementers"] = ",".join(
+                value for value in state._csv(tracker["run"]["implementers"])
+                if value != "impl-2")
+            return tracker
+
+        def new_fixer(tracker):
+            tracker["fix_rounds"].append({
+                "scope": "gate-master", "round": "1", "state": "fixing",
+                "fixer": "fixer-9", "findings": "F-009", "commits": "-",
+                "verification": "-", "re_review": "-", "remaining": "-"})
+            return tracker
+
+        def drop_fix_rounds(tracker):
+            tracker["fix_rounds"] = []
+            return tracker
+
+        self.refuse(run_dir, self.raw(run_dir, swap(False)), "impl-new")
+        self.refuse(run_dir, self.raw(run_dir, forget), "impl-2")
+        self.refuse(run_dir, self.raw(run_dir, new_fixer), "fixer-9")
+        self.raw(run_dir, swap(True), "test-swap")()
+        self.raw(run_dir, drop_fix_rounds, "test-drop")()
+        for former in ("impl-1", "fixer-0", "impl-2"):
+            with self.subTest(former=former):
+                self.refuse(run_dir, lambda former=former:
+                            state.open_master_gate(run_dir, reviewers={
+                                "A": former, "B": "reviewer-b"}), former)
+
+    def test_a_reviewer_id_is_compared_as_a_person(self):
+        """Probe M5: `IMPL-1` and `impl-1.` were not `impl-1`."""
+        run_dir = gate_run(self.tmp)
+        publish_owner(run_dir, "IMPL-7")
+        for reviewers, expected in (
+                ({"A": "IMPL-1", "B": "reviewer-b"}, "IMPL-1"),
+                ({"A": "reviewer-a", "B": "impl-1."}, "impl-1."),
+                ({"A": "impl-7", "B": "reviewer-b"}, "impl-7"),
+                ({"A": "reviewer-a", "B": "REVIEWER-A"}, "two")):
+            with self.subTest(reviewers=reviewers):
+                self.refuse(run_dir, lambda reviewers=reviewers:
+                            state.open_master_gate(run_dir,
+                                                   reviewers=reviewers),
+                            expected)
+
+    def test_a_master_gate_record_has_a_gate_subject(self):
+        """Difference 5: `final` and `branch-review` evidence is about the
+        master gate, and needed a subject kind for it."""
+        record = evidence_record(purpose="final", subject="gate/gate-master")
+        self.assertEqual(state.parse_verification_evidence(
+            state.render_verification_evidence(record))["subject"],
+            "gate/gate-master")
+
+    def test_implementers_is_a_sorted_list_of_distinct_tokens(self):
+        run_dir = gate_run(self.tmp)
+        for value in ("impl-2,impl-1,fixer-0,fixer-1,impl-3,impl-4",
+                      "fixer-0,fixer-1,impl-1,impl-1,impl-2,impl-3,impl-4"):
+            with self.subTest(value=value):
+                def mutate(tracker, value=value):
+                    tracker["run"]["implementers"] = value
+                    return tracker
+
+                self.refuse(run_dir, self.raw(run_dir, mutate), "sorted")
+
+    def test_an_opened_master_gate_starts_at_base_commit(self):
+        """Probe M4: a raw open chose its own base."""
+        run_dir = gate_run(self.tmp)
+
+        def open_raw(tracker):
+            next(row for row in tracker["gates"]
+                 if row["type"] == "master").update(
+                state="in_progress", base="a" * 40, head=MASTER_HEAD,
+                assignments="reviewer-a,reviewer-b")
+            return tracker
+
+        self.refuse(run_dir, self.raw(run_dir, open_raw), "base_commit")
+
+
+
+class ProposalsReaderFailsClosedTests(TempDirTestCase):
+    """M2: a proposal the reader cannot read exactly is refused, never
+    skipped -- a skipped proposal is `complete` over a frozen item."""
+
+    VARIANTS = {
+        "lower-case frozen": FROZEN_PROPOSAL.replace("Frozen", "frozen"),
+        "### CP-1": FROZEN_PROPOSAL.replace("## CP-1", "### CP-1"),
+        "## cp-1": FROZEN_PROPOSAL.replace("## CP-1", "## cp-1"),
+        "indented heading": FROZEN_PROPOSAL.replace("## CP-1", " ## CP-1"),
+        "##CP-1": FROZEN_PROPOSAL.replace("## CP-1", "##CP-1"),
+        "## CP-01": FROZEN_PROPOSAL.replace("## CP-1", "## CP-01"),
+        "* bullet": FROZEN_PROPOSAL.replace("- **Status:**", "* **Status:**"),
+        "**Status**:": FROZEN_PROPOSAL.replace("- **Status:** Frozen",
+                                               "- **Status**: Frozen"),
+        "plain Status:": FROZEN_PROPOSAL.replace("- **Status:** Frozen",
+                                                 "- Status: Frozen"),
+        "suffixed status": FROZEN_PROPOSAL.replace(
+            "Frozen", "Frozen (MISSING-FROM-SPEC)"),
+        "unbalanced fence": "Notes: see\n```\n" + FROZEN_PROPOSAL,
+        "~~~ fence": "~~~\n~~~\n" + FROZEN_PROPOSAL,
+        "indented fence": "   ```\n" + FROZEN_PROPOSAL,
+        "HTML comment": "<!--\n" + FROZEN_PROPOSAL + "-->\n",
+        "status outside its section": FROZEN_PROPOSAL.replace(
+            "- **Status:**", "## Notes\n- **Status:**"),
+        "section without a status": FROZEN_PROPOSAL.replace(
+            "- **Status:** Frozen\n", ""),
+        "first of two sections without a status": FROZEN_PROPOSAL.replace(
+            "- **Status:** Frozen\n", "") + FROZEN_PROPOSAL.replace(
+            "CP-1", "CP-2"),
+        "status before any section": "- **Status:** Frozen\n"
+                                     + FROZEN_PROPOSAL,
+        "heading lookalike with no status": FROZEN_PROPOSAL.replace(
+            "## CP-1", "### CP-1").replace("- **Status:** Frozen\n", ""),
+        "a second, lookalike status": FROZEN_PROPOSAL.replace(
+            "- **Status:** Frozen\n",
+            "- **Status:** Frozen\n- **Status:** Withdrawn\n"),
+    }
+
+    def test_every_near_miss_of_the_template_shape_is_refused(self):
+        for name, text in self.VARIANTS.items():
+            with self.subTest(variant=name):
+                tracker = finished_tracker(self.tmp)
+                path = self.tmp / tracker["run"]["completeness_proposals"]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+                with self.assertRaises(state.TrackerValidationError):
+                    state.derive_next_action(tracker)
 
 
 if __name__ == "__main__":

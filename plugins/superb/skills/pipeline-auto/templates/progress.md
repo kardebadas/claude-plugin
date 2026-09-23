@@ -21,6 +21,7 @@
 | decisions | docs/superpowers/runs/<run_id>/decisions.md |
 | findings | docs/superpowers/runs/<run_id>/findings.md |
 | completeness_proposals | docs/superpowers/runs/<run_id>/completeness-proposals.md |
+| implementers | - |
 | revision | 0 |
 | last_transition | initialized |
 

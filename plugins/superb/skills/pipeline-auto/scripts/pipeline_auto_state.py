@@ -2120,17 +2120,90 @@ def derive_next_action(tracker: dict) -> str:
     ``dict``, and callers mutate trackers in place between parsing and
     dispatching. A dict edited past the validator is still refused rather than
     silently reported complete.
+
+    The terminal action is ``complete``, or ``complete-with-proposals`` when
+    the run's ``completeness-proposals.md`` holds a ``Frozen`` proposal (the
+    spec: a frozen ``MISSING-FROM-SPEC`` item makes ``next_action``
+    ``complete-with-proposals``). Neither is derived while any item is
+    unfinished -- an open fix round above all -- even under an all-complete
+    stage table: that tracker disagrees with itself and is refused.
     """
     if any(row["state"] in ("queued", "asked") for row in tracker["escalations"]):
         return "await-escalation-batch"
     for row in tracker["stages"]:
         if row["stage_state"] == "active":
             return row["next_action"]
-    if all(row["stage_state"] == "complete" for row in tracker["stages"]):
-        return "complete"
-    raise TrackerValidationError(
-        "no stage is active and stages remain pending: the run has no next "
-        "action to derive and is not complete")
+    if not all(row["stage_state"] == "complete" for row in tracker["stages"]):
+        raise TrackerValidationError(
+            "no stage is active and stages remain pending: the run has no next "
+            "action to derive and is not complete")
+    unfinished = _unfinished_items(tracker)
+    if unfinished:
+        raise TrackerValidationError(
+            f"every stage reads complete but {unfinished[0]} is not finished; "
+            "a terminal action is derived only once every item is, and an "
+            "open fix round completes before any proposal is surfaced")
+    return ("complete-with-proposals" if _frozen_proposals(tracker)
+            else "complete")
+
+
+def _unfinished_items(tracker: dict) -> list:
+    """Every row that still has work in it, named for a diagnostic."""
+    items = [f"fix round {row['scope']} {row['round']}"
+             for row in tracker["fix_rounds"] if row["state"] != "complete"]
+    items += [f"task {row['id']}" for row in tracker["tasks"]
+              if row["state"] != "[x]" or row["integration"] == "held"]
+    items += [f"phase {row['id']}" for row in tracker["phases"]
+              if row["state"] != "[x]"]
+    items += [f"gate {row['id']}" for row in tracker["gates"]
+              if row["state"] != "accepted"]
+    items += [f"quorum {row['qid']}" for row in tracker["quorum"]
+              if row["state"] != "finalized"]
+    return items
+
+
+#: A proposal section's heading and its one legal status line, as
+#: ``templates/completeness-proposals.md`` writes them.
+_PROPOSAL_HEADING = "## CP-"
+_FROZEN_STATUS = "- **Status:** Frozen"
+
+
+def _frozen_proposals(tracker: dict) -> list:
+    """The ``CP-<n>`` ids ``completeness-proposals.md`` holds as ``Frozen``.
+
+    Read from the file ``## Run`` records, resolved against the recorded
+    repository root. A file that does not exist holds none. Fenced blocks are
+    skipped: the run's file starts as a copy of the template, whose example
+    section is itself a fenced ``## CP-1`` reading ``Frozen``.
+    """
+    path = _repo_dir(tracker) / tracker["run"]["completeness_proposals"]
+    if _NUL in str(path):
+        #: ``lexists`` answers False for a NUL-bearing name, and "no
+        #: proposals" is the one answer a name nothing can open may not give.
+        raise TrackerValidationError(
+            f"completeness proposals path {str(path)!r} carries a NUL byte")
+    if not os.path.lexists(path):
+        return []
+    _require_regular_file(path, "completeness proposals")
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise TrackerValidationError(
+            f"completeness proposals at {str(path)!r} cannot be read: {exc}"
+        ) from exc
+    frozen, current, fenced = [], None, False
+    for line in lines:
+        if line.startswith("```"):
+            fenced = not fenced
+        elif fenced:
+            continue
+        elif line.startswith(_PROPOSAL_HEADING):
+            current = line[len("## "):].strip()
+        elif line.startswith("## "):
+            current = None
+        elif line.strip() == _FROZEN_STATUS and current and current not in frozen:
+            frozen.append(current)
+    return frozen
 
 
 def repo_root(tracker: dict) -> str:

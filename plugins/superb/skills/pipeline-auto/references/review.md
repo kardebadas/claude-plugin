@@ -4,7 +4,7 @@ Load for the master gate, contradiction routing, a fixer dispute, the
 completeness critic, final verification, or the terminal report.
 
 **Not enforced by code:** contradiction routing, the proposals writer, the
-terminal action `complete-with-proposals`, the terminal report, and writers for
+terminal report, and writers for
 the master gate's reports, verdict, fix rounds and stage 12. `findings.md` has a
 validated grammar but no writer. These rules are yours to follow exactly. The
 completeness freeze rests on the phase-set seal (`planning.md`): no phase can
@@ -112,7 +112,11 @@ For each `MISSING-FROM-SPEC` item:
    Write the concrete ID, never `<n>`.
 2. List that ID in the terminal report.
 3. Once every other item is finished — an open fix round completes first —
-   `next_action: complete-with-proposals`.
+   `next_action: complete-with-proposals`. `derive_next_action` derives it
+   from the file: with every stage complete it returns
+   `complete-with-proposals` if a `## CP-<n>` section reads `Status: Frozen`,
+   else `complete`, and it refuses both while any fix round, task
+   (integration `held` included), phase, gate or quorum is unfinished.
 
 Never: a task, phase, fix-round finding, quorum, backlog or handover note; never
 a disposition (`deferred`, `out-of-scope`, `declined`, `closed` are all

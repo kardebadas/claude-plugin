@@ -1311,6 +1311,18 @@ class NextActionTests(unittest.TestCase):
         instead of the terminal verdict the controller stops on."""
         tracker = pas.parse_tracker(with_stages(["complete"] * 12))
         tracker["escalations"] = []
+        #: The terminal verdict also needs every item finished; the fixture's
+        #: in-flight rows are cut so only the stage table is under test.
+        tracker["tasks"] = [row for row in tracker["tasks"]
+                            if row["id"] == "P01-T01"]
+        tracker["fix_rounds"] = [row for row in tracker["fix_rounds"]
+                                 if row["state"] == "complete"]
+        tracker["quorum"] = [row for row in tracker["quorum"]
+                             if row["state"] == "finalized"]
+        for row in tracker["phases"]:
+            row["state"] = "[x]"
+        for row in tracker["gates"]:
+            row["state"] = "accepted"
         self.assertEqual(pas.derive_next_action(tracker), "complete")
 
     def test_a_hand_mutated_tracker_with_no_active_stage_still_refuses_to_report_complete(self):

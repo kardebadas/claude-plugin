@@ -228,7 +228,8 @@ for the fix loop. `MISSING-FROM-SPEC` is frozen, and the output **is**:
    `Status: Frozen`, classification verbatim.
 2. That proposal ID listed in the terminal report.
 3. Once every other item is finished — an open fix round completes first —
-   `next_action: complete-with-proposals`.
+   `next_action: complete-with-proposals`. `derive_next_action` derives it from
+   that file, and never while a fix round or other item is still open.
 
 Nothing else: no task, phase, fix-round finding, quorum, backlog or handover
 note, and no disposition — `deferred`, `out-of-scope`, `declined` and `closed`

@@ -6618,7 +6618,7 @@ class EvidenceResolutionTests(TempDirTestCase):
             "_response_record", "_plan_text", "resolve_evidence",
             "_ref_text", "_published_result_bytes",
             "_resolve_question_record", "_require_artifact_outputs",
-            "_result_candidates"})
+            "_result_candidates", "_frozen_proposals"})
         #: THE ONE CALLER THAT CATCHES THE DOOR AND DOES NOT RE-RAISE, so
         #: "does it escape the family on a NUL" is not a question it can
         #: answer. Five others catch it too and re-raise another
@@ -6653,6 +6653,11 @@ class EvidenceResolutionTests(TempDirTestCase):
                 task_id="T1"),
             "_require_artifact_outputs": lambda: state._require_artifact_outputs(
                 nul, ("docs/out.md",)),
+            #: P06's terminal-action read: the path is the recorded root plus
+            #: the `completeness_proposals` cell.
+            "_frozen_proposals": lambda: state._frozen_proposals(
+                {"run": {"repo_root": "/srv/repo",
+                         "completeness_proposals": nul}}),
         }
         self.assertEqual(set(drives) | reporters, callers)
         self.assertEqual(set(drives) & reporters, set())
@@ -20024,6 +20029,119 @@ class OpenMasterGateTests(TempDirTestCase):
     def test_the_master_gate_evidence_purposes_are_registered(self):
         self.assertEqual(state.EVIDENCE_PURPOSES[-2:],
                          ("branch-review", "final"))
+
+
+
+# --------------------------------------------------------------------------
+# P06 -- the terminal action `complete-with-proposals`.
+#
+# The spec: a MISSING-FROM-SPEC item is frozen into completeness-proposals.md
+# and "next_action becomes complete-with-proposals". SKILL.md: "Once every
+# other item is finished -- an open fix round completes first".
+# --------------------------------------------------------------------------
+
+FROZEN_PROPOSAL = """
+## CP-1
+
+- **Statement:** Export the report as CSV.
+- **Evidence:** The critic: no approved requirement asks for CSV.
+- **Traces to:** none
+- **Status:** Frozen
+- **Classification:** MISSING-FROM-SPEC
+"""
+
+
+class CompleteWithProposalsTests(TempDirTestCase):
+
+    def finished(self) -> dict:
+        """Every stage complete and every item finished, rooted at tmp."""
+        tracker = gate_ready_tracker()
+        for row in tracker["stages"]:
+            row.update(stage_state="complete", next_action="-")
+        next(row for row in tracker["gates"] if row["type"] == "master").update(
+            state="accepted", base=tracker["run"]["base_commit"],
+            head=MASTER_HEAD, assignments="reviewer-a,reviewer-b",
+            reports="scratch/master-a.md,scratch/master-b.md",
+            verification="scratch/master-tests.txt")
+        tracker["run"]["repo_root"] = str(self.tmp)
+        state.parse_tracker(state.render_tracker(tracker))
+        return tracker
+
+    def write_proposals(self, tracker: dict, text: str) -> Path:
+        path = self.tmp / tracker["run"]["completeness_proposals"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def template(self) -> str:
+        return (SKILL_DIR / "templates" / "completeness-proposals.md").read_text(
+            encoding="utf-8")
+
+    def test_a_finished_run_with_no_proposals_file_is_complete(self):
+        self.assertEqual(state.derive_next_action(self.finished()), "complete")
+
+    def test_a_frozen_proposal_makes_the_terminal_action_complete_with_proposals(self):
+        tracker = self.finished()
+        self.write_proposals(tracker, self.template() + FROZEN_PROPOSAL)
+        self.assertEqual(state.derive_next_action(tracker),
+                         "complete-with-proposals")
+
+    def test_the_templates_own_example_is_not_a_proposal(self):
+        """The run's file starts as a copy of the template, whose fenced
+        example reads `## CP-1` ... `Status: Frozen`."""
+        tracker = self.finished()
+        self.write_proposals(tracker, self.template())
+        self.assertEqual(state.derive_next_action(tracker), "complete")
+
+    def test_an_open_fix_round_wins_over_proposals(self):
+        """While the master gate's fix round is open, stage 11 is active and
+        its action is the next action, proposals or not."""
+        tracker = self.finished()
+        self.write_proposals(tracker, self.template() + FROZEN_PROPOSAL)
+        stages = {row["stage"]: row for row in tracker["stages"]}
+        stages["11"].update(stage_state="active",
+                            next_action="run-master-fix-round-1")
+        stages["12"].update(stage_state="pending")
+        tracker["fix_rounds"].append({
+            "scope": "gate-master", "round": "1", "state": "fixing",
+            "fixer": "fixer-9", "findings": "F-009", "commits": "-",
+            "verification": "-", "re_review": "-", "remaining": "-"})
+        state.parse_tracker(state.render_tracker(tracker))
+        self.assertEqual(state.derive_next_action(tracker),
+                         "run-master-fix-round-1")
+
+    def test_no_terminal_action_is_derived_over_an_unfinished_item(self):
+        """A stage table reading all-complete beside an open fix round, an
+        unfinished task or a held integration is a tracker that disagrees
+        with itself: neither terminal action may be derived from it."""
+        cases = {
+            "open fix round": lambda tracker: tracker["fix_rounds"].append({
+                "scope": "gate-master", "round": "1", "state": "fixing",
+                "fixer": "fixer-9", "findings": "F-009", "commits": "-",
+                "verification": "-", "re_review": "-", "remaining": "-"}),
+            "held integration": lambda tracker: tracker["tasks"][-1].update(
+                integration="held"),
+            "unverified phase": lambda tracker: tracker["phases"][-1].update(
+                state="[~]", verification="-"),
+            "gate not accepted": lambda tracker: tracker["gates"][-1].update(
+                state="blocked"),
+        }
+        for proposals in (False, True):
+            for name, damage in cases.items():
+                with self.subTest(case=name, proposals=proposals):
+                    tracker = self.finished()
+                    if proposals:
+                        self.write_proposals(tracker, FROZEN_PROPOSAL)
+                    damage(tracker)
+                    with self.assertRaises(state.TrackerValidationError):
+                        state.derive_next_action(tracker)
+
+    def test_a_proposals_path_that_is_not_a_file_is_refused(self):
+        tracker = self.finished()
+        path = self.tmp / tracker["run"]["completeness_proposals"]
+        path.mkdir(parents=True)
+        with self.assertRaises(state.TrackerError):
+            state.derive_next_action(tracker)
 
 
 if __name__ == "__main__":

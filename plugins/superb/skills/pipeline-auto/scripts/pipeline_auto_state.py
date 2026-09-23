@@ -2544,14 +2544,32 @@ def _guard_frozen_dispatch_ceiling(current: dict, proposed: dict) -> None:
     ``decisions.md``, never by rewriting these cells.
     """
     before = [current["run"][key] for key in _DISPATCH_CEILING_KEYS]
+    after = [proposed["run"].get(key) for key in _DISPATCH_CEILING_KEYS]
     if before == ["-"] * len(before):
+        #: THE FIRST WRITE IS THE FORMULA, OVER THE TRACKER IT LANDS IN. The
+        #: guard below holds a ceiling once set, so a raw transition that set
+        #: its own would freeze whatever budget it chose. Read on the reparse:
+        #: the validator has already held the three cells to all-or-none
+        #: positive counts, so the projection is an integer here.
+        if after != before and int(after[0]) != _dispatch_projection(proposed):
+            raise TrackerValidationError(
+                f"the dispatch projection {after[0]} is not 7 x total_tasks + "
+                "3 x BUDGET_PER_RUN + 5 = "
+                f"{_dispatch_projection(proposed)} over this tracker; the "
+                "first write of the ceiling is computed, never chosen")
         return
-    if [proposed["run"].get(key) for key in _DISPATCH_CEILING_KEYS] != before:
+    if after != before:
         raise TrackerValidationError(
             f"the dispatch ceiling {before!r} is frozen at the close of stage "
             "07; a finite human extension is a dispatch.extend-budget "
             "decision, and a transition rewriting these cells is the run "
             "raising its own budget")
+
+
+def _dispatch_projection(tracker: dict) -> int:
+    """``7 x total_tasks + 3 x BUDGET_PER_RUN + 5`` over ``tracker``."""
+    return (_DISPATCHES_PER_TASK * len(tracker["tasks"])
+            + _DISPATCHES_PER_ADOPTION * BUDGET_PER_RUN + _DISPATCH_MARGIN)
 
 
 def _guard_frozen_intent(current: dict, proposed: dict) -> None:
@@ -2615,6 +2633,46 @@ def _ratchet_trigger_fired(tracker: dict, phase_id: str, trigger: str) -> bool:
     return True
 
 
+def _guard_phase_rows(current: dict, proposed: dict) -> None:
+    """A phase row is never removed, and is born WITH its plan path.
+
+    ``_guard_review_class`` compares rows by id, so a row a transition DELETES
+    is never examined, and a row born later is compared with its plan as the
+    plan file reads THEN. Delete-then-re-add therefore withdrew a ratchet, and
+    with the plan edited in between lowered a ``required`` phase. Two rules
+    close every route to a late birth:
+
+    - the existing rows are a prefix of the proposed ones: none removed,
+      renamed or reordered. Order is identity here, because
+      ``_phase_plan_path`` resolves a phase by its INDEX in ``phase_plans``;
+    - ``phase_plans`` changes only by appending one path per new row, in the
+      same transition. A path recorded ahead of its row, or re-pointed after,
+      is the plan edit done in the tracker instead of on disk.
+
+    With both, a phase id is born once, in the transition that records its
+    plan, and ``_guard_review_class`` compares it with that plan then; every
+    later revision of it is a move, which only the ratchet may make.
+    """
+    before = [row["id"] for row in current["phases"]]
+    after = [row["id"] for row in proposed["phases"]]
+    if after[:len(before)] != before:
+        raise TrackerValidationError(
+            f"## Phases {before!r} cannot become {after!r}: an imported phase "
+            "row is never removed, renamed or reordered, because a row born "
+            "again is compared with its plan as the file reads now, and one "
+            "moved resolves to another phase's plan")
+    paths = _csv(current["run"]["phase_plans"])
+    new_paths = _csv(proposed["run"]["phase_plans"])
+    if new_paths == paths and after == before:
+        return
+    if new_paths[:len(paths)] != paths or len(new_paths) != len(after):
+        raise TrackerValidationError(
+            f"phase_plans {list(paths)!r} cannot become {list(new_paths)!r} "
+            f"beside phase rows {after!r}: a phase row and its plan path are "
+            "written together, one appended path per new row, and a recorded "
+            "path is never rewritten")
+
+
 def _guard_review_class(current: dict, proposed: dict) -> None:
     """``Review Class`` moves once, upward, on a trigger that fired.
 
@@ -2629,7 +2687,9 @@ def _guard_review_class(current: dict, proposed: dict) -> None:
     A NEW phase row is compared with its plan. ``import_phase_plan`` copies the
     class out of plan metadata, but it is a writer, and a raw transition does
     not go through it; so a row this transition adds must carry the class its
-    plan declares, as ``plan``. A phase is never born ratcheted.
+    plan declares, as ``plan``. A phase is never born ratcheted. That the plan
+    is read only ONCE, at the birth, is ``_guard_phase_rows``': a row is never
+    removed and re-added, and a path is never recorded ahead of its row.
 
     "Never by quorum" needs no code: no quorum path writes ``## Phases``, and a
     ratchet names one of ``RATCHET_TRIGGERS``, none of which is a decision.
@@ -2661,12 +2721,16 @@ def _guard_review_class(current: dict, proposed: dict) -> None:
                 "(required, ratchet), once -- never downward, never withdrawn, "
                 "and its ratchet record is never rewritten")
         trigger = phase["ratchet"].split("@")[0]
-        if not _ratchet_trigger_fired(proposed, phase["id"], trigger):
+        #: THE FACT IS READ FROM ``current``: a transition that wrote the
+        #: failing round, or the weak adoption, and ratcheted on it in the same
+        #: step would be a trigger the run fabricated and fired at once.
+        if not _ratchet_trigger_fired(current, phase["id"], trigger):
             raise TrackerValidationError(
                 f"phase {phase['id']!r} ratchets on {trigger!r}, which has not "
-                "fired: the tracker holds no fact that trigger names in this "
-                "phase, and a ratchet is mechanically triggered -- a record "
-                "written from a reading of the diff is no trigger")
+                "fired: the tracker as it stood before this transition holds "
+                "no fact that trigger names in this phase, and a ratchet is "
+                "mechanically triggered -- a record written from a reading of "
+                "the diff, or beside the fact it cites, is no trigger")
 
 
 def locked_tracker_update(run_dir: Path, *, transition_id: str, mutate,
@@ -2737,13 +2801,14 @@ def locked_tracker_update(run_dir: Path, *, transition_id: str, mutate,
             if proposed["run"].get(key) != current["run"][key]:
                 raise TrackerValidationError(f"a transition cannot change {key}")
         _guard_frozen_intent(current, proposed)
-        _guard_frozen_dispatch_ceiling(current, proposed)
         proposed["run"]["revision"] = str(int(current["run"]["revision"]) + 1)
         proposed["run"]["last_transition"] = transition_id
         canonical = render_tracker(proposed)
         reparsed = parse_tracker(canonical)
-        #: On the REPARSE, so the guard reads rows the validators have
+        #: On the REPARSE, so the guards read rows the validators have
         #: already held to their grammar rather than whatever ``mutate`` built.
+        _guard_frozen_dispatch_ceiling(current, reparsed)
+        _guard_phase_rows(current, reparsed)
         _guard_review_class(current, reparsed)
         _replace_tracker(run_dir, canonical, transition_id)
         return reparsed
@@ -14475,6 +14540,11 @@ def freeze_dispatch_ceiling(run_dir) -> dict:
     WHATEVER ITS PHASE'S CLASS, so a later upward ratchet cannot consume budget
     it was not granted. A second call on a frozen run changes nothing; counting
     dispatches against the ceilings, and refusing one, is the controller's.
+
+    "Once the phase plans are imported" is NOT CHECKED: the tracker records the
+    master plan's path and not its phase list, so no predicate over this state
+    says every listed plan is in. A premature freeze under-prices the run and
+    stops it early, at the soft ceiling first, which is the safe direction.
     """
     run_dir = _run_path(run_dir)
     tracker = validate_run(run_dir)
@@ -14487,9 +14557,7 @@ def freeze_dispatch_ceiling(run_dir) -> dict:
                 "the dispatch ceiling cannot be frozen on a run with no tasks: "
                 "it is projected from the task count the imported phase plans "
                 "fix, and stage 07 has not produced one")
-        projection = (_DISPATCHES_PER_TASK * len(tracker["tasks"])
-                      + _DISPATCHES_PER_ADOPTION * BUDGET_PER_RUN
-                      + _DISPATCH_MARGIN)
+        projection = _dispatch_projection(tracker)
         soft, hard = _dispatch_ceilings(projection)
         tracker["run"].update(dispatch_projection=str(projection),
                               dispatch_soft_ceiling=str(soft),

@@ -6,8 +6,12 @@ integrating, verifying a phase, or debugging.
 **Not enforced by code:** the adversarial trigger check, writers for
 `## Task Review` and `## Fix Rounds` (their grammar is validated; write rows
 through `locked_tracker_update`), phase verification and phase advance, and
-counting and refusing dispatches against the agent-dispatch ceiling. These
-rules are yours to follow exactly.
+counting and refusing dispatches against the agent-dispatch ceiling, and
+whether stage 07 has imported every phase plan the master plan lists before
+the ceiling is frozen. The ratchet triggers `repeated-suite-failure`,
+`debug-locality` and `accumulated-surface` are not verified against state: the
+tracker records no suite-failure count or root cause, and the module never runs
+git to count changed lines. These rules are yours to follow exactly.
 
 **The module never executes git.** It emits argv and validates a transcript you
 supply. Functions that need git take `run_command`: a callable that runs one
@@ -73,11 +77,17 @@ record (`Class Source: ratchet`).
 
 - The only legal change to a phase's class is `(final-only, plan, -)` →
   `(required, ratchet, <trigger>@<evidence>)`, once. Lowering, withdrawing,
-  re-labelling as `plan`, or rewriting the record is refused.
+  re-labelling as `plan`, or rewriting the record is refused. So is removing,
+  renaming or reordering an imported phase row, and recording or rewriting a
+  `phase_plans` path except together with its new row: a phase row is born
+  once, beside its plan path, so deleting it and re-adding it cannot reset its
+  class, and editing the plan file afterwards changes nothing.
 - `<trigger>` is one of the five names above (`RATCHET_TRIGGERS`).
 - `adversarial-finding` needs an adversarial round on one of the phase's tasks
   with verdict `fail`. `low-confidence-dependency` needs a `## Quorum` row in
-  the phase adopted below `specified`. The other three rest on the evidence you
+  the phase adopted below `specified`. Both facts are read from the tracker
+  as it stood **before** the ratchet's transition, so write the fact first and
+  ratchet in a later transition. The other three rest on the evidence you
   cite.
 - A phase row a transition adds must carry its plan's class as `plan`.
   `import_phase_plan` does this for you.

@@ -213,7 +213,9 @@ PLAUSIBLE finding returned by that reviewer. A ratchet record you write from
 your own reading of the diff is not a trigger. Never downward. The tracker
 enforces the move: `(final-only, plan)` → `(required, ratchet)` once, with a
 trigger from the closed list, and `adversarial-finding` or
-`low-confidence-dependency` only when the tracker already holds that fact.
+`low-confidence-dependency` only when the tracker already held that fact before
+the ratchet's transition. Lowering and withdrawing are refused, and so is
+deleting an imported phase row to re-add it.
 
 ## Completeness critic items
 

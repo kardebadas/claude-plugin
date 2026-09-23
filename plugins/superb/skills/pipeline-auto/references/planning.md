@@ -99,12 +99,15 @@ One `superpowers:writing-plans` worker per phase, capped by `worker_limit`.
 - Each approved plan is imported with `import_phase_plan(run_dir,
   phase_plan=...)`, which appends the phase row, task rows and path in one
   transition. A second import of the same phase raises.
-- **Close stage 07 by freezing the dispatch budget:**
+- **Close stage 07 by freezing the dispatch budget**, only after every phase
+  plan the master plan lists is imported (the tracker cannot check this: it
+  does not record the master plan's phase list):
   `freeze_dispatch_ceiling(run_dir)` writes `## Run`'s `dispatch_projection`
   (`7 × tasks + 3 × BUDGET_PER_RUN + 5`, every phase priced at 7 whatever its
   class), `dispatch_soft_ceiling` (`ceil(1.25 ×` projection`)`) and
-  `dispatch_hard_ceiling` (`2 ×` projection). The tracker refuses any later
-  change to them; a human raises the ceiling only through a
+  `dispatch_hard_ceiling` (`2 ×` projection). The tracker checks the first
+  write against that formula over the task rows it lands beside, and refuses
+  any later change; a human raises the ceiling only through a
   `dispatch.extend-budget` decision (`execution.md`).
 
 ### Phase-plan metadata (parsed by `parse_plan_metadata`)

@@ -19212,6 +19212,52 @@ class ReviewClassRatchetTests(TempDirTestCase):
         set_phase(run_dir, "test-ratchet", ratchet=record, **RATCHET_TO)
         self.assertEqual(self.phase(run_dir)["class_source"], "ratchet")
 
+    def test_a_trigger_fact_written_with_its_ratchet_is_no_trigger(self):
+        """The fact is read from the revision BEFORE the transition, so one
+        transition cannot fabricate the failing round, or the weak adoption,
+        and ratchet on it in the same step."""
+        run_dir, _plan = self.run_at("final-only")
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+
+        def review_and_ratchet(tracker: dict) -> dict:
+            row = blank_row("task_review")
+            row.update(task="T1", round="1", intensity="adversarial",
+                       state="blocked", reviewer="reviewer-1",
+                       package="scratch/p.md", report="scratch/r.md",
+                       critical="1", important="0", minor="0",
+                       adversarial="authz", adversarial_verdict="fail",
+                       open="1", evidence="scratch/e.txt")
+            state.append_row(tracker, "task_review", row)
+            tracker["phases"][0].update(
+                ratchet="adversarial-finding@scratch/r.md", **RATCHET_TO)
+            return tracker
+
+        def adopt_and_ratchet(tracker: dict) -> dict:
+            row = blank_row("quorum")
+            row.update(qid="3f2a1b0c9d8e", axis="new", phase="P04",
+                       state="finalized", owners="brain-1,brain-2,brain-3",
+                       payload_digest=FAKE_DIGEST, context_digest=OTHER_DIGEST,
+                       responses="scratch/q1.json,scratch/q2.json,"
+                                 "scratch/q3.json",
+                       depth="1", rung="code-evidenced",
+                       outcome="adopted", decision="Q-3f2a1b0c9d8e")
+            state.append_row(tracker, "quorum", row)
+            tracker["phases"][0].update(
+                ratchet="low-confidence-dependency@decisions.md", **RATCHET_TO)
+            return tracker
+
+        for name, mutate in (("adversarial", review_and_ratchet),
+                             ("weak-adoption", adopt_and_ratchet)):
+            with self.subTest(trigger=name):
+                before = (run_dir / "progress.md").read_bytes()
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    state.locked_tracker_update(
+                        run_dir, transition_id="test-fact-and-ratchet",
+                        mutate=mutate)
+                self.assertIn("has not fired", str(caught.exception))
+                self.assertEqual((run_dir / "progress.md").read_bytes(),
+                                 before)
+
     def test_a_specified_adoption_is_not_a_low_confidence_dependency(self):
         run_dir, _plan = self.run_at("final-only")
         self.adopt(run_dir, "specified")
@@ -19267,6 +19313,113 @@ class ReviewClassRatchetTests(TempDirTestCase):
             self.append_phase(run_dir, plan, class_source="ratchet",
                               ratchet="accumulated-surface@scratch/x.md")
         self.assertIn("differs from its plan metadata", str(caught.exception))
+
+    # --- a phase row is never removed, and is born WITH its plan path ------
+    #
+    # The move guard compares rows by id, so a row the transition deletes is
+    # never examined, and a row born later is compared with the plan AS IT
+    # READS THEN. Delete-then-re-add therefore reset a ratchet and, with the
+    # plan file edited in between, lowered a `required` phase.
+
+    def refuse_transition(self, run_dir, mutate, expected: str) -> None:
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.locked_tracker_update(run_dir, transition_id="test-phases",
+                                        mutate=mutate)
+        self.assertIn(expected, str(caught.exception))
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    @staticmethod
+    def strip_phase(tracker: dict, phase_id: str = "P04") -> dict:
+        """The reviewer's reproduction: the row and its tasks, plan path kept."""
+        tracker["phases"] = [row for row in tracker["phases"]
+                             if row["id"] != phase_id]
+        tracker["tasks"] = [row for row in tracker["tasks"]
+                            if row["phase"] != phase_id]
+        return tracker
+
+    def test_a_phase_row_is_never_removed(self):
+        """A ratcheted row withdrawn by deletion, and a `required` row deleted
+        so a later re-add can read an edited plan: both refused at the delete,
+        whether or not the plan path goes with it."""
+        for review_class, ratchet in (("final-only", True), ("required", False)):
+            for drop_path in (False, True):
+                with self.subTest(review_class=review_class,
+                                  drop_path=drop_path):
+                    self.tmp = self.tmp / f"{review_class}-{drop_path}"
+                    run_dir, _plan = self.run_at(review_class)
+                    if ratchet:
+                        set_phase(run_dir, "test-ratchet", ratchet=
+                                  "accumulated-surface@scratch/p04-lines.txt",
+                                  **RATCHET_TO)
+
+                    def mutate(tracker, drop_path=drop_path):
+                        self.strip_phase(tracker)
+                        if drop_path:
+                            tracker["run"]["phase_plans"] = "-"
+                        return tracker
+
+                    self.refuse_transition(run_dir, mutate, "never removed")
+
+    def test_editing_the_plan_does_not_lower_an_imported_phase(self):
+        """With removal refused, the edited plan is read by nothing that can
+        move the row: the existing row is guarded against lowering."""
+        run_dir, plan = self.run_at("required")
+        plan.write_text(plan.read_text(encoding="utf-8").replace(
+            "review_class=required", "review_class=final-only", 1),
+            encoding="utf-8")
+        self.assertEqual(
+            state.parse_plan_metadata(plan)["phase"]["review_class"],
+            "final-only")
+        self.refuse(run_dir, "moves only by the upward ratchet",
+                    review_class="final-only")
+        self.refuse_transition(run_dir, self.strip_phase, "never removed")
+        self.assertEqual(self.phase(run_dir)["review_class"], "required")
+
+    def test_existing_phase_rows_keep_their_order(self):
+        """`_phase_plan_path` resolves a phase by its INDEX. Swapping two rows
+        and leaving the paths re-points each phase at the other's plan."""
+        run_dir, _plan = self.run_at("required")
+        second = write_phase_plan(
+            run_dir, task_block("U1", write_scope="file:src/u.py"),
+            header=phase_header(phase_id="P05", deps="P04",
+                                review_class="final-only"),
+            name="phase-05.md")
+        state.import_phase_plan(run_dir, phase_plan=second)
+
+        def swap(tracker):
+            tracker["phases"].reverse()
+            return tracker
+
+        self.refuse_transition(run_dir, swap, "never removed")
+
+    def test_a_plan_path_is_never_recorded_ahead_of_its_phase_row(self):
+        """The other route to a late birth: record the path now, edit the plan,
+        add the row afterwards. A path and its row are written together."""
+        run_dir, plan = self.raw_run("required")
+
+        def record_path(tracker):
+            tracker["run"]["phase_plans"] = str(
+                Path(plan).resolve().relative_to(state.repo_root(tracker)))
+            return tracker
+
+        self.refuse_transition(run_dir, record_path, "written together")
+
+    def test_a_recorded_plan_path_is_never_rewritten(self):
+        """Re-pointing an imported phase at another plan file is the plan edit
+        done in the tracker instead of on disk."""
+        run_dir, plan = self.run_at("required")
+        other = write_phase_plan(
+            run_dir, three_disjoint_tasks(),
+            header=phase_header(review_class="final-only"),
+            name="phase-04-lowered.md")
+
+        def repoint(tracker):
+            tracker["run"]["phase_plans"] = str(
+                Path(other).resolve().relative_to(state.repo_root(tracker)))
+            return tracker
+
+        self.refuse_transition(run_dir, repoint, "written together")
 
 
 
@@ -19349,6 +19502,28 @@ class DispatchCeilingFieldTests(TempDirTestCase):
                 self.assertIn("frozen", str(caught.exception))
                 self.assertEqual((run_dir / "progress.md").read_bytes(),
                                  before)
+
+    def test_the_first_write_is_the_spec_formula_or_nothing(self):
+        """The frozen guard holds a ceiling once set; the WRITE that sets it
+        must be 7 x total_tasks + 3 x BUDGET_PER_RUN + 5 over the tracker it
+        lands in, or a raw transition picks its own budget and freezes it."""
+        _repo, run_dir, _plan = make_run(self.tmp, n_disjoint_tasks(4))
+        for name, fields in {
+                "forged": {"dispatch_projection": "100000",
+                           "dispatch_soft_ceiling": "125000",
+                           "dispatch_hard_ceiling": "200000"},
+                "one task short": {"dispatch_projection": "56",
+                                   "dispatch_soft_ceiling": "70",
+                                   "dispatch_hard_ceiling": "112"}}.items():
+            with self.subTest(case=name):
+                before = (run_dir / "progress.md").read_bytes()
+                with self.assertRaises(state.TrackerValidationError) as caught:
+                    set_run(run_dir, "test-forge-ceiling", **fields)
+                self.assertIn("7 x total_tasks", str(caught.exception))
+                self.assertEqual((run_dir / "progress.md").read_bytes(),
+                                 before)
+        self.assertEqual(state.freeze_dispatch_ceiling(run_dir)["run"][
+            "dispatch_projection"], "63")
 
     def test_freezing_twice_is_inert(self):
         _repo, run_dir, _plan = make_run(self.tmp, n_disjoint_tasks(4))

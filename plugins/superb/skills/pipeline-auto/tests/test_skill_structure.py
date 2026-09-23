@@ -340,6 +340,30 @@ class IntentReaderToolBoundary(unittest.TestCase):
     def test_intent_reader_frontmatter_grants_nothing_beyond_tools(self):
         assert_boundary_frontmatter(self, INTENT_READER_AGENT)
 
+class ExecutionOrder(unittest.TestCase):
+    """The controller steps the P09 walkthrough found the machinery enforces.
+
+    Import IS the completion (`import_worker_result` moves the task to `[x]`),
+    and the tracker refuses an `[x]` task whose last review round is not
+    accepted -- so the per-task gate runs on the PUBLISHED result, before
+    import, and a reconciliation parks a `[~]` task through its writer.
+    """
+
+    def setUp(self):
+        self.execution = read(SKILL / "references" / "execution.md")
+
+    def test_the_per_task_gate_runs_before_import(self):
+        gate = self.execution.index("run **the per-task gate (below) on the "
+                                    "published result")
+        self.assertLess(gate, self.execution.index("1. **Import**"))
+        section = self.execution.split("### The per-task gate", 1)[1]
+        self.assertIn("before import", section.split("\n## ", 1)[0])
+
+    def test_the_reconciliation_park_names_its_writer(self):
+        self.assertIn("park_task_on_quorum(run_dir, task_id=, qid=)",
+                      self.execution)
+
 
 if __name__ == "__main__":
     unittest.main()
+

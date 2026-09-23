@@ -168,10 +168,20 @@ accepts a phase. Then, in this order:
    from step 1 or the published question record from step 2. It returns the
    result's repository-relative path. A completion must cite its evidence when
    it is published, which is why the evidence comes first.
+4. For a `DONE` / `DONE_WITH_CONCERNS` result on a gated task (`required`, or
+   any fired trigger), run **the per-task gate (below) on the published result
+   and its commits, before import**, with the task still `[~]`. Import is the
+   completion: `import_worker_result` moves the task to `[x]`, and the tracker
+   refuses an `[x]` task whose last `## Task Review` round is not `accepted` —
+   so a failing round can only be recorded before import.
+5. Import (below): a gated completion only once a round is `accepted` at zero
+   open findings; an ungated completion, or a `NEEDS_CONTEXT`,
+   `PLAN_CONFLICT` or `BLOCKED` result (import parks it), straight away.
 
 ### Import, completion, integration — three separate facts
 
-1. **Import:** `import_worker_result(run_dir, result_path=, run_command=)`.
+1. **Import** — after the per-task gate accepted, for a gated task:
+   `import_worker_result(run_dir, result_path=, run_command=)`.
    Validates identity, task definition, files, and the range: every commit in
    `baseline..source-head` for **this attempt's** baseline (`reserved_baseline`,
    never `HEAD~1`), every changed path inside scope, and one `task-test` PASS
@@ -194,6 +204,9 @@ leaves no record.
 
 ### The per-task gate (`required`, or any fired trigger)
 
+Runs on the published result, **before import**; the task stays `[~]`
+throughout.
+
 1. Build the review package from the persisted baseline:
    `scripts/review-package RUN_DIR BASE HEAD [OUTFILE]`, with `BASE` the
    attempt's `reserved_baseline`. It prints a path; the package never enters
@@ -207,7 +220,8 @@ leaves no record.
    CONFIRMED → Critical; unrefuted PLAUSIBLE → Important.
 5. Fix to **zero open findings at every severity**: one fixer per round with all
    findings, re-review after each, at most three rounds, then escalate.
-6. Complete only after a round returns zero.
+6. Complete only after a round returns zero: that `accepted` round is what
+   licenses the import, and the import is the completion.
 
 Minor findings are fixed, not deferred. One recorded exception: a Minor or
 quality-part finding that would reverse a recorded decision goes to
@@ -216,15 +230,20 @@ disputed decision's recorded axis — its stage-03 id, or `new` — never the
 decision's qid (`quorum.md`), with the task in its `blocks`. Neither the controller nor the
 reviewer settles it. The fix loop does not stall while it runs:
 
-- the task moves to `[?]`, with a reference to the reconciliation question in
-  its `Question` cell;
-- its owner slot releases, and independent work continues;
+- after `open_quorum`, `park_task_on_quorum(run_dir, task_id=, qid=)` moves
+  the task `[~] → [?]`. It requires the task `[~]` and in the question's
+  `blocks`, and writes the `Question` cell as import does
+  (`quorum:<qid>@<path>#sha256=<digest>`). Record the disputed round in its
+  own transition;
+- its owner slot releases (only a reconciliation park releases one; any
+  other `[?]` keeps its slot), and independent work continues;
 - the fix-round counter does not increment: no `## Fix Rounds` round carries
   the disputed finding, so a decision dispute never spends one of the three
   rounds or escalates for the wrong reason.
 
 If the decision survives, the finding closes `REFUTED — governed by <D-ID>`
-and does not block completion.
+and does not block completion: `resume_task` on the adoption `Q-<qid>`
+releases the task to a new attempt, and the gate closes before its import.
 
 ## Stage 10 — Debug
 

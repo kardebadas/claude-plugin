@@ -14478,6 +14478,7 @@ QUORUM_SLOT_RESERVE = 3
 #: A blocked ``[?]`` task STILL OCCUPIES ITS IMPLEMENTATION SLOT. The worker
 #: holding it has not been released -- it is waiting on the answer -- which is
 #: the whole reason the three slots above are held back in the first place.
+#: The one exception is a reconciliation park (``_implementation_owners``).
 #: ``[x]`` and ``[ ]`` are deliberately absent: a finished task's worker is
 #: free, and an unstarted task never had one.
 _OCCUPYING_STATES = ("[~]", "[?]")
@@ -14504,11 +14505,46 @@ def implementation_slot_cap(worker_limit) -> int:
     return max(1, worker_limit - QUORUM_SLOT_RESERVE)
 
 
+#: The checkpoint ``park_task_on_quorum`` writes:
+#: ``reconciling:<attempt>@<question cell>``. It is what tells a
+#: reconciliation park apart from every other ``[?]`` row, because the spec
+#: releases the owner slot of that one alone.
+_RECONCILING_CHECKPOINT = "reconciling:"
+
+
+def _parked_for_reconciliation(row: dict) -> bool:
+    """Whether a ``[?]`` row is parked on a reconciliation at its CURRENT attempt.
+
+    Keyed on the attempt, so a task resumed and then blocked again on its own
+    worker's question -- a new attempt -- holds its slot as any blocked task
+    does. A worker cannot spell the entry: imported worker checkpoints are
+    prefixed ``worker:``.
+    """
+    if row.get("state") != _TASK_STATES[2]:
+        return False
+    prefix = (f"{_RECONCILING_CHECKPOINT}{row.get('attempt', _ABSENT_CELL)}"
+              f"{_CHECKPOINT_DELIMITERS[1]}")
+    return any(entry.startswith(prefix)
+               for entry in _csv(row.get("checkpoints", _ABSENT_CELL)))
+
+
 def _implementation_owners(tracker: dict) -> set:
+    """The owners holding an implementation slot.
+
+    A RECONCILIATION PARK RELEASES ITS SLOT, and no other ``[?]`` does. The
+    spec: the parked task's "owner slot releases, and independent work
+    continues" -- a decision dispute is not the task's worker waiting on an
+    answer to its own question, it is the reviewer's finding waiting on a
+    quorum, and holding the slot for it would stall the phase for a dispute
+    the task did not raise. Every other blocked task keeps its slot, which is
+    the premise ``QUORUM_SLOT_RESERVE`` rests on ("otherwise a blocked task
+    holds the slot needed to unblock it").
+    """
     return {
         row["owner"] for row in tracker.get("tasks", ()) or ()
         if _member(row["state"], _OCCUPYING_STATES)
         and row["owner"] != _ABSENT_CELL
+        and not _parked_for_reconciliation(row)
     }
 
 
@@ -16001,6 +16037,79 @@ def resume_task(run_dir, *, task_id: str, prior_attempt: int, new_owner: str,
         transition_id=f"resume-{task_id}-{prior_attempt}-{new_attempt}"
                       f"-{decision_ref}",
         mutate=mutate)
+
+
+def park_task_on_quorum(run_dir, *, task_id: str, qid: str) -> dict:
+    """Park a task under review on its reconciliation quorum: ``[~] -> [?]``.
+
+    THE PER-TASK GATE RUNS BEFORE IMPORT, because import IS the completion: a
+    task whose reviewer raised a Minor or quality-part finding that would
+    reverse a recorded decision is still ``[~]``, its result published and not
+    imported. The spec: "The task moves to ``[?]`` with a reconciliation
+    question reference, its owner slot releases, and independent work
+    continues. The fix-round counter does not increment."
+
+    ONE ``locked_tracker_update``, and it does three things:
+
+    * requires the task ``[~]`` -- a task already parked, finished or never
+      started is not under review;
+    * renders the ``Question`` cell with the renderer ``import_worker_result``
+      uses, ``_resolve_question_record``, over the record ``open_quorum``
+      published at ``<run>/quorum/<qid>/question.md`` -- so the qid is
+      re-derived from the record, the digest binds the bytes, and the task must
+      be in the question's ``blocks`` (the rung cap finds a question's raisers
+      through that list);
+    * sets ``[?]`` and appends ``reconciling:<attempt>@<cell>`` to the
+      append-only ``Checkpoints``, which is what releases the owner slot
+      (``_implementation_owners``) and what the audit trail reads back.
+
+    NOTHING ELSE MOVES. The attempt, owner and baseline stay, so
+    ``resume_task`` on the adoption ``Q-<qid>`` releases it exactly as it
+    releases a NEEDS_CONTEXT block; ``## Fix Rounds`` is not touched.
+    """
+    run_dir = _run_path(run_dir)
+    if not isinstance(task_id, str) or not _TASK_ID.fullmatch(task_id):
+        raise TrackerValidationError(
+            f"invalid task id {task_id!r}: it is written into this "
+            "transition's replay key and located by exact match")
+    qid = _quorum_qid(qid)
+
+    def mutate(tracker: dict) -> dict:
+        row = _task_row(tracker, task_id)
+        if row["state"] != _TASK_STATES[1]:
+            raise TrackerValidationError(
+                f"task {task_id} is {row['state']!r}, not '[~]'; a "
+                "reconciliation parks a task UNDER REVIEW -- the gate runs "
+                "before import, so a task already parked, finished or never "
+                "started has no review for the dispute to block")
+        repo = _repo_dir(tracker)
+        record = run_dir / _QUORUM_DIRNAME / qid / _QUESTION_FILE
+        try:
+            content = record.read_bytes()
+            directory = record.parent.resolve()
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise TrackerValidationError(
+                f"no question record for quorum {qid} at {str(record)!r} "
+                f"({type(exc).__name__}: {exc}); open the reconciliation "
+                "quorum first -- a task parks on a question that exists") from exc
+        relative = _citable_repo_relative(directory, repo, record.name)
+        marker = _resolve_question_record(
+            run_dir, repo,
+            f"{relative}{_DIGEST_DELIMITER}{hashlib.sha256(content).hexdigest()}",
+            task_id=row["id"])
+        updated = dict(row)
+        updated["state"] = _TASK_STATES[2]
+        updated["question"] = marker
+        updated["checkpoints"] = _append_history(
+            row["checkpoints"],
+            f"{_RECONCILING_CHECKPOINT}{row['attempt']}"
+            f"{_CHECKPOINT_DELIMITERS[1]}"
+            + _table_safe(marker, field="the reconciling checkpoint's question",
+                          list_valued=True))
+        return _replace_task(tracker, updated)
+
+    return locked_tracker_update(
+        run_dir, transition_id=f"park-{task_id}-{qid}", mutate=mutate)
 
 
 # ---------------------------------------------------------------------------

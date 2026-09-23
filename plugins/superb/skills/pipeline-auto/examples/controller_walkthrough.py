@@ -536,18 +536,14 @@ class Controller:
         base.update(fields)
         return base
 
-    def complete(self, task_id: str, files: dict, *, integrate=True) -> dict:
-        """Implement, re-run, publish, import and integrate one [~] task."""
+    def publish_done(self, task_id: str, files) -> str:
+        """Implement on ``task/<task id>``, re-run the suite, publish DONE.
+
+        execution.md: the branch is named ``task/<task id>``, because import
+        resolves the range head by that name. Returns the published path.
+        """
         row = self.task(task_id)
-        #: The module derives the head ref as ``task/<task id>``
-        #: (``_task_branch``); no reference or prompt says so (FINDINGS).
         branch = f"task/{task_id}"
-        finding("medium", "the task branch name is load-bearing and untaught",
-                "import_worker_result resolves the range head as "
-                "'task/<task id>' (_task_branch, TASK_BRANCH_PREFIX); a worker "
-                "branch named otherwise is refused ('names no reference'). "
-                "Neither execution.md, prompts/implementer.md nor the task "
-                "brief tells the controller or the implementer that name.")
         if files:
             commits = self.worker_commit(branch, files, f"{task_id} work")
         else:
@@ -565,13 +561,27 @@ class Controller:
         result = self.result(task_id, row, "DONE", source_ref=commits[-1],
                              commits=tuple(commits), tests=tuple(commands),
                              evidence=(evidence,))
-        path = self.pas.publish_worker_result(self.run_dir, result=result)
+        return self.pas.publish_worker_result(self.run_dir, result=result)
+
+    def complete(self, task_id: str, files, *, reviewer=None, round_number=1,
+                 integrate=True) -> dict:
+        """Publish, run the per-task gate BEFORE import, import, integrate.
+
+        execution.md: on a gated task the gate runs on the published result
+        while the task is still ``[~]``; import is the completion, so it comes
+        only after an accepted round.
+        """
+        path = self.publish_done(task_id, files)
+        if reviewer is not None:
+            check(self.task(task_id)["state"] == "[~]",
+                  f"{task_id} is not [~] while its gate runs")
+            self.review_round(task_id, round_number, reviewer)
         tracker = self.import_result(path)
         row = next(r for r in tracker["tasks"] if r["id"] == task_id)
         check(row["state"] == "[x]" and row["integration"] == "held",
               f"import left {task_id} at {row['state']}/{row['integration']}")
         if integrate:
-            self.integrate(task_id, branch)
+            self.integrate(task_id, f"task/{task_id}")
         return self.task(task_id)
 
     def integrate(self, task_id: str, branch: str) -> None:
@@ -584,12 +594,7 @@ class Controller:
             attempt=self.task(task_id)["attempt"], code_state=merge,
             commands=TASK_SUITES[task_id],
             name=f"{task_id}-integration.md")
-        finding("low", "task-integration evidence is required by the skill and "
-                "read by nothing",
-                "execution.md: integration needs 'one task-integration PASS "
-                "record for the merge commit'; integrate_task never reads one "
-                "and no tracker cell records it (this walkthrough publishes it "
-                "anyway).")
+        #: Recorded for audit; execution.md: read by no guard.
         tracker = self.pas.integrate_task(self.run_dir, task_id=task_id,
                                           merge_commit=merge,
                                           run_command=self.run_command)
@@ -601,13 +606,7 @@ class Controller:
     # -- dispatch helpers: the skill's own scripts, run by the controller ----
 
     def task_brief(self, task_id: str) -> Path:
-        finding("low", "task-brief needs numbered task headings the plan "
-                "grammar does not require",
-                "scripts/task-brief takes TASK_NUMBER as digits and extracts "
-                "'## Task <digits>'; planning.md's metadata grammar only says "
-                "'immediately below each task heading', and task ids like "
-                "'P1-T1' are not numbers. The walkthrough's plans head each "
-                "task '## Task <order>: <id>'.")
+        #: planning.md: each task is headed '## Task <n>: <id>'.
         phase = task_id.split("-")[0]
         number = str(PHASE_TASKS[phase].index(task_id) + 1)
         out = self.run_dir / "scratch" / f"{task_id}-brief.md"
@@ -735,7 +734,8 @@ class Controller:
             row, attempt=int(row["attempt"].split("-")[1]))
 
     def review_round(self, task_id: str, round_number: int, reviewer: str, *,
-                     minor: int = 0, state: str = "accepted") -> dict:
+                     minor: int = 0, state: str = "accepted",
+                     note: str = "") -> dict:
         self.dispatch(1, f"task reviewer for {task_id} round {round_number}")
         row = self.task(task_id)
         head = (row["source_ref"] if row["source_ref"] != "-"
@@ -743,7 +743,8 @@ class Controller:
         package = self.review_package(self.baseline(task_id), head)
         report = f"scratch/{task_id}-review-{round_number}.md"
         self.write(f"{RUN_REL}/{report}",
-                   f"spec: pass\nquality: {minor} minor\nverification: re-ran\n")
+                   f"spec: pass\nquality: {minor} minor\nverification: re-ran\n"
+                   + note)
         self.rerun_suite(head, TASK_SUITES[task_id])
         rerun = f"scratch/{task_id}-review-{round_number}-rerun.txt"
         self.write(f"{RUN_REL}/{rerun}", "OK\n")
@@ -761,42 +762,6 @@ class Controller:
                         f"({state})",
                         "a ## Task Review writer (execution.md: 'write rows "
                         "through locked_tracker_update')", mutate)
-
-    # -- reconciliation parking (execution.md, the per-task gate) ------------
-
-    def park_on_reconciliation(self, task_id: str, qid: str, reference: str,
-                               review: dict, *, clear_completion=False) -> dict:
-        """Move a task under review to [?] on the reconciliation question.
-
-        No public writer does this. The only writer of a ``Question`` cell is
-        ``import_worker_result``; this raw transition renders the cell and the
-        ``blocked:`` checkpoint exactly the way that writer does
-        (``quorum:<qid>@<path>#sha256=<digest>``) and records the disputed
-        round in the same transition.
-        """
-        marker = f"quorum:{qid}@{reference}"
-
-        def mutate(tracker: dict) -> dict:
-            row = next(r for r in tracker["tasks"] if r["id"] == task_id)
-            row["state"] = "[?]"
-            row["question"] = marker
-            if clear_completion:
-                #: A [?] row may not carry completion cells (_TASK_COMPLETION);
-                #: the commits stay on the branch and in the result file.
-                for key in ("source_ref", "commits", "artifacts", "integration"):
-                    row[key] = "-"
-            entry = f"blocked:{row['attempt']}@{marker}"
-            row["checkpoints"] = (entry if row["checkpoints"] == "-"
-                                  else f"{row['checkpoints']},{entry}")
-            return self.pas.append_row(tracker, "task_review", review)
-        suffix = "-cleared" if clear_completion else ""
-        return self.raw(f"reconcile-park-{task_id}{suffix}",
-                        f"park {task_id} [x]->[?] on reconciliation quorum "
-                        f"{qid}, with its disputed review round"
-                        + (", clearing its completion cells" if clear_completion
-                           else ""),
-                        "a reconciliation parking writer (the Question cell's "
-                        "only writer is import_worker_result)", mutate)
 
     # -- escalations (quorum.md, Escalating) ---------------------------------
 
@@ -973,12 +938,10 @@ def drive(ctl: Controller) -> None:
     # -- P1-T1: the plain path, with its per-task gate (P1 is required) ----
     ctl.reserve("P1-T1", "impl-1")
     ctl.task_brief("P1-T1")
-    ctl.complete("P1-T1", FILES["P1-T1"], integrate=False)
-    ctl.review_round("P1-T1", 1, "task-reviewer-1")
-    ctl.integrate("P1-T1", "task/P1-T1")
-    say("P1-T1: reserved, briefed (task-brief), committed, re-run as task-test "
-        "evidence, published, imported, reviewed (review-package, round 1 "
-        "accepted), integrated --no-ff")
+    ctl.complete("P1-T1", FILES["P1-T1"], reviewer="task-reviewer-1")
+    say("P1-T1: reserved, briefed (task-brief), committed on task/P1-T1, re-run "
+        "as task-test evidence, published, reviewed before import "
+        "(review-package, round 1 accepted), imported, integrated --no-ff")
 
     # -- P1-T2: NEEDS_CONTEXT -> quorum -> adopted -> resume on Q-<qid> -----
     ctl.reserve("P1-T2", "impl-2")
@@ -992,12 +955,10 @@ def drive(ctl: Controller) -> None:
     final = ctl.pas.finalize_quorum(str(ctl.run_dir), qid=qid)
     check(final["status"] == "adopted", f"finalize_quorum did not adopt: {final}")
     ctl.resume("P1-T2", 1, "impl-2b", f"Q-{qid}")
-    ctl.complete("P1-T2", FILES["P1-T2"], integrate=False)
-    ctl.review_round("P1-T2", 1, "task-reviewer-1")
-    ctl.integrate("P1-T2", "task/P1-T2")
+    ctl.complete("P1-T2", FILES["P1-T2"], reviewer="task-reviewer-1")
     say(f"P1-T2: NEEDS_CONTEXT parked on quorum {qid}; three brain responses "
         f"recorded from files; finalize_quorum adopted; resume_task on Q-{qid}; "
-        "attempt 2 completed, reviewed, integrated")
+        "attempt 2 published, reviewed, imported, integrated")
 
     reconciliation(ctl, qid)
     ctl.verify_phase("P1")
@@ -1012,46 +973,24 @@ def drive(ctl: Controller) -> None:
 
 
 def reconciliation(ctl: Controller, governing: str) -> None:
-    """Item 7: park a task under review on a reconciliation quorum.
+    """Park a task under review on a reconciliation quorum, then resume it.
 
     ``governing`` is the qid of the quorum decision the reviewer's Minor
     finding would reverse -- the spec's case ("requires reversing a quorum
     decision", design spec, "A reviewer finding may not reverse a decision").
+    The gate runs before import (execution.md), so the task is still ``[~]``
+    when the finding lands, and ``park_task_on_quorum`` moves it to ``[?]``.
     """
     pas = ctl.raw_module
     ctl.reserve("P1-T3", "impl-3")
     ctl.task_brief("P1-T3")
-    ctl.complete("P1-T3", FILES["P1-T3"], integrate=False)
-    row = ctl.task("P1-T3")
-    package = ctl.review_package(ctl.baseline("P1-T3"), row["source_ref"])
-    ctl.write(f"{RUN_REL}/scratch/P1-T3-review-1.md",
-              f"quality: Minor F-001 -- shout() should return '' on bad input "
-              f"the lenient way, which reverses Q-{governing} (raise)\n")
-    ctl.write(f"{RUN_REL}/scratch/P1-T3-review-1-rerun.txt", "OK\n")
-    blocked = {"task": "P1-T3", "round": "1", "intensity": "standard",
-               "state": "blocked", "reviewer": "task-reviewer-1",
-               "package": package, "report": "scratch/P1-T3-review-1.md",
-               "critical": "0", "important": "0", "minor": "1",
-               "adversarial": "-", "adversarial_verdict": "-", "open": "1",
-               "evidence": "scratch/P1-T3-review-1-rerun.txt"}
-    #: Probe 1: the gate's failing verdict, recorded while the task is [x].
-    try:
-        ctl.pas.locked_tracker_update(
-            ctl.run_dir, transition_id="probe-blocked-round-on-x",
-            mutate=lambda t: pas.append_row(t, "task_review", dict(blocked)))
-        finding("info", "a blocked review round is recordable on an imported "
-                "task", "no refusal")
-    except pas.TrackerError as exc:
-        finding("high", "the per-task gate cannot record a failing round after "
-                "import",
-                "import_worker_result moves a DONE task straight to [x], and "
-                "_validate_task_review refuses an [x] task whose last round is "
-                f"not accepted. Refusal: {exc}. execution.md orders import "
-                "BEFORE the per-task gate ('Import, completion, integration' "
-                "then 'The per-task gate ... Complete only after a round "
-                "returns zero'), but import IS the completion. Running the gate "
-                "before import works (this walkthrough does so for P1-T3's "
-                "attempt 2).")
+    ctl.publish_done("P1-T3", FILES["P1-T3"])
+    #: Round 1, recorded while the task is [~]: one Minor that would reverse
+    #: Q-<governing>. The disputed round is its own transition.
+    ctl.review_round(
+        "P1-T3", 1, "task-reviewer-1", minor=1, state="blocked",
+        note=(f"F-001 (Minor, quality): shout() should return '' on bad input "
+              f"the lenient way, which reverses Q-{governing} (raise)\n"))
     #: The reconciliation takes the disputed decision's RECORDED axis (quorum.md):
     #: Q-<governing> was asked on 'new', so the reconciliation is too. Its own
     #: qid is refused at the door -- open_quorum and finalize_quorum share one
@@ -1075,62 +1014,36 @@ def reconciliation(ctl: Controller, governing: str) -> None:
     qid, reference = ctl.open_question(
         "P1-T3", question, ["raise", "lenient"], axis=recorded["axis"],
         raiser="task-reviewer-1")
-    #: Probe 3: park it. First exactly as import_worker_result renders a
-    #: parked row; then with the completion cells cleared.
-    parked = False
-    for clear in (False, True):
-        try:
-            tracker = ctl.park_on_reconciliation("P1-T3", qid, reference,
-                                                 blocked, clear_completion=clear)
-        except pas.TrackerError as exc:
-            RAW_TRANSITIONS[-1] = RAW_TRANSITIONS[-1][:2] + (
-                RAW_TRANSITIONS[-1][2] + " [REFUSED]",)
-            finding("high", "reconciliation parking of an imported task is "
-                    "refused" + (" even with its completion cells cleared"
-                                 if clear else ""),
-                    f"raw park transition (import's cell rendering"
-                    f"{', completion cells cleared' if clear else ''}) refused: "
-                    f"{exc}")
-            continue
-        cell = next(r for r in tracker["tasks"] if r["id"] == "P1-T3")
-        parked = cell["state"] == "[?]"
-        say(f"reconciliation: raw park of P1-T3 on {qid} passed every guard"
-            + (" once its completion cells were cleared" if clear else ""))
-        break
-    if not parked:
-        return
-    owners = pas._implementation_owners(ctl.tracker())
-    if "impl-3" in owners:
-        finding("medium", "a parked reconciliation task keeps its owner slot",
-                "spec (reconciliation) and execution.md: 'its owner slot "
-                "releases'. _implementation_owners counts '[~]' and '[?]', so a "
-                "parked task still holds a slot under implementation_slot_cap.")
+    fix_rounds_before = list(ctl.tracker()["fix_rounds"])
+    tracker = ctl.pas.park_task_on_quorum(str(ctl.run_dir), task_id="P1-T3",
+                                          qid=qid)
+    cell = next(r for r in tracker["tasks"] if r["id"] == "P1-T3")
+    check(cell["state"] == "[?]" and cell["question"] == f"quorum:{qid}@{reference}",
+          f"park_task_on_quorum left P1-T3 at {cell['state']} {cell['question']}")
+    check("impl-3" not in pas._implementation_owners(ctl.tracker()),
+          "a reconciliation-parked task still holds its owner slot")
+    check(ctl.tracker()["fix_rounds"] == fix_rounds_before,
+          "parking spent a fix round")
+    say(f"reconciliation: round 1 blocked on [~] (F-001 would reverse "
+        f"Q-{governing}); park_task_on_quorum moved P1-T3 to [?] on {qid} with "
+        "import's cell rendering; its owner slot released")
     #: The decision survives: all three brains ground 'raise' in the spec.
     ctl.answer_brains(qid, [dict(r, qid=qid, blast=[qid]) for r in survives])
     final = ctl.pas.finalize_quorum(str(ctl.run_dir), qid=qid)
     check(final["status"] == "adopted",
           f"the reconciliation quorum did not adopt: {final.get('status')} "
           f"{final.get('reason')}")
-    try:
-        ctl.resume("P1-T3", 1, "impl-3b", f"Q-{qid}")
-    except pas.TrackerError as exc:
-        finding("high", "a reconciliation-parked task does not resume on the "
-                "adoption", f"resume_task refused Q-{qid}: {exc}")
-        return
-    #: The finding closes REFUTED -- governed by the surviving decision.
-    ctl.write(f"{RUN_REL}/scratch/P1-T3-review-2.md",
-              f"F-001: REFUTED — governed by Q-{governing}\n")
-    #: Round 2 is recorded BEFORE the attempt-2 import: once a round exists,
-    #: an [x] row needs its last round accepted, so the gate must close first.
-    ctl.review_round("P1-T3", 2, "task-reviewer-1")
-    ctl.complete("P1-T3", None, integrate=False)
-    ctl.integrate("P1-T3", "task/P1-T3")
+    ctl.resume("P1-T3", 1, "impl-3b", f"Q-{qid}")
+    #: The finding closes REFUTED -- governed by the surviving decision; the
+    #: accepted round 2 licenses attempt 2's import of the standing commits.
+    ctl.complete("P1-T3", None, reviewer="task-reviewer-1", round_number=2)
     fix_rounds = [r for r in ctl.tracker()["fix_rounds"] if r["scope"] == "P1-T3"]
     check(not fix_rounds, "the reconciliation spent a fix round")
     say("reconciliation: the decision's qid refused as an axis at open; asked "
-        f"on its recorded axis 'new', adopted Q-{qid} (the decision survives), resume_task released "
-        "P1-T3 on it, round 2 accepted with F-001 REFUTED, attempt 2 "
-        "re-imported the standing commits, integrated; no fix round spent")
+        f"on its recorded axis 'new', adopted Q-{qid} (the decision survives), "
+        "resume_task released P1-T3 on it, round 2 accepted with F-001 "
+        "REFUTED before import, attempt 2 imported the standing commits, "
+        "integrated; no fix round spent")
 
 
 def phase_two(ctl: Controller) -> None:

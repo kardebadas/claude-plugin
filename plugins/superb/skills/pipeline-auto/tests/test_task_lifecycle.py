@@ -10349,6 +10349,115 @@ class EscalatedAndReaskedQuorumResumeTests(TempDirTestCase):
 # --------------------------------------------------------------------------
 
 
+class ReconciliationParkingTests(TempDirTestCase):
+    """`park_task_on_quorum`: a task under review waits on a reconciliation.
+
+    The per-task gate runs BEFORE import (import is the completion), so the
+    task a reviewer's decision-reversing finding blocks is still `[~]` with no
+    result imported. The spec: "The task moves to `[?]` with a reconciliation
+    question reference, its owner slot releases, and independent work
+    continues. The fix-round counter does not increment."
+    """
+
+    def parked_run(self, *, worker_limit=6, blocks="T1"):
+        repo, run_dir, _ = make_run(self.tmp, three_disjoint_tasks(),
+                                    worker_limit=worker_limit)
+        publish_question_record(run_dir, text=question_record_text(
+            BLOCK_QID, BLOCK_QUESTION, BLOCK_AXIS, blocks=blocks))
+        state.reserve_task(run_dir, task_id="T1", owner="impl-1", attempt=1)
+        return repo, run_dir
+
+    def park(self, run_dir, task_id="T1"):
+        return state.park_task_on_quorum(run_dir, task_id=task_id,
+                                         qid=BLOCK_QID)
+
+    def test_parks_an_in_flight_task_with_the_cell_import_renders(self):
+        _repo, run_dir = self.parked_run()
+        before = state.validate_run(run_dir)
+        row = task_row(self.park(run_dir), "T1")
+        self.assertEqual(row["state"], "[?]")
+        #: The SAME renderer `import_worker_result` uses for a NEEDS_CONTEXT
+        #: result, so a grant binds to it exactly as it binds to that one.
+        self.assertEqual(row["question"], QUESTION_REF)
+        self.assertEqual(row["attempt"], "attempt-001")
+        self.assertEqual(row["owner"], "impl-1")
+        after = state.validate_run(run_dir)
+        #: The fix-round counter is untouched.
+        self.assertEqual(after["fix_rounds"], before["fix_rounds"])
+
+    def test_refuses_a_task_that_is_not_in_flight(self):
+        _repo, run_dir = self.parked_run()
+        with self.assertRaises(state.TrackerValidationError) as raised:
+            self.park(run_dir, task_id="T2")
+        self.assertIn("[~]", str(raised.exception))
+        self.park(run_dir)
+        #: An immediate re-issue is the replay `locked_tracker_update` makes
+        #: inert; once anything else has landed, a second park is refused.
+        bump(run_dir)
+        with self.assertRaises(state.TrackerValidationError):
+            self.park(run_dir)
+
+    def test_refuses_a_question_that_does_not_block_the_task(self):
+        _repo, run_dir = self.parked_run(blocks="T2")
+        with self.assertRaises(state.TrackerValidationError) as raised:
+            self.park(run_dir)
+        self.assertIn("blocks", str(raised.exception))
+        self.assertEqual(task_row(state.validate_run(run_dir), "T1")["state"],
+                         "[~]")
+
+    def test_a_parked_task_releases_its_owner_slot(self):
+        """worker_limit 4 is a cap of ONE implementation slot: T2 can only be
+        reserved if parking T1 released the slot it held."""
+        _repo, run_dir = self.parked_run(worker_limit=4)
+        with self.assertRaises(state.TrackerValidationError):
+            state.reserve_task(run_dir, task_id="T2", owner="impl-2",
+                               attempt=1)
+        self.park(run_dir)
+        state.reserve_task(run_dir, task_id="T2", owner="impl-2", attempt=1)
+        self.assertEqual(task_row(state.validate_run(run_dir), "T2")["state"],
+                         "[~]")
+
+    def test_any_other_blocked_task_still_holds_its_slot(self):
+        """The spec releases the slot of a RECONCILIATION park only: a task
+        blocked on its own worker's question is why three slots are held back
+        at all ("otherwise a blocked task holds the slot needed to unblock
+        it")."""
+        _repo, run_dir = blocked_run(self, worker_limit=4)
+        with self.assertRaises(state.TrackerValidationError) as raised:
+            state.reserve_task(run_dir, task_id="T2", owner="impl-2",
+                               attempt=1)
+        self.assertIn("slots exhausted", str(raised.exception))
+
+    def test_the_release_is_bound_to_the_attempt_that_was_parked(self):
+        """Resumed, then blocked again on its own worker's question at the
+        new attempt, the task is an ordinary blocked task and holds its slot:
+        the `reconciling:` entry names attempt 1, not attempt 2."""
+        _repo, run_dir = self.parked_run(worker_limit=4)
+        self.park(run_dir)
+        write_decisions(run_dir, RESUME_DECISION)
+        state.resume_task(run_dir, task_id="T1", prior_attempt=1,
+                          new_owner="impl-2", new_attempt=2,
+                          decision_ref=QUORUM_GRANT)
+        set_task_state(run_dir, "T1", "test-block-again", state="[?]",
+                       question=QUESTION_REF)
+        with self.assertRaises(state.TrackerValidationError) as raised:
+            state.reserve_task(run_dir, task_id="T2", owner="impl-3",
+                               attempt=1)
+        self.assertIn("slots exhausted", str(raised.exception))
+
+    def test_resumes_on_the_adoption_of_the_reconciliation(self):
+        _repo, run_dir = self.parked_run()
+        self.park(run_dir)
+        write_decisions(run_dir, RESUME_DECISION)
+        tracker = state.resume_task(run_dir, task_id="T1", prior_attempt=1,
+                                    new_owner="impl-2", new_attempt=2,
+                                    decision_ref=QUORUM_GRANT)
+        row = task_row(tracker, "T1")
+        self.assertEqual((row["state"], row["attempt"], row["owner"]),
+                         ("[~]", "attempt-002", "impl-2"))
+        self.assertEqual(tracker["fix_rounds"], [])
+
+
 def commit_file(repo, relative: str, text: str, message: str) -> str:
     path = Path(repo) / relative
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -13286,7 +13395,7 @@ RUN_DIR_ENTRY_POINTS = (
     "initialize_run", "import_phase_plan", "reserve_task", "resume_task",
     "publish_worker_result", "import_worker_result", "integrate_task",
     "reconcile_run", "freeze_dispatch_ceiling", "close_phase_set",
-    "open_master_gate",
+    "open_master_gate", "park_task_on_quorum",
 )
 RUN_DIR_CONTRACT_FUNCTIONS = ("validate_run", "locked_tracker_update")
 
@@ -13434,6 +13543,8 @@ class RunDirectoryCoercionSweepTests(TempDirTestCase):
                 value, phase_ids=["P04"]),
             "open_master_gate": lambda value: state.open_master_gate(
                 value, reviewers={"A": "reviewer-a", "B": "reviewer-b"}),
+            "park_task_on_quorum": lambda value: state.park_task_on_quorum(
+                value, task_id="T1", qid=BLOCK_QID),
         }
         self.assertEqual(sorted(calls), sorted(RUN_DIR_ENTRY_POINTS))
         shapes = (None, 5, b"/runs/r", ["/runs/r"], str(self.run_dir))

@@ -211,7 +211,9 @@ leaves no record.
 
 Minor findings are fixed, not deferred. One recorded exception: a Minor or
 quality-part finding that would reverse a recorded decision goes to
-reconciliation (`review.md`). The fix loop does not stall while it runs:
+reconciliation (`review.md`). The reconciliation is a quorum question on the
+decision's axis, with the task in its `blocks`. Neither the controller nor the
+reviewer settles it. The fix loop does not stall while it runs:
 
 - the task moves to `[?]`, with a reference to the reconciliation question in
   its `Question` cell;

@@ -628,6 +628,26 @@ stage 12; that the seal matches the master plan; and that the master head is
 still the target-branch tip with a clean tree. The prose sync after `fe23fc8`
 writes these into the references.
 
+**Open for the P09 walkthrough, found by the prose sync:**
+
+- **Reconciliation has no parking writer.** The spec moves a task under
+  reconciliation to `[?]` with a question reference. The references make that
+  question a quorum on the decision's axis. But the only writer of a `Question`
+  cell is `import_worker_result`, and its renderer is private. A reviewer's
+  finding is not a worker result, so today the controller would need a raw
+  transition that hand-renders a digest-bound cell. P09 must show whether that
+  path works or needs a small public writer.
+- **A `stale-context` quorum is finalised, not left open.** `finalize_quorum`
+  escalates it as `stale-context` without reading an answer. That escalation is
+  the spec's "flag to stage 11". The old instruction not to finalise it left the
+  parked task at `[?]` and the run with no terminal action.
+- **Cross-phase taint has no ratchet trigger.** `low-confidence-dependency` needs
+  a weak adoption in the same phase, so a task tainted from another phase cannot
+  ratchet its own phase.
+- **The master review has no spec lines for three things:** merging duplicate
+  findings across the two reviewers, rejecting a report written against another
+  head, and advancing the gate head after a gate fix round.
+
 ## Execution policy from 2026-09-22 — the skill is the product (SUPERSEDES the policy below)
 
 Set by the user after ~45 of 92 tasks, having found the build inverted relative

@@ -346,7 +346,7 @@ question therefore goes through a re-raise too.
 | State | Do |
 | --- | --- |
 | `finalised` | Nothing. A finalised record is never recomputed. |
-| `stale-context` | Do not re-open or finalise. Flag to stage 11. |
+| `stale-context` | Do not re-open or re-dispatch. `finalize_quorum`: it returns `escalated`, reason `stale-context`, without reading an answer. That escalation is the flag to stage 11, and a human answer resumes the task (see "Resuming on a human answer"). |
 | `ready-to-finalise` | `finalize_quorum`. No dispatch. The outcome may be an escalation. |
 | `redispatch` | `owed`: the single invalid-answer retry. `unanswered`: recovery re-send (no retry used). Only the listed owners, in the listed order. |
 | `awaiting-responses` | Wait for the live owners. |

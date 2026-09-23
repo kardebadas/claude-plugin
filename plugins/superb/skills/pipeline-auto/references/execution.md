@@ -231,25 +231,34 @@ throughout.
 
 Minor findings are fixed, not deferred. One recorded exception: a Minor or
 quality-part finding that would reverse a recorded decision goes to
-reconciliation (`review.md`). The reconciliation is a quorum question on the
-disputed decision's recorded axis — its stage-03 id, or `new` — never the
-decision's qid (`quorum.md`), with the task in its `blocks`. Neither the controller nor the
-reviewer settles it. The fix loop does not stall while it runs:
+reconciliation (`review.md`). The reconciliation is a re-open of the disputed
+decision (`quorum.md`): `Reopen of: <D-ID>`, the finding as its `Challenge`,
+asked on the axis the decision's question was asked on — its stage-03 id, or
+`new`, never the decision's qid — with the task in its `blocks`. It is held to
+the raised bar and allowed once per D-ID (`open_quorum`, `_reopen_authority`).
+Neither the controller nor the reviewer settles it. The fix loop does not
+stall while it runs:
 
-- after `open_quorum`, `park_task_on_quorum(run_dir, task_id=, qid=)` moves
-  the task `[~] → [?]`. It requires the task `[~]` and in the question's
-  `blocks`, and writes the `Question` cell as import does
-  (`quorum:<qid>@<path>#sha256=<digest>`). Record the disputed round in its
-  own transition;
+- record the disputed round `blocked` in its own transition first, then
+  `open_quorum`, then `park_task_on_quorum(run_dir, task_id=, qid=)` on the
+  re-open's qid moves the task `[~] → [?]`. It requires the task `[~]`, its
+  latest `## Task Review` round `blocked`, the quorum opened and not yet
+  finalised, and the task in the question's `blocks`; it writes the
+  `Question` cell as import does (`quorum:<qid>@<path>#sha256=<digest>`);
 - its owner slot releases (only a reconciliation park releases one; any
   other `[?]` keeps its slot), and independent work continues;
 - the fix-round counter does not increment: no `## Fix Rounds` round carries
   the disputed finding, so a decision dispute never spends one of the three
   rounds or escalates for the wrong reason.
 
-If the decision survives, the finding closes `REFUTED — governed by <D-ID>`
-and does not block completion: `resume_task` on the adoption `Q-<qid>`
-releases the task to a new attempt, and the gate closes before its import.
+If the re-open adopts, `finalize_quorum` supersedes the disputed decision and
+`resume_task` on the adoption `Q-<qid>` releases the task to a new attempt.
+When the adoption reverses the decision, the finding stands: the new attempt
+does the work under the new decision, and the gate re-reviews it before
+import. When it re-affirms the decision, or the re-open escalates and a human
+answer resumes the task, the decision survives: the finding closes
+`REFUTED — governed by <D-ID>`, does not block completion, and the gate closes
+before import.
 
 ## Stage 10 — Debug
 

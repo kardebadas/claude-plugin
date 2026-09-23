@@ -120,10 +120,16 @@ An adjudication goes in `findings.md` (`Adjudication` column), never in
 A finding prevails automatically only if it is Critical or Important **and** its
 verdict part is spec compliance or verification evidence. A Minor or
 quality-part finding that would reverse a recorded decision goes to unbiased
-reconciliation: a quorum question on the decision's recorded axis — its
-stage-03 id, or `new`, never the decision's qid (`quorum.md`). If the decision
-survives, the finding closes
-`REFUTED — governed by <D-ID>` and does not block completion. Do not widen
+reconciliation. A reconciliation is a re-open of the disputed decision
+(`quorum.md`): `Reopen of: <D-ID>`, the finding as its `Challenge`, asked on
+the axis the decision's question was asked on (its stage-03 id, or `new`,
+never the decision's qid), at the raised bar, once per D-ID. `open_quorum`
+admits it (`_reopen_authority`), and an adoption supersedes the decision
+(`finalize_quorum`). A decision with `Provenance: human` is not reconciled: that
+is a halt. If the decision survives, the finding closes
+`REFUTED — governed by <D-ID>` and does not block completion; if the
+reconciliation reverses it, the finding stands and the task is redone under
+the new decision. Do not widen
 this. Reconciliation never stalls the fix loop and never spends a fix round
 (`execution.md`, the per-task gate).
 

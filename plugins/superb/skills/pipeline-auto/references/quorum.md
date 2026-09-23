@@ -52,11 +52,21 @@ Read it from `current_floor(run_dir)["floor_rung"]`; never assume it.
 `check_admissible` returns a list of problem codes; `[]` admits. It also requires
 three distinct owners.
 
-**A reconciliation question takes the disputed decision's recorded axis:** the
-axis its question was asked on, as its `## Quorum` row records it — a stage-03
-question id or `new` — or a human decision's stage-03 id. Never the decision's
-qid, even where the decision record's `Axis` field carries it: `open_quorum`
-refuses that axis, because `finalize_quorum` could never record the row.
+**A reconciliation question is a re-open of the disputed decision.** Write it
+with `- **Reopen of:** <D-ID>` and put the reviewer's finding in
+`- **Challenge:**` — the finding is the challenging evidence. Ask it on the
+axis the decision's question was asked on, as its `## Quorum` row records it:
+a stage-03 question id or `new`, never the decision's qid (`open_quorum`
+refuses that axis, because `finalize_quorum` could never record the row).
+`open_quorum` admits it through `_reopen_authority` (a quorum adoption only; a
+human decision is a halt, never a reconciliation) and sets the raised bar to
+the decision's rung; it is once per D-ID, and a second reconciliation or
+challenge of that decision escalates as `second-challenge`. Park the task on
+its qid with `park_task_on_quorum`. If it adopts, `finalize_quorum` supersedes
+the disputed decision on that decision's recorded axis, so exactly one answer
+governs: the new one when it reverses, a re-affirmation when it does not. If
+it escalates (`raised-bar-not-cleared` included), the decision stands and a
+human answer resumes the task.
 
 4. **Complete the record, then open.** The worker's question record has no
    reading roots, owners or blast radius: owners are the brain ids you assign

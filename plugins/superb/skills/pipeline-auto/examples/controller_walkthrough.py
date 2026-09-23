@@ -435,9 +435,9 @@ class Controller:
                                        phase_plan=str(self.repo / PLAN_REL[phase]))
         tracker = self.pas.freeze_dispatch_ceiling(self.run_dir)
         run = tracker["run"]
-        check(run["dispatch_projection"] == str(7 * 6 + 3 * 10 + 5),
+        check(run["dispatch_projection"] == str(7 * 7 + 3 * 10 + 5),
               f"dispatch projection {run['dispatch_projection']} is not the "
-              "planning.md formula over six tasks")
+              "planning.md formula over seven tasks")
         self.move_stage("07", "08", "write-red-tests",
                         missing="stage transition 07->08 (freeze_dispatch_ceiling "
                                 "freezes but does not close stage 07)")
@@ -545,11 +545,12 @@ class Controller:
         row = self.task(task_id)
         branch = f"task/{task_id}"
         if files:
-            commits = self.worker_commit(branch, files, f"{task_id} work")
-        else:
-            #: A resumed attempt whose work already stands on its branch.
-            commits = self.git("rev-list", "--reverse",
-                               f"{self.baseline(task_id)}..{branch}").split()
+            self.worker_commit(branch, files, f"{task_id} work")
+        #: The attempt's range: everything on the branch past its baseline --
+        #: a resumed attempt's own commits and the earlier attempts' standing
+        #: ones alike.
+        commits = self.git("rev-list", "--reverse",
+                           f"{self.baseline(task_id)}..{branch}").split()
         commands = TASK_SUITES[task_id]
         #: execution.md step 1: re-run the task's exact suite at the worker's
         #: head, and record THAT as the task-test evidence.
@@ -629,7 +630,8 @@ class Controller:
     # -- quorum (references/quorum.md) ---------------------------------------
 
     def question_text(self, qid_heading: str, *, question, axis, phase, blocks,
-                      raiser, options, owners=None, blast=None) -> str:
+                      raiser, options, owners=None, blast=None,
+                      extra=()) -> str:
         lines = ["<!-- pipeline-auto/v1 -->", "", f"## {qid_heading}", "",
                  f"- **Question:** {question}",
                  f"- **Axis:** {axis}",
@@ -646,17 +648,31 @@ class Controller:
                       f"tests=tests, phase-plan={PLAN_REL[phase]}",
                       f"- **Owners:** {', '.join(owners)}",
                       f"- **Blast radius:** {blast}"]
+        lines += list(extra)
         return "\n".join(lines) + "\n"
 
     def open_question(self, task_id: str, question: str, options, *,
-                      axis: str = "new", raiser=None) -> tuple:
-        """The worker's record, the completed copy, then open_quorum."""
+                      axis: str = "new", raiser=None, reopen_of=None,
+                      challenge=None) -> tuple:
+        """The worker's record, the completed copy, then open_quorum.
+
+        With ``reopen_of`` it is a re-open (quorum.md): the D-ID it challenges
+        and the challenging evidence ride in the record, and the qid is
+        ``derive_reopen_qid``'s.
+        """
         row = self.task(task_id)
         phase = row["phase"]
         raiser = raiser or row["owner"]
-        qid = self.pas.derive_qid(question, axis)
+        extra = ()
+        if reopen_of is None:
+            qid = self.pas.derive_qid(question, axis)
+        else:
+            qid = self.pas.derive_reopen_qid(question, axis, reopen_of)
+            extra = (f"- **Reopen of:** {reopen_of}",
+                     f"- **Challenge:** {challenge}")
         fields = dict(question=question, axis=axis, phase=phase,
-                      blocks=task_id, raiser=raiser, options=options)
+                      blocks=task_id, raiser=raiser, options=options,
+                      extra=extra)
         stem = f"{RUN_REL}/scratch/{task_id}-{row['attempt']}-question"
         self.write(f"{stem}.md", self.question_text(f"Q-{qid} — {task_id}", **fields))
         completed = self.write(f"{stem}-completed.md", self.question_text(
@@ -689,12 +705,13 @@ class Controller:
         return qid
 
     def brain_response(self, qid: str, answer_key: str, *, line: int,
-                       quote: str, other: str, rung: str = "specified") -> dict:
+                       quote: str, other: str, rung: str = "specified",
+                       path: str = SPEC_REL, kind: str = "spec") -> dict:
         return {
             "qid": qid, "answer_key": answer_key,
             "answer": f"Use {answer_key}.",
             "rung": rung,
-            "evidence": [{"kind": "spec", "path": SPEC_REL, "line": line,
+            "evidence": [{"kind": kind, "path": path, "line": line,
                           "quote": quote}],
             "consequences": [{"kind": "command-passes",
                               "subject": f"python3 -m unittest -k {answer_key}",
@@ -826,6 +843,7 @@ count(items) returns the number of items and raises on a negative total.
 farewell(name) returns a farewell line for the user.
 wave(name) returns a wave line for the user.
 Every public function is covered by a unittest module under tests/.
+whisper(text) returns the text lowercased, as the user reads it.
 """
 
 MASTER_TEXT = """# Walkthrough master plan
@@ -842,6 +860,7 @@ TASK_SUITES = {
     "P1-T1": ["python3 -m unittest tests.test_greet"],
     "P1-T2": ["python3 -m unittest tests.test_count"],
     "P1-T3": ["python3 -m unittest tests.test_shout"],
+    "P1-T4": ["python3 -m unittest tests.test_whisper"],
     "P2-T1": ["python3 -m unittest tests.test_farewell"],
     "P2-T2": ["python3 -m unittest tests.test_wave"],
     "P2-T3": ["python3 -m unittest tests.test_beam"],
@@ -850,6 +869,7 @@ SCOPES = {
     "P1-T1": "file:app/greet.py,file:tests/test_greet.py",
     "P1-T2": "file:app/count.py,file:tests/test_count.py",
     "P1-T3": "file:app/shout.py,file:tests/test_shout.py",
+    "P1-T4": "file:app/whisper.py,file:tests/test_whisper.py",
     "P2-T1": "file:app/farewell.py,file:tests/test_farewell.py",
     "P2-T2": "file:app/wave.py,file:tests/test_wave.py",
     "P2-T3": "file:app/beam.py,file:tests/test_beam.py",
@@ -876,7 +896,7 @@ def phase_plan(phase: str, deps: str, review_class: str, reason: str,
     return "\n".join(lines)
 
 
-PHASE_TASKS = {"P1": ("P1-T1", "P1-T2", "P1-T3"),
+PHASE_TASKS = {"P1": ("P1-T1", "P1-T2", "P1-T3", "P1-T4"),
                "P2": ("P2-T1", "P2-T2", "P2-T3")}
 PHASE_1_PLAN = phase_plan("P1", "none", "required",
                           "public helpers other code will import",
@@ -904,6 +924,18 @@ FILES = {
               "class T(unittest.TestCase):\n    def test_shout(self):\n"
               "        self.assertEqual(shout('hi'), 'HI!')\n",
               "app/shout.py": "def shout(text):\n    return text.upper() + '!'\n"},
+    #: P1-T4 is implemented twice: under the decision a quorum first adopted
+    #: ('keep'), then under the reconciliation that reversed it ('lower').
+    "P1-T4": {"tests/test_whisper.py":
+              "import unittest\nfrom app.whisper import whisper\n\n\n"
+              "class T(unittest.TestCase):\n    def test_whisper(self):\n"
+              "        self.assertEqual(whisper('Hi'), 'Hi')\n",
+              "app/whisper.py": "def whisper(text):\n    return text\n"},
+    "P1-T4-reversed": {"tests/test_whisper.py":
+              "import unittest\nfrom app.whisper import whisper\n\n\n"
+              "class T(unittest.TestCase):\n    def test_whisper(self):\n"
+              "        self.assertEqual(whisper('Hi'), 'hi')\n",
+              "app/whisper.py": "def whisper(text):\n    return text.lower()\n"},
     "P2-T1": {"tests/test_farewell.py":
               "import unittest\nfrom app.farewell import farewell\n\n\n"
               "class T(unittest.TestCase):\n    def test_farewell(self):\n"
@@ -961,6 +993,7 @@ def drive(ctl: Controller) -> None:
         "attempt 2 published, reviewed, imported, integrated")
 
     reconciliation(ctl, qid)
+    reversal(ctl)
     ctl.verify_phase("P1")
     say("P1: phase suite re-run on the integrated tip, phase evidence "
         "published, phase [x]")
@@ -972,78 +1005,166 @@ def drive(ctl: Controller) -> None:
     master_gate_and_completion(ctl)
 
 
-def reconciliation(ctl: Controller, governing: str) -> None:
-    """Park a task under review on a reconciliation quorum, then resume it.
+def reconcile(ctl: Controller, task_id: str, governing: str, finding: str,
+              question: str, options) -> tuple:
+    """Round 1 blocked on ``[~]``, the re-open opened, the task parked on it.
 
-    ``governing`` is the qid of the quorum decision the reviewer's Minor
-    finding would reverse -- the spec's case ("requires reversing a quorum
-    decision", design spec, "A reviewer finding may not reverse a decision").
-    The gate runs before import (execution.md), so the task is still ``[~]``
-    when the finding lands, and ``park_task_on_quorum`` moves it to ``[?]``.
+    A reconciliation IS A RE-OPEN of the disputed decision (quorum.md): its
+    record names ``Reopen of: Q-<governing>`` and carries the reviewer's finding
+    as the ``Challenge``, it is asked on the axis the decision's question was
+    asked on (its ``## Quorum`` row's ``Axis``), and it is held to the raised
+    bar -- the decision's own rung -- once per D-ID.
     """
     pas = ctl.raw_module
-    ctl.reserve("P1-T3", "impl-3")
-    ctl.task_brief("P1-T3")
-    ctl.publish_done("P1-T3", FILES["P1-T3"])
-    #: Round 1, recorded while the task is [~]: one Minor that would reverse
-    #: Q-<governing>. The disputed round is its own transition.
-    ctl.review_round(
-        "P1-T3", 1, "task-reviewer-1", minor=1, state="blocked",
-        note=(f"F-001 (Minor, quality): shout() should return '' on bad input "
-              f"the lenient way, which reverses Q-{governing} (raise)\n"))
-    #: The reconciliation takes the disputed decision's RECORDED axis (quorum.md):
-    #: Q-<governing> was asked on 'new', so the reconciliation is too. Its own
-    #: qid is refused at the door -- open_quorum and finalize_quorum share one
-    #: axis predicate -- so nothing is dispatched on an axis no row can hold.
-    question = ("Should shout() return an empty string on bad input instead of "
-                "raising, reversing the count() ruling?")
-    survives = [ctl.brain_response("0" * 12, "raise", line=4,
-                                   quote="raises on a negative total",
-                                   other="lenient")] * 3
+    ctl.review_round(task_id, 1, "task-reviewer-1", minor=1, state="blocked",
+                     note=finding + "\n")
     recorded = next(r for r in ctl.tracker()["quorum"] if r["qid"] == governing)
     check(recorded["axis"] == "new",
           f"Q-{governing}'s ## Quorum row records axis {recorded['axis']!r}")
+    #: The decision's own qid is refused as an axis at the door: open_quorum
+    #: and finalize_quorum share one axis predicate.
     try:
-        ctl.open_question("P1-T3", question, ["raise", "lenient"],
-                          axis=governing, raiser="task-reviewer-1")
+        ctl.open_question(task_id, question, options, axis=governing,
+                          raiser="task-reviewer-1",
+                          reopen_of=f"Q-{governing}", challenge=finding)
         check(False, f"open_quorum admitted the decision's qid {governing!r} "
                      "as an axis")
     except pas.QuorumError as exc:
         check("neither a stage-03 question id" in str(exc),
               f"open_quorum refused the qid axis for another reason: {exc}")
     qid, reference = ctl.open_question(
-        "P1-T3", question, ["raise", "lenient"], axis=recorded["axis"],
-        raiser="task-reviewer-1")
+        task_id, question, options, axis=recorded["axis"],
+        raiser="task-reviewer-1", reopen_of=f"Q-{governing}", challenge=finding)
+    owner = ctl.task(task_id)["owner"]
     fix_rounds_before = list(ctl.tracker()["fix_rounds"])
-    tracker = ctl.pas.park_task_on_quorum(str(ctl.run_dir), task_id="P1-T3",
+    tracker = ctl.pas.park_task_on_quorum(str(ctl.run_dir), task_id=task_id,
                                           qid=qid)
-    cell = next(r for r in tracker["tasks"] if r["id"] == "P1-T3")
+    cell = next(r for r in tracker["tasks"] if r["id"] == task_id)
     check(cell["state"] == "[?]" and cell["question"] == f"quorum:{qid}@{reference}",
-          f"park_task_on_quorum left P1-T3 at {cell['state']} {cell['question']}")
-    check("impl-3" not in pas._implementation_owners(ctl.tracker()),
+          f"park_task_on_quorum left {task_id} at {cell['state']} {cell['question']}")
+    check(owner not in pas._implementation_owners(ctl.tracker()),
           "a reconciliation-parked task still holds its owner slot")
     check(ctl.tracker()["fix_rounds"] == fix_rounds_before,
           "parking spent a fix round")
-    say(f"reconciliation: round 1 blocked on [~] (F-001 would reverse "
-        f"Q-{governing}); park_task_on_quorum moved P1-T3 to [?] on {qid} with "
-        "import's cell rendering; its owner slot released")
-    #: The decision survives: all three brains ground 'raise' in the spec.
-    ctl.answer_brains(qid, [dict(r, qid=qid, blast=[qid]) for r in survives])
+    return qid
+
+
+def governing_answers(ctl: Controller, governing: str) -> list:
+    """The decisions standing Adopted on ``governing``'s recorded axis."""
+    parsed = ctl.raw_module.parse_decisions(ctl.read_decisions())
+    axis = parsed["decisions"][f"Q-{governing}"]["axis"]
+    return [did for did in parsed["axis_index"][axis]
+            if parsed["decisions"][did]["status"] == "Adopted"]
+
+
+def reconciliation(ctl: Controller, governing: str) -> None:
+    """The branch where the decision SURVIVES its reconciliation.
+
+    ``governing`` is the qid of the quorum decision the reviewer's Minor
+    finding would reverse (design spec, "A reviewer finding may not reverse a
+    decision"). The gate runs before import (execution.md), so the task is
+    still ``[~]`` when the finding lands. Q-<governing> was adopted at
+    ``specified``, so the re-open's raised bar cannot be cleared: it escalates,
+    the decision stands, and the human's answer resumes the task with the
+    finding REFUTED -- governed by Q-<governing>.
+    """
+    ctl.reserve("P1-T3", "impl-3")
+    ctl.task_brief("P1-T3")
+    ctl.publish_done("P1-T3", FILES["P1-T3"])
+    finding = (f"F-001 (Minor, quality): shout() should return '' on bad input "
+               f"the lenient way, which reverses Q-{governing} (raise)")
+    question = ("Should shout() return an empty string on bad input instead of "
+                "raising, reversing the count() ruling?")
+    qid = reconcile(ctl, "P1-T3", governing, finding, question,
+                    ["raise", "lenient"])
+    say(f"reconciliation (survives): round 1 blocked on [~] (F-001 would "
+        f"reverse Q-{governing}); the decision's qid refused as an axis; "
+        f"re-open {qid} of Q-{governing} opened on its asked axis 'new' with "
+        "the finding as its challenge; park_task_on_quorum moved P1-T3 to [?] "
+        "with import's cell rendering; its owner slot released")
+    ctl.answer_brains(qid, [
+        dict(ctl.brain_response(qid, "raise", line=4,
+                                quote="raises on a negative total",
+                                other="lenient"), blast=[qid])] * 3)
     final = ctl.pas.finalize_quorum(str(ctl.run_dir), qid=qid)
-    check(final["status"] == "adopted",
-          f"the reconciliation quorum did not adopt: {final.get('status')} "
-          f"{final.get('reason')}")
-    ctl.resume("P1-T3", 1, "impl-3b", f"Q-{qid}")
+    check(final["status"] == "escalated"
+          and final["reason"] == "raised-bar-not-cleared"
+          and final["reopen_of"] == f"Q-{governing}",
+          f"the reconciliation of a specified decision did not stop at its "
+          f"raised bar: {final.get('status')} {final.get('reason')}")
+    check(governing_answers(ctl, governing) == [f"Q-{governing}"],
+          "the surviving decision is not the one answer governing its axis")
+    h_survives = ctl.human_resume(
+        qid, "P1-T3", question,
+        f"raise — F-001 REFUTED, governed by Q-{governing}")
+    ctl.resume("P1-T3", 1, "impl-3b", h_survives)
     #: The finding closes REFUTED -- governed by the surviving decision; the
     #: accepted round 2 licenses attempt 2's import of the standing commits.
     ctl.complete("P1-T3", None, reviewer="task-reviewer-1", round_number=2)
     fix_rounds = [r for r in ctl.tracker()["fix_rounds"] if r["scope"] == "P1-T3"]
     check(not fix_rounds, "the reconciliation spent a fix round")
-    say("reconciliation: the decision's qid refused as an axis at open; asked "
-        f"on its recorded axis 'new', adopted Q-{qid} (the decision survives), "
-        "resume_task released P1-T3 on it, round 2 accepted with F-001 "
-        "REFUTED before import, attempt 2 imported the standing commits, "
-        "integrated; no fix round spent")
+    say(f"reconciliation (survives): the re-open could not clear Q-{governing}'s "
+        f"raised bar and escalated (raised-bar-not-cleared); Q-{governing} "
+        f"still the one governing answer; human {h_survives} resumed P1-T3; "
+        "round 2 accepted with F-001 REFUTED before import; attempt 2 imported "
+        "the standing commits, integrated; no fix round spent")
+
+
+def reversal(ctl: Controller) -> None:
+    """The branch where the reconciliation REVERSES the decision.
+
+    P1-T4's own question is adopted at ``code-evidenced``; the reviewer's
+    finding is reconciled by a re-open whose brains ground the other option in
+    the spec, strictly above that bar. The adoption supersedes the disputed
+    decision on its recorded axis, so exactly one answer governs afterwards,
+    and the task is redone under it.
+    """
+    ctl.reserve("P1-T4", "impl-4")
+    ctl.task_brief("P1-T4")
+    question = "Should whisper() lowercase its text or keep its case?"
+    governing = ctl.raise_question("P1-T4", question, ["keep", "lower"])
+    ctl.answer_brains(governing, [
+        ctl.brain_response(governing, "keep", line=1, quote="def count(items):",
+                           other="lower", rung="code-evidenced",
+                           path="app/count.py", kind="repo")] * 3)
+    final = ctl.pas.finalize_quorum(str(ctl.run_dir), qid=governing)
+    check(final["status"] == "adopted" and final["winner_rung"] == "code-evidenced",
+          f"P1-T4's quorum did not adopt at code-evidenced: {final.get('status')} "
+          f"{final.get('reason')} {final.get('winner_rung')}")
+    ctl.resume("P1-T4", 1, "impl-4b", f"Q-{governing}")
+    ctl.publish_done("P1-T4", FILES["P1-T4"])
+    finding = (f"F-002 (Minor, quality): whisper() keeps the caller's case, "
+               f"which the spec's lowercasing contradicts; reverses "
+               f"Q-{governing} (keep)")
+    qid = reconcile(ctl, "P1-T4", governing, finding,
+                    "Should whisper() lowercase its text, reversing the "
+                    "keep-case ruling?", ["keep", "lower"])
+    ctl.answer_brains(qid, [
+        dict(ctl.brain_response(qid, "lower", line=8,
+                                quote="returns the text lowercased",
+                                other="keep"), blast=[qid])] * 3)
+    final = ctl.pas.finalize_quorum(str(ctl.run_dir), qid=qid)
+    check(final["status"] == "adopted" and final["reopen_of"] == f"Q-{governing}",
+          f"the reversing reconciliation did not adopt: {final.get('status')} "
+          f"{final.get('reason')}")
+    records = ctl.raw_module.parse_decisions(ctl.read_decisions())["decisions"]
+    check(records[f"Q-{governing}"]["status"] == "Superseded"
+          and records[f"Q-{qid}"]["status"] == "Adopted"
+          and records[f"Q-{qid}"].get("supersedes", "").strip() == f"Q-{governing}",
+          f"the reversal did not supersede Q-{governing}")
+    check(governing_answers(ctl, governing) == [f"Q-{qid}"],
+          f"more than one answer governs Q-{governing}'s axis: "
+          f"{governing_answers(ctl, governing)}")
+    #: The finding stands: attempt 3 redoes the work under the new decision,
+    #: and the gate re-reviews it before import.
+    ctl.resume("P1-T4", 2, "impl-4c", f"Q-{qid}")
+    ctl.complete("P1-T4", FILES["P1-T4-reversed"], reviewer="task-reviewer-1",
+                 round_number=2)
+    say(f"reconciliation (reverses): P1-T4's Q-{governing} adopted at "
+        f"code-evidenced; F-002 reconciled by re-open {qid} on 'new'; its "
+        f"brains cleared the raised bar at specified and it adopted 'lower', "
+        f"superseding Q-{governing} -- Q-{qid} is the one governing answer; "
+        "P1-T4 resumed on it, redone, round 2 accepted, imported, integrated")
 
 
 def phase_two(ctl: Controller) -> None:

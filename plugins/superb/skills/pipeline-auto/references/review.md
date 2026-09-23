@@ -3,12 +3,12 @@
 Load for the master gate, contradiction routing, a fixer dispute, the
 completeness critic, final verification, or the terminal report.
 
-**Not yet enforced by code (P06):** the two-reviewer master gate and reviewer
-independence, contradiction routing, the completeness freeze and proposals
-writer, the `final` evidence purpose, the terminal action
-`complete-with-proposals`, and the terminal report. `## Gates` rows and
-`findings.md` have validated grammars but no dedicated writers. Until P06 these
-rules are yours to follow exactly.
+**Not enforced by code:** contradiction routing, the proposals writer, the
+terminal action `complete-with-proposals`, the terminal report, and writers for
+the master gate's reports, verdict, fix rounds and stage 12. `findings.md` has a
+validated grammar but no writer. These rules are yours to follow exactly. The
+completeness freeze rests on the phase-set seal (`planning.md`): no phase can
+be created after stage 06.
 
 **REQUIRED SUB-SKILLS:** `superpowers:requesting-code-review` (stage 11),
 `superpowers:verification-before-completion` (stage 12).
@@ -18,6 +18,19 @@ rules are yours to follow exactly.
 **Exactly two independent reviewers** over the whole edge: tracker
 `base_commit` → the last phase's verified integrated HEAD, which must still equal
 the target-branch tip. Neither may be a persisted task implementation owner.
+
+Open the gate with `open_master_gate(run_dir, reviewers={"A": ..., "B": ...})`
+once stage 11 is active and every phase is `[x]`. It records the edge itself
+(`base_commit` → the last source task's integration merge; you do not pass
+either end) and writes the two reviewers into the master row's `Assignments`,
+A first. The tracker enforces the rest, for this call and for any raw write:
+exactly two distinct reviewers, neither a task `Owner`, a `Fixer`, nor the
+owner of any published worker result (superseded attempts included), and no
+reviewer may later become a task owner or fixer. An unreadable result under
+`agent-output/` refuses the gate rather than being skipped. Reopening with the
+same reviewers is inert; swapping them raises. Checking that the head is still
+the target-branch tip is yours. Record the stage-12 run as `final` evidence and
+the gate's own re-run as `branch-review`.
 
 | Reviewer | Covers |
 | --- | --- |

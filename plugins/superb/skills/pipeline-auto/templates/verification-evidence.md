@@ -9,7 +9,7 @@ Fill nothing in here; hand the controller the values.
 
 | Field | Value |
 | --- | --- |
-| purpose | <task-test_task-integration_or_phase> |
+| purpose | <task-test_task-integration_phase_branch-review_or_final> |
 | run_id | <run_id> |
 | subject | <task_or_phase>/<stable-id> |
 | attempt | <attempt-NNN_or_N/A> |
@@ -30,7 +30,8 @@ acceptance is a `## Tasks` state the controller writes after it has checked it.
 ## What each field commits you to
 
 `purpose` is one of the REGISTERED purposes. Each phase adds the purpose it
-needs — P04 ships `task-test`, `task-integration` and `phase` — because a
+needs — P04 ships `task-test`, `task-integration` and `phase`, and P06 adds
+`branch-review` and `final` for the master gate and stage 12 — because a
 purpose nobody declared is a record nobody validates.
 
 `subject` is `<kind>/<stable-id>` and the kind is `task` or `phase`. It is what

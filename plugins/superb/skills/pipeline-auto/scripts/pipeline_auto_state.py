@@ -1627,6 +1627,39 @@ def _validate_gates(tracker: dict) -> None:
                 f"evaluated gate {gate['id']!r} needs its reports and its "
                 "verification evidence; a verdict with neither is a verdict with "
                 "no basis, in whichever direction it went")
+        if gate["type"] == "master" and gate["assignments"] != "-":
+            _validate_master_reviewers(tracker, gate)
+
+
+def _implementers(tracker: dict) -> set:
+    """Every implementation owner the tracker names: a task's ``Owner`` and a
+    fix round's ``Fixer``. The owners of superseded attempts are on disk only;
+    ``_guard_master_reviewers`` reads those."""
+    return ({row["owner"] for row in tracker["tasks"]}
+            | {row["fixer"] for row in tracker["fix_rounds"]}) - {"-"}
+
+
+def _validate_master_reviewers(tracker: dict, gate: dict) -> None:
+    """The master gate's ``Assignments`` are its two reviewers, neither an
+    implementer.
+
+    The spec: stage 11 is "two independent reviewers", and P06 is "two
+    reviewers with non-implementer enforcement". Held on every read, so a task
+    reserved or a fix round opened AFTER the gate opens cannot hand either
+    reviewer code to write that they then review.
+    """
+    reviewers = _csv(gate["assignments"])
+    if (len(reviewers) != 2 or len(set(reviewers)) != 2
+            or not all(_TOKEN.fullmatch(value) for value in reviewers)):
+        raise TrackerValidationError(
+            f"master gate {gate['id']!r} assigns {gate['assignments']!r}; the "
+            "master gate takes exactly two distinct reviewers")
+    conflicted = [value for value in reviewers if value in _implementers(tracker)]
+    if conflicted:
+        raise TrackerValidationError(
+            f"master reviewer {conflicted[0]!r} owns a task or a fix round in "
+            "this run; a master reviewer is never an implementer of the code "
+            "under review")
 
 
 #: The review-intensity dial as it is recorded PER ROUND, lowest first. It is a
@@ -2645,6 +2678,42 @@ def _guard_frozen_phase_set(current: dict, proposed: dict) -> None:
             "impossible, and no later stage may create a phase")
 
 
+def _guard_master_reviewers(run_dir: Path, current: dict,
+                            proposed: dict) -> None:
+    """A master reviewer never owned a published attempt, superseded or not.
+
+    ``_validate_master_reviewers`` sees the owners the tracker still names. A
+    worker released after its attempt was superseded is named by nothing but
+    the immutable result it published, and it is exactly the worker likely to
+    be free when reviewers are drawn. So when a transition sets or changes the
+    master gate's reviewers, every published result is read. It fails CLOSED:
+    a result that cannot be read may be the one naming the reviewer. Later
+    work cannot reintroduce one: a new result needs a task ``Owner`` cell that
+    agrees with it, and the validator refuses a reviewer there.
+    """
+    before = {row["id"]: row["assignments"] for row in current["gates"]}
+    changed = [row for row in proposed["gates"]
+               if row["type"] == "master" and row["assignments"] != "-"
+               and row["assignments"] != before.get(row["id"])]
+    if not changed:
+        return
+    diagnostics: list = []
+    owners = {result["owner"]
+              for _path, result in _result_candidates(run_dir, diagnostics)}
+    if diagnostics:
+        raise TrackerValidationError(
+            "the master reviewers cannot be checked against every published "
+            f"worker result: {diagnostics[0]}")
+    for row in changed:
+        conflicted = [value for value in _csv(row["assignments"])
+                      if value in owners]
+        if conflicted:
+            raise TrackerValidationError(
+                f"master reviewer {conflicted[0]!r} owned a published attempt "
+                "in this run; a released or superseded implementer is still "
+                "the implementer of that code")
+
+
 def _guard_frozen_intent(current: dict, proposed: dict) -> None:
     """The reconciled intent brief is immutable once stage 03 closes.
 
@@ -2883,6 +2952,7 @@ def locked_tracker_update(run_dir: Path, *, transition_id: str, mutate,
         _guard_frozen_dispatch_ceiling(current, reparsed)
         _guard_phase_rows(current, reparsed)
         _guard_frozen_phase_set(current, reparsed)
+        _guard_master_reviewers(run_dir, current, reparsed)
         _guard_review_class(current, reparsed)
         _replace_tracker(run_dir, canonical, transition_id)
         return reparsed
@@ -13356,11 +13426,15 @@ def parse_worker_result(text: str) -> dict:
 EVIDENCE_MARKER = "<!-- pipeline-auto-verification-evidence/v1 -->"
 EVIDENCE_TITLE = "# Pipeline Auto — Verification Evidence"
 
-#: EXTENDED BY THE PHASE THAT NEEDS THE PURPOSE, never pre-populated here. P05
-#: appends ``task-review`` and ``adversarial``; P06 appends ``branch-review``,
-#: ``completeness`` and ``final``. The validator refusing an unregistered
-#: purpose is the point: a purpose nobody declared is a record nobody validates.
+#: EXTENDED BY THE PHASE THAT NEEDS THE PURPOSE, never pre-populated here. P06
+#: appends ``branch-review`` and ``final`` below; the ``task-review``,
+#: ``adversarial`` and ``completeness`` purposes were planned with tasks that
+#: were dropped, so nothing registers them. The validator refusing an
+#: unregistered purpose is the point: a purpose nobody declared is a record
+#: nobody validates.
 EVIDENCE_PURPOSES = ("task-test", "task-integration", "phase")
+#: P06: the master gate's whole-branch review and stage 12's final run.
+EVIDENCE_PURPOSES += ("branch-review", "final")
 
 #: The two things a suite can be run ABOUT. The template says
 #: ``<task_or_phase>/<stable-id>`` and a template that states a rule the codec
@@ -18317,3 +18391,106 @@ def reconcile_run(run_dir, *, run_command) -> dict:
 
     return {"actions": tuple(actions), "questions": tuple(questions),
             "diagnostics": tuple(diagnostics)}
+
+
+# ---------------------------------------------------------------------------
+# P06 Task 2: the master gate and its two non-implementer reviewers.
+#
+# The spec: stage 11 is "two independent reviewers scoring against
+# decisions.md", and P06 is "two reviewers with non-implementer enforcement".
+# The enforcement is not in the writer: ``_validate_master_reviewers`` holds it
+# on every read and ``_guard_master_reviewers`` on every transition, so a raw
+# ``locked_tracker_update`` is held exactly as ``open_master_gate`` is.
+# ---------------------------------------------------------------------------
+
+MASTER_GATE_ID = "gate-master"
+
+#: Reviewer A covers requirements and recorded decisions, B integration and
+#: architecture (``references/review.md``). ``Assignments`` records them in
+#: this order.
+MASTER_REVIEWER_ROLES = ("A", "B")
+
+
+def _master_edge_head(tracker: dict) -> str:
+    """The reviewed head: the integration merge of the last source task.
+
+    Tasks integrate ``--no-ff`` in plan order and ``## Tasks`` holds them in
+    that order, so the last source task's merge is the head of the whole edge.
+    A cell that is not yet a merge commit (``held``, ``-``) is not checked
+    here: ``_validate_gates`` refuses any opened gate whose head is not a
+    commit sha, on the reparse of this very transition.
+    """
+    source = [row for row in tracker["tasks"] if row["kind"] == TASK_KINDS[0]]
+    if not source:
+        raise TrackerValidationError(
+            "the run has no source task, so there is no edge to review")
+    return source[-1]["integration"]
+
+
+def open_master_gate(run_dir, *, reviewers) -> dict:
+    """Open the stage-11 master gate: two reviewers over the whole edge.
+
+    ``reviewers`` is ``{"A": <id>, "B": <id>}``. ``base`` and ``head`` are not
+    parameters: the base is the tracker's ``base_commit`` and the head is the
+    last source task's integration merge, so no caller chooses the diff it is
+    judged on. Every phase must be verified and stage 11 active.
+
+    Neither reviewer may be an implementer: not a task ``Owner``, not a
+    ``Fixer``, and not the owner of any published worker result. That is
+    enforced by the tracker, not here.
+
+    Opening again with the same reviewers is inert; with others it raises.
+    """
+    run_dir = _run_path(run_dir)
+    if (not isinstance(reviewers, dict)
+            or sorted(reviewers) != list(MASTER_REVIEWER_ROLES)
+            or not all(isinstance(value, str) for value in reviewers.values())):
+        raise TrackerValidationError(
+            f"reviewers {reviewers!r} must name exactly two reviewers, as "
+            f"{{'A': <id>, 'B': <id>}}")
+    assignments = ",".join(reviewers[role] for role in MASTER_REVIEWER_ROLES)
+
+    def opened(tracker: dict) -> list:
+        return [row for row in tracker["gates"]
+                if row["type"] == "master" and row["state"] != "pending"]
+
+    tracker = validate_run(run_dir)
+    for row in opened(tracker):
+        if row["assignments"] == assignments:
+            return tracker
+        raise TrackerValidationError(
+            f"master gate {row['id']!r} is already open with reviewers "
+            f"{row['assignments']!r}; reviewers are not swapped after the "
+            "gate opens")
+
+    def mutate(tracker: dict) -> dict:
+        if opened(tracker):
+            raise TrackerValidationError("the master gate is already open")
+        if _stage_state(tracker, "11") != "active":
+            raise TrackerValidationError(
+                "the master gate opens at stage 11, and stage 11 is "
+                f"{_stage_state(tracker, '11')!r}")
+        unverified = [row["id"] for row in tracker["phases"]
+                      if row["state"] != _PHASE_STATES[2]]
+        if unverified:
+            raise TrackerValidationError(
+                f"phase {unverified[0]!r} is not verified; the master gate "
+                "reviews the whole run once every phase is")
+        head = _master_edge_head(tracker)
+        masters = [row for row in tracker["gates"] if row["type"] == "master"]
+        if masters:
+            gate = masters[0]
+        else:
+            gate = {column: _ABSENT_CELL for column in section_columns("gates")}
+            gate.update({_key("ID"): MASTER_GATE_ID, _key("Type"): "master",
+                         _key("Findings"): tracker["run"]["findings"]})
+            append_row(tracker, "gates", gate)
+            gate = tracker["gates"][-1]
+        gate.update({_key("State"): "in_progress",
+                     _key("Base"): tracker["run"]["base_commit"],
+                     _key("Head"): head,
+                     _key("Assignments"): assignments})
+        return tracker
+
+    return locked_tracker_update(
+        run_dir, transition_id="open-master-gate", mutate=mutate)

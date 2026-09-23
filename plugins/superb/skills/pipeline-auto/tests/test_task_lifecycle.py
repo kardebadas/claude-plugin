@@ -7019,7 +7019,8 @@ class EvidenceModuleBoundaryTests(unittest.TestCase):
         self.assertEqual(state.EVIDENCE_MARKER,
                          "<!-- pipeline-auto-verification-evidence/v1 -->")
         self.assertEqual(state.EVIDENCE_PURPOSES,
-                         ("task-test", "task-integration", "phase"))
+                         ("task-test", "task-integration", "phase",
+                          "branch-review", "final"))
         self.assertEqual(state.EVIDENCE_FIELDS, (
             "purpose", "run_id", "subject", "attempt", "code_state", "outcome",
             "commands", "environment", "inputs"))
@@ -13269,6 +13270,7 @@ RUN_DIR_ENTRY_POINTS = (
     "initialize_run", "import_phase_plan", "reserve_task", "resume_task",
     "publish_worker_result", "import_worker_result", "integrate_task",
     "reconcile_run", "freeze_dispatch_ceiling", "close_phase_set",
+    "open_master_gate",
 )
 RUN_DIR_CONTRACT_FUNCTIONS = ("validate_run", "locked_tracker_update")
 
@@ -13414,6 +13416,8 @@ class RunDirectoryCoercionSweepTests(TempDirTestCase):
             "freeze_dispatch_ceiling": state.freeze_dispatch_ceiling,
             "close_phase_set": lambda value: state.close_phase_set(
                 value, phase_ids=["P04"]),
+            "open_master_gate": lambda value: state.open_master_gate(
+                value, reviewers={"A": "reviewer-a", "B": "reviewer-b"}),
         }
         self.assertEqual(sorted(calls), sorted(RUN_DIR_ENTRY_POINTS))
         shapes = (None, 5, b"/runs/r", ["/runs/r"], str(self.run_dir))
@@ -19795,6 +19799,231 @@ class DispatchCeilingNeedsTheSealTests(TempDirTestCase):
         state.import_phase_plan(run_dir, phase_plan=phase_05_plan(run_dir))
         self.assertEqual(state.freeze_dispatch_ceiling(run_dir)["run"][
             "dispatch_projection"], str(7 * 5 + 3 * 10 + 5))
+
+
+
+# --------------------------------------------------------------------------
+# P06 -- the master gate: two reviewers, neither an implementer.
+#
+# The spec's P06 row: "two reviewers with non-implementer enforcement"; stage
+# 11: "two independent reviewers". review.md: "Neither may be a persisted task
+# implementation owner." Persisted means every owner the run has on record: a
+# task's `Owner` cell, a fix round's `Fixer`, and the owner line of every
+# published worker result -- where a superseded attempt's owner survives after
+# its `Owner` cell has been overwritten.
+# --------------------------------------------------------------------------
+
+VALID_FIXTURE = SKILL_DIR / "tests" / "fixtures" / "valid-progress.md"
+MASTER_HEAD = "3" * 40
+REVIEWERS = {"A": "reviewer-a", "B": "reviewer-b"}
+
+
+def gate_ready_tracker() -> dict:
+    """The committed fixture carried to stage 11: P01's two tasks integrated,
+    both phases verified, P02's gate accepted, nothing in flight."""
+    tracker = state.parse_tracker(VALID_FIXTURE.read_text(encoding="utf-8"))
+    for row in tracker["stages"]:
+        if row["stage"] < "11":
+            row.update(stage_state="complete", next_action="-")
+        elif row["stage"] == "11":
+            row.update(stage_state="active", next_action="open-master-gate")
+        else:
+            row.update(stage_state="pending", next_action="-")
+    tracker["escalations"] = [row for row in tracker["escalations"]
+                              if row["state"] == "answered"]
+    tracker["quorum"] = [row for row in tracker["quorum"]
+                         if row["state"] == "finalized"]
+    tracker["tasks"] = [row for row in tracker["tasks"]
+                        if row["phase"] == "P01"]
+    tracker["tasks"][-1]["integration"] = MASTER_HEAD
+    tracker["task_review"] = [row for row in tracker["task_review"]
+                              if row["task"].startswith("P01-")]
+    tracker["fix_rounds"] = [row for row in tracker["fix_rounds"]
+                             if row["scope"].startswith("P01-")]
+    tracker["phases"][-1].update(state="[x]",
+                                 verification="scratch/p02-verification.txt")
+    next(row for row in tracker["gates"] if row["id"] == "gate-p02").update(
+        state="accepted", reports="scratch/gate-p02-review.md",
+        verification="scratch/gate-p02-tests.txt")
+    return tracker
+
+
+def gate_run(root, tracker: dict | None = None) -> Path:
+    run_dir = Path(root) / "run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "progress.md").write_text(
+        state.render_tracker(tracker or gate_ready_tracker()), encoding="utf-8")
+    return run_dir
+
+
+def publish_owner(run_dir, owner: str, task_id: str = "P01-T01") -> Path:
+    """An immutable result of a SUPERSEDED attempt: its owner is on disk and
+    nowhere in the tracker."""
+    path = run_dir / state.AGENT_OUTPUT_DIRNAME / task_id / "attempt-009.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(state.render_worker_result(worker_result(
+        run_id="2026-09-14-pipeline-auto", task_id=task_id, attempt=9,
+        owner=owner)), encoding="utf-8")
+    return path
+
+
+def master_row(run_dir) -> dict:
+    return next(row for row in state.validate_run(run_dir)["gates"]
+                if row["type"] == "master")
+
+
+class OpenMasterGateTests(TempDirTestCase):
+
+    def refuse(self, run_dir, call, expected: str) -> None:
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            call()
+        self.assertIn(expected, str(caught.exception))
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def set_assignments(self, run_dir, value: str):
+        def mutate(tracker):
+            gate = next(row for row in tracker["gates"]
+                        if row["type"] == "master")
+            gate.update(state="in_progress",
+                        base=tracker["run"]["base_commit"], head=MASTER_HEAD,
+                        assignments=value)
+            return tracker
+
+        return lambda: state.locked_tracker_update(
+            run_dir, transition_id="test-master-assignments", mutate=mutate)
+
+    def test_opening_records_both_reviewers_over_the_derived_edge(self):
+        run_dir = gate_run(self.tmp)
+        state.open_master_gate(run_dir, reviewers=REVIEWERS)
+        gate = master_row(run_dir)
+        self.assertEqual(
+            (gate["state"], gate["base"], gate["head"], gate["assignments"]),
+            ("in_progress", "c8bddd610119f52b54bf077d284c7f5d8362ae77",
+             MASTER_HEAD, "reviewer-a,reviewer-b"))
+
+    def test_a_run_with_no_master_row_gets_one(self):
+        tracker = gate_ready_tracker()
+        tracker["gates"] = [row for row in tracker["gates"]
+                            if row["type"] != "master"]
+        run_dir = gate_run(self.tmp, tracker)
+        state.open_master_gate(run_dir, reviewers=REVIEWERS)
+        gate = master_row(run_dir)
+        self.assertEqual(
+            (gate["id"], gate["phase"], gate["state"], gate["findings"]),
+            (state.MASTER_GATE_ID, "-", "in_progress",
+             tracker["run"]["findings"]))
+
+    def test_a_released_implementer_on_disk_cannot_review(self):
+        """THE NON-IMPLEMENTER SEED. impl-7 owned a superseded attempt; the
+        tracker's `Owner` cell now names someone else, so a check over
+        current cells would clear impl-7 to review the code impl-7 wrote.
+        The guard reads the published results, for the writer and for a raw
+        transition alike."""
+        run_dir = gate_run(self.tmp)
+        publish_owner(run_dir, "impl-7")
+        for call in (
+                lambda: state.open_master_gate(
+                    run_dir, reviewers={"A": "impl-7", "B": "reviewer-b"}),
+                self.set_assignments(run_dir, "reviewer-a,impl-7")):
+            with self.subTest(call=call):
+                self.refuse(run_dir, call, "impl-7")
+
+    def test_a_task_owner_or_a_fixer_on_the_tracker_cannot_review(self):
+        run_dir = gate_run(self.tmp)
+        for owner in ("impl-1", "impl-4", "fixer-0"):
+            with self.subTest(owner=owner):
+                self.refuse(run_dir, self.set_assignments(
+                    run_dir, f"reviewer-a,{owner}"), owner)
+
+    def test_an_opened_reviewer_cannot_later_become_a_fixer(self):
+        run_dir = gate_run(self.tmp)
+        state.open_master_gate(run_dir, reviewers=REVIEWERS)
+
+        def fix(tracker):
+            tracker["fix_rounds"].append({
+                "scope": "gate-master", "round": "1", "state": "fixing",
+                "fixer": "reviewer-b", "findings": "F-009", "commits": "-",
+                "verification": "-", "re_review": "-", "remaining": "-"})
+            return tracker
+
+        self.refuse(run_dir, lambda: state.locked_tracker_update(
+            run_dir, transition_id="test-fix", mutate=fix), "reviewer-b")
+
+    def test_exactly_two_distinct_reviewers(self):
+        run_dir = gate_run(self.tmp)
+        for value in ("reviewer-a", "reviewer-a,reviewer-a",
+                      "reviewer-a,reviewer-b,reviewer-c"):
+            with self.subTest(value=value):
+                self.refuse(run_dir, self.set_assignments(run_dir, value),
+                            "two")
+        for reviewers in ({"A": "reviewer-a"}, {"A": "r", "B": "r"},
+                          {"A": "r1", "B": "r2", "C": "r3"}, ["r1", "r2"]):
+            with self.subTest(reviewers=reviewers):
+                self.refuse(run_dir, lambda reviewers=reviewers:
+                            state.open_master_gate(run_dir,
+                                                   reviewers=reviewers),
+                            "two")
+
+    def test_a_task_reviewer_or_a_brain_is_not_an_implementer(self):
+        """The spec's rule is non-implementer, and no wider: brains, readers
+        and task reviewers wrote no code."""
+        run_dir = gate_run(self.tmp)
+        state.open_master_gate(
+            run_dir, reviewers={"A": "reviewer-1", "B": "brain-1"})
+        self.assertEqual(master_row(run_dir)["assignments"],
+                         "reviewer-1,brain-1")
+
+    def test_an_unreadable_result_store_fails_closed(self):
+        """A result the guard cannot read may name the reviewer."""
+        run_dir = gate_run(self.tmp)
+        stray = run_dir / state.AGENT_OUTPUT_DIRNAME / "P01-T01" / "x.md"
+        stray.parent.mkdir(parents=True)
+        stray.write_text("not a worker result\n", encoding="utf-8")
+        self.refuse(run_dir,
+                    lambda: state.open_master_gate(run_dir,
+                                                   reviewers=REVIEWERS),
+                    "x.md")
+
+    def test_the_gate_opens_over_finished_work_only(self):
+        """A held head is refused upstream, by `_validate_gates`' commit-sha
+        rule for an opened gate's edge; the writer adds no check of its own."""
+        tracker = gate_ready_tracker()
+        tracker["tasks"][-1]["integration"] = "held"
+        self.tmp = self.tmp / "held"
+        run_dir = gate_run(self.tmp, tracker)
+        self.refuse(run_dir, lambda: state.open_master_gate(
+            run_dir, reviewers=REVIEWERS), "held")
+        tracker = gate_ready_tracker()
+        tracker["phases"][-1].update(state="[~]", verification="-")
+        self.tmp = self.tmp.parent / "unverified"
+        run_dir = gate_run(self.tmp, tracker)
+        self.refuse(run_dir, lambda: state.open_master_gate(
+            run_dir, reviewers=REVIEWERS), "P02")
+
+    def test_the_gate_opens_at_stage_11(self):
+        tracker = gate_ready_tracker()
+        stages = {row["stage"]: row for row in tracker["stages"]}
+        stages["10"].update(stage_state="active", next_action="debug")
+        stages["11"].update(stage_state="pending", next_action="-")
+        run_dir = gate_run(self.tmp, tracker)
+        self.refuse(run_dir, lambda: state.open_master_gate(
+            run_dir, reviewers=REVIEWERS), "stage 11")
+
+    def test_opening_again_is_inert_for_the_same_reviewers_only(self):
+        run_dir = gate_run(self.tmp)
+        state.open_master_gate(run_dir, reviewers=REVIEWERS)
+        bump(run_dir)
+        before = (run_dir / "progress.md").read_bytes()
+        state.open_master_gate(run_dir, reviewers=REVIEWERS)
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+        self.refuse(run_dir, lambda: state.open_master_gate(
+            run_dir, reviewers={"A": "reviewer-a", "B": "reviewer-c"}),
+            "already open")
+
+    def test_the_master_gate_evidence_purposes_are_registered(self):
+        self.assertEqual(state.EVIDENCE_PURPOSES[-2:],
+                         ("branch-review", "final"))
 
 
 if __name__ == "__main__":

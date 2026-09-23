@@ -8,10 +8,11 @@ conversation memory or a stale summary. `progress.md` is the only mutable
 tracker. Never edit its tables by hand, infer a missing field, or add a second
 state file.
 
-**Not yet enforced by code:** the terminal-state check that the repository is
-still at the accepted master HEAD with a clean tree (P06). Stage transitions and
-review, fix-round and gate rows have no dedicated writers. Write them through
-`locked_tracker_update`.
+**Not enforced by code:** the terminal-state check that the repository is
+still at the accepted master HEAD with a clean tree. Stage transitions other
+than the close of stage 06 (`close_phase_set`), review and fix-round rows, and
+gate rows other than the master row `open_master_gate` writes have no dedicated
+writers. Write them through `locked_tracker_update`.
 
 **The module never executes git.** Functions that need Git facts take
 `run_command` (see `execution.md`), or they emit argv for you to run and then
@@ -71,7 +72,12 @@ It lives inside the run directory, never under `.superpowers/sdd`.
   only by the upward ratchet (`execution.md`).
 - `derive_next_action(tracker)` puts a pending escalation (`queued` or `asked`)
   first, giving `await-escalation-batch`. Otherwise it returns the active stage's
-  next action. It returns `complete` only when every stage is complete.
+  next action. With every stage complete it returns `await-escalation-batch`
+  for a `halted` escalation, then `await-dispatch-budget` for a count past the
+  hard ceiling, then `complete-with-proposals` or `complete` (`review.md`). It
+  raises instead while any fix round, task, phase, gate or quorum is
+  unfinished, the phase-set seal or a sealed phase's row is missing, or there
+  is no master gate row.
 
 ## Writing the tracker
 

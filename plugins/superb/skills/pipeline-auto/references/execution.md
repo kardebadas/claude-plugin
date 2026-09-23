@@ -211,9 +211,17 @@ leaves no record.
 
 Minor findings are fixed, not deferred. One recorded exception: a Minor or
 quality-part finding that would reverse a recorded decision goes to
-reconciliation (`review.md`). The task moves to `[?]`, its slot releases, and the
-fix-round counter does not increment. If the decision survives, the finding
-closes `REFUTED — governed by <D-ID>`.
+reconciliation (`review.md`). The fix loop does not stall while it runs:
+
+- the task moves to `[?]`, with a reference to the reconciliation question in
+  its `Question` cell;
+- its owner slot releases, and independent work continues;
+- the fix-round counter does not increment: no `## Fix Rounds` round carries
+  the disputed finding, so a decision dispute never spends one of the three
+  rounds or escalates for the wrong reason.
+
+If the decision survives, the finding closes `REFUTED — governed by <D-ID>`
+and does not block completion.
 
 ## Stage 10 — Debug
 

@@ -6,9 +6,9 @@ the rules; this file adds the mechanics and the functions that back them.
 
 A quorum decides an **open** question. It never overrules a **recorded** one.
 
-**Not yet enforced by code:** queueing a *non-quorum* escalation and batching the
+**Not enforced by code:** queueing a *non-quorum* escalation and batching the
 queue at a stage boundary (no function writes `asked`/`answered`); provisional
-propagation to dependent tasks. These are the controller's job until P05/P06.
+propagation to dependent tasks. These are yours to follow exactly.
 
 ## Rungs, strongest first
 
@@ -235,7 +235,15 @@ third outcome and no controller override.
 **Provisional taint:** a task whose dependency closure holds a decision
 adopted below `specified` is `provisional`. Marking it — the tracker
 `Provisional` column, and the decision ids in its `Decisions` column — is yours.
-Reviewer A at stage 11 names every provisional task.
+Those two cells carry the taint everywhere it acts:
+
+- `finalize_quorum` reads them for the rung cap below, so a quorum the task
+  raises adopts no stronger than its weakest premise;
+- the task reviewer receives the provisional block
+  (`prompts/task-reviewer.md`): each tainting decision's ID and adopted answer,
+  copied verbatim into its global constraints;
+- reviewer A at stage 11 receives the same block, and names and scores every
+  provisional task (`review.md`).
 
 **Rungs inherit downward — enforced by `finalize_quorum`.** A quorum raised by
 a tainted task (a task in the question's `blocks`) adopts at no stronger than
@@ -296,7 +304,22 @@ Finalise as `escalated`, queue for the next stage boundary (even mid-phase),
 `## Escalations` for every `escalated`, `question-not-decidable` and
 `rejected-contradicts-human` outcome; it writes none for an adoption or a
 `rejected-contradicts-quorum`. Any other escalation — including a question
-refused before `open_quorum` — you record yourself.
+refused before `open_quorum` and a halt to the escalation queue — you record
+yourself, through `locked_tracker_update`, as one `## Escalations` row:
+
+| Column | Value |
+| --- | --- |
+| `ID` | `E-` and one more than the highest number the section holds |
+| `QID` | the qid when `## Quorum` holds its row; otherwise `-` (a halt against a human decision, a `second-challenge`, a budget refusal, a fix loop's round-cap halt) |
+| `Blast` | the axis tokens it touches, comma-separated, or `-` |
+| `State` | `queued` |
+| `Batch` | `-` |
+| `Resolution` | `-` |
+
+Batching sets `asked` and the batch id; with more than four pending, ask four
+and set the rest `halted`. The human's answer sets `answered` and `Resolution`
+to that answer's `H-` id.
+
 Batches: up to four per `AskUserQuestion`, ranked by blast radius. Escalating
 costs no budget and is never the discouraged path. `unresolved`, `deferred` or
 "carry to handover" is not escalating.

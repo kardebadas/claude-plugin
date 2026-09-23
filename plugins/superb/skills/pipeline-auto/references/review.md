@@ -53,11 +53,15 @@ from integration order is also yours to catch.
 
 | Reviewer | Covers |
 | --- | --- |
-| A | Requirements, behaviour, error paths, assumptions, recorded decisions. **Names and scores every `provisional` task**; each tainting decision's ID and adopted answer are copied verbatim into A's global constraints. |
+| A | Requirements, behaviour, error paths, assumptions, recorded decisions. **Names and scores every `provisional` task**; each tainting decision's ID and adopted answer are copied verbatim into A's global constraints, as the provisional block in `prompts/task-reviewer.md`. |
 | B | Integration, architecture, persistence, recovery, concurrency, security, regressions, test quality. |
 
 Collect both reports before consolidating or dispatching any fix. Then run the
 completeness critic.
+
+A quorum that `classify_quorum` reports as `stale-context` arrives here as a
+flag (`quorum.md`, Resume). It is not re-opened or re-decided at stage 11
+either.
 
 | Severity | Meaning |
 | --- | --- |
@@ -88,6 +92,9 @@ deleted; closed with a disposition).
 A re-open must beat the challenged decision's rung strictly (`quorum.md`). It
 carries the challenging evidence, never the original rung or who chose it.
 
+A halt is an escalation row you record yourself, in the shape `quorum.md`
+gives under Escalating.
+
 ### Fixer disputes go to one adjudicator, not a quorum
 
 A dispute is about a **fact** ("can line 41 be null"), settled by reading code or
@@ -112,7 +119,9 @@ A finding prevails automatically only if it is Critical or Important **and** its
 verdict part is spec compliance or verification evidence. A Minor or
 quality-part finding that would reverse a recorded decision goes to unbiased
 reconciliation; if the decision survives, the finding closes
-`REFUTED — governed by <D-ID>`. Do not widen this.
+`REFUTED — governed by <D-ID>` and does not block completion. Do not widen
+this. Reconciliation never stalls the fix loop and never spends a fix round
+(`execution.md`, the per-task gate).
 
 ## Completeness critic items
 
@@ -153,15 +162,19 @@ Completion requires all of:
 - master gate accepted;
 - final verification recorded;
 - all work committed and integrated on the designated feature branch;
-- `git status --short` prints nothing (`scratch/` self-ignores);
+- `git status --short` prints nothing (`scratch/` self-ignores). Clean means
+  empty output: an exit status of 0 with any line printed is not clean;
 - a fresh session derives `complete` from files and Git, not from a message.
 
 **Never push, publish, open a pull request, or merge into `main`/`master`.**
 
 ## The terminal report
 
-Leads with quorum-adopted decisions, **weakest rung first**. Every one is
-labelled `Provenance: quorum` here, in `decisions.md`, and in the tracker. Also:
+When the run hit a dispatch ceiling (a `dispatch-overrun` escalation was
+queued at soft, or the run stopped at hard), its first line is that overrun:
+`agent_dispatch_count` and the ceiling it reached. Then come the
+quorum-adopted decisions, **weakest rung first**. Every one is labelled
+`Provenance: quorum` here, in `decisions.md`, and in the tracker. Also:
 
 - every `provisional` task and its tainting decision;
 - counts of `rejected-contradicts-human` and `rejected-contradicts-quorum`;

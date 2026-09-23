@@ -24,6 +24,7 @@ Subagent (general-purpose):
 
     Global constraints, verbatim from plan and spec:
     [GLOBAL_CONSTRAINTS]
+    [PROVISIONAL_BLOCK]
 
     Governing decisions:
     [GOVERNING_DECISIONS — `<D-ID> — <question> — <adopted answer> —
@@ -152,10 +153,25 @@ Subagent (general-purpose):
 ## Placeholders — all REQUIRED
 
 `[MODEL]`, `[TASK_ID]`, `[BRIEF_FILE]`, `[GLOBAL_CONSTRAINTS]`,
-`[GOVERNING_DECISIONS]`, `[WRITE_SCOPE]`, `[REPORT_FILE]`, `[BASE_SHA]` (the
-attempt's `reserved_baseline`), `[HEAD_SHA]`, `[DIFF_FILE]` (from
+`[PROVISIONAL_BLOCK]`, `[GOVERNING_DECISIONS]`, `[WRITE_SCOPE]`,
+`[REPORT_FILE]`, `[BASE_SHA]` (the attempt's `reserved_baseline`),
+`[HEAD_SHA]`, `[DIFF_FILE]` (from
 `scripts/review-package RUN_DIR BASE HEAD [OUTFILE]`), `[TEST_COMMANDS]`. Never
 leave the reviewer to guess a test command.
+
+**`[PROVISIONAL_BLOCK]`** is empty when the task's `Provisional` cell reads
+`no`. When it reads `yes`, it is this block, one line per tainting decision —
+each decision the task's `Decisions` cell names that was adopted below
+`specified`:
+
+    Provisional: this task rests on quorum decisions adopted below `specified`.
+    Score it against them and name it in your report.
+    - <D-ID>: <the adopted answer, copied verbatim from decisions.md>
+
+The ID and the answer are copied verbatim: never paraphrased, summarised or
+shortened. The same `Provisional` and `Decisions` cells cap the rung of any
+quorum this task raises (`../references/quorum.md`), so the reviewer and the
+cap read one record.
 
 **The reviewer is never the implementer.** Never dispatch a reviewer whose id
 matches a persisted implementation owner for the task.

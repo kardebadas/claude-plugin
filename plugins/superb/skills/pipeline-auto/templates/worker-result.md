@@ -58,16 +58,17 @@ ordered `tests` it ran; for an `artifact` task its `artifacts`.
 ## Why the owner is stated twice
 
 The `- **Owner:**` line above the table is a CROSS-PHASE CONTRACT, not a
-decoration. P06's reviewer-independence check scans every published result in
-the run's results tree for exactly that line and refuses to hand a task to
-anyone who ever owned an attempt at it — including a released or superseded
-attempt whose only surviving record is its immutable result file. The `owner`
-table cell is what the codec reads the owner out of; the line is a projection of
-that cell, written by the same renderer and asserted equal on the way back in,
-so a document can never state two owners. Neither may be removed: without the
-cell the codec has no owner, and without the line P06 checks independence
-against the empty set and a worker released after finishing a task can be
-assigned to review it.
+decoration. The master gate's reviewer-independence check parses every
+published result in the run's results tree, owner line included, and refuses a
+master reviewer who ever owned an attempt at any task — including a released or
+superseded attempt whose only surviving record is its immutable result file.
+The `owner` table cell is what the codec reads the owner out of; the line is a
+projection of that cell, written by the same renderer and asserted equal on the
+way back in, so a document can never state two owners. Neither may be removed:
+without the cell the codec has no owner, and without the line the codec refuses
+the document, so the check refuses the gate rather than skip the result.
+Per-task reviewer independence is not checked by
+code; the controller keeps it (`prompts/task-reviewer.md`).
 
 Nothing here accepts anything. There is no field in this grammar that can say
 "accepted", "approved" or "verified" — acceptance is a `## Tasks` state the

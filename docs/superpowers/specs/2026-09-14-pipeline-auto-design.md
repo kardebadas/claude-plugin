@@ -152,9 +152,22 @@ even though the spec text uses "blast" for both.
    decided.
 5. It is one decision, not several wearing one coat.
 
-A worker never dispatches brains. It publishes its immutable result with status
-`NEEDS_CONTEXT` or `PLAN_CONFLICT` and a question record file. `BLOCKED` still
-means halt: three brains cannot conjure an API key.
+A worker never dispatches brains, and never publishes its own result. It reports
+its status — `NEEDS_CONTEXT` or `PLAN_CONFLICT` with a draft question record —
+and the controller completes the record, opens the quorum, and publishes the
+worker's immutable result. `BLOCKED` still means halt: three brains cannot
+conjure an API key.
+
+*Amended 2026-09-23.* This sentence previously said the worker publishes its
+own result. Two things made that untrue. For a finished task, the user ruled
+that the controller re-runs the task's test suite itself and records the
+evidence, so the controller publishes the result once that evidence exists. For
+a question, it is forced: the brain owner ids are assigned by the controller
+before dispatch, so only the controller can complete the question record; the
+record is published when the controller opens the quorum; and the worker's
+result must cite that published record, which does not exist until the
+controller acts. The worker's own draft is never edited — the controller writes
+a completed copy.
 
 `qid = sha256(normalize(question) || "\x00" || axis)`. The decisions digest is
 **not** part of the qid — including it would give the same question a new

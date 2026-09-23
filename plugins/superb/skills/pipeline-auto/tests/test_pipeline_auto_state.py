@@ -13720,6 +13720,9 @@ class OpenQuorum(unittest.TestCase):
 
     def setUp(self):
         self.root, self.run_dir = repo_with_a_run(self)
+        #: open_quorum refuses an axis the finalisation would refuse, so the
+        #: run knows the stage-03 question this fixture asks on.
+        register_questions(self.run_dir, QUESTION["axis"])
         self.record_path = self.run_dir / "question-T04.md"
         self.record_path.write_text(question_text(), encoding="utf-8")
         self.qid = pas.derive_qid(QUESTION["question"], QUESTION["axis"])
@@ -13975,6 +13978,7 @@ class OpenQuorum(unittest.TestCase):
         for shape, build in shapes:
             with self.subTest(shape=shape, record="in flight"):
                 root, run_dir = repo_with_a_run(self)
+                register_questions(run_dir, QUESTION["axis"])
                 record = run_dir / "question-T04.md"
                 record.write_text(question_text(), encoding="utf-8")
                 self.open(run_dir=run_dir, record=record)
@@ -13989,6 +13993,7 @@ class OpenQuorum(unittest.TestCase):
 
             with self.subTest(shape=shape, record="the budget trip"):
                 root, run_dir = repo_with_a_run(self)
+                register_questions(run_dir, QUESTION["axis"])
                 register_phases(run_dir, *BUDGET_PHASES)
                 ids = seed_adoptions(run_dir, QUESTION["phase"],
                                      pas.BUDGET_PER_PHASE)
@@ -14030,6 +14035,7 @@ class OpenQuorum(unittest.TestCase):
                               lambda path: path.symlink_to(path))):
             with self.subTest(shape=shape):
                 root, run_dir = repo_with_a_run(self)
+                register_questions(run_dir, QUESTION["axis"])
                 record = run_dir / "question-T04.md"
                 record.write_text(question_text(), encoding="utf-8")
                 self.open(run_dir=run_dir, record=record)
@@ -14316,6 +14322,7 @@ class OpenQuorum(unittest.TestCase):
         for status in sorted(pas._FINAL_STATUSES):
             with self.subTest(status=status):
                 _root, run_dir = repo_with_a_run(self)
+                register_questions(run_dir, QUESTION["axis"])
                 record = run_dir / "question-T04.md"
                 record.write_text(question_text(), encoding="utf-8")
                 settled = seed_final(
@@ -14411,6 +14418,7 @@ class OpenQuorum(unittest.TestCase):
         for label, make, diagnostic in cases:
             with self.subTest(label):
                 _root, run_dir = repo_with_a_run(self)
+                register_questions(run_dir, QUESTION["axis"])
                 record = run_dir / "question-T04.md"
                 record.write_text(question_text(), encoding="utf-8")
                 make(run_dir / "decisions.md")
@@ -14541,6 +14549,7 @@ class OpenQuorum(unittest.TestCase):
             for text in HOSTILE_JSON:
                 def call(name=name, text=text):
                     _root, run_dir = repo_with_a_run(self)
+                    register_questions(run_dir, QUESTION["axis"])
                     record = run_dir / "question-T04.md"
                     record.write_text(question_text(), encoding="utf-8")
                     target = run_dir / name
@@ -14587,6 +14596,7 @@ def run_with_owners(case, owners) -> Path:
     """
     owners = list(owners)
     _, run_dir = repo_with_a_run(case)
+    register_questions(run_dir, QUESTION["axis"])
     path = run_dir / "question-T04.md"
     path.write_text(question_text(owners=", ".join(owners)), encoding="utf-8")
     opened = pas.open_quorum(str(run_dir), question_record=str(path))
@@ -14652,6 +14662,9 @@ class RecordBrainResponse(unittest.TestCase):
 
     def setUp(self):
         self.root, self.run_dir = repo_with_a_run(self)
+        #: open_quorum refuses an axis the finalisation would refuse, so the
+        #: run knows the stage-03 question this fixture asks on.
+        register_questions(self.run_dir, QUESTION["axis"])
         self.record_path = self.run_dir / "question-T04.md"
         self.record_path.write_text(question_text(), encoding="utf-8")
         self.qid = pas.derive_qid(QUESTION["question"], QUESTION["axis"])
@@ -15197,6 +15210,7 @@ class RecordBrainResponse(unittest.TestCase):
         complete nor abandon.
         """
         root, run_dir = repo_with_a_run(self)
+        register_questions(run_dir, QUESTION["axis"])
         register_phases(run_dir, *BUDGET_PHASES)
         seed_adoptions(run_dir, QUESTION["phase"], pas.BUDGET_PER_PHASE)
         record_path = run_dir / "question-T04.md"
@@ -15245,6 +15259,7 @@ class RecordBrainResponse(unittest.TestCase):
         second.write_text(
             question_text(question="Which cache backend serves the session cache?",
                           axis="cache-backend"), encoding="utf-8")
+        register_questions(self.run_dir, "cache-backend")
         pas.open_quorum(str(self.run_dir), question_record=str(second))
 
         self.assertNotEqual(projection.read_bytes(), before,
@@ -15659,6 +15674,9 @@ class ClassifyQuorum(unittest.TestCase):
 
     def setUp(self):
         self.root, self.run_dir = repo_with_a_run(self)
+        #: open_quorum refuses an axis the finalisation would refuse, so the
+        #: run knows the stage-03 question this fixture asks on.
+        register_questions(self.run_dir, QUESTION["axis"])
         self.record_path = self.run_dir / "question-T04.md"
         self.record_path.write_text(question_text(), encoding="utf-8")
         self.qid = pas.derive_qid(QUESTION["question"], QUESTION["axis"])
@@ -15709,6 +15727,7 @@ class ClassifyQuorum(unittest.TestCase):
         return record
 
     def raise_another(self, name, question, axis):
+        register_questions(self.run_dir, axis)
         path = self.run_dir / name
         path.write_text(question_text(question=question, axis=axis),
                         encoding="utf-8")
@@ -16080,6 +16099,7 @@ class ClassifyQuorum(unittest.TestCase):
         can neither complete nor abandon.
         """
         root, run_dir = repo_with_a_run(self)
+        register_questions(run_dir, QUESTION["axis"])
         register_phases(run_dir, *BUDGET_PHASES)
         seed_adoptions(run_dir, QUESTION["phase"], pas.BUDGET_PER_PHASE)
         path = run_dir / "question-T04.md"
@@ -17926,6 +17946,41 @@ class AdoptedDecisionRecordTests(unittest.TestCase):
             pas._rendered_decisions(outcome, text, pas.parse_decisions(text))
         self.assertIn("H-001", str(raised.exception))
 
+    # --- open/finalise axis parity -------------------------------------------
+    #
+    # `open_quorum` once admitted any axis token, and `finalize_quorum` refuses
+    # every axis the `## Quorum` row cannot hold -- so a question asked on a
+    # decision's minted qid dispatched three brains, sat at
+    # `ready-to-finalise` for ever, and `reconcile_run` reported nothing. ONE
+    # predicate now answers both.
+
+    def test_open_refuses_an_axis_the_finalisation_would_refuse(self):
+        qid, _result = self.adopt(axis="new",
+                                  question="Do we keep a session table at all?")
+        before = sorted(p.name for p in (self.run_dir / "quorum").iterdir())
+        with self.assertRaises(pas.QuorumError) as raised:
+            open_question(self, self.run_dir, axis=qid,
+                          question="Does the session table decision stand?")
+        self.assertIn(qid, str(raised.exception))
+        self.assertIn("new", str(raised.exception))
+        #: NOTHING WAS DISPATCHED: no directory for the refused question.
+        self.assertEqual(
+            sorted(p.name for p in (self.run_dir / "quorum").iterdir()), before)
+
+    def test_open_and_the_row_validator_share_one_axis_predicate(self):
+        """The parity, over each axis class: a registered stage-03 id, the
+        reserved literal, an unregistered token, and a bare 12-hex qid."""
+        tracker = pas.validate_run(self.run_dir)
+        for axis in ("storage-engine", "new", "unknown-axis", "a" * 12):
+            try:
+                pas._require_quorum_axis(tracker, axis)
+                opened = True
+            except pas.QuorumError:
+                opened = False
+            with self.subTest(axis=axis):
+                self.assertEqual(opened, axis in ("storage-engine", "new"))
+                self.assertEqual(pas._quorum_axis_legal(tracker, axis), opened)
+
     def test_the_retirement_touches_only_the_record_it_retires(self):
         """Scoped to the target's OWN section. A status line searched for
         across the document retires whichever record happens to be read first —
@@ -18926,9 +18981,19 @@ class QuorumMirrorTests(unittest.TestCase):
         never be written at all. Judged inside the mirror, the same fault
         publishes nothing: a human registers the missing question and the very
         next call finalises.
+
+        `open_quorum` now refuses the same axis at the door (one predicate,
+        `_quorum_axis_legal`), so the fault is staged the only way left: the
+        question is registered for the open and gone again at finalisation.
         """
+        register_questions(self.run_dir, "cache-layer")
         qid = open_question(self, self.run_dir, axis="cache-layer",
                             question="Which cache layer fronts the session?")
+        path = self.run_dir / "progress.md"
+        tracker = pas.parse_tracker(path.read_text(encoding="utf-8"))
+        tracker["questions"] = [row for row in tracker["questions"]
+                                if row["id"] != "cache-layer"]
+        path.write_text(pas.render_tracker(tracker), encoding="utf-8")
         answer_quorum(self.run_dir, qid, [graded("postgres", "specified"),
                                           graded("postgres", "speculation"),
                                           graded("sqlite", "speculation")])

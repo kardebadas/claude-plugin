@@ -46,11 +46,17 @@ Read it from `current_floor(run_dir)["floor_rung"]`; never assume it.
 | --- | --- | --- |
 | 1 | Blocks named work (task, gate, or planning artifact) | `check_admissible`: `blocks-nothing` |
 | 2 | Decidable from the repository, spec and `decisions.md` — not from what only the user knows (budget, deadline, users, purpose) | **you**; failing it means escalate |
-| 3 | Carries an axis (stage-03 question id or `new`) and a blast radius from `task \| phase \| run \| contract` | axis: `check_admissible` (`missing-axis`); blast radius: **you** |
+| 3 | Carries an axis (stage-03 question id or `new`) and a blast radius from `task \| phase \| run \| contract` | axis: `check_admissible` (`missing-axis`), and `open_quorum` refuses any other axis; blast radius: **you** |
 | 4 | Passes the options test (blank the title, keep the options, the decision is still clear; adjectives are not options) and is one decision | options: `check_admissible` (`fewer-than-two-options`, …); one-decision: **you** |
 
 `check_admissible` returns a list of problem codes; `[]` admits. It also requires
 three distinct owners.
+
+**A reconciliation question takes the disputed decision's recorded axis:** the
+axis its question was asked on, as its `## Quorum` row records it — a stage-03
+question id or `new` — or a human decision's stage-03 id. Never the decision's
+qid, even where the decision record's `Axis` field carries it: `open_quorum`
+refuses that axis, because `finalize_quorum` could never record the row.
 
 4. **Complete the record, then open.** The worker's question record has no
    reading roots, owners or blast radius: owners are the brain ids you assign

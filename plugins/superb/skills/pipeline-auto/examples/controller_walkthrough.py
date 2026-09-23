@@ -1052,43 +1052,29 @@ def reconciliation(ctl: Controller, governing: str) -> None:
                 "returns zero'), but import IS the completion. Running the gate "
                 "before import works (this walkthrough does so for P1-T3's "
                 "attempt 2).")
-    #: Probe 2: "a quorum question on the decision's axis". A quorum decision's
-    #: axis is its own minted qid.
+    #: The reconciliation takes the disputed decision's RECORDED axis (quorum.md):
+    #: Q-<governing> was asked on 'new', so the reconciliation is too. Its own
+    #: qid is refused at the door -- open_quorum and finalize_quorum share one
+    #: axis predicate -- so nothing is dispatched on an axis no row can hold.
     question = ("Should shout() return an empty string on bad input instead of "
                 "raising, reversing the count() ruling?")
     survives = [ctl.brain_response("0" * 12, "raise", line=4,
                                    quote="raises on a negative total",
                                    other="lenient")] * 3
-    on_axis = False
+    recorded = next(r for r in ctl.tracker()["quorum"] if r["qid"] == governing)
+    check(recorded["axis"] == "new",
+          f"Q-{governing}'s ## Quorum row records axis {recorded['axis']!r}")
     try:
-        probe = None
-        probe, _ = ctl.open_question("P1-T3", question, ["raise", "lenient"],
-                                     axis=governing, raiser="task-reviewer-1")
-        ctl.answer_brains(probe, [dict(r, qid=probe, blast=[probe])
-                                  for r in survives])
-        final = ctl.pas.finalize_quorum(str(ctl.run_dir), qid=probe)
-        on_axis = final["status"] == "adopted"
-    except pas.TrackerError as exc:
-        wedged = (ctl.pas.classify_quorum(str(ctl.run_dir), qid=probe,
-                                          live_owners=list(BRAINS))["state"]
-                  if probe else "not opened")
-        finding("high", "a reconciliation question on a quorum decision's axis "
-                "opens but can never be finalised",
-                f"open_quorum accepted axis {governing!r} (the minted axis of "
-                f"Q-{governing}) and dispatched; finalize_quorum then raised "
-                f"({type(exc).__name__}: {exc}) while mirroring the ## Quorum "
-                "row, publishing nothing; classify_quorum still reports "
-                f"{wedged!r} and reconcile_run reports nothing, so the quorum "
-                "is wedged on disk. execution.md: 'The reconciliation is a "
-                "quorum question on the decision's axis'; a quorum decision's "
-                "axis is its minted qid, which ## Quorum's Axis cell refuses "
-                "(stage-03 ids and 'new' only), and open_quorum does not check "
-                "it. Fallback used: the same question on axis 'new'.")
-    if on_axis:
-        qid, reference = probe, None
-        check(False, "unexpected: the on-axis reconciliation adopted")
+        ctl.open_question("P1-T3", question, ["raise", "lenient"],
+                          axis=governing, raiser="task-reviewer-1")
+        check(False, f"open_quorum admitted the decision's qid {governing!r} "
+                     "as an axis")
+    except pas.QuorumError as exc:
+        check("neither a stage-03 question id" in str(exc),
+              f"open_quorum refused the qid axis for another reason: {exc}")
     qid, reference = ctl.open_question(
-        "P1-T3", question, ["raise", "lenient"], raiser="task-reviewer-1")
+        "P1-T3", question, ["raise", "lenient"], axis=recorded["axis"],
+        raiser="task-reviewer-1")
     #: Probe 3: park it. First exactly as import_worker_result renders a
     #: parked row; then with the completion cells cleared.
     parked = False
@@ -1141,8 +1127,8 @@ def reconciliation(ctl: Controller, governing: str) -> None:
     ctl.integrate("P1-T3", "task/P1-T3")
     fix_rounds = [r for r in ctl.tracker()["fix_rounds"] if r["scope"] == "P1-T3"]
     check(not fix_rounds, "the reconciliation spent a fix round")
-    say("reconciliation: on axis new"
-        f", adopted Q-{qid} (the decision survives), resume_task released "
+    say("reconciliation: the decision's qid refused as an axis at open; asked "
+        f"on its recorded axis 'new', adopted Q-{qid} (the decision survives), resume_task released "
         "P1-T3 on it, round 2 accepted with F-001 REFUTED, attempt 2 "
         "re-imported the standing commits, integrated; no fix round spent")
 

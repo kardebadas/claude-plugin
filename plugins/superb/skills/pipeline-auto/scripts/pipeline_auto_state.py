@@ -1160,6 +1160,37 @@ _QUORUM_STATES = ("in_flight", "finalized")
 _BRAINS = 3
 
 
+def _quorum_axis_legal(tracker: dict, axis) -> bool:
+    """Whether ``axis`` may be a ``## Quorum`` row's ``Axis`` cell.
+
+    THE ONE PREDICATE BOTH ENDS OF A QUORUM ASK. ``_validate_quorum`` holds the
+    row to it, so ``finalize_quorum`` -- which mirrors the row before it
+    publishes anything -- refuses every axis it refuses; ``open_quorum`` asks it
+    too, through ``_require_quorum_axis``, so a question is never dispatched on
+    an axis whose quorum could never be finalised. Answered once, here, so the
+    two cannot drift: a question opened on an axis finalisation refuses sits at
+    ``ready-to-finalise`` for ever with three dispatches spent on it.
+
+    The namespace is the stage-03 question ids plus the reserved literal
+    ``new``. A decision's minted qid is NOT in it: that is the axis a record
+    carries, not an axis a question may be asked on.
+    """
+    return (isinstance(axis, str)
+            and (axis == _RESERVED_AXIS
+                 or axis in {row["id"] for row in tracker["questions"]}))
+
+
+def _require_quorum_axis(tracker: dict, axis) -> None:
+    """``open_quorum``'s half of ``_quorum_axis_legal``: refuse before dispatch."""
+    if not _quorum_axis_legal(tracker, axis):
+        raise QuorumError(
+            f"quorum axis {axis!r} is neither a stage-03 question id nor the "
+            f"literal {_RESERVED_AXIS!r}, so finalize_quorum could never record "
+            "this quorum's row and it would wait at ready-to-finalise for ever. "
+            "A question takes a stage-03 id or 'new' -- a reconciliation takes "
+            "the disputed decision's recorded axis, never the decision's qid")
+
+
 def _validate_quorum(tracker: dict) -> None:
     """The three-phase quorum record, structurally.
 
@@ -1209,7 +1240,6 @@ def _validate_quorum(tracker: dict) -> None:
     #: namespaces do not overlap and are not meant to. A ``new``-axis row whose
     #: ``Decision`` is ``Q-<qid>`` and whose record's ``Axis`` is that same bare
     #: ``<qid>`` is the INTENDED shape, and is pinned end to end in the suite.
-    axes = {row["id"] for row in tracker["questions"]} | {_RESERVED_AXIS}
     phases = {row["id"] for row in tracker["phases"]}
     if len({row["qid"] for row in rows}) != len(rows):
         raise TrackerValidationError(
@@ -1220,7 +1250,7 @@ def _validate_quorum(tracker: dict) -> None:
             raise TrackerValidationError(
                 "a qid is twelve lowercase hex characters; a row keyed by "
                 "anything else is one whose question cannot be found again")
-        if row["axis"] not in axes:
+        if not _quorum_axis_legal(tracker, row["axis"]):
             raise TrackerValidationError(
                 f"quorum axis {row['axis']!r} is neither a stage-03 question id "
                 f"nor the literal {_RESERVED_AXIS!r}")
@@ -8640,7 +8670,7 @@ def open_quorum(run_dir: str, *, question_record: str,
     #: foreign, missing or malformed run is a read-only stop, and it must stop
     #: without this call first creating a lock file inside a directory that
     #: belongs to somebody else's tool.
-    validate_run(run_dir)
+    tracker = validate_run(run_dir)
     record_file = _record_path(question_record)
     try:
         text = record_file.read_text(encoding="utf-8")
@@ -8666,6 +8696,10 @@ def open_quorum(run_dir: str, *, question_record: str,
             f"the question is inadmissible ({problems}); a quorum is never "
             "opened on a question the run has already established it may not "
             "ask")
+    #: PARITY WITH THE FINALISATION, before anything is written or dispatched.
+    #: The stage-03 question ids are frozen long before any worker can raise a
+    #: question, so reading them outside the lock reads what the lock would.
+    _require_quorum_axis(tracker, record["axis"])
     for owner in record["owners"]:
         if not _OWNER.fullmatch(owner):
             raise QuorumSchemaInvalid(

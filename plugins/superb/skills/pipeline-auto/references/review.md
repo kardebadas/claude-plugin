@@ -118,7 +118,9 @@ An adjudication goes in `findings.md` (`Adjudication` column), never in
 A finding prevails automatically only if it is Critical or Important **and** its
 verdict part is spec compliance or verification evidence. A Minor or
 quality-part finding that would reverse a recorded decision goes to unbiased
-reconciliation; if the decision survives, the finding closes
+reconciliation: a quorum question on the decision's recorded axis — its
+stage-03 id, or `new`, never the decision's qid (`quorum.md`). If the decision
+survives, the finding closes
 `REFUTED — governed by <D-ID>` and does not block completion. Do not widen
 this. Reconciliation never stalls the fix loop and never spends a fix round
 (`execution.md`, the per-task gate).

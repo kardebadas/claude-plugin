@@ -10228,6 +10228,81 @@ class EscalatedAndReaskedQuorumResumeTests(TempDirTestCase):
         add_escalation(run_dir, qid=reask)
         self.refuse(run_dir, ESCALATION_ANSWER, "resolves no escalation of")
 
+    def test_a_human_answer_to_the_original_cannot_resume_a_re_ask_block(self):
+        """The H-route twin of the stale-answer test above. The cell names
+        re-ask Y; the answered escalation names the ORIGINAL B. A human who
+        answered B did not answer Y: Y exists because B was re-opened, so the
+        answer to B is the answer the re-ask replaced."""
+        reask, text = reask_record()
+        run_dir = self.run_with(
+            decisions_file(escalation_answer()),
+            question=f"quorum:{reask}@{QUESTION_RECORD_PATH}"
+                     f"#sha256={'0a' * 32}")
+        publish_question_record(run_dir, text=text, qid=reask)
+        add_escalation(run_dir, qid=BLOCK_QID)
+        message = self.refuse(run_dir, ESCALATION_ANSWER,
+                              "resolves no escalation of")
+        self.assertIn(reask, message)
+
+    def test_a_human_answer_to_a_sibling_re_ask_cannot_resume_a_re_ask_block(self):
+        """Two re-asks of ONE question under different reopen authorities are
+        two qids with one lineage root. The cell names Y1; the answered
+        escalation names Y2. Sharing a root does not make Y2's answer Y1's:
+        the lineage walk is from the ORIGINAL, and Y1 is not one."""
+        y1, text1 = reask_record()
+        y2, text2 = reask_record(reopen_of="H-901")
+        self.assertNotEqual(y1, y2)
+        run_dir = self.run_with(
+            decisions_file(escalation_answer()),
+            question=f"quorum:{y1}@{QUESTION_RECORD_PATH}#sha256={'0a' * 32}")
+        publish_question_record(run_dir, text=text1, qid=y1)
+        publish_question_record(run_dir, text=text2, qid=y2)
+        add_escalation(run_dir, qid=y2)
+        message = self.refuse(run_dir, ESCALATION_ANSWER,
+                              "resolves no escalation of")
+        self.assertIn(y1, message)
+
+    def resume_two_tasks_once_each(self, record: str, grant: str, *,
+                                   escalated: bool) -> None:
+        """`Scope: T1, T2` is two grants in one record, not one grant two
+        tasks race for. Each task resumes on it once; the SECOND resume of
+        the same task is refused, and spending it on T1 does not spend it on
+        T2 -- `_resumed_by` reads one row's history."""
+        run_dir = self.run_with(decisions_file(record))
+        state.reserve_task(run_dir, task_id="T2", owner="impl-9", attempt=1)
+        set_task_state(run_dir, "T2", "test-block-T2", state="[?]",
+                       question=QUESTION_REF)
+        if escalated:
+            add_escalation(run_dir, qid=BLOCK_QID)
+        self.assertEqual(
+            task_row(self.resume(run_dir, grant), "T1")["state"], "[~]")
+        set_task_state(run_dir, "T1", "test-reblock-T1", state="[?]",
+                       question=QUESTION_REF)
+        self.refuse(run_dir, grant, "has already resumed task", prior=2)
+        resumed = state.resume_task(
+            run_dir, task_id="T2", prior_attempt=1, new_owner="impl-8",
+            new_attempt=2, decision_ref=grant)
+        self.assertEqual(task_row(resumed, "T2")["state"], "[~]")
+        set_task_state(run_dir, "T2", "test-reblock-T2", state="[?]",
+                       question=QUESTION_REF)
+        before = (run_dir / "progress.md").read_bytes()
+        with self.assertRaises(state.TrackerValidationError) as caught:
+            state.resume_task(
+                run_dir, task_id="T2", prior_attempt=2, new_owner="impl-7",
+                new_attempt=3, decision_ref=grant)
+        self.assertIn("has already resumed task", str(caught.exception))
+        self.assertEqual((run_dir / "progress.md").read_bytes(), before)
+
+    def test_one_adoption_scoped_to_two_tasks_resumes_each_once(self):
+        self.resume_two_tasks_once_each(
+            decision_record(overrides={"Scope": "T1, T2"}), QUORUM_GRANT,
+            escalated=False)
+
+    def test_one_human_answer_scoped_to_two_tasks_resumes_each_once(self):
+        self.resume_two_tasks_once_each(
+            escalation_answer(overrides={"Scope": "T1, T2"}),
+            ESCALATION_ANSWER, escalated=True)
+
 
 # THE RUNNER GOES LAST, and it has to. `unittest.main()` calls `sys.exit()`, so
 # this block sat at what was once the end of the file and became its MIDDLE the

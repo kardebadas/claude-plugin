@@ -14649,6 +14649,10 @@ def _resumed_by(row: dict) -> set:
     released again by the adoption that released the first block. The
     append-only `Checkpoints` cell already records every resume with the
     decision it cited, so a spent adoption is read from there.
+
+    "Spent" is keyed per task: this reads one row's history, so a decision
+    scoped to several tasks resumes each of them once, and spending it on one
+    spends nothing on another.
     """
     spent = set()
     for entry in _csv(row["checkpoints"]):

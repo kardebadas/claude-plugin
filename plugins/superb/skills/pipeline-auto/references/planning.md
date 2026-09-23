@@ -84,10 +84,14 @@ and reason.
 - **Close stage 06 with `close_phase_set(run_dir, phase_ids=[...])`**, passing
   every phase id the master plan lists, in its order. It writes them into
   `## Run`'s `phase_set`, completes stage 06 and opens stage 07
-  (`fan-out-phase-plans`) in one transition. The tracker enforces the seal:
-  it never changes, stage 06 cannot complete without it, and after it no
-  phase row outside it can be written, by `import_phase_plan` or by any raw
-  transition. A second call with the same ids is inert; other ids raise.
+  (`fan-out-phase-plans`) in one transition. The tracker enforces the seal,
+  for `import_phase_plan` and for any raw transition alike: it is written
+  only by the transition that closes an active stage 06, it never changes,
+  stage 06 cannot complete without it, a phase row is born only while stage
+  07 is active, and no phase row outside the seal can be written. The tracker
+  does not check the ids against the master plan, which it cannot read: pass
+  them exactly. A second call with the same ids is inert once stage 06 is
+  complete; other ids raise.
 - **Discover the target repository's test runner** from its CI config, manifest
   and existing tests, and record it. Never assume one. Record the lint, format
   and coverage commands the same way. Never invent a coverage percentage: no
@@ -109,7 +113,8 @@ One `superpowers:writing-plans` worker per phase, capped by `worker_limit`.
   `phase_set` is refused.
 - **Close stage 07 by freezing the dispatch budget**, once every sealed phase
   is imported. The tracker refuses the freeze before the seal exists or while
-  a sealed phase has no row:
+  a sealed phase has no row, and refuses to complete stage 07 before the
+  freeze:
   `freeze_dispatch_ceiling(run_dir)` writes `## Run`'s `dispatch_projection`
   (`7 × tasks + 3 × BUDGET_PER_RUN + 5`, every phase priced at 7 whatever its
   class), `dispatch_soft_ceiling` (`ceil(1.25 ×` projection`)`) and

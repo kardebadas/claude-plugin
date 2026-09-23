@@ -6,8 +6,10 @@ integrating, verifying a phase, or debugging.
 **Not enforced by code:** the adversarial trigger check, writers for
 `## Task Review` and `## Fix Rounds` (their grammar is validated; write rows
 through `locked_tracker_update`), phase verification and phase advance, and
-counting and refusing dispatches against the agent-dispatch ceiling. The
-ratchet triggers `repeated-suite-failure`, `debug-locality` and
+counting and refusing dispatches against the agent-dispatch ceiling, and
+whether the phase set sealed at stage 06 is the master plan's actual phase
+list: the master plan is not machine-readable, so the seal is whatever ids
+`close_phase_set` was given. The ratchet triggers `repeated-suite-failure`, `debug-locality` and
 `accumulated-surface` are not verified against state: the tracker records no
 suite-failure count or root cause, and the module never runs git to count
 changed lines. These rules are yours to follow exactly.

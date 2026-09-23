@@ -23,14 +23,33 @@ Open the gate with `open_master_gate(run_dir, reviewers={"A": ..., "B": ...})`
 once stage 11 is active and every phase is `[x]`. It records the edge itself
 (`base_commit` → the last source task's integration merge; you do not pass
 either end) and writes the two reviewers into the master row's `Assignments`,
-A first. The tracker enforces the rest, for this call and for any raw write:
-exactly two distinct reviewers, neither a task `Owner`, a `Fixer`, nor the
-owner of any published worker result (superseded attempts included), and no
-reviewer may later become a task owner or fixer. An unreadable result under
-`agent-output/` refuses the gate rather than being skipped. Reopening with the
-same reviewers is inert; swapping them raises. Checking that the head is still
-the target-branch tip is yours. Record the stage-12 run as `final` evidence and
-the gate's own re-run as `branch-review`.
+A first. The tracker enforces the rest, for this call and for any transition
+written through `locked_tracker_update`:
+
+- exactly two distinct reviewers, neither a task `Owner`, a `Fixer`, nor a
+  name in `## Run`'s `implementers`. Ids are compared ignoring case and
+  surrounding punctuation, so `IMPL-1` and `impl-1.` are `impl-1`;
+- `implementers` only grows, and every transition that writes an `Owner` or a
+  `Fixer` adds it there. An overwritten owner or a deleted fix round is still
+  an implementer. `reserve_task` and `resume_task` add theirs; a raw
+  transition writing a fix round must add its fixer;
+- no reviewer may later become a task owner or fixer;
+- an opened master gate's base is `base_commit`;
+- whenever a master row is new, or its type or reviewers change, every
+  published worker result under `agent-output/` is read and its owner may not
+  review (superseded attempts included). An unreadable result refuses the gate
+  rather than being skipped.
+
+A `progress.md` edited by hand, outside any transition, is still held by the
+rules checked on every read (all but the result scan and the growth of
+`implementers`). Reopening with the same reviewers is inert; swapping them
+raises. Record the stage-12 run as `final` evidence and the gate's own re-run
+as `branch-review`, both with subject `gate/<gate-id>`.
+
+**Not enforced:** that the head is still the target-branch tip is yours to
+check. `open_master_gate` takes the head from the last source task in table
+order, not from the most recent integration, so a table order that differs
+from integration order is also yours to catch.
 
 | Reviewer | Covers |
 | --- | --- |

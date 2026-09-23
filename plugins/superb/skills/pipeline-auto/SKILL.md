@@ -26,7 +26,7 @@ threshold, budget or escalation route loosens the answer.
 | Three agents agreeing proves nothing | Agreed. The bar is grounding rung, not votes; reading assignments decorrelate the three |
 | It will decide more and more | 3 adoptions per phase, 10 per run, checked before dispatch; only a human extends, at most twice |
 | It will overrule the user | A candidate contradicting `Provenance: human` is rejected at any rung |
-| It will build what nobody asked for | Stage 06 seals the phase set and the tracker refuses any other phase; `MISSING-FROM-SPEC` is frozen |
+| It will build what nobody asked for | Stage 06 seals the phase set; the tracker creates phases only at stage 07 and only for sealed ids (the ids themselves are not checked against the master plan); `MISSING-FROM-SPEC` is frozen |
 | It will drift from the request | Depth cap 2 from the last human answer |
 | It grades its own homework | Every adoption is labelled `Provenance: quorum`; the terminal report leads with them, weakest first |
 

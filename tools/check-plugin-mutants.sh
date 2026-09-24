@@ -155,7 +155,7 @@ rm "$f"
 [ ! -e "$f" ] || echo "mutant is a no-op: execution reference was not removed"
 '
 
-run_mutant "one manifest reverts to 0.13.0" "$J \"import json; p='plugins/superb/.claude-plugin/plugin.json'; d=json.load(open(p)); assert d.get('version')=='0.14.0', 'mutant is a no-op: Claude manifest is not at the approved baseline'; d['version']='0.13.0'; json.dump(d,open(p,'w'),indent=2); assert json.load(open(p))['version']=='0.13.0', 'mutant is a no-op: version replacement did not apply'\""
+run_mutant "one manifest reverts to 0.13.0" "$J \"import json; p='plugins/superb/.claude-plugin/plugin.json'; d=json.load(open(p)); assert d.get('version')=='0.15.0', 'mutant is a no-op: Claude manifest is not at the approved baseline'; d['version']='0.13.0'; json.dump(d,open(p,'w'),indent=2); assert json.load(open(p))['version']=='0.13.0', 'mutant is a no-op: version replacement did not apply'\""
 
 run_mutant "CI loses setup-python@v5" '
 f=.github/workflows/checks.yml

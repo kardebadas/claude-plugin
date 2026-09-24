@@ -1,0 +1,195 @@
+# Review and completion: stages 11–12
+
+Load for the master gate, contradiction routing, a fixer dispute, the
+completeness critic, final verification, or the terminal report.
+
+**Not enforced by code:** contradiction routing, the proposals writer, the
+terminal report, and writers for
+the master gate's reports, verdict, fix rounds and stage 12. `findings.md` has a
+validated grammar but no writer. The `branch-review` and `final` evidence
+records are recorded for audit and read by no guard: no tracker cell or check
+opens them. These rules are yours to follow exactly. The
+completeness freeze rests on the phase-set seal (`planning.md`): no phase can
+be created after stage 06.
+
+**REQUIRED SUB-SKILLS:** `superpowers:requesting-code-review` (stage 11),
+`superpowers:verification-before-completion` (stage 12).
+
+## Stage 11 — The master gate
+
+**Exactly two independent reviewers** over the whole edge: tracker
+`base_commit` → the last phase's verified integrated HEAD, which must still equal
+the target-branch tip. Neither may be a persisted task implementation owner.
+
+Open the gate with `open_master_gate(run_dir, reviewers={"A": ..., "B": ...})`
+once stage 11 is active and every phase is `[x]`. It records the edge itself
+(`base_commit` → the last source task's integration merge; you do not pass
+either end) and writes the two reviewers into the master row's `Assignments`,
+A first. The tracker enforces the rest, for this call and for any transition
+written through `locked_tracker_update`:
+
+- exactly two distinct reviewers, neither a task `Owner`, a `Fixer`, nor a
+  name in `## Run`'s `implementers`. Ids are compared ignoring case and
+  surrounding punctuation, so `IMPL-1` and `impl-1.` are `impl-1`;
+- `implementers` only grows, and every transition that writes an `Owner` or a
+  `Fixer` adds it there. An overwritten owner or a deleted fix round is still
+  an implementer. `reserve_task` and `resume_task` add theirs; a raw
+  transition writing a fix round must add its fixer;
+- no reviewer may later become a task owner or fixer;
+- an opened master gate's base is `base_commit`;
+- whenever a master row is new, or its type or reviewers change, every
+  published worker result under `agent-output/` is read and its owner may not
+  review (superseded attempts included). An unreadable result refuses the gate
+  rather than being skipped.
+
+A `progress.md` edited by hand, outside any transition, is still held by the
+rules checked on every read (all but the result scan and the growth of
+`implementers`). Reopening with the same reviewers is inert; swapping them
+raises. Record the stage-12 run as `final` evidence and the gate's own re-run
+as `branch-review`, both with subject `gate/<gate-id>`.
+
+**Not enforced:** that the head is still the target-branch tip is yours to
+check. `open_master_gate` takes the head from the last source task in table
+order, not from the most recent integration, so a table order that differs
+from integration order is also yours to catch.
+
+| Reviewer | Covers |
+| --- | --- |
+| A | Requirements, behaviour, error paths, assumptions, recorded decisions. **Names and scores every `provisional` task**; each tainting decision's ID and adopted answer are copied verbatim into A's global constraints, as the provisional block in `prompts/task-reviewer.md`. |
+| B | Integration, architecture, persistence, recovery, concurrency, security, regressions, test quality. |
+
+Collect both reports before consolidating or dispatching any fix. Then run the
+completeness critic.
+
+A quorum that `classify_quorum` reports as `stale-context` arrives here as a
+flag (`quorum.md`, Resume). It is not re-opened or re-decided at stage 11
+either.
+
+| Severity | Meaning |
+| --- | --- |
+| Critical | Security, data loss, destructive behaviour, fundamental failure to meet an approved requirement |
+| Important | Correctness defect, regression, missing approved behaviour or test, unsafe recovery or integration |
+| Minor | Violates no approved requirement and creates no likely defect |
+
+Ease of fixing never sets severity; a missing approved requirement is never
+Minor. The bar is **zero open findings at every severity**, same as per-task.
+Confirm each claim against code, tests, spec and `decisions.md` before acting;
+never downgrade a verified finding and never reject one because its fix is
+inconvenient. Findings go to `findings.md` (`critical | important | minor`, never
+deleted; closed with a disposition).
+
+## Contradiction routing — you route, never decide
+
+| Situation | Route |
+| --- | --- |
+| Code does not comply with a decision | Ordinary finding, fix loop |
+| Plan-mandated finding tracing to a **human** decision | Halt to the escalation queue |
+| Plan-mandated finding tracing to a **quorum** decision | Re-open that qid at a raised bar |
+| Plan-mandated finding `writing-plans` invented | Ordinary quorum |
+| `DECISION-CHALLENGE` against a human decision | Halt, always |
+| `DECISION-CHALLENGE` against a quorum decision | One re-open at a raised bar |
+| Second challenge to the same D-ID | Automatic halt |
+| Fixer disputes a finding | One adjudicator (below) |
+
+A re-open must beat the challenged decision's rung strictly (`quorum.md`). It
+carries the challenging evidence, never the original rung or who chose it.
+
+A halt is an escalation row you record yourself, in the shape `quorum.md`
+gives under Escalating.
+
+### Fixer disputes go to one adjudicator, not a quorum
+
+A dispute is about a **fact** ("can line 41 be null"), settled by reading code or
+running an experiment. A quorum is for choices. Admissible only with a
+refutation citing `file:line`, or a command and its output; a bare disagreement
+is inadmissible and the finding stands.
+
+One read-only adjudicator gets the finding, the rebuttal and the review package:
+
+| Verdict | Result |
+| --- | --- |
+| CONFIRMED | Finding stands; fixer fixes |
+| REFUTED | Closed on the adjudicator's citation |
+| PLAUSIBLE | Only this becomes a quorum question, framed neutrally |
+
+An adjudication goes in `findings.md` (`Adjudication` column), never in
+`decisions.md`.
+
+### The one exception to zero open findings
+
+A finding prevails automatically only if it is Critical or Important **and** its
+verdict part is spec compliance or verification evidence. A Minor or
+quality-part finding that would reverse a recorded decision goes to unbiased
+reconciliation. A reconciliation is a re-open of the disputed decision
+(`quorum.md`): `Reopen of: <D-ID>`, the finding as its `Challenge`, asked on
+the axis the decision's question was asked on (its stage-03 id, or `new`,
+never the decision's qid), at the raised bar, once per D-ID. `open_quorum`
+admits it (`_reopen_authority`), and an adoption supersedes the decision
+(`finalize_quorum`). A decision with `Provenance: human` is not reconciled: that
+is a halt. If the decision survives, the finding closes
+`REFUTED — governed by <D-ID>` and does not block completion; if the
+reconciliation reverses it, the finding stands and the task is redone under
+the new decision. Do not widen
+this. Reconciliation never stalls the fix loop and never spends a fix round
+(`execution.md`, the per-task gate).
+
+## Completeness critic items
+
+The critic classifies each item. Its classification is not yours to change.
+
+| Class | Route |
+| --- | --- |
+| `SPEC-NOT-MET` | A finding. Fix loop, zero-open-findings bar. |
+| `MISSING-FROM-SPEC` | Frozen. A proposal, nothing else. |
+
+For each `MISSING-FROM-SPEC` item:
+
+1. Append a section to the run's `completeness-proposals.md`
+   (shape: `templates/completeness-proposals.md`) headed with the **next unused
+   number**: `## CP-1` if the file has none, else one more than the highest.
+   Write the concrete ID, never `<n>`.
+2. List that ID in the terminal report.
+3. Once every other item is finished — an open fix round completes first —
+   `next_action: complete-with-proposals`. `derive_next_action` derives it
+   from the file: with every stage complete it returns
+   `complete-with-proposals` if a `## CP-<n>` section reads `Status: Frozen`,
+   else `complete`, and it refuses both while any fix round, task
+   (integration `held` included), phase, gate or quorum is unfinished.
+
+Never: a task, phase, fix-round finding, quorum, backlog or handover note; never
+a disposition (`deferred`, `out-of-scope`, `declined`, `closed` are all
+reclassifications). The phase set has been immutable since stage 06, so the run
+cannot build it anyway. Quorum is biased toward "yes, also cover X"; the user
+decides.
+
+## Stage 12 — Final verification
+
+Record digest-bound `final` PASS evidence for the accepted master HEAD. The
+module does not run git; you supply the transcript.
+
+Completion requires all of:
+
+- master gate accepted;
+- final verification recorded;
+- all work committed and integrated on the designated feature branch;
+- `git status --short` prints nothing (`scratch/` self-ignores). Clean means
+  empty output: an exit status of 0 with any line printed is not clean;
+- a fresh session derives `complete` from files and Git, not from a message.
+
+**Never push, publish, open a pull request, or merge into `main`/`master`.**
+
+## The terminal report
+
+When the run hit a dispatch ceiling (a `dispatch-overrun` escalation was
+queued at soft, or the run stopped at hard), its first line is that overrun:
+`agent_dispatch_count` and the ceiling it reached. Then come the
+quorum-adopted decisions, **weakest rung first**. Every one is labelled
+`Provenance: quorum` here, in `decisions.md`, and in the tracker. Also:
+
+- every `provisional` task and its tainting decision;
+- counts of `rejected-contradicts-human` and `rejected-contradicts-quorum`;
+- every `CP-<number>` proposal, by its concrete ID;
+- the adoption floor applied (`current_floor`) and any inflation rise;
+- drift budget used and extensions granted (`quorum_budget`);
+- every escalation, answered or outstanding;
+- completions whose range proof is `attested`.

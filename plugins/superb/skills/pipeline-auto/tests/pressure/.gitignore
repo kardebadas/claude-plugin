@@ -1,0 +1,23 @@
+# records/ holds raw transcripts: workspace-local evidence, not project
+# documentation. P08 depends on RED-baseline.md, which IS committed, so a
+# different workspace loses nothing that matters. This rule is permanent --
+# unlike the oracles.md rule that stood here while P01 was measuring, which
+# P01's final task removed on the way out. See
+# tests/test_oracle_disclosure_order.py for why the order mattered.
+records/
+
+# RECORD-TEMPLATE.md is the scaffold a raw record is copied from. Like
+# records/ it is workspace-local and PERMANENTLY ignored -- no phase commits
+# it, so unlike the oracles.md rule that stood above it, this one has no
+# expiry and must not be removed now that P01 has closed. Without this line
+# the template is an untracked file one `git add -A` away from the repository,
+# and it breaks the empty `git status --short` every task in this phase gates
+# on.
+# tests/test_record_template_ignored.py enforces it.
+RECORD-TEMPLATE.md
+
+# scoring.md is Task 9 working output: verbatim rationalizations plus the
+# oracle predicates they were scored against. Same secrecy as oracles.md while
+# P01 measures, and unlike oracles.md no phase ever commits it — Task 10
+# curates RED-baseline.md from it, which IS committed.
+scoring.md

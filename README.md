@@ -40,7 +40,7 @@ the product is, `superb:pipeline` decides *how* it gets built and then builds it
 reaching `CRAFT STATUS: VISION CLEAR` is the signal that the pipeline has
 enough to work from — it is not an instruction to start building.
 
-`pipeline` and `bug-fix` both compose the
+`pipeline`, `pipeline-auto` and `bug-fix` all compose the
 [superpowers](https://github.com/obra/superpowers) skills, so install that
 plugin too.
 
@@ -171,6 +171,82 @@ Completion leaves the designated feature branch clean, committed, integrated,
 and locally recoverable. Pipeline never pushes, publishes, creates a pull
 request, or merges into `main` or `master`.
 
+### `superb:pipeline-auto`
+
+```
+> /superb:pipeline-auto
+> /superb:pipeline-auto resume
+> /superb:pipeline-auto status
+```
+
+Pipeline-auto builds a feature the way `superb:pipeline` does — approved design,
+master plan, phase plans, a file-backed tracker, TDD, reviews, a clean feature
+branch — but it **does not stop to ask you every time a choice comes up.** It is
+a separate skill; `superb:pipeline` is untouched and still the right choice when
+every unanswered question should reach you.
+
+**You are asked once.** Three readers first study your request independently.
+Then, at stage 03, the skill asks you at most four questions in a single prompt.
+Your answers are recorded as `Provenance: human` decisions, and they are the only
+requirements the run treats as unimpeachable.
+
+**After that, open questions go to a quorum.** When a worker hits a choice the
+spec and your answers do not settle, three brain agents each read a different
+source — the spec and your intent, the code and tests, the decisions and the
+plan — and answer independently. Each names how its answer is grounded, from
+strongest to weakest:
+
+```
+specified > code-evidenced > convention-cited > engineering-judgement > speculation
+```
+
+An answer is adopted only when all three brains gave valid responses, the
+winning answer is grounded **strictly more strongly** than the runner-up, and it
+clears a floor of `code-evidenced`. Equal grounding never adopts, however strong,
+and nothing breaks a tie — not a vote, not recency, not "the safer option".
+
+**What a quorum can never do:**
+
+- overrule you — an answer that contradicts one of your recorded decisions is
+  rejected at any confidence and sent back to you;
+- decide what only you can know — deadlines, budget, users, purpose;
+- decide without limit — a drift budget allows 3 adoptions per phase and 10 per
+  run. Only you can extend it, twice at most;
+- add work — the set of phases is sealed when planning ends, so anything the run
+  thinks is missing becomes a frozen proposal for you, never a new task.
+
+Anything a quorum may not decide is **escalated**: the affected work stops, the
+question is queued, and escalations are brought to you together at the next
+stage boundary. Unrelated work keeps going. Escalating costs nothing from the
+budget, and the skill treats it as the decisive action, not a failure.
+
+**The rules are enforced, not just written down.** The tracker
+(`pipeline-auto/v1`) is a state machine that refuses illegal moves:
+
+- phases created after planning closed;
+- a review level lowered;
+- a decision adopted above what its premises support;
+- a final reviewer who implemented any task;
+- a run declared complete with work outstanding.
+
+Everything lives on disk, so an interrupted or compacted session resumes from
+the files and Git:
+
+```
+docs/superpowers/specs/<feature>-design.md
+docs/superpowers/plans/<feature>-master-plan.md
+docs/superpowers/plans/<feature>/phase-*.md
+docs/superpowers/runs/<run-id>/progress.md          the tracker
+docs/superpowers/runs/<run-id>/decisions.md         every decision, and who made it
+docs/superpowers/runs/<run-id>/quorum/<qid>/        each question, its brains' answers, the outcome
+```
+
+The run ends on a clean, committed feature branch after a final review by two
+reviewers who wrote none of the code. Its report **leads with every decision the
+machine made without asking you, weakest first**, then any frozen proposals
+waiting for your call. Like `superb:pipeline`, it never pushes, publishes,
+opens a pull request, or merges into `main` or `master`.
+
 ### `superb:bug-fix`
 
 ```
@@ -271,6 +347,8 @@ The repository checks below run in CI and are also worth running locally:
 
 ```
 python3.11 -m unittest discover -s plugins/superb/skills/pipeline/tests -v
+python3 -m unittest discover -s plugins/superb/skills/pipeline-auto/tests
+python3 plugins/superb/skills/pipeline-auto/examples/controller_walkthrough.py
 ./tools/check-plugin.sh            plugin structure — frontmatter, namespace, manifests, drift
 ./tools/check-plugin-mutants.sh    proves the above can still fail
 ./tools/test-craftui.sh            the craft UI test suite

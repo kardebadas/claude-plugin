@@ -1,7 +1,7 @@
 {
   "name": "superb",
-  "version": "0.15.0",
-  "description": "Personal skills for Codex: setup, craft, pipeline, pipeline-auto, bug-investigate and bug-fix.",
+  "version": "0.16.0",
+  "description": "Personal skills for Codex: setup, craft, pipeline, pipeline-auto, fast-pipeline, turbo-pipeline, bug-investigate and bug-fix.",
   "author": {
     "name": "kardebadas"
   },
@@ -9,7 +9,7 @@
   "interface": {
     "displayName": "Superb",
     "shortDescription": "Clarify product ideas, run an implementation pipeline, fix bugs from evidence.",
-    "longDescription": "setup installs and verifies the dependencies the others need. craft turns a vague product idea into a decision-rich brief. pipeline v2 takes an approved brief through file-backed planning, durable execution state, implementation, review and fixes. pipeline-auto is its autonomous variant: one human gate, then later decisions go to a three-agent quorum that may never overrule a recorded human answer. bug-investigate traces a reported bug to file:line evidence and stops there, for when knowing is the deliverable. bug-fix carries that same investigation on to a fix that is not done until a regression test which failed first passes.",
+    "longDescription": "setup installs and verifies the dependencies the others need. craft turns a vague product idea into a decision-rich brief. pipeline v2 takes an approved brief through file-backed planning, durable execution state, implementation, review and fixes. pipeline-auto is its autonomous variant: one human gate, then later decisions go to a three-agent quorum that may never overrule a recorded human answer. fast-pipeline is the quick variant: one spec approval, no project tests, and a final review/bug-fix loop. turbo-pipeline is the autonomous quick variant: one batch of at most six questions, then spec, plan, implementation and review run without you, with two independent brains settling any open decision by the higher confidence. bug-investigate traces a reported bug to file:line evidence and stops there, for when knowing is the deliverable. bug-fix carries that same investigation on to a fix that is not done until a regression test which failed first passes.",
     "developerName": "kardebadas",
     "category": "Productivity",
     "capabilities": [
@@ -20,6 +20,8 @@
       "Set up superb and install what it needs.",
       "Help me turn this product idea into a clear brief.",
       "Run the implementation pipeline for this approved design.",
+      "Build this fast — one spec approval, no tests, I will test it myself.",
+      "Ask me what you need once, then build it without coming back to me.",
       "Find out why this is broken.",
       "Find out why this is broken and fix it."
     ]

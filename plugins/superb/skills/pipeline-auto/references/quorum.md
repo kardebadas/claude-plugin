@@ -90,6 +90,9 @@ human answer resumes the task.
    qid; act on that, dispatch nothing.
 6. Dispatch **exactly three** `pipeline-auto-brain` agents, one per index. Never
    fewer to fit capacity (run them sequentially), never a fourth.
+   Without named agent types (Codex): three `spawn_agent` calls, each sent the
+   body of [../../../agents/pipeline-auto-brain.md](../../../agents/pipeline-auto-brain.md)
+   plus that index's rendered `prompts/brain.md` — see the Harness section of [../SKILL.md](../SKILL.md).
 
 `qid = derive_qid(question, axis)`. The decisions digest is not part of it, so
 the same question keeps its identity; a re-open gets
@@ -351,6 +354,9 @@ to that answer's `H-` id.
 Batches: up to four per `AskUserQuestion`, ranked by blast radius. Escalating
 costs no budget and is never the discouraged path. `unresolved`, `deferred` or
 "carry to handover" is not escalating.
+Without `AskUserQuestion` (a headless harness), a batch is the same four
+questions carried by a `needs_info` end of turn, and the answers arrive on
+resume from the run files.
 
 While escalated, nothing is dispatched on that axis — no trace, fact-finding,
 fresh quorum, or "safe" subset — until a human answers.

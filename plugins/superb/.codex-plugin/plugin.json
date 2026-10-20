@@ -1,6 +1,6 @@
 {
   "name": "superb",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "description": "Personal skills for Codex: setup, craft, pipeline, pipeline-auto, fast-pipeline, turbo-pipeline, bug-investigate and bug-fix.",
   "author": {
     "name": "kardebadas"

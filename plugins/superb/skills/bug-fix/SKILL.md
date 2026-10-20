@@ -64,6 +64,13 @@ Take the first branch that applies:
 Check your actual agent list rather than assuming. On harnesses with no
 bundled-agent support the second branch is the normal path, not a failure.
 
+**On a harness whose sub-agent tool has no named agent types** (Codex, whose
+`spawn_agent` takes a free-text brief), `superb:bug-investigator` is the file
+[../../agents/bug-investigator.md](../../agents/bug-investigator.md) in this
+plugin: dispatch it with `spawn_agent`, `fork_turns: "none"`, the message being
+that file's body after its frontmatter followed by the Step 0 report, then
+`wait_agent` for its report. That counts as the first branch.
+
 **Always name the agent `superb:bug-investigator`, with the prefix.** A bare
 `bug-investigator` resolves to whatever personal agent the user happens to have,
 possibly written for a different stack, and the result will look like it worked.
@@ -105,6 +112,10 @@ Otherwise go straight to planning. Do not manufacture questions.
 
 **REQUIRED SUB-SKILL:** use `superpowers:writing-plans`, giving it the Step 2
 file as its `Spec:` path plus the agreed fix direction.
+Where `superpowers:writing-plans` is not installed (Codex without that plugin),
+write the plan file yourself at `docs/superpowers/plans/<date>-<bug>.md` with
+the contents this step names, and record which executor branch of Step 4 it
+is written for.
 
 The plan must include a **regression test that fails before the fix and passes
 after**, and the test must be **its own task, ordered before the fix task** —
@@ -139,6 +150,11 @@ plan was written against, and overriding it means the implementers read one
 thing and you intended another. If the choice is still open when you get there,
 prefer `superpowers:subagent-driven-development` where a subagent mechanism
 exists, so the fix is reviewed by something that did not write it.
+Where `superpowers:subagent-driven-development` is not installed (Codex
+without that plugin), the inline branch is: execute the plan's tasks yourself,
+in order, and after each task dispatch one fresh `spawn_agent` reviewer
+(`fork_turns: "none"`, brief: the task text, the diff, "you may only read;
+report findings only") before starting the next task.
 
 The verification is the plan's last task, so the executor runs it while the
 branch still exists:

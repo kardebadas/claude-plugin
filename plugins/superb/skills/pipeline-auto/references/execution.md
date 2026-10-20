@@ -30,6 +30,12 @@ leading NUL separator and trailing newline are part of the grammar.
   merged `--no-ff` in task order.
 - `superpowers:dispatching-parallel-agents` — only for ready independent batches.
 
+A `superpowers:*` skill that is not installed changes none of this: RED before
+GREEN, cause before fix, one worktree per concurrent implementer, and only
+independent batches in parallel are the rules; the skill was the reminder. On
+Codex an implementer or reviewer is a `spawn_agent` call briefed from the
+prompt file named in SKILL.md's dispatch table.
+
 ## The review dial
 
 You set each phase's `review_class` **once, at stage 04** — the classification

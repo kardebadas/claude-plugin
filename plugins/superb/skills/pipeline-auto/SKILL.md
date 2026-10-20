@@ -48,6 +48,45 @@ For `resume` and `status`, use [references/persistence.md](references/persistenc
 No identifiable run: say so. Several: ask which. Recency is not selection
 authority.
 
+## Harness
+
+**First action on every harness**, before any other step: read
+[references/planning.md](references/planning.md). This file is the rules; the
+stage files are the procedure. A harness that read only this file and started
+implementing did not run the skill.
+
+**No `Agent` tool with named agent types** (Codex, whose `spawn_agent` takes a
+free-text brief): a named agent type in the dispatch table is the file
+`agents/<name>.md` in this plugin, `../../agents/<name>.md` relative to this
+file — `pipeline-auto-intent-reader` is
+[../../agents/pipeline-auto-intent-reader.md](../../agents/pipeline-auto-intent-reader.md),
+`pipeline-auto-brain` is
+[../../agents/pipeline-auto-brain.md](../../agents/pipeline-auto-brain.md).
+Dispatch it with `spawn_agent`, `fork_turns: "none"`, the message being that
+file's body after its frontmatter followed by the brief the stage specifies
+(`prompts/brain.md`, `prompts/brain-proposal.md`, or the stage-01 intent read).
+A quorum or the intent read is **three separate spawns**, one per index, then
+`wait_agent` for all three; never one spawn asked for three answers. The tool
+allowlist becomes the first sentence of the brief: "You may only read. Edit
+nothing, run nothing, spawn nothing. Answer with the JSON object only." "Never
+substitute `brainstorm-architect`" holds here too: spawn the brain file, never
+an improvised architect role.
+
+**No `AskUserQuestion`** (a headless harness, for example the office app that
+routes questions to an inbox): stage 03 still asks. Write the run files first,
+then end the turn with status `needs_info` carrying the at-most-four questions.
+When the harness resumes the session with answers, continue in `resume` mode
+from the run files (`progress.md`, `decisions.md`), never from memory of the
+earlier turn.
+
+**A `superpowers:*` skill that is not installed:** the SDD review protocol is
+already inlined in `prompts/` and `scripts/`, so nothing is lost there. For the
+others, do what the stage describes inline; the stage's files in the run
+directory are the requirement, not the skill name.
+
+**Red flag:** implementing before the stage 01–07 files exist in the run
+directory is a violation on every harness.
+
 ## The one gate, and files as the authority
 
 **Stage 03 asks at most four questions in one `AskUserQuestion` call.** Those

@@ -12,6 +12,10 @@ closes only through `close_phase_set`, below.
 
 - Dispatch **exactly three** `pipeline-auto-intent-reader` agents. Sequentially
   if `worker_limit < 3`; never fewer.
+- Without named agent types (Codex): three `spawn_agent` calls, each sent the
+  body of [../../../agents/pipeline-auto-intent-reader.md](../../../agents/pipeline-auto-intent-reader.md)
+  plus the request, then `wait_agent` for all three before reconciling — see
+  the Harness section of [../SKILL.md](../SKILL.md).
 - Each returns strict JSON: what the request says (user's words quoted), implies
   (basis named), leaves unstated, puts out of scope, and what the repository
   already provides (`file:line`).
@@ -31,6 +35,9 @@ Tracker: `## Intent` rows `reader-1`, `reader-2`, `reader-3`, `brief`; states
   [../prompts/brain-proposal.md](../prompts/brain-proposal.md) — never
   `prompts/brain.md` (no qid exists yet) and never another agent (not
   `architecture-discovery`, not `brainstorm-architect`).
+- Without named agent types (Codex): three `spawn_agent` calls, each sent the
+  body of [../../../agents/pipeline-auto-brain.md](../../../agents/pipeline-auto-brain.md)
+  plus the rendered proposal template — see the Harness section of [../SKILL.md](../SKILL.md).
 - Merge as that template says: drop the inadmissible, dedupe, rank by blast
   radius, cut to **four** including intent-conflict slots. Ranking and cutting
   are routing: answer none, add none of your own.
@@ -42,6 +49,10 @@ Tracker: `## Intent` rows `reader-1`, `reader-2`, `reader-3`, `brief`; states
 
 **One `AskUserQuestion` call, at most four questions.** The only guaranteed
 human interaction in the run.
+Without `AskUserQuestion` (a headless harness): write the run files, end the
+turn with status `needs_info` carrying the same at-most-four questions, and
+continue in `resume` mode from the run files when the answers arrive — see
+the Harness section of [../SKILL.md](../SKILL.md).
 
 - Spend slots on what only the user knows: budget, deadline, users, purpose,
   which product this is.
@@ -58,6 +69,8 @@ escalation.
 ## Stage 04 — Design and review class
 
 **REQUIRED SUB-SKILL:** `superpowers:brainstorming`.
+Not installed: do the design inline — options, trade-offs, one chosen
+architecture written down — before touching the review class.
 
 Fix each phase's `review_class` (`final-only` or `required`) **here, before any
 plan exists**, with a specific risk reason. See `execution.md` for what each
@@ -71,6 +84,7 @@ ratchet whose trigger has already fired raises it (`execution.md`).
 **REQUIRED SUB-SKILL:** `superpowers:writing-plans`. Records the selected
 architecture and boundaries, not a chat summary. Save under the repository's
 convention, else `docs/superpowers/specs/<feature>-design.md`.
+Not installed: write that file yourself, same path, same contents.
 
 ## Stage 06 — Master plan
 
@@ -101,6 +115,8 @@ and reason.
 ## Stage 07 — Phase fan-out
 
 One `superpowers:writing-plans` worker per phase, capped by `worker_limit`.
+Without that skill, a worker is a general sub-agent (`spawn_agent` on Codex)
+briefed to write the phase plan file; the rules below bind it unchanged.
 
 - At most `MAX_TASKS_PER_PHASE` (12) genuine tasks per phase; more means split.
 - **A planner never invents an interface.** An unresolved interface returns

@@ -14,6 +14,9 @@ be created after stage 06.
 
 **REQUIRED SUB-SKILLS:** `superpowers:requesting-code-review` (stage 11),
 `superpowers:verification-before-completion` (stage 12).
+Not installed: the two reviewers below are general sub-agents (`spawn_agent`
+on Codex) briefed with the review package, and stage 12 runs every verification
+command and reads its output before any claim of completion.
 
 ## Stage 11 — The master gate
 

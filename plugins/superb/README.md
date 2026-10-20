@@ -21,6 +21,12 @@ product is, `pipeline` settles *how* it gets built and then builds it.
 `pipeline` composes the [superpowers](https://github.com/obra/superpowers)
 skills, so install that plugin too.
 
+Codex reads the plugin from its own cache under `~/.codex/plugins/cache`, not
+from this checkout, and keeps every version it has ever installed. After a
+version bump refresh it with
+`codex plugin remove superb@personal && codex plugin add superb@personal`;
+the `personal` marketplace is this repository's `.agents/plugins/marketplace.json`.
+
 Pipeline never fills an unresolved requirement with an agent guess: it records
 the question and waits for the user's explicit answer. Its Python 3.11+
 standard-library state helper keeps task attempts and checkpoints authoritative

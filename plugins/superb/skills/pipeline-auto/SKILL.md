@@ -79,6 +79,38 @@ When the harness resumes the session with answers, continue in `resume` mode
 from the run files (`progress.md`, `decisions.md`), never from memory of the
 earlier turn.
 
+**A harness that cannot write to Git** (Codex in the office app: sub-agents
+inherit the parent's sandbox, Git metadata is read-only, and the host commits
+the worktree as one commit after the turn ends): stages 09 to 12 still run,
+inside the turn, before it ends. Stopping at stage 08 to "await the host
+commit" is wrong: the host commit comes after the turn, and nothing in stages
+09 to 12 waits for it. On this harness each task's implementer is still a
+spawned sub-agent (`spawn_agent`, `fork_turns: "none"`, briefed as the stage
+specifies: `prompts/implementer.md` plus the `scripts/task-brief` output) that
+edits the worktree and reports what it changed; the task reviewer is a second
+spawned sub-agent, never the implementer, that reviews the worktree diff
+(`git diff`, `git diff --stat` and `git status` are reads and are allowed; only
+writes to Git are not) and returns the report in the shape the stage names; a
+fix round spawns the fixer the same way. The controller never implements a
+task itself and never skips the reviewer, the fix rounds, the master gate or
+the completeness pass because no commit exists. When the harness cannot
+commit, "commit", "task branch" and "integration merge" in stages 09 and 10
+mean the task's state in `progress.md` plus the worktree diff, and the host
+commit the harness makes after the turn stands in for all three. The master
+gate (stage 11) and the completeness pass (stage 12) run against the worktree
+diff instead of the branch. The controller records every transition in
+`progress.md` exactly as on Claude; the final report names the files changed
+instead of commits.
+
+**Resume, on every harness:** the first action of any turn whose session
+already holds a run directory (`docs/superpowers/runs/<run-id>/progress.md`
+exists) is to read `progress.md`, `decisions.md` and the stage table, then
+continue from the active stage, recording the transitions it finds missing. A
+resumed turn never implements before the tracker says stage 09 is active:
+whatever the resuming prompt says ("continue", "go on", "finish it"), the
+tracker decides what continues, not the prompt and not memory of the earlier
+turn.
+
 **A `superpowers:*` skill that is not installed:** the SDD review protocol is
 already inlined in `prompts/` and `scripts/`, so nothing is lost there. For the
 others, do what the stage describes inline; the stage's files in the run
@@ -86,6 +118,10 @@ directory are the requirement, not the skill name.
 
 **Red flag:** implementing before the stage 01–07 files exist in the run
 directory is a violation on every harness.
+
+**Red flag:** a resumed turn that edits source while the tracker shows stage
+01–08 active is a violation on every harness. So is ending a turn at stage 08
+to "await the host commit" on a harness that cannot commit.
 
 ## The one gate, and files as the authority
 
@@ -303,3 +339,5 @@ are all reclassifications. The proposal is the user's to decide.
 - Pushing, publishing, opening a pull request, or merging into `main`/`master`.
   Success is a clean committed feature branch and a report that leads with every
   decision the run made without asking.
+- A resumed turn editing source while the tracker shows stage 01–08 active,
+  or ending at stage 08 to await a host commit when the harness cannot commit.

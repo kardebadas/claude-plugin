@@ -36,6 +36,18 @@ independent batches in parallel are the rules; the skill was the reminder. On
 Codex an implementer or reviewer is a `spawn_agent` call briefed from the
 prompt file named in SKILL.md's dispatch table.
 
+When the harness cannot write to Git (Codex in the office app: Git metadata is
+read-only for the parent and every sub-agent, and the host commits the
+worktree once the turn ends), stages 08 to 10 still run to the end inside the
+turn. The implementer is still a spawned sub-agent briefed from
+`prompts/implementer.md` and the task brief; it edits the worktree, runs the
+suite, and reports the files it changed in place of commits. The task reviewer
+is a second spawned sub-agent, never the implementer, that reviews the worktree
+diff (`git diff`, `git diff --stat` and `git status` are reads and are allowed)
+and returns the three verdicts the gate names; a fix round spawns the fixer the
+same way. Ending the turn at stage 08 to "await the host commit" is wrong: the
+host commit comes after the turn, and nothing below waits for it.
+
 ## The review dial
 
 You set each phase's `review_class` **once, at stage 04** — the classification
@@ -124,6 +136,10 @@ The failing test is written and committed before the change. The report records
 the RED command, the failing output, why that failure was expected, then the
 GREEN command and output. GREEN with no RED is unevidenced.
 
+When the harness cannot commit, "committed before the change" means present in
+the worktree diff before the change; the RED command, its failing output, and
+the GREEN command and output are still recorded in the report.
+
 Run the runner the plan recorded. If it is not installed: `PLAN_CONFLICT`. Never
 substitute a runner.
 
@@ -144,6 +160,16 @@ attempt.
 Create the task's branch as **`task/<task id>`** (for example `task/P1-T1`),
 from the reservation baseline. The name is load-bearing: import resolves the
 range head as `task/<task id>` and refuses any other branch.
+
+When the harness cannot commit, no branch is created and none is named: the
+reservation baseline is the host's last commit (`HEAD`), the task's branch is
+its `[~]` row in `progress.md` plus the worktree diff against that baseline,
+and the import's range proof is the list of changed paths from
+`git diff --name-only <baseline>` plus `git status --short`, every one inside
+the task's write scope. The one worktree per concurrent implementer that
+`superpowers:using-git-worktrees` asks for cannot be created either, so on
+this harness `implementation_slot_cap` is one: tasks run one at a time, in
+plan order.
 
 Dispatch each implementer with its task brief file —
 `scripts/task-brief RUN_DIR PLAN_FILE TASK_NUMBER [OUTFILE]`, never pasted plan
@@ -171,6 +197,9 @@ accepts a phase. Then, in this order:
    `publish_immutable` under the run directory. The worker's "tests pass" is a
    claim; this record is the evidence. A failing suite leaves no record — the
    task is unfinished work, not a completion.
+   When the harness cannot commit, the worker's head commit is the worktree
+   as the worker left it: re-run the suite against the worktree, and record
+   the reservation baseline SHA as `code_state`.
 2. For `NEEDS_CONTEXT` / `PLAN_CONFLICT`, open the quorum on your completed
    copy of the question record (`quorum.md`) so `quorum/<qid>/question.md`
    exists.
@@ -210,6 +239,12 @@ accepts a phase. Then, in this order:
 An `artifact` task needs exactly its declared outputs, integration `N/A`, and no
 invented commit.
 
+When the harness cannot commit, there is no merge: record the task's
+`integration` as `held` (the host commit after the turn integrates it), keep
+the `task-test` PASS record as the task's evidence, and move on to the next
+task. `held` here is the recorded, deliberate value the tracker accepts; an
+unrecorded integration is not.
+
 Evidence records are written only by `render_verification_evidence`; purposes
 are `task-test`, `task-integration`, `phase`. Outcome is only `PASS` — a failure
 leaves no record.
@@ -223,6 +258,10 @@ throughout.
    `scripts/review-package RUN_DIR BASE HEAD [OUTFILE]`, with `BASE` the
    attempt's `reserved_baseline`. It prints a path; the package never enters
    your context.
+   When the harness cannot commit, build the package yourself at the same
+   path: `git diff --stat <baseline>`, `git status --short`, then
+   `git diff -U20 <baseline>`, with the changed-path list in place of the
+   commit list. The reviewer reads that file.
 2. Dispatch the task reviewer with brief, report, package, decisions and test
    commands. The reviewer is never the implementer. It returns three verdicts:
    spec, quality, independent verification.

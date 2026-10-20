@@ -18,6 +18,13 @@ Not installed: the two reviewers below are general sub-agents (`spawn_agent`
 on Codex) briefed with the review package, and stage 12 runs every verification
 command and reads its output before any claim of completion.
 
+When the harness cannot write to Git (Codex in the office app, whose host
+commits the worktree after the turn), stages 11 and 12 still run inside the
+turn, after the last phase's boundary and before the turn ends: two spawned
+reviewers over the whole worktree diff, the completeness critic, the fix
+rounds, and final verification against the worktree. Ending the turn without
+them because no branch exists is a violation.
+
 ## Stage 11 — The master gate
 
 **Exactly two independent reviewers** over the whole edge: tracker
@@ -55,6 +62,13 @@ as `branch-review`, both with subject `gate/<gate-id>`.
 check. `open_master_gate` takes the head from the last source task in table
 order, not from the most recent integration, so a table order that differs
 from integration order is also yours to catch.
+
+When the harness cannot commit, the edge is `base_commit` → the worktree as it
+stands after the last phase, and the package both reviewers read is
+`git diff --stat <base_commit>`, `git status --short`, then
+`git diff -U20 <base_commit>`, built at the path `scripts/review-package`
+would have used. The reviewers are still two spawned sub-agents, neither a
+task owner nor a fixer, and the fix rounds still spawn a fixer per round.
 
 | Reviewer | Covers |
 | --- | --- |
@@ -179,6 +193,14 @@ Completion requires all of:
   empty output: an exit status of 0 with any line printed is not clean;
 - a fresh session derives `complete` from files and Git, not from a message.
 
+When the harness cannot commit, "committed and integrated" and "`git status
+--short` prints nothing" are satisfied by the host commit after the turn, not
+by anything the turn can do: the turn ends with every change in the worktree,
+the master gate accepted, final verification recorded against the worktree,
+every `integration` cell `held`, and the terminal report naming the files
+changed. The run's `complete` is then derived by the next turn from the files
+and the host's commit.
+
 **Never push, publish, open a pull request, or merge into `main`/`master`.**
 
 ## The terminal report
@@ -196,3 +218,4 @@ quorum-adopted decisions, **weakest rung first**. Every one is labelled
 - drift budget used and extensions granted (`quorum_budget`);
 - every escalation, answered or outstanding;
 - completions whose range proof is `attested`.
+- when the harness cannot commit, the files changed, in place of commits.

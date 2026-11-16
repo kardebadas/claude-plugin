@@ -62,8 +62,10 @@ switch files, and the project one wins when it exists:
 | Global | `.superb-agent-mode` in the Claude config directory (`$CLAUDE_CONFIG_DIR`, by default `~/.claude`) |
 | Project | `.claude/superb-agent-mode` in the repo's main checkout, shared by its git worktrees and kept out of git through `.git/info/exclude` |
 
-An empty file means ask every session, `off` means off, and anything else is the
-saved picks. Delete the project file to follow the global setting again.
+An empty file means ask every session, `off` means off, and a line like
+`Codex code · Claude UI · DeepSeek + Claude reviews` is the saved picks. Any
+other content is treated as empty, so a cloned repo cannot slip instructions
+into the session through this file. Delete the project file to follow the global setting again.
 `/superb:agent-mode` with no argument asks again mid-session. It is a command, not a skill, so Codex never loads it.
 
 `pipeline`, `pipeline-auto`, `fast-pipeline`, `turbo-pipeline` and `bug-fix` all compose the

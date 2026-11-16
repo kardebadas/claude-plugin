@@ -19,6 +19,9 @@ fi
 picks=
 read -r picks < "$f"
 [ "$picks" = off ] && exit 0
+# The text reaches Claude as an instruction, and a cloned repo can ship this
+# file: accept only the picks shape, letters only, and ask on anything else.
+printf '%s\n' "$picks" | grep -Eqx '[A-Za-z]+ code · [A-Za-z]+ UI · [A-Za-z]+( \+ [A-Za-z]+)* reviews' || picks=
 
 run=/superb:agent-mode
 [ -n "$picks" ] && run="/superb:agent-mode use $picks"

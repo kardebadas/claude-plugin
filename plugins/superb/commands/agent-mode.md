@@ -24,8 +24,9 @@ first line decides what happens:
 - empty: ask the question below at every session start;
 - `off`: agent mode is off (only meaningful in the project file; turning the
   global one off deletes it);
-- anything else: saved picks such as `Codex code · Claude UI · DeepSeek
-  reviews`; the hook then has you run `use` with them and nothing is asked.
+- saved picks such as `Codex code · Claude UI · DeepSeek + Claude reviews`:
+  the hook has you run `use` with them and nothing is asked. Any other content
+  counts as empty.
 
 Whenever you write the project file inside a git repo, keep it out of git:
 append the line `.claude/superb-agent-mode` to `info/exclude` in the git common
@@ -84,7 +85,9 @@ this order:
    - `Just this session`: ask again next session
 
 If no reviewer is picked, use DeepSeek. A free-text "Other" answer is used as
-written.
+written for this session, but it is saved only if it is one word of letters:
+the hook passes on nothing but that shape, because a cloned repo could ship the
+project file, and it asks the question instead.
 
 The picks are one line: `<Code> code · <UI> UI · <reviewers joined by " + ">
 reviews`, for example `Codex code · Claude UI · DeepSeek + Claude reviews`.

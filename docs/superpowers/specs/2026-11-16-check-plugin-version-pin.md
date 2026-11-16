@@ -27,7 +27,9 @@ for label in ("claude", "codex"):
         bad(f"{label} manifest must identify the release as version 0.16.0")
 ```
 
-The literal was introduced as `0.14.0` in `6ac66ab` and hand-edited on each
+The gate's literal was introduced as `0.14.0` in `1f7ef45` ("test(pipeline):
+validate v2 release structure"), the mutant's `0.14.0` anchor in `6ac66ab`, and
+both were hand-edited on each
 release (`644cfb8` to 0.15.0, `fbb8b03` to 0.16.0). Releases 0.17.0
 (`e24c68d`), 0.17.1 (`ae6eee2`) and 0.18.0 (`43bf0c5`) bumped only the
 manifests, so the literal went stale.
@@ -60,4 +62,6 @@ enforces ("version drift or missing").
 3. Regression test: a "release bump" step in `tools/check-plugin-mutants.sh`
    that copies the repository, sets both manifests to a version no release has
    used, and requires `check-plugin.sh` to PASS. It fails while any release
-   number is pinned, and passes once none is.
+   number is pinned, and passes once none is. The harness then runs every
+   mutant on that bumped copy, so a mutant anchored on a release number is
+   reported as a NO-OP.

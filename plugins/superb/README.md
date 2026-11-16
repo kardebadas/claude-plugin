@@ -18,6 +18,12 @@ invoked as `superb:<skill>`.
 product is, `pipeline` settles *how* it gets built and then builds it.
 `bug-fix` is for after something is built and has gone wrong.
 
+On Claude Code only, `/superb:agent-mode on` makes every session start (and
+every `/clear`) ask who writes the code, who does UI and who reviews, with the
+main session as orchestrator, until `/superb:agent-mode off`. The command lives
+in `commands/` and its hook in `hooks/claude-hooks.json`, which only the Claude
+manifest lists, so Codex loads neither.
+
 `pipeline` composes the [superpowers](https://github.com/obra/superpowers)
 skills, so install that plugin too.
 

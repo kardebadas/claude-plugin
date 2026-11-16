@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.superb-agent-mode\" ] && echo 'superb agent mode is ON. Before any other work in this session, run /superb:agent-mode with no arguments and follow it.' || true",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.superb-agent-mode\" ] && echo 'superb agent mode is ON. Keep the agent mode chosen earlier in this session. If the summary no longer says which mode was chosen, run /superb:agent-mode again.' || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

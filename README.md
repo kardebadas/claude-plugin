@@ -42,6 +42,18 @@ the product is, `superb:pipeline` decides *how* it gets built and then builds it
 reaching `CRAFT STATUS: VISION CLEAR` is the signal that the pipeline has
 enough to work from — it is not an instruction to start building.
 
+### Agent mode (Claude Code only)
+
+`/superb:agent-mode on` switches it on until `/superb:agent-mode off`. While it
+is on, superb's SessionStart hook makes every new session, and every `/clear`,
+start with one question in three tabs: who writes the code (Codex, Claude or
+DeepSeek, or no orchestrator), who does UI and Blender, and who reviews each
+task. The main session then orchestrates: it plans, dispatches, reviews the
+reports and merges, and never edits project code itself. The switch is the
+file `.superb-agent-mode` in the Claude config directory (`$CLAUDE_CONFIG_DIR`,
+by default `~/.claude`). `/superb:agent-mode` with no argument asks again
+mid-session. It is a command, not a skill, so Codex never loads it.
+
 `pipeline`, `pipeline-auto`, `fast-pipeline`, `turbo-pipeline` and `bug-fix` all compose the
 [superpowers](https://github.com/obra/superpowers) skills, so install that
 plugin too.
@@ -403,6 +415,8 @@ plugins/superb/
   .codex-plugin/plugin.json         the Codex plugin manifest
   skills/<skill>/SKILL.md           one directory per skill
   agents/<agent>.md                 subagents, auto-discovered by Claude Code
+  commands/agent-mode.md            /superb:agent-mode, Claude Code only
+  hooks/claude-hooks.json           SessionStart hook, listed only in the Claude manifest
   skills/<skill>/references/        read at the stage that needs them
   skills/<skill>/templates/         copied into a run directory, never edited
 ```

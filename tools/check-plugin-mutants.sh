@@ -73,6 +73,23 @@ run_mutant() { # name, shell applied inside the throwaway copy
   fi
 }
 
+echo "release bump (both manifests at a version no release used must PASS):"
+BUMP="$WORK/bump"
+mkdir -p "$BUMP"
+tar -C "$SRC" --exclude=.git --exclude=__pycache__ -cf - . | tar -C "$BUMP" -xf -
+(cd "$BUMP" && python3 -c "
+import json
+for p in ('plugins/superb/.claude-plugin/plugin.json', 'plugins/superb/.codex-plugin/plugin.json'):
+    d = json.load(open(p)); d['version'] = '99.0.0'; json.dump(d, open(p, 'w'), indent=2)
+")
+if (cd "$BUMP" && ./tools/check-plugin.sh) >/dev/null 2>&1; then
+  echo "  ok    a version bump alone passes"
+else
+  echo "  FAIL  a version bump alone fails the gate: a release number is pinned"
+  (cd "$BUMP" && ./tools/check-plugin.sh) | grep FAIL
+  exit 1
+fi
+echo
 echo "baseline (unmutated copy must PASS):"
 BASE="$WORK/base"
 mkdir -p "$BASE"

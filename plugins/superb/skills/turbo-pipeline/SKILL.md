@@ -138,8 +138,10 @@ Brain's.
    - **Questions.** An implementer's question, a `NEEDS_CONTEXT`, or a
      reviewer finding that conflicts with the plan is answered by you from
      rungs 1–5; what they do not settle goes to the Resolver, and the
-     decision is handed back as the answer or the ruling. Its `Ruling:` lines
-     carry both confidences when a Brain decided.
+     decision is handed back as the answer or the ruling. Every such
+     decision is a `Ruling:` ledger line, whether a rung or a Brain settled
+     it — stage 9 collects only those — and it carries both confidences when
+     a Brain decided.
    - **Stops.** Of its four stops only the authorization exception survives.
      A plan "so broken every path forward is a guess" goes to the Resolver
      as the smallest question that unblocks it, never to the user.

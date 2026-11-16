@@ -44,15 +44,29 @@ enough to work from — it is not an instruction to start building.
 
 ### Agent mode (Claude Code only)
 
-`/superb:agent-mode on` switches it on until `/superb:agent-mode off`. While it
-is on, superb's SessionStart hook makes every new session, and every `/clear`,
-start with one question in three tabs: who writes the code (Codex, Claude or
-DeepSeek, or no orchestrator), who does UI and Blender, and who reviews each
-task. The main session then orchestrates: it plans, dispatches, reviews the
-reports and merges, and never edits project code itself. The switch is the
-file `.superb-agent-mode` in the Claude config directory (`$CLAUDE_CONFIG_DIR`,
-by default `~/.claude`). `/superb:agent-mode` with no argument asks again
-mid-session. It is a command, not a skill, so Codex never loads it.
+`/superb:agent-mode on` switches it on for every project until
+`/superb:agent-mode off`. While it is on, superb's SessionStart hook makes every
+new session, and every `/clear`, start with one question in four tabs: who
+writes the code (Codex, Claude or DeepSeek, or no orchestrator), who does UI and
+Blender, who reviews each task, and whether to remember the picks for this
+project, for all projects, or not at all. Remembered picks are used without
+asking. The main session then orchestrates: it plans, dispatches, reviews the
+reports and merges, and never edits project code itself.
+
+Add `project` (`/superb:agent-mode on project`, `/superb:agent-mode off project`)
+to switch one repo on or off whatever the global setting says. There are two
+switch files, and the project one wins when it exists:
+
+| Scope | File |
+|---|---|
+| Global | `.superb-agent-mode` in the Claude config directory (`$CLAUDE_CONFIG_DIR`, by default `~/.claude`) |
+| Project | `.claude/superb-agent-mode` in the repo's main checkout, shared by its git worktrees and kept out of git through `.git/info/exclude` |
+
+An empty file means ask every session, `off` means off, and a line like
+`Codex code · Claude UI · DeepSeek + Claude reviews` is the saved picks. Any
+other content is treated as empty, so a cloned repo cannot slip instructions
+into the session through this file. Delete the project file to follow the global setting again.
+`/superb:agent-mode` with no argument asks again mid-session. It is a command, not a skill, so Codex never loads it.
 
 `pipeline`, `pipeline-auto`, `fast-pipeline`, `turbo-pipeline` and `bug-fix` all compose the
 [superpowers](https://github.com/obra/superpowers) skills, so install that
@@ -417,6 +431,7 @@ plugins/superb/
   agents/<agent>.md                 subagents, auto-discovered by Claude Code
   commands/agent-mode.md            /superb:agent-mode, Claude Code only
   hooks/claude-hooks.json           SessionStart hook, listed only in the Claude manifest
+  hooks/agent-mode.sh               what that hook runs: reads the global and project switch files
   skills/<skill>/references/        read at the stage that needs them
   skills/<skill>/templates/         copied into a run directory, never edited
 ```

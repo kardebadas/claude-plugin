@@ -17,6 +17,7 @@ jobs:
           python-version: '3.11'
       - run: python -m unittest discover -s plugins/superb/skills/pipeline/tests -v
       - run: ./tools/check-plugin-mutants.sh
+      - run: ./tools/test-agent-mode-hook.sh
 
   craft-brief:
     name: craft completion check

@@ -73,6 +73,18 @@ run_mutant() { # name, shell applied inside the throwaway copy
   fi
 }
 
+echo "baseline (unmutated copy must PASS):"
+BASE="$WORK/base"
+mkdir -p "$BASE"
+tar -C "$SRC" --exclude=.git --exclude=__pycache__ -cf - . | tar -C "$BASE" -xf -
+if (cd "$BASE" && ./tools/check-plugin.sh) >/dev/null 2>&1; then
+  echo "  ok    clean copy passes"
+else
+  echo "  FAIL  clean copy does not pass — fix the repo before trusting mutations"
+  (cd "$BASE" && ./tools/check-plugin.sh) | grep FAIL
+  exit 1
+fi
+
 echo "release bump (both manifests at a version no release used must PASS):"
 BUMP="$WORK/bump"
 mkdir -p "$BUMP"
@@ -90,17 +102,8 @@ else
   exit 1
 fi
 echo
-echo "baseline (unmutated copy must PASS):"
-BASE="$WORK/base"
-mkdir -p "$BASE"
-tar -C "$SRC" --exclude=.git --exclude=__pycache__ -cf - . | tar -C "$BASE" -xf -
-if (cd "$BASE" && ./tools/check-plugin.sh) >/dev/null 2>&1; then
-  echo "  ok    clean copy passes"
-else
-  echo "  FAIL  clean copy does not pass — fix the repo before trusting mutations"
-  (cd "$BASE" && ./tools/check-plugin.sh) | grep FAIL
-  exit 1
-fi
+# the mutants run on the bumped copy, so a mutant anchored on a release number shows up as a NO-OP
+SRC="$BUMP"
 
 echo "mutants:"
 J="python3 -c"

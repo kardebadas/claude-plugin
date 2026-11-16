@@ -85,6 +85,26 @@ else
   exit 1
 fi
 
+echo "release bump (both manifests at a version no release used must PASS):"
+BUMP="$WORK/bump"
+mkdir -p "$BUMP"
+tar -C "$SRC" --exclude=.git --exclude=__pycache__ -cf - . | tar -C "$BUMP" -xf -
+(cd "$BUMP" && python3 -c "
+import json
+for p in ('plugins/superb/.claude-plugin/plugin.json', 'plugins/superb/.codex-plugin/plugin.json'):
+    d = json.load(open(p)); d['version'] = '99.0.0'; json.dump(d, open(p, 'w'), indent=2)
+")
+if (cd "$BUMP" && ./tools/check-plugin.sh) >/dev/null 2>&1; then
+  echo "  ok    a version bump alone passes"
+else
+  echo "  FAIL  a version bump alone fails the gate: a release number is pinned"
+  (cd "$BUMP" && ./tools/check-plugin.sh) | grep FAIL
+  exit 1
+fi
+echo
+# the mutants run on the bumped copy, so a mutant anchored on a release number shows up as a NO-OP
+SRC="$BUMP"
+
 echo "mutants:"
 J="python3 -c"
 
@@ -155,7 +175,8 @@ rm "$f"
 [ ! -e "$f" ] || echo "mutant is a no-op: execution reference was not removed"
 '
 
-run_mutant "one manifest reverts to 0.13.0" "$J \"import json; p='plugins/superb/.claude-plugin/plugin.json'; d=json.load(open(p)); assert d.get('version')=='0.16.0', 'mutant is a no-op: Claude manifest is not at the approved baseline'; d['version']='0.13.0'; json.dump(d,open(p,'w'),indent=2); assert json.load(open(p))['version']=='0.13.0', 'mutant is a no-op: version replacement did not apply'\""
+run_mutant "one manifest reverts to 0.13.0" "$J \"import json; p='plugins/superb/.claude-plugin/plugin.json'; d=json.load(open(p)); assert d.get('version') and d['version']!='0.13.0', 'mutant is a no-op: Claude manifest has no version or is already 0.13.0'; d['version']='0.13.0'; json.dump(d,open(p,'w'),indent=2); assert json.load(open(p))['version']=='0.13.0', 'mutant is a no-op: version replacement did not apply'\""
+run_mutant "both manifests lose their version" "$J \"import json; paths=['plugins/superb/.claude-plugin/plugin.json','plugins/superb/.codex-plugin/plugin.json']; data=[json.load(open(p)) for p in paths]; assert all(d.get('version') for d in data), 'mutant is a no-op: a manifest already has no version'; [(d.pop('version'),json.dump(d,open(p,'w'),indent=2)) for p,d in zip(paths,data)]\""
 
 run_mutant "CI loses setup-python@v5" '
 f=.github/workflows/checks.yml

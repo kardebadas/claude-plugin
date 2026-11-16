@@ -455,10 +455,6 @@ for relative in required_pipeline_paths:
     else:
         bad(f"required Pipeline v2 path is missing: {relative}")
 
-for label in ("claude", "codex"):
-    if label in manifests and manifests[label].get("version") != "0.16.0":
-        bad(f"{label} manifest must identify the release as version 0.16.0")
-
 progress_text, progress_error = read(
     ROOT / "plugins/superb/skills/pipeline/templates/progress.md"
 )
